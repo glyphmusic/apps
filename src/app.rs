@@ -100,6 +100,18 @@ pub struct CoverArt {
     pub ascii: Vec<(String, Option<Palette>)>,
 }
 
+/// Pages of the settings modal (Liner-style left navigation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Playback,
+    Audio,
+    Appearance,
+    Server,
+    Storage,
+    About,
+    Support,
+}
+
 pub struct Glyph {
     pub focus: FocusHandle,
     pub view: View,
@@ -143,8 +155,18 @@ pub struct Glyph {
     pub show_lyrics: bool,
     /// Now Playing shows only the lyrics (global player bar stays visible).
     pub lyrics_only: bool,
+    /// Slide state of the player bar.
+    pub bar_slide: Slide,
     pub radio: bool,
     pub mini_on_top: bool,
+    /// Settings modal.
+    pub settings_open: bool,
+    pub settings_page: SettingsPage,
+    pub settings_search: Entity<TextInput>,
+    /// Which dropdown in the settings modal is open.
+    pub open_select: Option<&'static str>,
+    /// Storage breakdown for "Cache & Storage" (None = not measured yet).
+    pub storage: Option<glyph_core::storage::StorageStats>,
     pub toast: Option<(String, Instant)>,
     pub lang: crate::i18n::Lang,
     /// Eased text ink per background zone (0 light .. 1 dark).
@@ -164,6 +186,45 @@ pub struct Glyph {
     _poll: Task<()>,
 }
 
+/// A 0..1 slide-in/out value eased over time (player bar).
+pub struct Slide {
+    target: bool,
+    from: f32,
+    at: Instant,
+}
+
+impl Default for Slide {
+    fn default() -> Self {
+        Self { target: false, from: 0.0, at: Instant::now() - Duration::from_secs(10) }
+    }
+}
+
+impl Slide {
+    const DURATION: f32 = 0.32;
+
+    fn raw(&self) -> f32 {
+        let t = (self.at.elapsed().as_secs_f32() / Self::DURATION).min(1.0);
+        // ease-out cubic
+        let e = 1.0 - (1.0 - t).powi(3);
+        let to = if self.target { 1.0 } else { 0.0 };
+        self.from + (to - self.from) * e
+    }
+
+    /// Sets the target and returns the current value.
+    pub fn update(&mut self, target: bool) -> f32 {
+        if target != self.target {
+            self.from = self.raw();
+            self.target = target;
+            self.at = Instant::now();
+        }
+        self.raw()
+    }
+
+    pub fn running(&self) -> bool {
+        self.at.elapsed().as_secs_f32() < Self::DURATION
+    }
+}
+
 pub fn track_key(t: &Track) -> String {
     format!("{:?}:{}", t.source, t.id)
 }
@@ -174,6 +235,7 @@ impl Glyph {
         let search_input =
             cx.new(|cx| TextInput::new("search.placeholder", cx));
         let server_input = cx.new(|cx| TextInput::new("settings.server.placeholder", cx));
+        let settings_search = cx.new(|cx| TextInput::new("settings.search", cx));
         let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
             "youtube",
             "jamendo_client_id",
@@ -271,8 +333,14 @@ impl Glyph {
             show_queue: false,
             show_lyrics: true,
             lyrics_only: false,
+            bar_slide: Slide::default(),
             radio: true,
             mini_on_top: true,
+            settings_open: false,
+            settings_page: SettingsPage::Playback,
+            settings_search,
+            open_select: None,
+            storage: None,
             toast: None,
             lang: crate::i18n::lang(),
             ink: [0.0; 3],
@@ -552,7 +620,8 @@ impl Glyph {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.search.loading
+        self.bar_slide.running()
+            || self.search.loading
             || self.resolving
             || self.lyrics.loading
             || self.update.checking
@@ -663,6 +732,10 @@ impl Glyph {
     // ------------------------------------------------------------ navigation
 
     pub fn navigate(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        if view == View::Settings {
+            self.open_settings(None, cx);
+            return;
+        }
         self.view = view;
         if view == View::Search {
             let f = self.search_input.read(cx).focus.clone();
@@ -1145,6 +1218,121 @@ impl Glyph {
     }
 
     // ------------------------------------------------------------ settings
+
+    // ------------------------------------------------------------ settings modal
+
+    pub fn open_settings(&mut self, page: Option<SettingsPage>, cx: &mut Context<Self>) {
+        self.settings_open = true;
+        if let Some(p) = page {
+            self.settings_page = p;
+        }
+        self.open_select = None;
+        if self.settings_page == SettingsPage::Storage {
+            self.refresh_storage(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.open_select = None;
+        let f = self.focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    pub fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        self.settings_page = page;
+        self.open_select = None;
+        if page == SettingsPage::Storage {
+            self.refresh_storage(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_select(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.open_select = if self.open_select == Some(id) { None } else { Some(id) };
+        cx.notify();
+    }
+
+    /// Measures the storage folders off the UI thread.
+    pub fn refresh_storage(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let stats = cx.background_executor().spawn(async { glyph_core::storage::stats() }).await;
+            this.update(cx, |s, cx| {
+                s.storage = Some(stats);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn clear_storage(&mut self, kind: glyph_core::storage::StorageKind, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { glyph_core::storage::clear(kind) }).await;
+            this.update(cx, |s, cx| {
+                if let Err(e) = res {
+                    s.toast(format!("{e:#}"));
+                }
+                if kind == glyph_core::storage::StorageKind::Covers {
+                    s.covers.clear();
+                    s.ascii_covers.clear();
+                }
+                s.refresh_storage(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Cover cache limit in MB (0 = no limit); applies on the next backend build.
+    pub fn set_cache_limit(&mut self, mb: u64, cx: &mut Context<Self>) {
+        self.config.storage.cache_limit_mb = mb;
+        self.save_config(cx);
+        if let Some(b) = self.backend.clone() {
+            let cfg = self.config.clone();
+            guard(|| b.set_config(cfg));
+        }
+        cx.notify();
+    }
+
+    pub fn set_audio_quality(&mut self, q: glyph_core::config::AudioQuality, cx: &mut Context<Self>) {
+        self.config.audio.quality = q;
+        self.open_select = None;
+        self.save_config(cx);
+        if let Some(b) = self.backend.clone() {
+            let cfg = self.config.clone();
+            guard(|| b.set_config(cfg));
+        }
+        cx.notify();
+    }
+
+    /// Version, OS and setup summary for bug reports (no keys, no personal data).
+    pub fn diagnostics(&self) -> String {
+        let mode = match &self.backend_state {
+            BackendState::Ready(BackendMode::Server { url, server_version }) => format!("server {url} v{server_version}"),
+            BackendState::Ready(m) => format!("{m:?}"),
+            other => format!("{other:?}"),
+        };
+        format!(
+            "Glyph {}
+OS: {} {}
+Target: {}
+Protocol: v{}
+Backend: {}
+Providers: {:?}
+Language: {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            glyph_core::updater::current_target(),
+            glyph_protocol::PROTOCOL_VERSION,
+            mode,
+            self.config.providers.enabled,
+            self.lang.code(),
+        )
+    }
 
     pub fn set_intensity(&mut self, v: f32, cx: &mut Context<Self>) {
         self.config.visuals.intensity = v.clamp(0.0, 1.0);

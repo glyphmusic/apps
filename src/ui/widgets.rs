@@ -128,7 +128,8 @@ pub fn panel() -> Div {
 
 /// Flat dark card (#141414-like), no border.
 pub fn card() -> Div {
-    div().bg(theme::card()).rounded(px(8.0))
+    // Clip children (covers, icon tiles) to the card's rounded corners.
+    div().bg(theme::card()).rounded(px(8.0)).overflow_hidden()
 }
 
 pub fn pill() -> Div {

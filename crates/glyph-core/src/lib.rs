@@ -23,6 +23,7 @@ pub mod providers;
 pub mod queue;
 pub mod resolver;
 pub mod server_client;
+pub mod storage;
 pub mod updater;
 
 pub use config::Config;
@@ -176,7 +177,11 @@ impl Inner {
             config.providers.priority.clone(),
             Some(paths::data_dir().join("resolver_cache.json")),
         ));
-        let covers = CoverCache::new(paths::cache_dir().join("covers"), http.clone(), providers.clone());
+        let limit = match config.storage.cache_limit_mb {
+            0 => u64::MAX,
+            mb => mb * 1024 * 1024,
+        };
+        let covers = CoverCache::new(storage::covers_dir(), http.clone(), providers.clone()).with_max_bytes(limit);
         let lyrics_cache = LyricsCache::new(paths::data_dir().join("lyrics"));
 
         let mut mode = BackendMode::Direct;

@@ -29,6 +29,7 @@ actions!(
         FocusSearch,
         ToggleLyrics,
         ToggleQueue,
+        CloseOverlay,
         Quit
     ]
 );
@@ -45,6 +46,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-k", FocusSearch, None),
         KeyBinding::new("secondary-l", ToggleLyrics, None),
         KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("escape", CloseOverlay, Some("Glyph")),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
@@ -125,7 +127,8 @@ impl Render for Glyph {
             View::Search => views::search(self, window, cx).into_any_element(),
             View::Library => views::library(self, window, cx).into_any_element(),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
-            View::Settings => settings::settings(self, window, cx).into_any_element(),
+            // Settings is a modal over the current view (see below).
+            View::Settings => views::home(self, window, cx).into_any_element(),
         };
         theme::set_zone(None);
         // Content floats directly on the background (Liner): no big panel.
@@ -136,8 +139,30 @@ impl Render for Glyph {
         // Song + lyrics in Now Playing carries its own transport (Liner):
         // no second player bar there. Lyrics-only keeps the bar.
         let full_np = self.view == View::NowPlaying && self.current.is_some() && !(self.show_lyrics && self.lyrics_only);
-        let bar = (!full_np).then(|| player_bar::player_bar(self, window, cx).into_any_element());
+        // The bar slides in when something starts playing and out when it is
+        // not needed (nothing loaded, or Now Playing with its own transport).
+        let want_bar = !full_np && self.current.is_some();
+        let shown = self.bar_slide.update(want_bar);
+        let bar = (shown > 0.0).then(|| {
+            let h = theme::PLAYER_H + theme::GAP * 2.0;
+            div()
+                .flex_none()
+                .relative()
+                .overflow_hidden()
+                .h(px(h * shown))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(0.0))
+                        .p(px(theme::GAP))
+                        .child(player_bar::player_bar(self, window, cx)),
+                )
+                .into_any_element()
+        });
         let toast = self.toast.as_ref().map(|(m, _)| m.clone());
+        let modal = self.settings_open.then(|| settings::modal(self, window, cx));
 
         div()
             .id("glyph-root")
@@ -162,6 +187,19 @@ impl Render for Glyph {
                 } else {
                     this.show_lyrics = true;
                     this.navigate(View::NowPlaying, w, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
+                if this.open_select.is_some() {
+                    this.open_select = None;
+                    cx.notify();
+                } else if this.settings_open {
+                    this.close_settings(w, cx);
+                } else {
+                    // Closes the search dropdown (focus leaves the input).
+                    let f = this.focus.clone();
+                    w.focus(&f, cx);
+                    cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleQueue, _, cx| {
@@ -194,7 +232,8 @@ impl Render for Glyph {
                     .child(main_panel)
                     .children(queue),
             )
-            .children(bar.map(|bar| div().p(px(theme::GAP)).child(bar)))
+            .children(bar)
+            .children(modal)
             .when_some(toast, |d, m| {
                 d.child(
                     div()

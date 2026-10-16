@@ -79,6 +79,8 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
                 .flex()
                 .items_center()
                 .justify_center()
+                // GPUI clips to rectangles, so round the tile's own corners.
+                .rounded_l(px(8.0))
                 .bg(theme::active())
                 .child(icon("heart", 20.0, theme::text())),
         )
@@ -95,7 +97,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
     for i in 0..list.len() {
         let tr = list[i].clone();
         let l = list.clone();
-        let art = cover(app, &tr, 56.0, 0.0, cx);
+        let art = cover(app, &tr, 56.0, 8.0, cx);
         cards.push(
             base(("card", i).into())
                 .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)))

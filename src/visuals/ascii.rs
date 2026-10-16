@@ -56,6 +56,15 @@ pub fn from_image_colored(path: &Path, cols: u32, rows: u32) -> Option<Vec<Color
         let q = |v: f32| ((v.clamp(0.0, 1.0) * 15.0).round() as u8);
         (q(c.0), q(c.1), q(c.2))
     };
+    // Stretch the cover's own luma range over the ramp, so flat covers still
+    // get structure instead of one dense character everywhere.
+    let lumas: Vec<f32> = small
+        .pixels()
+        .map(|p| Rgb(p.0[0] as f32 / 255.0, p.0[1] as f32 / 255.0, p.0[2] as f32 / 255.0).luma())
+        .collect();
+    let lo = lumas.iter().cloned().fold(1.0f32, f32::min);
+    let hi = lumas.iter().cloned().fold(0.0f32, f32::max);
+    let span = (hi - lo).max(0.08);
     let mut out = Vec::with_capacity(rows as usize);
     for y in 0..rows {
         let mut line = String::with_capacity(cols as usize);
@@ -64,8 +73,8 @@ pub fn from_image_colored(path: &Path, cols: u32, rows: u32) -> Option<Vec<Color
         for x in 0..cols {
             let p = small.get_pixel(x, y).0;
             let c = Rgb(p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
-            let l = c.luma();
-            line.push(ramp_char(l.powf(0.85)));
+            let l = ((c.luma() - lo) / span).clamp(0.0, 1.0);
+            line.push(ramp_char(l.powf(0.9)));
             // Lift dark-but-coloured pixels so the hue stays visible.
             let mx = c.0.max(c.1).max(c.2).max(0.001);
             let target = (0.35 + 0.65 * mx).min(1.0);

@@ -311,7 +311,7 @@ pub fn window_pill() -> impl IntoElement {
 
 pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let item = |id: &'static str, name: &'static str, view: View, cx: &mut Context<Glyph>| {
-        let active = app.view == view;
+        let active = if view == View::Settings { app.settings_open } else { app.view == view && !app.settings_open };
         div()
             .id(id)
             .w(px(44.0))

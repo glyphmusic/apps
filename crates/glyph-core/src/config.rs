@@ -16,6 +16,8 @@ pub struct Config {
     pub providers: ProvidersConfig,
     pub visuals: VisualsConfig,
     pub updates: UpdatesConfig,
+    pub audio: AudioConfig,
+    pub storage: StorageConfig,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -61,6 +63,38 @@ pub struct UpdatesConfig {
     pub auto_install: bool,
     /// "stable" | "prerelease"
     pub channel: String,
+}
+
+/// Stream quality where a source offers several (Jamendo: mp31 / mp32 / ogg).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioQuality {
+    /// Data saver (~96 kbps MP3).
+    Low,
+    /// ~128–160 kbps.
+    Standard,
+    /// Best the source offers.
+    #[default]
+    High,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub quality: AudioQuality,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// Cover cache limit in MB; 0 = no limit.
+    pub cache_limit_mb: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self { cache_limit_mb: 1024 }
+    }
 }
 
 impl Default for ProvidersConfig {
