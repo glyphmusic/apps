@@ -133,7 +133,10 @@ impl Render for Glyph {
         let queue = self
             .show_queue
             .then(|| views::queue_panel(self, window, cx).into_any_element());
-        let bar = player_bar::player_bar(self, window, cx).into_any_element();
+        // Song + lyrics in Now Playing carries its own transport (Liner):
+        // no second player bar there. Lyrics-only keeps the bar.
+        let full_np = self.view == View::NowPlaying && self.current.is_some() && !(self.show_lyrics && self.lyrics_only);
+        let bar = (!full_np).then(|| player_bar::player_bar(self, window, cx).into_any_element());
         let toast = self.toast.as_ref().map(|(m, _)| m.clone());
 
         div()
@@ -191,7 +194,7 @@ impl Render for Glyph {
                     .child(main_panel)
                     .children(queue),
             )
-            .child(div().p(px(theme::GAP)).child(bar))
+            .children(bar.map(|bar| div().p(px(theme::GAP)).child(bar)))
             .when_some(toast, |d, m| {
                 d.child(
                     div()

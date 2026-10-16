@@ -141,6 +141,8 @@ pub struct Glyph {
 
     pub show_queue: bool,
     pub show_lyrics: bool,
+    /// Now Playing shows only the lyrics (global player bar stays visible).
+    pub lyrics_only: bool,
     pub radio: bool,
     pub mini_on_top: bool,
     pub toast: Option<(String, Instant)>,
@@ -149,6 +151,10 @@ pub struct Glyph {
     pub ink: [f32; 3],
     /// Cover cache: track key -> resolved local path (None = no cover / loading).
     pub covers: std::collections::HashMap<String, Option<PathBuf>>,
+    /// Covers currently being fetched (drawn as skeletons).
+    pub covers_loading: std::collections::HashSet<String>,
+    /// Covers rendered as ASCII, per (track, cols, rows); `None` = computing.
+    pub ascii_covers: std::collections::HashMap<(String, u32, u32), Option<Vec<crate::visuals::ascii::ColoredRow>>>,
     pub embed: crate::embed::EmbedHost,
     /// Last (track, playing, position/5 s) pushed to the OS media controls.
     media_keys_sent: Option<(Option<(glyph_protocol::ProviderId, String)>, bool, u64)>,
@@ -264,12 +270,15 @@ impl Glyph {
             conn_test: None,
             show_queue: false,
             show_lyrics: true,
+            lyrics_only: false,
             radio: true,
             mini_on_top: true,
             toast: None,
             lang: crate::i18n::lang(),
             ink: [0.0; 3],
             covers: Default::default(),
+            covers_loading: Default::default(),
+            ascii_covers: Default::default(),
             embed: crate::embed::EmbedHost::new(raw_handle(window)),
             media_keys_sent: None,
             started: Instant::now(),
@@ -534,7 +543,7 @@ impl Glyph {
                 dirty = true;
             }
         }
-        if self.is_animating() {
+        if self.is_animating() || crate::ui::widgets::take_skeleton_seen() {
             dirty = true;
         }
         if dirty {
@@ -1368,18 +1377,48 @@ impl Glyph {
         self.covers.insert(key.clone(), None);
         let b = self.backend.clone()?;
         let t = t.clone();
+        self.covers_loading.insert(key.clone());
         cx.spawn(async move |this, cx| {
             let r = guard_async(b.cover(&t)).await;
-            if let Ok(Some(p)) = r {
-                this.update(cx, |s, cx| {
+            this.update(cx, |s, cx| {
+                s.covers_loading.remove(&key);
+                if let Ok(Some(p)) = r {
                     s.covers.insert(key, Some(p));
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
         None
+    }
+
+    /// The cover at `path` as ASCII rows; computed on the background executor.
+    pub fn ascii_cover(&mut self, t: &Track, path: &std::path::Path, cols: u32, rows: u32, cx: &mut Context<Self>) -> Option<Vec<crate::visuals::ascii::ColoredRow>> {
+        let key = (track_key(t), cols, rows);
+        if let Some(v) = self.ascii_covers.get(&key) {
+            return v.clone();
+        }
+        self.ascii_covers.insert(key.clone(), None);
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let rows_ = cx
+                .background_executor()
+                .spawn(async move { crate::visuals::ascii::from_image_colored(&path, cols, rows) })
+                .await;
+            this.update(cx, |s, cx| {
+                // Undecodable image: empty rows, the caller shows the image.
+                s.ascii_covers.insert(key, Some(rows_.unwrap_or_default()));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    pub fn cover_loading(&self, t: &Track) -> bool {
+        self.covers_loading.contains(&track_key(t))
     }
 }
 

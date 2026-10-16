@@ -169,10 +169,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
     } else if query.trim().is_empty() {
         ascii_state(ART_SEARCH, t("search.empty.title"), t("search.empty.sub")).into_any_element()
     } else if app.search.results.is_empty() && app.search.loading {
-        div()
-            .py(px(24.0))
-            .child(spinner_line(app.spinner(), tf("search.loading", &[("q", &query)])))
-            .into_any_element()
+        skeleton_rows("search", 8).pt(px(8.0)).into_any_element()
     } else if app.search.results.is_empty() {
         ascii_state(ART_EMPTY, t("search.none.title"), format!("\u{201c}{query}\u{201d}")).into_any_element()
     } else {

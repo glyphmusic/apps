@@ -101,26 +101,41 @@ fn input_box(input: impl IntoElement) -> Div {
         .child(input)
 }
 
-/// Floating preview while a priority entry is dragged.
+/// The dragged priority entry: the whole row follows the cursor.
 #[derive(Clone)]
 struct PrioDrag {
     from: usize,
-    label: SharedString,
+    provider: ProviderId,
+    width: gpui::Pixels,
+}
+
+/// One priority row's content (shared by the list and the drag preview).
+fn prio_row_content(i: usize, p: ProviderId) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .px(px(16.0))
+        .py(px(10.0))
+        .child(icon("grip-vertical", 15.0, theme::text_faint()))
+        .child(mono().w(px(18.0)).text_size(theme::text_sm()).text_color(theme::text_faint()).child(format!("{}", i + 1)))
+        .child(div().flex_1().text_size(theme::text_md()).child(p.display_name()))
+        .child(badge(p))
 }
 
 impl Render for PrioDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(12.0))
-            .py(px(6.0))
-            .rounded(px(8.0))
-            .bg(hsla(0.0, 0.0, 0.16, 0.96))
-            .border_1()
-            .border_color(hsla(0.0, 0.0, 1.0, 0.14))
-            .text_size(theme::text_sm())
-            .text_color(gpui::white())
-            .font_family(theme::FONT)
-            .child(self.label.clone())
+        theme::on_panel(|| {
+            prio_row_content(self.from, self.provider)
+                .w(self.width)
+                .rounded(px(8.0))
+                .bg(hsla(0.0, 0.0, 0.17, 0.98))
+                .border_1()
+                .border_color(hsla(0.0, 0.0, 1.0, 0.12))
+                .font_family(theme::FONT)
+                .text_color(gpui::white())
+                .cursor_grabbing()
+        })
     }
 }
 
@@ -173,23 +188,16 @@ pub fn settings(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> im
         .into_iter()
         .enumerate()
         .map(|(i, p)| {
-            let drag = PrioDrag { from: i, label: p.display_name().into() };
+            // The preview is as wide as the list column (the row's width).
+            let drag = PrioDrag { from: i, provider: p, width: px(COLUMN_W) };
             div()
                 .id(("prio", i))
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .px(px(16.0))
-                .py(px(10.0))
                 .cursor_grab()
                 .hover(|s| s.bg(hsla(0.0, 0.0, 1.0, 0.03)))
                 .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
                 .drag_over::<PrioDrag>(|s, _, _, _| s.bg(hsla(0.0, 0.0, 1.0, 0.07)))
                 .on_drop(cx.listener(move |this, d: &PrioDrag, _, cx| this.reorder_priority(d.from, i, cx)))
-                .child(icon("grip-vertical", 15.0, theme::text_faint()))
-                .child(mono().w(px(18.0)).text_size(theme::text_sm()).text_color(theme::text_faint()).child(format!("{}", i + 1)))
-                .child(div().flex_1().text_size(theme::text_md()).child(p.display_name()))
-                .child(badge(p))
+                .child(prio_row_content(i, p))
                 .into_any_element()
         })
         .collect();

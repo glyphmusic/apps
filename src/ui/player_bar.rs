@@ -95,8 +95,11 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                         .child(title_lines(tr.title.clone().into(), sub)),
                 )
                 .child(
-                    icon_button("bar-like", "heart", 16.0, if liked { theme::pink() } else { theme::text_dim() })
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_like(&t_like, cx))),
+                    toggle_button("bar-like", "heart", 16.0, liked, Some(theme::pink()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            mark_toggled("bar-like");
+                            this.toggle_like(&t_like, cx)
+                        })),
                 )
         }
         None => div()
@@ -190,10 +193,16 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .h(px(36.0))
         .rounded(px(10.0))
         .bg(hsla(0.0, 0.0, 1.0, 0.04))
-        .child(icon_button("shuffle", "shuffle", 15.0, on(app.shuffle())).on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))))
+        .child(toggle_button("shuffle", "shuffle", 15.0, app.shuffle(), None).on_click(cx.listener(|this, _, _, cx| {
+            mark_toggled("shuffle");
+            this.toggle_shuffle(cx)
+        })))
         .child(
-            icon_button("repeat", if repeat == RepeatMode::One { "repeat-1" } else { "repeat" }, 15.0, on(repeat != RepeatMode::Off))
-                .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx))),
+            toggle_button("repeat", if repeat == RepeatMode::One { "repeat-1" } else { "repeat" }, 15.0, repeat != RepeatMode::Off, None)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    mark_toggled("repeat");
+                    this.cycle_repeat(cx)
+                })),
         )
         .child(
             div()
@@ -204,9 +213,13 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .child(icon(if app.volume() <= 0.001 { "volume-x" } else { "volume-2" }, 15.0, theme::text_dim()))
                 .child(thin_bar("vol", 80.0, app.volume(), vol)),
         )
-        .child(icon_button("mini", "picture-in-picture-2", 15.0, on(app.mini_on_top)).on_click(cx.listener(|this, _, _, cx| this.toggle_mini(cx))))
+        .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_on_top, None).on_click(cx.listener(|this, _, _, cx| {
+            mark_toggled("mini");
+            this.toggle_mini(cx)
+        })))
         .child(
-            icon_button("queue", "list-music", 15.0, on(app.show_queue)).on_click(cx.listener(|this, _, _, cx| {
+            toggle_button("queue", "list-music", 15.0, app.show_queue, None).on_click(cx.listener(|this, _, _, cx| {
+                mark_toggled("queue");
                 this.show_queue = !this.show_queue;
                 cx.notify();
             })),

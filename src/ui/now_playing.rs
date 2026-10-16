@@ -141,13 +141,19 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .flex()
                 .items_center()
                 .gap(px(14.0))
-                .child(icon_button("np-shuf", "shuffle", 17.0, on(app.shuffle())).on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))))
+                .child(toggle_button("np-shuf", "shuffle", 17.0, app.shuffle(), None).on_click(cx.listener(|this, _, _, cx| {
+                    mark_toggled("np-shuf");
+                    this.toggle_shuffle(cx)
+                })))
                 .child(icon_button("np-prev", "skip-back", 19.0, theme::text()).on_click(cx.listener(|this, _, _, cx| this.previous(cx))))
                 .child(play_btn)
                 .child(icon_button("np-next", "skip-forward", 19.0, theme::text()).on_click(cx.listener(|this, _, _, cx| this.next(false, cx))))
                 .child(
-                    icon_button("np-rep", if repeat == RepeatMode::One { "repeat-1" } else { "repeat" }, 17.0, on(repeat != RepeatMode::Off))
-                        .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx))),
+                    toggle_button("np-rep", if repeat == RepeatMode::One { "repeat-1" } else { "repeat" }, 17.0, repeat != RepeatMode::Off, None)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            mark_toggled("np-rep");
+                            this.cycle_repeat(cx)
+                        })),
                 ),
         )
         .child(
@@ -158,11 +164,25 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .child(icon("volume-2", 16.0, theme::text_dim()))
                 .child(thin_bar("np-vol", 150.0, app.volume(), vol))
                 .child(
-                    icon_button("np-like", "heart", 16.0, if liked { theme::pink() } else { theme::text_dim() })
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_like(&t_like, cx))),
+                    toggle_button("np-like", "heart", 16.0, liked, Some(theme::pink()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            mark_toggled("np-like");
+                            this.toggle_like(&t_like, cx)
+                        })),
                 ),
         );
 
+    if app.show_lyrics && app.lyrics_only {
+        // Lyrics only: centred column, the global player bar does transport.
+        return div()
+            .id("np-root")
+            .size_full()
+            .flex()
+            .justify_center()
+            .px(px(40.0))
+            .child(div().w_full().max_w(px(820.0)).h_full().child(lyrics(app, cx)))
+            .into_any_element();
+    }
     div()
         .id("np-root")
         .size_full()
@@ -175,12 +195,36 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .into_any_element()
 }
 
+/// "Song + lyrics" / "Lyrics only" switch (filled icon = active mode).
+fn mode_switch(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
+    let only = app.lyrics_only;
+    pill()
+        .px(px(3.0))
+        .h(px(32.0))
+        .gap(px(2.0))
+        .child(
+            toggle_button("np-mode-split", "layout-split", 15.0, !only, None).on_click(cx.listener(|this, _, _, cx| {
+                mark_toggled("np-mode-split");
+                this.lyrics_only = false;
+                cx.notify();
+            })),
+        )
+        .child(
+            toggle_button("np-mode-lyrics", "text-center", 15.0, only, None).on_click(cx.listener(|this, _, _, cx| {
+                mark_toggled("np-mode-lyrics");
+                this.lyrics_only = true;
+                cx.notify();
+            })),
+        )
+}
+
 fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
     let ls = &app.lyrics;
     if ls.loading {
         return div()
             .flex_1()
-            .child(spinner_line(app.spinner(), t("lyrics.loading")))
+            .pt(px(72.0))
+            .child(skeleton_lyrics(7))
             .into_any_element();
     }
     let Some(l) = ls.lyrics.clone() else {
@@ -195,8 +239,9 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
     let active = guard(|| l.active_line(pos_ms, offset)).flatten();
     let progress = guard(|| l.line_progress(pos_ms, offset)).unwrap_or(0.0);
     let synced = !l.synced.is_empty();
+    let centered = app.lyrics_only;
 
-    let info = div().flex().justify_center().child(
+    let info = div().flex().justify_center().gap(px(8.0)).child(mode_switch(app, cx)).child(
         pill()
             .px(px(6.0))
             .h(px(32.0))
@@ -231,6 +276,7 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         div()
             .flex()
             .flex_col()
+            .when(app.lyrics_only, |d| d.items_center().text_center())
             .gap(px(22.0))
             .children((start..end).map(|i| {
                 let line = &l.synced[i];
@@ -256,6 +302,7 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
                     let rest: String = text.chars().skip(k).collect();
                     base.flex()
                         .flex_wrap()
+                        .when(centered, |d| d.justify_center())
                         .child(div().text_color(theme::text()).child(done))
                         .child(div().text_color(theme::text().opacity(0.78)).child(rest))
                 } else {

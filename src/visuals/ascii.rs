@@ -40,6 +40,51 @@ pub fn from_image(path: &Path, cols: u32, rows: u32) -> Option<Vec<AsciiRow>> {
     Some(out)
 }
 
+/// One row of cover ASCII: the text plus colour runs `(byte start, len, colour)`.
+pub type ColoredRow = (String, Vec<(usize, usize, Rgb)>);
+
+/// The real cover as ASCII: each character's glyph follows the pixel's
+/// brightness and its colour is the pixel's own colour (lifted a bit, since a
+/// thin glyph shows less colour than a solid pixel). Neighbouring characters
+/// with nearly the same colour share one run.
+pub fn from_image_colored(path: &Path, cols: u32, rows: u32) -> Option<Vec<ColoredRow>> {
+    let img = image::open(path).ok()?;
+    let small = img
+        .resize_exact(cols, rows, image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    let quant = |c: Rgb| -> (u8, u8, u8) {
+        let q = |v: f32| ((v.clamp(0.0, 1.0) * 15.0).round() as u8);
+        (q(c.0), q(c.1), q(c.2))
+    };
+    let mut out = Vec::with_capacity(rows as usize);
+    for y in 0..rows {
+        let mut line = String::with_capacity(cols as usize);
+        let mut runs: Vec<(usize, usize, Rgb)> = Vec::new();
+        let mut last: Option<(u8, u8, u8)> = None;
+        for x in 0..cols {
+            let p = small.get_pixel(x, y).0;
+            let c = Rgb(p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
+            let l = c.luma();
+            line.push(ramp_char(l.powf(0.85)));
+            // Lift dark-but-coloured pixels so the hue stays visible.
+            let mx = c.0.max(c.1).max(c.2).max(0.001);
+            let target = (0.35 + 0.65 * mx).min(1.0);
+            let shown = c.scale(target / mx);
+            let q = quant(shown);
+            if Some(q) == last {
+                if let Some(r) = runs.last_mut() {
+                    r.1 += 1;
+                }
+            } else {
+                runs.push((x as usize, 1, shown));
+                last = Some(q);
+            }
+        }
+        out.push((line, runs));
+    }
+    Some(out)
+}
+
 /// Deterministic generated pattern (concentric noise rings) for a seed.
 pub fn pattern(seed: &str, cols: u32, rows: u32) -> Vec<AsciiRow> {
     let h = seed

@@ -14,7 +14,7 @@ macro_rules! icons {
 
 icons!(
     "arrow-down", "arrow-up", "chevron-down", "chevron-left", "chevron-right", "copy", "disc-3",
-    "download", "grip-vertical", "heart", "house", "library", "link-2", "list-music", "list-plus", "list-start",
+    "download", "grip-vertical", "heart", "heart-fill", "layout-split", "layout-split-fill", "list-music-fill", "picture-in-picture-2-fill", "text-center", "house", "library", "link-2", "list-music", "list-plus", "list-start",
     "minimize-2", "minus", "music-2", "pause", "picture-in-picture-2", "play", "plus",
     "refresh-cw", "repeat-1", "repeat", "search", "settings", "shuffle", "skip-back",
     "skip-forward", "square", "timer", "trash-2", "volume-2", "volume-x", "x",
