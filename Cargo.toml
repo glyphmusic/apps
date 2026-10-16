@@ -6,7 +6,7 @@ members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audi
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/OWNER/glyph"
+repository = "https://github.com/glyphmusic/glyph"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -37,6 +37,8 @@ glyph-core.workspace = true
 glyph-audio.workspace = true
 # Pinned Zed revision (2026-10-16). Bump deliberately.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+raw-window-handle = "0.6"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -44,6 +46,9 @@ futures.workspace = true
 flume.workspace = true
 noise = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
 
 [profile.release]
 lto = "thin"

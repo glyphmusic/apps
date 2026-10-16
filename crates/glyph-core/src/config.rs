@@ -14,6 +14,11 @@ pub struct Config {
     pub providers: ProvidersConfig,
     pub visuals: VisualsConfig,
     pub updates: UpdatesConfig,
+    /// Keys as they stand in the file (before env overrides), so `save()` never
+    /// writes env-provided secrets to disk.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub file_keys: Option<ApiKeys>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -33,6 +38,8 @@ pub struct ProvidersConfig {
     pub enabled: Vec<ProviderId>,
     /// Full-source priority for the resolver.
     pub priority: Vec<ProviderId>,
+    /// Max YouTube `search.list` calls per day (each costs 100 of 10 000 quota units).
+    pub youtube_daily_searches: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +67,7 @@ impl Default for ProvidersConfig {
         Self {
             enabled: ProviderId::ALL.to_vec(),
             priority: vec![Audius, Jamendo, SoundCloud, YouTube],
+            youtube_daily_searches: 90,
         }
     }
 }
@@ -73,7 +81,7 @@ impl Default for VisualsConfig {
 impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
-            repo: "OWNER/glyph".into(),
+            repo: "glyphmusic/glyph".into(),
             check_on_start: true,
             auto_install: false,
             channel: "stable".into(),
@@ -81,18 +89,151 @@ impl Default for UpdatesConfig {
     }
 }
 
+impl ApiKeys {
+    fn blank_to_none(&mut self) {
+        for k in [
+            &mut self.youtube,
+            &mut self.jamendo_client_id,
+            &mut self.soundcloud_client_id,
+            &mut self.spotify_client_id,
+            &mut self.spotify_client_secret,
+            &mut self.lastfm,
+        ] {
+            if k.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                *k = None;
+            }
+        }
+    }
+}
+
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
 impl Config {
     pub fn dir() -> PathBuf {
-        todo!()
+        dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("glyph")
     }
+
     pub fn path() -> PathBuf {
-        todo!()
+        if let Some(p) = env("GLYPH_CONFIG") {
+            return PathBuf::from(p);
+        }
+        Self::dir().join("config.toml")
     }
+
     /// Missing file = defaults (and writes nothing). Env vars override keys.
     pub fn load() -> anyhow::Result<Self> {
-        todo!()
+        Self::load_from(&Self::path())
     }
+
+    pub fn load_from(path: &std::path::Path) -> anyhow::Result<Self> {
+        let mut cfg = match std::fs::read_to_string(path) {
+            Ok(text) => Self::from_toml(&text)
+                .map_err(|e| anyhow::anyhow!("invalid {}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(e.into()),
+        };
+        cfg.keys.blank_to_none();
+        cfg.file_keys = Some(cfg.keys.clone());
+        cfg.apply_env();
+        Ok(cfg)
+    }
+
+    pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(text)
+    }
+
+    /// Applies `GLYPH_*` environment overrides (non-empty values only).
+    pub fn apply_env(&mut self) {
+        let k = &mut self.keys;
+        if let Some(v) = env("GLYPH_YOUTUBE_KEY") {
+            k.youtube = Some(v);
+        }
+        if let Some(v) = env("GLYPH_JAMENDO_CLIENT_ID") {
+            k.jamendo_client_id = Some(v);
+        }
+        if let Some(v) = env("GLYPH_SOUNDCLOUD_CLIENT_ID") {
+            k.soundcloud_client_id = Some(v);
+        }
+        if let Some(v) = env("GLYPH_SPOTIFY_CLIENT_ID") {
+            k.spotify_client_id = Some(v);
+        }
+        if let Some(v) = env("GLYPH_SPOTIFY_CLIENT_SECRET") {
+            k.spotify_client_secret = Some(v);
+        }
+        if let Some(v) = env("GLYPH_LASTFM_KEY") {
+            k.lastfm = Some(v);
+        }
+        if let Some(v) = env("GLYPH_SERVER_URL") {
+            self.server_url = v;
+        }
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
-        todo!()
+        self.save_to(&Self::path())
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let mut out = self.clone();
+        // Do not persist keys that only exist because of an env var.
+        if let Some(file_keys) = &self.file_keys {
+            let mut env_cfg = Config::default();
+            env_cfg.apply_env();
+            let e = &env_cfg.keys;
+            let f = file_keys;
+            let k = &mut out.keys;
+            macro_rules! keep {
+                ($field:ident) => {
+                    if e.$field.is_some() && k.$field == e.$field {
+                        k.$field = f.$field.clone();
+                    }
+                };
+            }
+            keep!(youtube);
+            keep!(jamendo_client_id);
+            keep!(soundcloud_client_id);
+            keep!(spotify_client_id);
+            keep!(spotify_client_secret);
+            keep!(lastfm);
+        }
+        let text = toml::to_string_pretty(&out)?;
+        crate::paths::write_atomic(path, text.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_roundtrip_through_toml() {
+        let cfg = Config::default();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back = Config::from_toml(&text).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn partial_file_uses_defaults() {
+        let cfg = Config::from_toml("server_url = \"https://x.example\"
+[keys]
+youtube = \"abc\"").unwrap();
+        assert_eq!(cfg.server_url, "https://x.example");
+        assert_eq!(cfg.keys.youtube.as_deref(), Some("abc"));
+        assert!(cfg.updates.check_on_start);
+        assert_eq!(cfg.providers.priority.len(), 4);
+    }
+
+    #[test]
+    fn missing_file_is_default_and_save_creates_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub").join("config.toml");
+        let mut cfg = Config::load_from(&p).unwrap();
+        assert!(!p.exists());
+        cfg.keys.lastfm = Some("k".into());
+        cfg.save_to(&p).unwrap();
+        let again = Config::load_from(&p).unwrap();
+        assert_eq!(again.keys.lastfm.as_deref(), Some("k"));
     }
 }

@@ -1,0 +1,52 @@
+# Glyph configuration. Copy to:
+#   Linux:   ~/.config/glyph/config.toml
+#   macOS:   ~/Library/Application Support/glyph/config.toml
+#   Windows: %APPDATA%\glyph\config.toml
+#
+# Every key is optional. Environment variables override the file:
+#   GLYPH_SERVER_URL, GLYPH_YOUTUBE_KEY, GLYPH_JAMENDO_CLIENT_ID,
+#   GLYPH_SOUNDCLOUD_CLIENT_ID, GLYPH_SPOTIFY_CLIENT_ID,
+#   GLYPH_SPOTIFY_CLIENT_SECRET, GLYPH_LASTFM_KEY
+# Keys set through env vars are never written back to this file.
+# Providers without a key are skipped (Audius, Internet Archive, Deezer,
+# MusicBrainz and LRCLIB need no key).
+
+# glyph-server instance used for metadata (search cache, shared keys).
+# Empty = direct mode: the app queries the providers itself with the keys below.
+server_url = ""
+
+[keys]
+# YouTube Data API v3 (Google Cloud console). search.list costs 100 of 10 000 units/day.
+# youtube = "AIza..."
+# Jamendo: https://devportal.jamendo.com
+# jamendo_client_id = ""
+# SoundCloud: registered app's client id (https://soundcloud.com/you/apps)
+# soundcloud_client_id = ""
+# Spotify: https://developer.spotify.com/dashboard (metadata + public playlist import only)
+# spotify_client_id = ""
+# spotify_client_secret = ""
+# Last.fm: https://www.last.fm/api/account/create (radio, loved tracks import)
+# lastfm = ""
+
+[providers]
+# Providers to use (remove entries to disable them).
+enabled = ["audius", "jamendo", "archive", "soundcloud", "youtube", "spotify", "deezer", "musicbrainz", "lastfm", "lrclib"]
+# Order in which full-playback sources are preferred by the resolver.
+priority = ["audius", "jamendo", "soundcloud", "youtube"]
+# Cap on YouTube search.list calls per day (each = 100 quota units).
+youtube_daily_searches = 90
+
+[visuals]
+# Glow / ASCII intensity, 0.0 .. 1.0
+intensity = 0.8
+# Draw covers as ASCII art
+ascii_covers = false
+
+[updates]
+# GitHub repository (owner/repo) that publishes releases.
+repo = "glyphmusic/glyph"
+check_on_start = true
+# Download + install automatically (always SHA-256 verified). Restart is asked first.
+auto_install = false
+# "stable" or "prerelease"
+channel = "stable"

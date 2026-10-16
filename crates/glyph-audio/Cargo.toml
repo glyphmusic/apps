@@ -11,3 +11,15 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 flume.workspace = true
+serde_json.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mkv"] }
+rustfft = "6"
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+webbrowser = "1"
+
+# Embedded webview mini-player runs on its own thread where the OS allows it.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+wry = "0.57"
+tao = "0.37"

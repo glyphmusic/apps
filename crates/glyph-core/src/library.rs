@@ -1,8 +1,15 @@
 //! Local library: liked songs, recently played (last 50), playlists, per-song
 //! lyrics offsets. Persisted as JSON in the app data dir. Never leaves the device.
 
+use crate::dedupe::{same_song, track_key};
+use crate::paths;
 use glyph_protocol::Track;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Max entries in "recently played".
+pub const RECENT_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Playlist {
@@ -18,47 +25,253 @@ pub struct Library {
     pub liked: Vec<Track>,
     pub recent: Vec<Track>,
     pub playlists: Vec<Playlist>,
+    /// Lyrics offsets in ms, keyed by normalised `title|artist`.
+    #[serde(default)]
+    pub lyrics_offsets: BTreeMap<String, i64>,
 }
 
 impl Library {
+    pub fn path() -> PathBuf {
+        paths::data_dir().join("library.json")
+    }
+
+    /// Missing file = empty library. A corrupt file is kept as `library.json.bak`.
     pub fn load() -> anyhow::Result<Self> {
-        todo!()
+        Self::load_from(&Self::path())
     }
+
+    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(lib) => Ok(lib),
+                Err(e) => {
+                    let _ = std::fs::copy(path, path.with_extension("json.bak"));
+                    Err(anyhow::anyhow!("library file is corrupt (backup kept): {e}"))
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
-        todo!()
+        self.save_to(&Self::path())
     }
+
+    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        paths::write_json(path, self)
+    }
+
     pub fn is_liked(&self, track: &Track) -> bool {
-        let _ = track;
-        todo!()
+        self.liked.iter().any(|t| same_entry(t, track))
     }
+
     pub fn toggle_like(&mut self, track: &Track) {
-        let _ = track;
-        todo!()
+        if let Some(i) = self.liked.iter().position(|t| same_entry(t, track)) {
+            self.liked.remove(i);
+        } else {
+            self.liked.insert(0, track.clone());
+        }
     }
+
     /// Push to front, dedupe, cap at 50.
     pub fn push_recent(&mut self, track: Track) {
-        let _ = track;
-        todo!()
+        self.recent.retain(|t| !same_entry(t, &track));
+        self.recent.insert(0, track);
+        self.recent.truncate(RECENT_LIMIT);
     }
+
     pub fn create_playlist(&mut self, name: &str) -> &mut Playlist {
-        let _ = name;
-        todo!()
+        self.playlists.push(Playlist {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            name: name.trim().to_string(),
+            tracks: vec![],
+            origin: None,
+        });
+        self.playlists.last_mut().expect("just pushed")
     }
+
+    pub fn playlist(&self, id: &str) -> Option<&Playlist> {
+        self.playlists.iter().find(|p| p.id == id)
+    }
+
+    pub fn playlist_mut(&mut self, id: &str) -> Option<&mut Playlist> {
+        self.playlists.iter_mut().find(|p| p.id == id)
+    }
+
     pub fn rename_playlist(&mut self, id: &str, name: &str) {
-        let _ = (id, name);
-        todo!()
+        if let Some(p) = self.playlist_mut(id) {
+            p.name = name.trim().to_string();
+        }
     }
+
     pub fn delete_playlist(&mut self, id: &str) {
-        let _ = id;
-        todo!()
+        self.playlists.retain(|p| p.id != id);
     }
+
+    /// Appends a song unless the playlist already has it. Returns `true` if added.
+    pub fn add_to_playlist(&mut self, id: &str, track: Track) -> bool {
+        let Some(p) = self.playlist_mut(id) else { return false };
+        if p.tracks.iter().any(|t| same_entry(t, &track)) {
+            return false;
+        }
+        p.tracks.push(track);
+        true
+    }
+
+    pub fn remove_from_playlist(&mut self, id: &str, index: usize) {
+        if let Some(p) = self.playlist_mut(id) {
+            if index < p.tracks.len() {
+                p.tracks.remove(index);
+            }
+        }
+    }
+
+    pub fn move_in_playlist(&mut self, id: &str, from: usize, to: usize) {
+        if let Some(p) = self.playlist_mut(id) {
+            if from < p.tracks.len() && to < p.tracks.len() {
+                let t = p.tracks.remove(from);
+                p.tracks.insert(to, t);
+            }
+        }
+    }
+
+    /// Saves imported tracks as a playlist. If a playlist with the same
+    /// `origin` already exists, only songs that are not in it yet are added
+    /// (re-import). Returns the playlist and how many songs were added.
+    pub fn save_import(&mut self, name: &str, origin: Option<&str>, tracks: Vec<Track>) -> (&mut Playlist, usize) {
+        let existing = origin.and_then(|o| self.playlists.iter().position(|p| p.origin.as_deref() == Some(o)));
+        let idx = match existing {
+            Some(i) => i,
+            None => {
+                let p = self.create_playlist(name);
+                p.origin = origin.map(str::to_string);
+                self.playlists.len() - 1
+            }
+        };
+        let p = &mut self.playlists[idx];
+        let mut added = 0;
+        for t in tracks {
+            if !p.tracks.iter().any(|x| same_entry(x, &t)) {
+                p.tracks.push(t);
+                added += 1;
+            }
+        }
+        (&mut self.playlists[idx], added)
+    }
+
+    /// Adds imported tracks to Liked Songs (no duplicates). Returns how many were added.
+    pub fn like_all(&mut self, tracks: Vec<Track>) -> usize {
+        let mut added = 0;
+        for t in tracks {
+            if !self.is_liked(&t) {
+                self.liked.push(t);
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// Lyrics offset in ms for a track (default 0), stepped by ±100 in the UI.
     pub fn lyrics_offset(&self, track: &Track) -> i64 {
-        let _ = track;
-        todo!()
+        self.lyrics_offsets.get(&track_key(track)).copied().unwrap_or(0)
     }
+
     pub fn set_lyrics_offset(&mut self, track: &Track, offset_ms: i64) {
-        let _ = (track, offset_ms);
-        todo!()
+        let key = track_key(track);
+        if offset_ms == 0 {
+            self.lyrics_offsets.remove(&key);
+        } else {
+            self.lyrics_offsets.insert(key, offset_ms);
+        }
+    }
+}
+
+/// Same library entry: same provider id, or the same song by title/artist/duration.
+fn same_entry(a: &Track, b: &Track) -> bool {
+    (a.source == b.source && a.id == b.id)
+        || a.external_ids.get(&b.source).map(|id| id == &b.id).unwrap_or(false)
+        || b.external_ids.get(&a.source).map(|id| id == &a.id).unwrap_or(false)
+        || same_song(a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dedupe::test_track;
+    use glyph_protocol::ProviderId;
+
+    fn tr(id: &str, title: &str) -> Track {
+        test_track(ProviderId::Audius, id, title, "Band", Some(180_000))
+    }
+
+    #[test]
+    fn like_toggle_and_recent_cap() {
+        let mut lib = Library::default();
+        let t = tr("1", "Song");
+        assert!(!lib.is_liked(&t));
+        lib.toggle_like(&t);
+        assert!(lib.is_liked(&t));
+        // same song from another provider counts as liked
+        let other = test_track(ProviderId::Deezer, "d9", "Song (Remastered)", "Band", Some(181_000));
+        assert!(lib.is_liked(&other));
+        lib.toggle_like(&t);
+        assert!(!lib.is_liked(&t));
+
+        for i in 0..60 {
+            lib.push_recent(tr(&i.to_string(), &format!("Song {i}")));
+        }
+        assert_eq!(lib.recent.len(), 50);
+        assert_eq!(lib.recent[0].id, "59");
+        lib.push_recent(tr("30", "Song 30"));
+        assert_eq!(lib.recent.len(), 50);
+        assert_eq!(lib.recent[0].id, "30");
+        assert_eq!(lib.recent.iter().filter(|t| t.id == "30").count(), 1);
+    }
+
+    #[test]
+    fn playlists_crud_and_reimport() {
+        let mut lib = Library::default();
+        let id = lib.create_playlist("  Mix ").id.clone();
+        assert_eq!(lib.playlist(&id).unwrap().name, "Mix");
+        lib.rename_playlist(&id, "Better");
+        assert!(lib.add_to_playlist(&id, tr("1", "A")));
+        assert!(!lib.add_to_playlist(&id, tr("1", "A")));
+        assert!(lib.add_to_playlist(&id, tr("2", "B")));
+        lib.move_in_playlist(&id, 1, 0);
+        assert_eq!(lib.playlist(&id).unwrap().tracks[0].id, "2");
+        lib.remove_from_playlist(&id, 0);
+        assert_eq!(lib.playlist(&id).unwrap().tracks.len(), 1);
+        lib.delete_playlist(&id);
+        assert!(lib.playlists.is_empty());
+
+        let (p, added) = lib.save_import("Imp", Some("https://x/pl"), vec![tr("1", "A"), tr("2", "B")]);
+        assert_eq!((p.tracks.len(), added), (2, 2));
+        let (p, added) = lib.save_import("Imp", Some("https://x/pl"), vec![tr("2", "B"), tr("3", "C")]);
+        assert_eq!((p.tracks.len(), added), (3, 1));
+        assert_eq!(lib.playlists.len(), 1);
+    }
+
+    #[test]
+    fn offsets_and_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        assert_eq!(Library::load_from(&path).unwrap(), Library::default());
+
+        let mut lib = Library::default();
+        let t = tr("1", "Song");
+        lib.set_lyrics_offset(&t, -300);
+        assert_eq!(lib.lyrics_offset(&t), -300);
+        lib.toggle_like(&t);
+        lib.save_to(&path).unwrap();
+        let back = Library::load_from(&path).unwrap();
+        assert_eq!(back, lib);
+        let mut back = back;
+        back.set_lyrics_offset(&t, 0);
+        assert_eq!(back.lyrics_offset(&t), 0);
+
+        std::fs::write(&path, b"{ nope").unwrap();
+        assert!(Library::load_from(&path).is_err());
+        assert!(path.with_extension("json.bak").exists());
     }
 }

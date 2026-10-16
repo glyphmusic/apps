@@ -12,8 +12,43 @@
 //! * Events are pulled by the UI from [`PlayerController::events`].
 //! * [`PlayerController::spectrum`] returns 32 bands (0.0..=1.0) for the visuals;
 //!   all zeros while an embed plays (visuals go procedural then).
+//!
+//! # Architecture
+//!
+//! One command channel feeds one player thread ([`engine`]). That thread owns
+//! the rodio output, the decode threads' control blocks, the FFT analyser and
+//! the embed backend, and publishes [`PlayerState`], the spectrum and
+//! [`PlayerEvent`]s through shared cells.
+//!
+//! * **Native**: `native` (symphonia decode thread per track, HTTP via
+//!   `http::HttpSource` with Range requests) -> bounded chunk channel ->
+//!   `TrackSource` -> `rodio::Player`. The next track is preloaded
+//!   ([`PlayerController::preload_next`]) and appended to the same rodio
+//!   `Player`, which gives gapless transitions. After a gapless switch the
+//!   engine emits `Ended`; the UI's following `load(next)` for the same track
+//!   is recognised and ignored.
+//! * **Embed**: see [`embed`] for the threading design and per-OS behaviour.
+//! * **FFT**: the audio thread copies a mono tap, the player thread runs a
+//!   2048-point FFT at ~60 Hz and maps it to 32 log-spaced, smoothed bands.
+//!
+//! # Platform requirements
+//!
+//! Linux: `libasound2-dev` (cpal/ALSA), `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
+//! `libsoup-3.0-dev`, `libxdo-dev` (wry/tao), `pkg-config`. Windows needs the
+//! WebView2 runtime (preinstalled on Windows 11). macOS needs nothing extra.
 
+pub mod embed;
+mod engine;
+mod http;
+mod media_keys;
+mod native;
+pub mod spectrum;
+
+pub use media_keys::MediaKeys;
+
+use flume::{Receiver, Sender};
 use glyph_protocol::{PlaybackSource, ProviderId, Track};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const SPECTRUM_BANDS: usize = 32;
@@ -65,63 +100,113 @@ pub struct MiniPlayerOptions {
     pub position: Option<(f64, f64)>,
 }
 
+/// Messages to the player thread.
+pub(crate) enum Cmd {
+    Load(Track, PlaybackSource),
+    Preload(Track, PlaybackSource),
+    Play,
+    Pause,
+    Toggle,
+    Stop,
+    Seek(Duration),
+    Volume(f32),
+    MiniOptions(MiniPlayerOptions),
+    Opened { id: u64, opened: native::Opened },
+    DecodeError { id: u64, message: String },
+    Embed(u64, embed::EmbedEvent),
+    Shutdown,
+}
+
+pub(crate) struct Shared {
+    pub state: Mutex<PlayerState>,
+    pub spectrum: Mutex<[f32; SPECTRUM_BANDS]>,
+    pub events_tx: Sender<PlayerEvent>,
+    pub events_rx: Receiver<PlayerEvent>,
+}
+
 pub struct PlayerController {
-    // implementation detail
+    cmd: Sender<Cmd>,
+    shared: Arc<Shared>,
 }
 
 impl PlayerController {
     pub fn new() -> anyhow::Result<Self> {
-        todo!()
+        let (events_tx, events_rx) = flume::unbounded();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(PlayerState {
+                status: Status::Idle,
+                track: None,
+                provider: None,
+                backend: None,
+                is_preview: false,
+                position: Duration::ZERO,
+                duration: None,
+                volume: 1.0,
+            }),
+            spectrum: Mutex::new([0.0; SPECTRUM_BANDS]),
+            events_tx,
+            events_rx,
+        });
+        let (cmd, rx) = flume::unbounded();
+        let engine = engine::Engine::new(shared.clone(), rx, cmd.clone());
+        std::thread::Builder::new()
+            .name("glyph-player".into())
+            .spawn(move || engine.run())?;
+        Ok(Self { cmd, shared })
     }
+
+    fn send(&self, c: Cmd) {
+        let _ = self.cmd.send(c);
+    }
+
     pub fn load(&self, track: Track, source: PlaybackSource) {
-        let _ = (track, source);
-        todo!()
+        self.send(Cmd::Load(track, source));
     }
     /// Gapless: decode/buffer the next native track ahead of time.
     pub fn preload_next(&self, track: Track, source: PlaybackSource) {
-        let _ = (track, source);
-        todo!()
+        self.send(Cmd::Preload(track, source));
     }
     pub fn play(&self) {
-        todo!()
+        self.send(Cmd::Play);
     }
     pub fn pause(&self) {
-        todo!()
+        self.send(Cmd::Pause);
     }
     pub fn toggle(&self) {
-        todo!()
+        self.send(Cmd::Toggle);
     }
     pub fn stop(&self) {
-        todo!()
+        self.send(Cmd::Stop);
     }
     pub fn seek(&self, position: Duration) {
-        let _ = position;
-        todo!()
+        self.send(Cmd::Seek(position));
     }
     /// 0.0..=1.0
     pub fn set_volume(&self, volume: f32) {
-        let _ = volume;
-        todo!()
+        // Reflect immediately so a UI slider reads back what it just set.
+        if volume.is_finite() {
+            self.shared.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
+        }
+        self.send(Cmd::Volume(volume));
     }
     pub fn state(&self) -> PlayerState {
-        todo!()
+        self.shared.state.lock().unwrap().clone()
     }
-    pub fn events(&self) -> flume::Receiver<PlayerEvent> {
-        todo!()
+    pub fn events(&self) -> Receiver<PlayerEvent> {
+        self.shared.events_rx.clone()
     }
     pub fn spectrum(&self) -> [f32; SPECTRUM_BANDS] {
-        todo!()
+        *self.shared.spectrum.lock().unwrap()
     }
     pub fn set_mini_player_options(&self, options: MiniPlayerOptions) {
-        let _ = options;
-        todo!()
+        self.send(Cmd::MiniOptions(options));
     }
 }
 
-/// OS media keys + now-playing info (souvlaki). Created by the app because
-/// Windows needs the main window's HWND.
-pub struct MediaKeys {
-    // implementation detail
+impl Drop for PlayerController {
+    fn drop(&mut self) {
+        let _ = self.cmd.send(Cmd::Shutdown);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,17 +221,111 @@ pub enum MediaKeyEvent {
     SeekBackward,
 }
 
-impl MediaKeys {
-    /// `hwnd`: the main window handle on Windows, ignored elsewhere.
-    pub fn new(hwnd: Option<*mut std::ffi::c_void>) -> anyhow::Result<Self> {
-        let _ = hwnd;
-        todo!()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn track(id: &str, source: ProviderId) -> Track {
+        Track {
+            id: id.into(),
+            source,
+            title: "t".into(),
+            artist: "a".into(),
+            album: None,
+            duration_ms: Some(1000),
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+        }
     }
-    pub fn events(&self) -> flume::Receiver<MediaKeyEvent> {
-        todo!()
+
+    fn wait_for(rx: &Receiver<PlayerEvent>, secs: u64, f: impl Fn(&PlayerEvent) -> bool) -> Option<PlayerEvent> {
+        let end = Instant::now() + Duration::from_secs(secs);
+        while let Ok(e) = rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            if f(&e) {
+                return Some(e);
+            }
+        }
+        None
     }
-    pub fn set_now_playing(&self, track: Option<&Track>, playing: bool, position: Duration) {
-        let _ = (track, playing, position);
-        todo!()
+
+    #[test]
+    fn embed_for_unsupported_provider_errors() {
+        let p = PlayerController::new().unwrap();
+        let rx = p.events();
+        p.load(
+            track("x", ProviderId::Audius),
+            PlaybackSource::Embed { provider: ProviderId::Audius, embed_id: "x".into() },
+        );
+        // Either the mini-player cannot start in this environment or the provider has no embed.
+        let e = wait_for(&rx, 20, |e| matches!(e, PlayerEvent::Error(_)));
+        assert!(e.is_some());
+        assert_eq!(p.state().status, Status::Idle);
+    }
+
+    #[test]
+    fn volume_is_clamped_and_readable() {
+        let p = PlayerController::new().unwrap();
+        p.set_volume(3.0);
+        assert_eq!(p.state().volume, 1.0);
+        p.set_volume(0.25);
+        assert_eq!(p.state().volume, 0.25);
+        assert_eq!(p.spectrum(), [0.0; SPECTRUM_BANDS]);
+    }
+
+    /// Plays a generated WAV through the real pipeline. Needs an output device;
+    /// without one the engine must report an error instead of hanging.
+    #[test]
+    fn plays_local_wav_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("glyph-audio-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.wav");
+        let rate = 44_100u32;
+        let n = rate / 2;
+        let mut data = Vec::new();
+        for i in 0..n {
+            let s = ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.3 * i16::MAX as f32) as i16;
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(&path, wav).unwrap();
+
+        let p = PlayerController::new().unwrap();
+        p.set_volume(0.0);
+        let rx = p.events();
+        p.load(
+            track("tone", ProviderId::Archive),
+            PlaybackSource::Stream {
+                provider: ProviderId::Archive,
+                url: path.to_string_lossy().to_string(),
+                mime: Some("audio/wav".into()),
+            },
+        );
+        let e = wait_for(&rx, 20, |e| matches!(e, PlayerEvent::Ended | PlayerEvent::Error(_)));
+        match e {
+            Some(PlayerEvent::Ended) => {
+                let st = p.state();
+                assert_eq!(st.status, Status::Ended);
+                assert!(st.duration.unwrap() >= Duration::from_millis(400));
+            }
+            Some(PlayerEvent::Error(m)) => eprintln!("no audio device in this environment: {m}"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

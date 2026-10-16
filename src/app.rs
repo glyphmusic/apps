@@ -1,0 +1,1241 @@
+//! Application state and logic (`Glyph` entity). Rendering lives in `ui/`.
+//!
+//! Every call into glyph-core / glyph-audio goes through `crate::guard`, so a
+//! backend that is not ready yet (or panics) degrades to `[ BACKEND OFFLINE ]`
+//! instead of taking the window down.
+
+use crate::guard::{guard, guard_async, guard_res};
+use crate::ui::input::{InputEvent, TextInput};
+use crate::visuals::{ascii, Palette, Preset};
+use crate::visuals::glow::GlowView;
+use glyph_audio::{
+    MediaKeyEvent, MediaKeys, MiniPlayerOptions, PlayerController, PlayerEvent, PlayerState,
+    Status,
+};
+use glyph_core::{
+    flume_like, Backend, BackendMode, Config, Library, Lyrics, Queue, RepeatMode, UpdateInfo,
+    UpdateStatus,
+};
+use glyph_protocol::{ProviderId, SearchEvent, Track};
+use gpui::{App, AppContext, Context, Entity, FocusHandle, Subscription, Task, Window};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Home,
+    Search,
+    Library,
+    NowPlaying,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibTab {
+    Liked,
+    Recent,
+    Playlists,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFilter {
+    All,
+    Tracks,
+    Albums,
+    Artists,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackendState {
+    Connecting,
+    Ready(BackendMode),
+    Offline(String),
+}
+
+#[derive(Default)]
+pub struct SearchState {
+    pub query: String,
+    pub seq: u64,
+    pub results: Vec<Track>,
+    pub seen: HashSet<(ProviderId, String)>,
+    pub errors: Vec<(ProviderId, String)>,
+    pub loading: bool,
+    pub filter: Option<SearchFilter>,
+    pub error: Option<String>,
+    task: Option<Task<()>>,
+}
+
+#[derive(Default)]
+pub struct LyricsState {
+    pub key: Option<String>,
+    pub lyrics: Option<Lyrics>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub last_line: Option<usize>,
+}
+
+#[derive(Default)]
+pub struct UpdateState {
+    pub checking: bool,
+    pub status: Option<UpdateStatus>,
+    pub error: Option<String>,
+    pub installing: Option<(u64, u64)>,
+    pub installed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnTest {
+    Running,
+    Ok(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct CoverArt {
+    pub key: String,
+    pub path: Option<PathBuf>,
+    pub ascii: Vec<(String, Option<Palette>)>,
+}
+
+pub struct Glyph {
+    pub focus: FocusHandle,
+    pub view: View,
+    pub lib_tab: LibTab,
+    pub open_playlist: Option<String>,
+    pub glow: Entity<GlowView>,
+    pub search_input: Entity<TextInput>,
+    pub server_input: Entity<TextInput>,
+    pub key_inputs: Vec<(&'static str, Entity<TextInput>)>,
+
+    pub config: Config,
+    pub backend: Option<Arc<Backend>>,
+    pub backend_state: BackendState,
+    pub player: Option<Arc<PlayerController>>,
+    pub player_ok: bool,
+    pub player_error: Option<String>,
+    pub player_state: Option<PlayerState>,
+    player_events: Option<flume::Receiver<PlayerEvent>>,
+    pub media_keys: Option<MediaKeys>,
+    media_events: Option<flume::Receiver<MediaKeyEvent>>,
+    hwnd: Option<usize>,
+
+    pub queue: Queue,
+    pub queue_ok: bool,
+    pub library: Library,
+    pub library_ok: bool,
+
+    pub current: Option<Track>,
+    pub current_source: Option<ProviderId>,
+    pub current_preview: bool,
+    pub resolving: bool,
+    pub palette: Option<Palette>,
+    pub cover: Option<CoverArt>,
+
+    pub search: SearchState,
+    pub lyrics: LyricsState,
+    pub update: UpdateState,
+    pub conn_test: Option<ConnTest>,
+
+    pub show_queue: bool,
+    pub show_lyrics: bool,
+    pub radio: bool,
+    pub mini_on_top: bool,
+    pub toast: Option<(String, Instant)>,
+    /// Re-render every tick while something animates (spinners).
+    pub started: Instant,
+    _subs: Vec<Subscription>,
+    _poll: Task<()>,
+}
+
+pub fn track_key(t: &Track) -> String {
+    format!("{:?}:{}", t.source, t.id)
+}
+
+impl Glyph {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let glow = cx.new(|cx| GlowView::new(window, cx));
+        let search_input =
+            cx.new(|cx| TextInput::new("suchen — titel, artist, playlist-link", cx));
+        let server_input = cx.new(|cx| TextInput::new("leer = direkt-modus", cx));
+        let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
+            "youtube",
+            "jamendo_client_id",
+            "soundcloud_client_id",
+            "spotify_client_id",
+            "spotify_client_secret",
+            "lastfm",
+        ]
+        .into_iter()
+        .map(|k| (k, cx.new(|cx| TextInput::new("nicht gesetzt", cx).masked())))
+        .collect();
+
+        let mut subs = vec![cx.subscribe(&search_input, |this, _, ev: &InputEvent, cx| {
+            match ev {
+                InputEvent::Changed(q) => this.on_query(q.clone(), false, cx),
+                InputEvent::Submit(q) => this.on_query(q.clone(), true, cx),
+                InputEvent::Cancel => {}
+            }
+        })];
+        subs.push(cx.subscribe(&server_input, |this, _, ev: &InputEvent, cx| {
+            if let InputEvent::Changed(v) | InputEvent::Submit(v) = ev {
+                this.config.server_url = v.trim().to_string();
+                this.conn_test = None;
+                if matches!(ev, InputEvent::Submit(_)) {
+                    this.save_config(cx);
+                }
+            }
+        }));
+        for (name, input) in &key_inputs {
+            let name = *name;
+            subs.push(cx.subscribe(input, move |this, _, ev: &InputEvent, cx| {
+                if let InputEvent::Changed(v) | InputEvent::Submit(v) = ev {
+                    let v = (!v.trim().is_empty()).then(|| v.trim().to_string());
+                    let k = &mut this.config.keys;
+                    match name {
+                        "youtube" => k.youtube = v,
+                        "jamendo_client_id" => k.jamendo_client_id = v,
+                        "soundcloud_client_id" => k.soundcloud_client_id = v,
+                        "spotify_client_id" => k.spotify_client_id = v,
+                        "spotify_client_secret" => k.spotify_client_secret = v,
+                        _ => k.lastfm = v,
+                    }
+                    if matches!(ev, InputEvent::Submit(_)) {
+                        this.save_config(cx);
+                    }
+                }
+            }));
+        }
+
+        let hwnd = window_hwnd(window);
+
+        let poll = cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
+                .await;
+            if this.update(cx, |s, cx| s.poll(cx)).is_err() {
+                break;
+            }
+        });
+
+        let mut this = Self {
+            focus: cx.focus_handle(),
+            view: View::Home,
+            lib_tab: LibTab::Liked,
+            open_playlist: None,
+            glow,
+            search_input,
+            server_input,
+            key_inputs,
+            config: Config::default(),
+            backend: None,
+            backend_state: BackendState::Connecting,
+            player: None,
+            player_ok: false,
+            player_error: None,
+            player_state: None,
+            player_events: None,
+            media_keys: None,
+            media_events: None,
+            hwnd,
+            queue: Queue::default(),
+            queue_ok: true,
+            library: Library::default(),
+            library_ok: false,
+            current: None,
+            current_source: None,
+            current_preview: false,
+            resolving: false,
+            palette: None,
+            cover: None,
+            search: SearchState::default(),
+            lyrics: LyricsState::default(),
+            update: UpdateState::default(),
+            conn_test: None,
+            show_queue: false,
+            show_lyrics: true,
+            radio: true,
+            mini_on_top: true,
+            toast: None,
+            started: Instant::now(),
+            _subs: subs,
+            _poll: poll,
+        };
+        this.boot(cx);
+        this
+    }
+
+    // ------------------------------------------------------------ startup
+
+    fn boot(&mut self, cx: &mut Context<Self>) {
+        // Config → Backend, entirely off the UI thread.
+        cx.spawn(async move |this, cx| {
+            let config = cx
+                .background_executor()
+                .spawn(async { guard_res(Config::load) })
+                .await;
+            let config = match config {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("config: {e}");
+                    Config::default()
+                }
+            };
+            let cfg = config.clone();
+            this.update(cx, |s, cx| s.apply_config(cfg, cx)).ok();
+            let backend = cx
+                .background_executor()
+                .spawn(async move { guard_async(Backend::new(config)).await })
+                .await;
+            this.update(cx, |s, cx| s.backend_ready(backend, cx)).ok();
+        })
+        .detach();
+
+        // Library + player, also in the background.
+        cx.spawn(async move |this, cx| {
+            let lib = cx
+                .background_executor()
+                .spawn(async { guard_res(Library::load) })
+                .await;
+            let player = cx
+                .background_executor()
+                .spawn(async { guard_res(PlayerController::new) })
+                .await;
+            this.update(cx, |s, cx| {
+                match lib {
+                    Ok(l) => {
+                        s.library = l;
+                        s.library_ok = true;
+                    }
+                    Err(e) => tracing::warn!("library: {e}"),
+                }
+                match player {
+                    Ok(p) => {
+                        let p = Arc::new(p);
+                        s.player_events = guard(|| p.events());
+                        s.player_ok = true;
+                        s.glow.update(cx, |g, _| g.set_player(Some(p.clone())));
+                        s.player = Some(p);
+                    }
+                    Err(e) => {
+                        tracing::warn!("player: {e}");
+                        s.player_error = Some(e);
+                    }
+                }
+                s.init_media_keys();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn init_media_keys(&mut self) {
+        let hwnd = self.hwnd.map(|h| h as *mut std::ffi::c_void);
+        match guard_res(|| MediaKeys::new(hwnd)) {
+            Ok(mk) => {
+                self.media_events = guard(|| mk.events());
+                self.media_keys = Some(mk);
+            }
+            Err(e) => tracing::warn!("media keys: {e}"),
+        }
+    }
+
+    fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
+        self.server_input
+            .update(cx, |i, cx| i.set_value(config.server_url.clone(), cx));
+        for (name, input) in &self.key_inputs {
+            let k = &config.keys;
+            let v = match *name {
+                "youtube" => &k.youtube,
+                "jamendo_client_id" => &k.jamendo_client_id,
+                "soundcloud_client_id" => &k.soundcloud_client_id,
+                "spotify_client_id" => &k.spotify_client_id,
+                "spotify_client_secret" => &k.spotify_client_secret,
+                _ => &k.lastfm,
+            };
+            let v = v.clone().unwrap_or_default();
+            input.update(cx, |i, cx| i.set_value(v, cx));
+        }
+        let intensity = config.visuals.intensity;
+        self.glow.update(cx, |g, _| g.set_intensity(intensity));
+        self.config = config;
+        cx.notify();
+    }
+
+    fn backend_ready(&mut self, res: Result<Backend, String>, cx: &mut Context<Self>) {
+        match res {
+            Ok(b) => {
+                let b = Arc::new(b);
+                self.backend_state = match guard(|| b.mode()) {
+                    Some(m) => BackendState::Ready(m),
+                    None => BackendState::Ready(BackendMode::Direct),
+                };
+                self.backend = Some(b);
+                if self.config.updates.check_on_start {
+                    self.check_updates(false, cx);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("backend offline: {e}");
+                self.backend_state = BackendState::Offline(e);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn retry_backend(&mut self, cx: &mut Context<Self>) {
+        self.backend_state = BackendState::Connecting;
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let backend = cx
+                .background_executor()
+                .spawn(async move { guard_async(Backend::new(config)).await })
+                .await;
+            this.update(cx, |s, cx| s.backend_ready(backend, cx)).ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------ polling
+
+    fn poll(&mut self, cx: &mut Context<Self>) {
+        let mut dirty = false;
+
+        if let (Some(p), true) = (self.player.clone(), self.player_ok) {
+            match guard(|| p.state()) {
+                Some(st) => {
+                    if self.player_state.as_ref() != Some(&st) {
+                        let playing = st.status == Status::Playing;
+                        self.glow.update(cx, |g, _| g.set_playing(playing));
+                        if let Some(mk) = &self.media_keys {
+                            let pos = st.position;
+                            let track = st.track.clone();
+                            guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
+                        }
+                        self.player_state = Some(st);
+                        dirty = true;
+                    }
+                }
+                None => self.player_ok = false,
+            }
+        }
+        let events: Vec<PlayerEvent> = self
+            .player_events
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for ev in events {
+            dirty = true;
+            match ev {
+                PlayerEvent::Ended => self.next(true, cx),
+                PlayerEvent::NearEnd => self.preload_next(cx),
+                PlayerEvent::Error(e) => self.toast(format!("ERR player -> {e}")),
+                PlayerEvent::StatusChanged(_) => {}
+            }
+        }
+        let keys: Vec<MediaKeyEvent> = self
+            .media_events
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for k in keys {
+            dirty = true;
+            match k {
+                MediaKeyEvent::Play => self.with_player(|p| p.play()),
+                MediaKeyEvent::Pause => self.with_player(|p| p.pause()),
+                MediaKeyEvent::Toggle => self.toggle_play(cx),
+                MediaKeyEvent::Next => self.next(false, cx),
+                MediaKeyEvent::Previous => self.previous(cx),
+                MediaKeyEvent::Stop => self.with_player(|p| p.stop()),
+                MediaKeyEvent::SeekForward => self.seek_relative(5.0),
+                MediaKeyEvent::SeekBackward => self.seek_relative(-5.0),
+            }
+        }
+
+        // Lyric line changes pulse the glow.
+        if let (Some(l), Some(st)) = (&self.lyrics.lyrics, &self.player_state) {
+            let off = self.lyrics_offset();
+            let pos = st.position.as_millis() as u64;
+            let line = guard(|| l.active_line(pos, off)).flatten();
+            if line != self.lyrics.last_line {
+                self.lyrics.last_line = line;
+                if line.is_some() {
+                    self.glow.update(cx, |g, _| g.pulse());
+                }
+                dirty = true;
+            }
+        }
+
+        if let Some((_, at)) = &self.toast {
+            if at.elapsed() > Duration::from_secs(5) {
+                self.toast = None;
+                dirty = true;
+            }
+        }
+        if self.is_animating() {
+            dirty = true;
+        }
+        if dirty {
+            cx.notify();
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.search.loading
+            || self.resolving
+            || self.lyrics.loading
+            || self.update.checking
+            || self.update.installing.is_some()
+            || matches!(self.conn_test, Some(ConnTest::Running))
+            || self.backend_state == BackendState::Connecting
+            || (self.view == View::NowPlaying && self.is_playing())
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    pub fn toast(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        tracing::info!("{msg}");
+        self.toast = Some((msg, Instant::now()));
+    }
+
+    fn with_player(&mut self, f: impl FnOnce(&PlayerController)) {
+        if let Some(p) = &self.player {
+            if guard(|| f(p)).is_none() {
+                self.toast("ERR player -> nicht bereit");
+            }
+        } else {
+            self.toast("[ PLAYER OFFLINE ]");
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.player_state.as_ref().is_some_and(|s| s.status == Status::Playing)
+    }
+
+    pub fn position(&self) -> Duration {
+        self.player_state.as_ref().map(|s| s.position).unwrap_or_default()
+    }
+
+    pub fn duration(&self) -> Option<Duration> {
+        self.player_state
+            .as_ref()
+            .and_then(|s| s.duration)
+            .or_else(|| self.current.as_ref()?.duration_ms.map(Duration::from_millis))
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.player_state.as_ref().map(|s| s.volume).unwrap_or(0.8)
+    }
+
+    pub fn is_liked(&self, t: &Track) -> bool {
+        self.library_ok && guard(|| self.library.is_liked(t)).unwrap_or(false)
+    }
+
+    pub fn lyrics_offset(&self) -> i64 {
+        match &self.current {
+            Some(t) if self.library_ok => guard(|| self.library.lyrics_offset(t)).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    pub fn upcoming(&self) -> Vec<Track> {
+        guard(|| self.queue.upcoming().into_iter().cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn shuffle(&self) -> bool {
+        guard(|| self.queue.shuffle()).unwrap_or(false)
+    }
+
+    pub fn repeat(&self) -> RepeatMode {
+        guard(|| self.queue.repeat()).unwrap_or_default()
+    }
+
+    pub fn spinner(&self) -> char {
+        const S: [char; 4] = ['|', '/', '-', '\\'];
+        S[(self.started.elapsed().as_millis() / 110 % 4) as usize]
+    }
+
+    fn save_library(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            return;
+        }
+        let lib = self.library.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = guard_res(|| lib.save()) {
+                    tracing::warn!("library save: {e}");
+                }
+            })
+            .detach();
+    }
+
+    pub fn save_config(&mut self, cx: &mut Context<Self>) {
+        let cfg = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_executor()
+                .spawn(async move { guard_res(|| cfg.save()) })
+                .await;
+            this.update(cx, |s, cx| {
+                match r {
+                    Ok(()) => s.toast("config.toml -> gespeichert"),
+                    Err(e) => s.toast(format!("ERR config.toml -> {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------ navigation
+
+    pub fn navigate(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = view;
+        if view == View::Search {
+            let f = self.search_input.read(cx).focus.clone();
+            window.focus(&f, cx);
+        }
+        if self.current.is_none() || view == View::Settings {
+            let preset = match view {
+                View::Home => Preset::Strahl,
+                View::Search => Preset::Band,
+                View::Library => Preset::Horizont,
+                View::NowPlaying => Preset::Sonnenaufgang,
+                View::Settings => Preset::Horizont,
+            };
+            self.glow.update(cx, |g, _| g.set_preset(preset));
+        }
+        cx.notify();
+    }
+
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let f = self.search_input.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------ search
+
+    fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
+        self.search.query = q.clone();
+        self.search.seq += 1;
+        let seq = self.search.seq;
+        if self.view != View::Search && !q.trim().is_empty() {
+            self.view = View::Search;
+        }
+        if q.trim().is_empty() {
+            self.search.task = None;
+            self.search.loading = false;
+            self.search.results.clear();
+            self.search.seen.clear();
+            self.search.errors.clear();
+            self.search.error = None;
+            cx.notify();
+            return;
+        }
+        self.search.loading = true;
+        cx.notify();
+        self.search.task = Some(cx.spawn(async move |this, cx| {
+            if !immediate {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+            }
+            let stream = this
+                .update(cx, |s, _| {
+                    if s.search.seq != seq {
+                        return Err(None);
+                    }
+                    s.search.results.clear();
+                    s.search.seen.clear();
+                    s.search.errors.clear();
+                    s.search.error = None;
+                    let Some(b) = s.backend.clone() else {
+                        return Err(Some("[ BACKEND OFFLINE ]".to_string()));
+                    };
+                    guard(|| b.search(q.trim())).ok_or(Some("search -> nicht implementiert".into()))
+                })
+                .ok();
+            let mut stream = match stream {
+                Some(Ok(s)) => s,
+                Some(Err(Some(e))) => {
+                    this.update(cx, |s, cx| {
+                        s.search.loading = false;
+                        s.search.error = Some(e);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                _ => return,
+            };
+            use futures::{FutureExt, StreamExt};
+            loop {
+                let next = std::panic::AssertUnwindSafe(stream.next()).catch_unwind().await;
+                let ev = match next {
+                    Ok(Some(ev)) => ev,
+                    Ok(None) => SearchEvent::Done,
+                    Err(_) => SearchEvent::Done,
+                };
+                let done = matches!(ev, SearchEvent::Done);
+                let alive = this
+                    .update(cx, |s, cx| {
+                        if s.search.seq != seq {
+                            return false;
+                        }
+                        match ev {
+                            SearchEvent::Results { tracks, .. } => {
+                                for t in tracks {
+                                    if s.search.seen.insert((t.source, t.id.clone())) {
+                                        s.search.results.push(t);
+                                    } else if let Some(x) = s.search.results.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
+                                        *x = t;
+                                    }
+                                }
+                            }
+                            SearchEvent::ProviderError { provider, message } => {
+                                s.search.errors.push((provider, message))
+                            }
+                            SearchEvent::Done => s.search.loading = false,
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if done || !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    // ------------------------------------------------------------ playback
+
+    /// Replace the queue with `tracks` and start at `index`.
+    pub fn play_list(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
+        let Some(track) = tracks.get(index).cloned() else { return };
+        if guard(|| self.queue.set(tracks, index)).is_none() {
+            self.queue_ok = false;
+        }
+        self.play_track(track, cx);
+    }
+
+    pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        let key = track_key(&track);
+        self.current = Some(track.clone());
+        self.current_source = Some(track.source);
+        self.current_preview = false;
+        self.resolving = true;
+        if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
+            self.save_library(cx);
+        }
+        let seed = format!("{}{}", track.artist, track.title);
+        let palette = Palette::from_seed(&seed);
+        self.palette = Some(palette);
+        self.glow.update(cx, |g, _| {
+            g.set_palette(Some(palette));
+            g.set_preset(Preset::from_seed(&seed));
+        });
+        self.cover = Some(CoverArt {
+            key: key.clone(),
+            path: None,
+            ascii: ascii::pattern(&seed, 34, 17),
+        });
+        self.lyrics = LyricsState {
+            key: Some(key.clone()),
+            loading: true,
+            ..Default::default()
+        };
+        cx.notify();
+
+        let Some(backend) = self.backend.clone() else {
+            self.resolving = false;
+            self.lyrics.loading = false;
+            self.toast("[ BACKEND OFFLINE ] resolve übersprungen");
+            return;
+        };
+
+        // Resolve → load → play.
+        let b = backend.clone();
+        let t = track.clone();
+        let k = key.clone();
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.resolve(&t)).await;
+            this.update(cx, |s, cx| {
+                if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
+                    return;
+                }
+                s.resolving = false;
+                match r {
+                    Ok(Some(res)) => {
+                        s.current_source = Some(res.source.provider());
+                        s.current_preview =
+                            matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
+                        let src = res.source.clone();
+                        let tr = res.track.clone();
+                        s.with_player(move |p| {
+                            p.load(tr, src);
+                            p.play();
+                        });
+                    }
+                    Ok(None) => s.toast("RESOLVE -> keine legale quelle gefunden"),
+                    Err(e) => s.toast(format!("ERR resolve -> {e}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        // Lyrics.
+        let b = backend.clone();
+        let t = track.clone();
+        let k = key.clone();
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.lyrics(&t)).await;
+            this.update(cx, |s, cx| {
+                if s.lyrics.key.as_deref() != Some(k.as_str()) {
+                    return;
+                }
+                s.lyrics.loading = false;
+                match r {
+                    Ok(l) => s.lyrics.lyrics = l,
+                    Err(e) => s.lyrics.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        // Cover → palette + ASCII art.
+        let b = backend;
+        let t = track;
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(path)) = guard_async(b.cover(&t)).await else { return };
+            let p2 = path.clone();
+            let (pal, art) = cx
+                .background_executor()
+                .spawn(async move { (Palette::from_image(&p2), ascii::from_image(&p2, 34, 17)) })
+                .await;
+            this.update(cx, |s, cx| {
+                if s.current.as_ref().map(track_key).as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                if let Some(p) = pal {
+                    s.palette = Some(p);
+                    s.glow.update(cx, |g, _| g.set_palette(Some(p)));
+                }
+                s.cover = Some(CoverArt {
+                    key: key.clone(),
+                    path: Some(path),
+                    ascii: art.unwrap_or_else(|| ascii::pattern(&key, 34, 17)),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if self.current.is_none() {
+            let recent = self.library.recent.clone();
+            if !recent.is_empty() {
+                self.play_list(recent, 0, cx);
+            }
+            return;
+        }
+        self.with_player(|p| p.toggle());
+        cx.notify();
+    }
+
+    pub fn seek_to(&mut self, pos: Duration) {
+        self.with_player(|p| p.seek(pos));
+    }
+
+    pub fn seek_relative(&mut self, secs: f32) {
+        let cur = self.position().as_secs_f32();
+        let max = self.duration().map(|d| d.as_secs_f32()).unwrap_or(f32::MAX);
+        let to = (cur + secs).clamp(0.0, max);
+        self.seek_to(Duration::from_secs_f32(to));
+    }
+
+    pub fn set_volume(&mut self, v: f32) {
+        self.with_player(|p| p.set_volume(v.clamp(0.0, 1.0)));
+    }
+
+    pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {
+        match guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() }) {
+            Some(Some(t)) => self.play_track(t, cx),
+            Some(None) => {
+                if self.radio {
+                    self.start_radio(cx);
+                } else if auto {
+                    self.toast("QUEUE -> ende");
+                }
+            }
+            None => {
+                self.queue_ok = false;
+                self.toast("[ QUEUE OFFLINE ]");
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn previous(&mut self, cx: &mut Context<Self>) {
+        if self.position() > Duration::from_secs(3) {
+            self.seek_to(Duration::ZERO);
+            return;
+        }
+        if let Some(Some(t)) = guard(|| self.queue.previous().cloned()) {
+            self.play_track(t, cx);
+        }
+    }
+
+    fn preload_next(&mut self, cx: &mut Context<Self>) {
+        let Some(Some(next)) = guard(|| self.queue.peek_next().cloned()) else { return };
+        let Some(b) = self.backend.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(res)) = guard_async(b.resolve(&next)).await {
+                this.update(cx, |s, _| s.with_player(|p| p.preload_next(res.track, res.source)))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Queue finished: continue with similar tracks (Last.fm getSimilar).
+    fn start_radio(&mut self, cx: &mut Context<Self>) {
+        let (Some(b), Some(seed)) = (self.backend.clone(), self.current.clone()) else { return };
+        self.toast(format!("RADIO -> ähnlich wie {}", seed.title));
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.similar(&seed)).await;
+            this.update(cx, |s, cx| match r {
+                Ok(tracks) if !tracks.is_empty() => s.play_list(tracks, 0, cx),
+                Ok(_) => s.toast("RADIO -> nichts gefunden"),
+                Err(e) => s.toast(format!("ERR radio -> {e}")),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        let on = !self.shuffle();
+        guard(|| self.queue.set_shuffle(on));
+        cx.notify();
+    }
+
+    pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
+        let next = match self.repeat() {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+        guard(|| self.queue.set_repeat(next));
+        cx.notify();
+    }
+
+    pub fn toggle_mini(&mut self, cx: &mut Context<Self>) {
+        self.mini_on_top = !self.mini_on_top;
+        let on_top = self.mini_on_top;
+        self.with_player(|p| {
+            p.set_mini_player_options(MiniPlayerOptions { always_on_top: on_top, position: None })
+        });
+        cx.notify();
+    }
+
+    pub fn queue_add(&mut self, t: Track, next: bool, cx: &mut Context<Self>) {
+        let title = t.title.clone();
+        let ok = if next {
+            guard(|| self.queue.play_next(t))
+        } else {
+            guard(|| self.queue.push(t))
+        };
+        match ok {
+            Some(()) => self.toast(format!(
+                "QUEUE {} -> {title}",
+                if next { "als nächstes" } else { "+" }
+            )),
+            None => self.toast("[ QUEUE OFFLINE ]"),
+        }
+        cx.notify();
+    }
+
+    pub fn queue_remove(&mut self, i: usize, cx: &mut Context<Self>) {
+        guard(|| self.queue.remove(i));
+        cx.notify();
+    }
+
+    pub fn queue_move(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        guard(|| self.queue.move_item(from, to));
+        cx.notify();
+    }
+
+    pub fn toggle_like(&mut self, t: &Track, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            self.toast("[ LIBRARY OFFLINE ]");
+            return;
+        }
+        if guard(|| self.library.toggle_like(t)).is_some() {
+            self.save_library(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn create_playlist(&mut self, cx: &mut Context<Self>) {
+        let n = self.library.playlists.len() + 1;
+        let name = format!("playlist {n:02}");
+        if guard(|| {
+            self.library.create_playlist(&name);
+        })
+        .is_some()
+        {
+            self.save_library(cx);
+        } else {
+            self.toast("[ LIBRARY OFFLINE ]");
+        }
+        cx.notify();
+    }
+
+    pub fn delete_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
+        if guard(|| self.library.delete_playlist(id)).is_some() {
+            self.save_library(cx);
+        }
+        if self.open_playlist.as_deref() == Some(id) {
+            self.open_playlist = None;
+        }
+        cx.notify();
+    }
+
+    pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
+        if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
+            if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
+                p.tracks.push(t);
+                let name = p.name.clone();
+                self.save_library(cx);
+                self.toast(format!("PLAYLIST {name} -> +1"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn share(&mut self, t: &Track, cx: &mut Context<Self>) {
+        match &t.permalink {
+            Some(url) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+                self.toast(format!("LINK -> zwischenablage ({})", t.source.display_name()));
+            }
+            None => self.toast("LINK -> keiner vorhanden"),
+        }
+    }
+
+    pub fn shift_lyrics_offset(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
+        let Some(t) = self.current.clone() else { return };
+        let cur = self.lyrics_offset();
+        if self.library_ok && guard(|| self.library.set_lyrics_offset(&t, cur + delta_ms)).is_some()
+        {
+            self.save_library(cx);
+        }
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------ settings
+
+    pub fn set_intensity(&mut self, v: f32, cx: &mut Context<Self>) {
+        self.config.visuals.intensity = v.clamp(0.0, 1.0);
+        self.glow.update(cx, |g, _| g.set_intensity(v));
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_provider(&mut self, p: ProviderId, cx: &mut Context<Self>) {
+        let en = &mut self.config.providers.enabled;
+        if let Some(i) = en.iter().position(|x| *x == p) {
+            en.remove(i);
+        } else {
+            en.push(p);
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn move_priority(&mut self, i: usize, up: bool, cx: &mut Context<Self>) {
+        let pr = &mut self.config.providers.priority;
+        let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < pr.len()) };
+        if let Some(j) = j {
+            pr.swap(i, j);
+            let p = pr.clone();
+            if let Some(b) = &self.backend {
+                guard(|| b.set_priority(p));
+            }
+            self.save_config(cx);
+        }
+        cx.notify();
+    }
+
+    /// Connection test: builds a throw-away backend for the entered URL and
+    /// reports the decided mode.
+    pub fn test_connection(&mut self, cx: &mut Context<Self>) {
+        let mut cfg = self.config.clone();
+        cfg.server_url = self.server_input.read(cx).value.trim().to_string();
+        if cfg.server_url.is_empty() {
+            self.conn_test = Some(ConnTest::Ok("direkt-modus (kein server)".into()));
+            cx.notify();
+            return;
+        }
+        self.conn_test = Some(ConnTest::Running);
+        cx.spawn(async move |this, cx| {
+            let url = cfg.server_url.clone();
+            let r = cx
+                .background_executor()
+                .spawn(async move {
+                    let b = guard_async(Backend::new(cfg)).await?;
+                    guard(|| b.mode()).ok_or_else(|| "mode -> nicht implementiert".to_string())
+                })
+                .await;
+            this.update(cx, |s, cx| {
+                s.conn_test = Some(match r {
+                    Ok(BackendMode::Server { server_version, .. }) => {
+                        ConnTest::Ok(format!("GET {url}/v1/health -> 200 · v{server_version}"))
+                    }
+                    Ok(BackendMode::Incompatible { protocol_version, .. }) => ConnTest::Failed(
+                        format!("SERVER protokoll v{protocol_version} · INKOMPATIBEL"),
+                    ),
+                    Ok(BackendMode::Direct) => {
+                        ConnTest::Failed(format!("GET {url}/v1/health -> nicht erreichbar"))
+                    }
+                    Err(e) => ConnTest::Failed(e),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn apply_server(&mut self, cx: &mut Context<Self>) {
+        self.config.server_url = self.server_input.read(cx).value.trim().to_string();
+        self.save_config(cx);
+        self.retry_backend(cx);
+    }
+
+    pub fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.update.error = Some("[ BACKEND OFFLINE ]".into());
+            cx.notify();
+            return;
+        };
+        self.update.checking = true;
+        self.update.error = None;
+        cx.spawn(async move |this, cx| {
+            let r = if manual { guard_async(b.check_for_update()).await } else { guard_async(b.check_for_update_auto()).await };
+            this.update(cx, |s, cx| {
+                s.update.checking = false;
+                match r {
+                    Ok(UpdateStatus::Skipped) if !manual => {}
+                    Ok(st) => {
+                        let auto = s.config.updates.auto_install;
+                        if let (UpdateStatus::Available(info), true) = (&st, auto) {
+                            if info.can_self_install && !manual {
+                                let info = info.clone();
+                                s.update.status = Some(st);
+                                s.install_update(info, cx);
+                                return;
+                            }
+                        }
+                        s.update.status = Some(st);
+                    }
+                    Err(e) => s.update.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn available_update(&self) -> Option<&UpdateInfo> {
+        match &self.update.status {
+            Some(UpdateStatus::Available(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    pub fn install_update(&mut self, info: UpdateInfo, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        self.update.installing = Some((0, 0));
+        let (tx, mut rx) = flume_like::channel::<(u64, u64)>();
+        cx.spawn(async move |this, cx| {
+            while let Some(p) = rx.recv().await {
+                if this
+                    .update(cx, |s, cx| {
+                        s.update.installing = Some(p);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.install_update(info, tx)).await;
+            this.update(cx, |s, cx| {
+                s.update.installing = None;
+                match r {
+                    Ok(()) => s.update.installed = true,
+                    Err(e) => s.update.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn set_update_channel(&mut self, prerelease: bool, cx: &mut Context<Self>) {
+        self.config.updates.channel = if prerelease { "prerelease" } else { "stable" }.into();
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_auto_update(&mut self, cx: &mut Context<Self>) {
+        self.config.updates.auto_install = !self.config.updates.auto_install;
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn restart(&mut self, cx: &mut App) {
+        cx.restart();
+    }
+}
+
+/// Raw main-window handle for souvlaki on Windows.
+fn window_hwnd(window: &Window) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(h) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::Win32(w) = h.as_raw() {
+                return Some(w.hwnd.get() as usize);
+            }
+        }
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
+    }
+}
