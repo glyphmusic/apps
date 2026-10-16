@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OWNER/glyph"
+rust-version = "1.85"
+
+[workspace.dependencies]
+glyph-protocol = { path = "crates/glyph-protocol" }
+glyph-core = { path = "crates/glyph-core" }
+glyph-audio = { path = "crates/glyph-audio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+futures = "0.3"
+flume = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
+
+# ---- Desktop app (GPUI). Owned by the UI work stream. ----
+[package]
+name = "glyph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native music app: search everywhere, play only from legal free sources."
+
+[dependencies]
+glyph-protocol.workspace = true
+glyph-core.workspace = true
+glyph-audio.workspace = true
+# Pinned Zed revision (2026-10-16). Bump deliberately.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures.workspace = true
+flume.workspace = true
+noise = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

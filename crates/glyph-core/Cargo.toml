@@ -1,0 +1,21 @@
+[package]
+name = "glyph-core"
+description = "GPUI-free core of Glyph: providers, resolver, server client, library, lyrics, import, updater."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glyph-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+async-trait = "0.1"
+toml = "0.8"
+dirs = "6"
+lru = "0.12"

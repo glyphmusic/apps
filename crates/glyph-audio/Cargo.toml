@@ -1,0 +1,13 @@
+[package]
+name = "glyph-audio"
+description = "Glyph playback: native decode (rodio/symphonia) + visible embed mini-player (wry), FFT, media keys."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glyph-protocol.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+flume.workspace = true
