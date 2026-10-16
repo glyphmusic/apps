@@ -77,19 +77,49 @@ impl Render for Shell {
                     .border_color(theme::border_faint())
             })
             .child(div().absolute().inset_0().child(self.glow.clone()))
+            // Window control areas (drag strip, window buttons) live here, outside
+            // the cached app view: GPUI does not carry them over when it reuses a
+            // cached view's paint, so inside it they vanish after the first frame
+            // and Windows stops treating the titlebar as a titlebar.
+            // The drag strip sits *behind* the app, so the search bar and other
+            // occluding titlebar elements still take their own clicks.
+            .child(
+                div()
+                    .id("drag-strip")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(theme::TITLEBAR_H))
+                    .window_control_area(gpui::WindowControlArea::Drag),
+            )
             .child(
                 div()
                     .absolute()
                     .inset_0()
                     .child(self.app.clone().cached(StyleRefinement::default().size_full())),
             )
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px((theme::TITLEBAR_H - chrome::WINDOW_PILL_H) / 2.0))
+                        .right(px(8.0))
+                        .child(chrome::window_pill()),
+                )
+            })
     }
 }
 
 impl Render for Glyph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::set_ink(self.ink);
+        theme::set_zone(Some(0));
         let titlebar = chrome::titlebar(self, window, cx).into_any_element();
+        theme::set_zone(Some(1));
         let sidebar = chrome::sidebar(self, window, cx).into_any_element();
+        // Settings is built from cards: panel ink throughout.
+        theme::set_zone((self.view != View::Settings).then_some(2));
         let main = match self.view {
             View::Home => views::home(self, window, cx).into_any_element(),
             View::Search => views::search(self, window, cx).into_any_element(),
@@ -97,12 +127,9 @@ impl Render for Glyph {
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             View::Settings => settings::settings(self, window, cx).into_any_element(),
         };
-        // Now playing lets the glow fill the area: no panel behind it.
-        let main_panel = if self.view == View::NowPlaying {
-            div().flex_1().min_w_0().h_full().child(main)
-        } else {
-            widgets::panel().flex_1().min_w_0().h_full().overflow_hidden().child(main)
-        };
+        theme::set_zone(None);
+        // Content floats directly on the background (Liner): no big panel.
+        let main_panel = div().flex_1().min_w_0().h_full().overflow_hidden().child(main);
         let queue = self
             .show_queue
             .then(|| views::queue_panel(self, window, cx).into_any_element());
@@ -177,8 +204,8 @@ impl Render for Glyph {
                         .bg(theme::panel_strong())
                         .border_1()
                         .border_color(theme::border())
-                        .text_size(theme::text_xs())
-                        .text_color(theme::text_dim())
+                        .text_size(theme::text_sm())
+                        .text_color(theme::text())
                         .child(m),
                 )
             })

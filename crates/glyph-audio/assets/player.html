@@ -18,6 +18,9 @@
   #stage iframe, #stage > div { width: 100%; height: 100%; border: 0; display: block; }
   #msg { position: fixed; top: 18px; bottom: 1px; left: 1px; right: 1px; display: flex; align-items: center;
     justify-content: center; color: #888; z-index: 0; pointer-events: none; font-size: 18px; }
+  .host body { border: 0; }
+  .host #bar { display: none; }
+  .host #stage, .host #msg { top: 0; left: 0; right: 0; bottom: 0; }
 </style>
 </head>
 <body>
@@ -27,6 +30,7 @@
 <script>
 (function () {
   "use strict";
+  if (/[?&]host=1/.test(location.search)) document.documentElement.className = "host";
   var hasIpc = !!(window.ipc && window.ipc.postMessage);
   var token = location.pathname.split("/")[1] || "";
   var session = 0, provider = null, adapter = null, volume = 100, wantPlay = true;

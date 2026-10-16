@@ -60,3 +60,7 @@ pub fn hash_hex(s: &str) -> String {
     let d = Sha256::digest(s.as_bytes());
     d.iter().take(10).map(|b| format!("{b:02x}")).collect()
 }
+
+/// Serialises tests that touch process-wide environment variables.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

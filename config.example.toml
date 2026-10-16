@@ -15,6 +15,9 @@
 # Empty = direct mode: the app queries the providers itself with the keys below.
 server_url = ""
 
+# UI language: "" = system language, or "en" | "de" | "ru".
+language = ""
+
 [keys]
 # YouTube Data API v3 (Google Cloud console). search.list costs 100 of 10 000 units/day.
 # youtube = "AIza..."
@@ -30,7 +33,10 @@ server_url = ""
 
 [providers]
 # Providers to use (remove entries to disable them).
-enabled = ["audius", "jamendo", "archive", "soundcloud", "youtube", "spotify", "deezer", "musicbrainz", "lastfm", "lrclib"]
+# Default: pure-audio sources + metadata/lyrics providers. To enable youtube/soundcloud
+# as fallback (plays the official embed inside the app), add "youtube" / "soundcloud"
+# here (and set their keys above).
+enabled = ["audius", "jamendo", "archive", "spotify", "deezer", "musicbrainz", "lastfm", "lrclib"]
 # Order in which full-playback sources are preferred by the resolver.
 priority = ["audius", "jamendo", "soundcloud", "youtube"]
 # Cap on YouTube search.list calls per day (each = 100 quota units).

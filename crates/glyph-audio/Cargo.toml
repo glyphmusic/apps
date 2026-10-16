@@ -19,7 +19,13 @@ rustfft = "6"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 webbrowser = "1"
 
-# Embedded webview mini-player runs on its own thread where the OS allows it.
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+raw-window-handle = "0.6"
 wry = "0.57"
+
+# Own-window mini-player (fallback) runs tao on its own thread where the OS allows it.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 tao = "0.37"
+
+# wry's webkit2gtk needs gtk initialised/pumped by us for the child-webview host.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

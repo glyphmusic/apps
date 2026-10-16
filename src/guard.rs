@@ -48,7 +48,7 @@ pub fn guard_res<T>(f: impl FnOnce() -> anyhow::Result<T>) -> Result<T, String> 
     match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(format!("{e:#}")),
-        Err(_) => Err("nicht implementiert".into()),
+        Err(_) => Err("not implemented".into()),
     }
 }
 
@@ -60,6 +60,6 @@ pub async fn guard_async<T>(
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(format!("{e:#}")),
-        Err(_) => Err("nicht implementiert".into()),
+        Err(_) => Err("not implemented".into()),
     }
 }

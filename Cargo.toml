@@ -39,6 +39,8 @@ glyph-audio.workspace = true
 gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
 raw-window-handle = "0.6"
+toml = "0.8"
+sys-locale = "0.3"
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -49,6 +51,18 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+# Debug builds stay responsive: GPUI and the rest of the dependency tree are
+# far too slow unoptimized for a 30 fps background.
+[profile.dev]
+opt-level = 1
+# Full debug info makes the binary ~65 MB and linking slow; line tables are
+# enough for backtraces.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
 
 [profile.release]
 lto = "thin"

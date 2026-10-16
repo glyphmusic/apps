@@ -30,6 +30,7 @@
 //! Control is plain JS strings produced by the pure `script_*` functions
 //! below (unit tested); page events are parsed by [`parse_message`].
 
+pub mod host;
 pub mod server;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod webview;
@@ -214,11 +215,25 @@ pub struct EmbedBackend {
     transport: Box<dyn Transport>,
     page_ready: bool,
     pending: Vec<String>,
+    in_host: bool,
 }
 
 impl EmbedBackend {
-    pub fn start(sink: EventSink, options: MiniPlayerOptions) -> anyhow::Result<Self> {
+    /// Whether this backend renders in the main-window child webview.
+    pub fn is_host(&self) -> bool {
+        self.in_host
+    }
+
+    /// `host`: when its child webview is attached, the embed lives inside the
+    /// main window instead of a popup/browser.
+    pub fn start(sink: EventSink, options: MiniPlayerOptions, host: Option<Arc<host::HostQueue>>) -> anyhow::Result<Self> {
         let srv = server::LocalServer::start(sink.clone())?;
+        if let Some(q) = host.filter(|q| q.is_attached()) {
+            q.set_sink(sink);
+            let t = HostTransport::new(q, srv);
+            tracing::info!("embed transport: {}", t.name());
+            return Ok(Self { transport: Box::new(t), page_ready: false, pending: Vec::new(), in_host: true });
+        }
         #[allow(unused_mut)]
         let mut transport: Option<Box<dyn Transport>> = None;
         #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -232,7 +247,7 @@ impl EmbedBackend {
         let _ = (&sink, options);
         let transport = transport.unwrap_or_else(|| Box::new(BrowserTransport::new(srv)));
         tracing::info!("embed transport: {}", transport.name());
-        Ok(Self { transport, page_ready: false, pending: Vec::new() })
+        Ok(Self { transport, page_ready: false, pending: Vec::new(), in_host: false })
     }
 
     pub fn transport_name(&self) -> &'static str {
@@ -288,6 +303,35 @@ impl EmbedBackend {
         }
         self.pending.clear();
         self.transport.set_visible(false);
+    }
+}
+
+/// Child webview inside the main window; commands are queued for the UI thread.
+pub struct HostTransport {
+    q: Arc<host::HostQueue>,
+    _srv: Arc<server::LocalServer>,
+}
+
+impl HostTransport {
+    pub fn new(q: Arc<host::HostQueue>, srv: Arc<server::LocalServer>) -> Self {
+        q.push(host::HostCmd::Navigate(srv.page_url_host()));
+        Self { q, _srv: srv }
+    }
+}
+
+impl Transport for HostTransport {
+    fn eval(&self, js: String) {
+        self.q.push(host::HostCmd::Eval(js));
+    }
+    fn set_visible(&self, visible: bool) {
+        self.q.push(host::HostCmd::Parked(!visible));
+    }
+    fn set_options(&self, _options: MiniPlayerOptions) {}
+    fn ensure_open(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "host-child-webview"
     }
 }
 

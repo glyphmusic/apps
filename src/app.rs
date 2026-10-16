@@ -5,6 +5,7 @@
 //! instead of taking the window down.
 
 use crate::guard::{guard, guard_async, guard_res};
+use crate::i18n::{t, tf};
 use crate::ui::input::{InputEvent, TextInput};
 use crate::visuals::{ascii, Palette, Preset};
 use crate::visuals::glow::GlowView;
@@ -143,6 +144,14 @@ pub struct Glyph {
     pub radio: bool,
     pub mini_on_top: bool,
     pub toast: Option<(String, Instant)>,
+    pub lang: crate::i18n::Lang,
+    /// Eased text ink per background zone (0 light .. 1 dark).
+    pub ink: [f32; 3],
+    /// Cover cache: track key -> resolved local path (None = no cover / loading).
+    pub covers: std::collections::HashMap<String, Option<PathBuf>>,
+    pub embed: crate::embed::EmbedHost,
+    /// Last (track, playing, position/5 s) pushed to the OS media controls.
+    media_keys_sent: Option<(Option<(glyph_protocol::ProviderId, String)>, bool, u64)>,
     /// Re-render every tick while something animates (spinners).
     pub started: Instant,
     _subs: Vec<Subscription>,
@@ -157,8 +166,8 @@ impl Glyph {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let glow = cx.new(|cx| GlowView::new(window, cx));
         let search_input =
-            cx.new(|cx| TextInput::new("suchen — titel, artist, playlist-link", cx));
-        let server_input = cx.new(|cx| TextInput::new("leer = direkt-modus", cx));
+            cx.new(|cx| TextInput::new("search.placeholder", cx));
+        let server_input = cx.new(|cx| TextInput::new("settings.server.placeholder", cx));
         let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
             "youtube",
             "jamendo_client_id",
@@ -168,7 +177,7 @@ impl Glyph {
             "lastfm",
         ]
         .into_iter()
-        .map(|k| (k, cx.new(|cx| TextInput::new("nicht gesetzt", cx).masked())))
+        .map(|k| (k, cx.new(|cx| TextInput::new("settings.keys.unset", cx).masked())))
         .collect();
 
         let mut subs = vec![cx.subscribe(&search_input, |this, _, ev: &InputEvent, cx| {
@@ -212,7 +221,7 @@ impl Glyph {
 
         let poll = cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(33))
+                .timer(Duration::from_millis(16))
                 .await;
             if this.update(cx, |s, cx| s.poll(cx)).is_err() {
                 break;
@@ -258,6 +267,11 @@ impl Glyph {
             radio: true,
             mini_on_top: true,
             toast: None,
+            lang: crate::i18n::lang(),
+            ink: [0.0; 3],
+            covers: Default::default(),
+            embed: crate::embed::EmbedHost::new(raw_handle(window)),
+            media_keys_sent: None,
             started: Instant::now(),
             _subs: subs,
             _poll: poll,
@@ -316,6 +330,10 @@ impl Glyph {
                         s.player_events = guard(|| p.events());
                         s.player_ok = true;
                         s.glow.update(cx, |g, _| g.set_player(Some(p.clone())));
+                        // The embed webview is attached lazily in `poll` once an
+                        // embed actually plays: a child webview makes Windows send
+                        // synchronous messages to our window while GPUI holds its
+                        // state ("RefCell already borrowed" on titlebar hover).
                         s.player = Some(p);
                     }
                     Err(e) => {
@@ -358,6 +376,9 @@ impl Glyph {
             let v = v.clone().unwrap_or_default();
             input.update(cx, |i, cx| i.set_value(v, cx));
         }
+        let lang = crate::config_ext::language(&config);
+        crate::i18n::set_lang(lang);
+        self.lang = lang;
         let intensity = config.visuals.intensity;
         self.glow.update(cx, |g, _| g.set_intensity(intensity));
         self.config = config;
@@ -403,6 +424,19 @@ impl Glyph {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut dirty = false;
+        if let Some(p) = self.player.clone() {
+            let embed_playing = self.embed_playing();
+            if embed_playing {
+                self.embed.attach(&p);
+            }
+            // Touch the webview only while an embed is involved, so normal
+            // (native) playback never triggers child-window messages.
+            if embed_playing || self.embed.is_visible() {
+                let vis = self.view == View::NowPlaying && embed_playing;
+                self.embed.set_visible(&p, vis);
+                self.embed.pump(&p);
+            }
+        }
 
         if let (Some(p), true) = (self.player.clone(), self.player_ok) {
             match guard(|| p.state()) {
@@ -411,9 +445,20 @@ impl Glyph {
                         let playing = st.status == Status::Playing;
                         self.glow.update(cx, |g, _| g.set_playing(playing));
                         if let Some(mk) = &self.media_keys {
-                            let pos = st.position;
-                            let track = st.track.clone();
-                            guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
+                            // The OS media controls only need track, play state
+                            // and a coarse position; pushing every state change
+                            // (~60/s) means needless OS calls on the UI thread.
+                            let key = (
+                                st.track.as_ref().map(|t| (t.source, t.id.clone())),
+                                playing,
+                                st.position.as_secs() / 5,
+                            );
+                            if self.media_keys_sent.as_ref() != Some(&key) {
+                                let pos = st.position;
+                                let track = st.track.clone();
+                                guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
+                                self.media_keys_sent = Some(key);
+                            }
                         }
                         self.player_state = Some(st);
                         dirty = true;
@@ -432,7 +477,7 @@ impl Glyph {
             match ev {
                 PlayerEvent::Ended => self.next(true, cx),
                 PlayerEvent::NearEnd => self.preload_next(cx),
-                PlayerEvent::Error(e) => self.toast(format!("ERR player -> {e}")),
+                PlayerEvent::Error(e) => self.toast(tf("toast.player_error", &[("e", &e)])),
                 PlayerEvent::StatusChanged(_) => {}
             }
         }
@@ -469,6 +514,20 @@ impl Glyph {
             }
         }
 
+        // Adaptive text ink: ease towards the better-contrast colour (~300 ms).
+        crate::theme::set_lum_grid(self.glow.read(cx).lum_grid());
+        if crate::theme::update_inks() {
+            dirty = true;
+        }
+        let zones = self.glow.read(cx).zones();
+        for (ink, lum) in self.ink.iter_mut().zip(zones) {
+            let target = crate::theme::ink_for(lum);
+            if (*ink - target).abs() > 0.001 {
+                let step = 0.016 / 0.3;
+                *ink = if target > *ink { (*ink + step).min(target) } else { (*ink - step).max(target) };
+                dirty = true;
+            }
+        }
         if let Some((_, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(5) {
                 self.toast = None;
@@ -505,10 +564,10 @@ impl Glyph {
     fn with_player(&mut self, f: impl FnOnce(&PlayerController)) {
         if let Some(p) = &self.player {
             if guard(|| f(p)).is_none() {
-                self.toast("ERR player -> nicht bereit");
+                self.toast(t("toast.player_not_ready"));
             }
         } else {
-            self.toast("[ PLAYER OFFLINE ]");
+            self.toast(t("status.player_offline"));
         }
     }
 
@@ -582,8 +641,8 @@ impl Glyph {
                 .await;
             this.update(cx, |s, cx| {
                 match r {
-                    Ok(()) => s.toast("config.toml -> gespeichert"),
-                    Err(e) => s.toast(format!("ERR config.toml -> {e}")),
+                    Ok(()) => s.toast(t("toast.config_saved")),
+                    Err(e) => s.toast(tf("toast.config_error", &[("e", &e)])),
                 }
                 cx.notify();
             })
@@ -656,9 +715,9 @@ impl Glyph {
                     s.search.errors.clear();
                     s.search.error = None;
                     let Some(b) = s.backend.clone() else {
-                        return Err(Some("[ BACKEND OFFLINE ]".to_string()));
+                        return Err(Some(t("status.backend_offline").to_string()));
                     };
-                    guard(|| b.search(q.trim())).ok_or(Some("search -> nicht implementiert".into()))
+                    guard(|| b.search(q.trim())).ok_or(Some(t("error.not_ready").to_string()))
                 })
                 .ok();
             let mut stream = match stream {
@@ -716,9 +775,42 @@ impl Glyph {
 
     // ------------------------------------------------------------ playback
 
+    /// Songs for the search dropdown: search history, else recently played.
+    pub fn search_suggestions(&self) -> (bool, Vec<Track>) {
+        if !self.library.search_history.is_empty() {
+            (true, self.library.search_history.iter().take(8).cloned().collect())
+        } else {
+            (false, self.library.recent.iter().take(8).cloned().collect())
+        }
+    }
+
+    /// Play a song picked from the search dropdown and close it.
+    pub fn play_suggestion(&mut self, track: Track, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library_ok {
+            let picked = track.clone();
+            guard(|| self.library.push_search(picked));
+        }
+        self.play_list(vec![track], 0, cx);
+        let f = self.focus.clone();
+        window.focus(&f, cx);
+    }
+
+    pub fn remove_search_history(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.library_ok && guard(|| self.library.remove_search(index)).is_some() {
+            self.save_library(cx);
+        }
+        cx.notify();
+    }
+
     /// Replace the queue with `tracks` and start at `index`.
     pub fn play_list(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
         let Some(track) = tracks.get(index).cloned() else { return };
+        // Picked from search results: remember it for the search dropdown
+        // (saved together with "recent" in `play_track`).
+        if self.library_ok && self.view == View::Search {
+            let picked = track.clone();
+            guard(|| self.library.push_search(picked));
+        }
         if guard(|| self.queue.set(tracks, index)).is_none() {
             self.queue_ok = false;
         }
@@ -756,7 +848,7 @@ impl Glyph {
         let Some(backend) = self.backend.clone() else {
             self.resolving = false;
             self.lyrics.loading = false;
-            self.toast("[ BACKEND OFFLINE ] resolve übersprungen");
+            self.toast(t("status.backend_offline"));
             return;
         };
 
@@ -783,8 +875,8 @@ impl Glyph {
                             p.play();
                         });
                     }
-                    Ok(None) => s.toast("RESOLVE -> keine legale quelle gefunden"),
-                    Err(e) => s.toast(format!("ERR resolve -> {e}")),
+                    Ok(None) => s.toast(crate::i18n::t("toast.no_source")),
+                    Err(e) => s.toast(tf("toast.resolve_error", &[("e", &e)])),
                 }
                 cx.notify();
             })
@@ -877,7 +969,7 @@ impl Glyph {
                 if self.radio {
                     self.start_radio(cx);
                 } else if auto {
-                    self.toast("QUEUE -> ende");
+                    self.toast(t("toast.queue_end"));
                 }
             }
             None => {
@@ -913,13 +1005,13 @@ impl Glyph {
     /// Queue finished: continue with similar tracks (Last.fm getSimilar).
     fn start_radio(&mut self, cx: &mut Context<Self>) {
         let (Some(b), Some(seed)) = (self.backend.clone(), self.current.clone()) else { return };
-        self.toast(format!("RADIO -> ähnlich wie {}", seed.title));
+        self.toast(tf("toast.radio", &[("title", &seed.title)]));
         cx.spawn(async move |this, cx| {
             let r = guard_async(b.similar(&seed)).await;
             this.update(cx, |s, cx| match r {
                 Ok(tracks) if !tracks.is_empty() => s.play_list(tracks, 0, cx),
-                Ok(_) => s.toast("RADIO -> nichts gefunden"),
-                Err(e) => s.toast(format!("ERR radio -> {e}")),
+                Ok(_) => s.toast(t("toast.radio_empty")),
+                Err(e) => s.toast(tf("toast.radio_error", &[("e", &e)])),
             })
             .ok();
         })
@@ -959,10 +1051,7 @@ impl Glyph {
             guard(|| self.queue.push(t))
         };
         match ok {
-            Some(()) => self.toast(format!(
-                "QUEUE {} -> {title}",
-                if next { "als nächstes" } else { "+" }
-            )),
+            Some(()) => self.toast(tf(if next { "toast.play_next" } else { "toast.queued" }, &[("title", &title)])),
             None => self.toast("[ QUEUE OFFLINE ]"),
         }
         cx.notify();
@@ -980,7 +1069,7 @@ impl Glyph {
 
     pub fn toggle_like(&mut self, t: &Track, cx: &mut Context<Self>) {
         if !self.library_ok {
-            self.toast("[ LIBRARY OFFLINE ]");
+            self.toast(crate::i18n::t("status.library_offline"));
             return;
         }
         if guard(|| self.library.toggle_like(t)).is_some() {
@@ -991,7 +1080,7 @@ impl Glyph {
 
     pub fn create_playlist(&mut self, cx: &mut Context<Self>) {
         let n = self.library.playlists.len() + 1;
-        let name = format!("playlist {n:02}");
+        let name = tf("library.new_playlist_name", &[("n", &n)]).to_string();
         if guard(|| {
             self.library.create_playlist(&name);
         })
@@ -999,7 +1088,7 @@ impl Glyph {
         {
             self.save_library(cx);
         } else {
-            self.toast("[ LIBRARY OFFLINE ]");
+            self.toast(t("status.library_offline"));
         }
         cx.notify();
     }
@@ -1020,7 +1109,7 @@ impl Glyph {
                 p.tracks.push(t);
                 let name = p.name.clone();
                 self.save_library(cx);
-                self.toast(format!("PLAYLIST {name} -> +1"));
+                self.toast(tf("toast.added_to_playlist", &[("name", &name)]));
             }
         }
         cx.notify();
@@ -1030,9 +1119,9 @@ impl Glyph {
         match &t.permalink {
             Some(url) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                self.toast(format!("LINK -> zwischenablage ({})", t.source.display_name()));
+                self.toast(tf("toast.link_copied", &[("source", &t.source.display_name())]));
             }
-            None => self.toast("LINK -> keiner vorhanden"),
+            None => self.toast(crate::i18n::t("toast.no_link")),
         }
     }
 
@@ -1066,6 +1155,22 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Drag-and-drop reorder of the source priority list.
+    pub fn reorder_priority(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let pr = &mut self.config.providers.priority;
+        if from == to || from >= pr.len() || to >= pr.len() {
+            return;
+        }
+        let p = pr.remove(from);
+        pr.insert(to, p);
+        let p = pr.clone();
+        if let Some(b) = &self.backend {
+            guard(|| b.set_priority(p));
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
     pub fn move_priority(&mut self, i: usize, up: bool, cx: &mut Context<Self>) {
         let pr = &mut self.config.providers.priority;
         let j = if up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < pr.len()) };
@@ -1086,7 +1191,7 @@ impl Glyph {
         let mut cfg = self.config.clone();
         cfg.server_url = self.server_input.read(cx).value.trim().to_string();
         if cfg.server_url.is_empty() {
-            self.conn_test = Some(ConnTest::Ok("direkt-modus (kein server)".into()));
+            self.conn_test = Some(ConnTest::Ok(t("settings.server.direct").to_string()));
             cx.notify();
             return;
         }
@@ -1097,19 +1202,19 @@ impl Glyph {
                 .background_executor()
                 .spawn(async move {
                     let b = guard_async(Backend::new(cfg)).await?;
-                    guard(|| b.mode()).ok_or_else(|| "mode -> nicht implementiert".to_string())
+                    guard(|| b.mode()).ok_or_else(|| "mode -> not implemented".to_string())
                 })
                 .await;
             this.update(cx, |s, cx| {
                 s.conn_test = Some(match r {
                     Ok(BackendMode::Server { server_version, .. }) => {
-                        ConnTest::Ok(format!("GET {url}/v1/health -> 200 · v{server_version}"))
+                        ConnTest::Ok(tf("settings.server.ok", &[("url", &url), ("v", &server_version)]).to_string())
                     }
                     Ok(BackendMode::Incompatible { protocol_version, .. }) => ConnTest::Failed(
-                        format!("SERVER protokoll v{protocol_version} · INKOMPATIBEL"),
+                        tf("status.incompatible", &[("v", &protocol_version)]).to_string(),
                     ),
                     Ok(BackendMode::Direct) => {
-                        ConnTest::Failed(format!("GET {url}/v1/health -> nicht erreichbar"))
+                        ConnTest::Failed(tf("settings.server.unreachable", &[("url", &url)]).to_string())
                     }
                     Err(e) => ConnTest::Failed(e),
                 });
@@ -1129,7 +1234,7 @@ impl Glyph {
 
     pub fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else {
-            self.update.error = Some("[ BACKEND OFFLINE ]".into());
+            self.update.error = Some(t("status.backend_offline").to_string());
             cx.notify();
             return;
         };
@@ -1219,6 +1324,68 @@ impl Glyph {
     pub fn restart(&mut self, cx: &mut App) {
         cx.restart();
     }
+}
+
+impl Glyph {
+    pub fn set_language(&mut self, l: crate::i18n::Lang, cx: &mut Context<Self>) {
+        crate::i18n::set_lang(l);
+        self.lang = l;
+        crate::config_ext::set_language(&mut self.config, l);
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// YouTube / SoundCloud as fallback (official, visible embed player).
+    pub fn embed_fallback(&self) -> bool {
+        let en = &self.config.providers.enabled;
+        en.contains(&ProviderId::YouTube) || en.contains(&ProviderId::SoundCloud)
+    }
+
+    pub fn toggle_embed_fallback(&mut self, cx: &mut Context<Self>) {
+        let on = !self.embed_fallback();
+        let en = &mut self.config.providers.enabled;
+        en.retain(|p| !matches!(p, ProviderId::YouTube | ProviderId::SoundCloud));
+        if on {
+            en.push(ProviderId::SoundCloud);
+            en.push(ProviderId::YouTube);
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn embed_playing(&self) -> bool {
+        self.player_state
+            .as_ref()
+            .is_some_and(|s| s.backend == Some(glyph_audio::BackendKind::Embed))
+    }
+
+    /// Cached cover path for a track; kicks off a fetch the first time.
+    pub fn cover_path(&mut self, t: &Track, cx: &mut Context<Self>) -> Option<PathBuf> {
+        let key = track_key(t);
+        if let Some(v) = self.covers.get(&key) {
+            return v.clone();
+        }
+        self.covers.insert(key.clone(), None);
+        let b = self.backend.clone()?;
+        let t = t.clone();
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.cover(&t)).await;
+            if let Ok(Some(p)) = r {
+                this.update(cx, |s, cx| {
+                    s.covers.insert(key, Some(p));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        None
+    }
+}
+
+fn raw_handle(window: &Window) -> Option<raw_window_handle::RawWindowHandle> {
+    use raw_window_handle::HasWindowHandle;
+    HasWindowHandle::window_handle(window).ok().map(|h| h.as_raw())
 }
 
 /// Raw main-window handle for souvlaki on Windows.

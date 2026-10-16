@@ -1,14 +1,21 @@
 //! Glyph's visual tokens: deep black, floating translucent panels, hairline
 //! borders, no shadows, monospace everywhere.
 
-use gpui::{hsla, App, Hsla, Pixels, px};
+use gpui::{canvas, div, hsla, prelude::*, px, AnyElement, App, Bounds, Hsla, Pixels};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::Instant;
 
-pub const FONT: &str = "JetBrains Mono";
+/// Body / titles.
+pub const FONT: &str = "Inter";
+/// Accents only: times, badges, status lines, logo.
+pub const MONO: &str = "JetBrains Mono";
 
-pub const TITLEBAR_H: f32 = 38.0;
-pub const SIDEBAR_W: f32 = 56.0;
-pub const PLAYER_H: f32 = 76.0;
+pub const TITLEBAR_H: f32 = 44.0;
+pub const SIDEBAR_W: f32 = 64.0;
+pub const PLAYER_H: f32 = 80.0;
 pub const GAP: f32 = 10.0;
 pub const RADIUS: f32 = 10.0;
 pub const WINDOW_RADIUS: f32 = 10.0;
@@ -45,17 +52,186 @@ pub fn hover() -> Hsla {
 pub fn active() -> Hsla {
     hsla(0.0, 0.0, 1.0, 0.10)
 }
+// ---- adaptive text ink -------------------------------------------------
+//
+// Text that sits directly on the glow adapts to it: the glow worker reports
+// the displayed luminance per zone, `Glyph` eases an "ink" value per zone
+// (0 = light text, 1 = dark text) and sets it here before building each zone.
+// Text on flat panels/cards uses zone `None` and always stays light.
+
+thread_local! {
+    static ZONE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static INK: std::cell::Cell<[f32; 3]> = const { std::cell::Cell::new([0.0; 3]) };
+}
+
+pub fn set_ink(ink: [f32; 3]) {
+    INK.with(|c| c.set(ink));
+}
+
+/// `Some(zone index)` for text on the background, `None` on panels.
+pub fn set_zone(zone: Option<usize>) {
+    ZONE.with(|c| c.set(zone));
+}
+
+/// Runs `f` with panel ink (light text), restoring the previous zone/scope.
+pub fn on_panel<R>(f: impl FnOnce() -> R) -> R {
+    let prev = ZONE.with(|c| c.replace(None));
+    let prev_scope = SCOPE.with(|c| c.replace(None));
+    let r = f();
+    ZONE.with(|c| c.set(prev));
+    SCOPE.with(|c| c.set(prev_scope));
+    r
+}
+
+fn ink() -> f32 {
+    if let Some(k) = SCOPE.with(|c| c.get()) {
+        return SCOPES.with(|s| s.borrow().get(&k).map(|e| e.ink).unwrap_or(0.0));
+    }
+    let z = ZONE.with(|c| c.get());
+    z.map(|i| INK.with(|c| c.get())[i.min(2)]).unwrap_or(0.0)
+}
+
+// ---- per-element adaptive ink --------------------------------------------
+//
+// Zones are too coarse for text in the content column (a heading next to the
+// bright beam got dark ink on a dark spot). `adaptive` measures the
+// background under each wrapped element instead: its bounds are recorded at
+// prepaint, and `update_inks` eases that element's ink towards the colour with
+// the better contrast against the glow luminance under exactly those bounds.
+
+/// Displayed background luminance on a coarse grid, in window coordinates.
+pub struct LumGrid {
+    pub w: usize,
+    pub h: usize,
+    /// Logical px per cell.
+    pub pitch: f32,
+    pub data: Vec<f32>,
+}
+
+impl LumGrid {
+    /// Bright end (90th percentile) of the luminance under `b`.
+    fn sample(&self, b: Bounds<Pixels>) -> Option<f32> {
+        let x0 = (f32::from(b.origin.x) / self.pitch).floor().max(0.0) as usize;
+        let y0 = (f32::from(b.origin.y) / self.pitch).floor().max(0.0) as usize;
+        let x1 = ((f32::from(b.origin.x + b.size.width) / self.pitch).ceil() as usize).min(self.w);
+        let y1 = ((f32::from(b.origin.y + b.size.height) / self.pitch).ceil() as usize).min(self.h);
+        let mut v: Vec<f32> = Vec::new();
+        for y in y0..y1 {
+            v.extend_from_slice(&self.data[y * self.w + x0.min(x1)..y * self.w + x1]);
+        }
+        if v.is_empty() {
+            return None;
+        }
+        let k = ((v.len() as f32 * 0.9) as usize).min(v.len() - 1);
+        v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+        Some(v[k])
+    }
+}
+
+#[derive(Default)]
+struct Scope {
+    bounds: Option<Bounds<Pixels>>,
+    ink: f32,
+}
+
+thread_local! {
+    static SCOPE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static SCOPES: std::cell::RefCell<HashMap<u64, Scope>> = std::cell::RefCell::new(HashMap::new());
+    static GRID: std::cell::RefCell<Option<Arc<LumGrid>>> = const { std::cell::RefCell::new(None) };
+    static LAST_EASE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Wraps `build()` so every theme text colour inside it adapts to the
+/// background under the element. `key` must be stable across frames.
+pub fn adaptive(key: impl Hash, build: impl FnOnce() -> AnyElement) -> AnyElement {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    let k = h.finish();
+    SCOPES.with(|s| {
+        s.borrow_mut().entry(k).or_default();
+    });
+    let prev = SCOPE.with(|c| c.replace(Some(k)));
+    let el = build();
+    SCOPE.with(|c| c.set(prev));
+    div()
+        .relative()
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    SCOPES.with(|s| {
+                        if let Some(e) = s.borrow_mut().get_mut(&k) {
+                            e.bounds = Some(bounds);
+                        }
+                    })
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(el)
+        .into_any_element()
+}
+
+pub fn set_lum_grid(grid: Option<Arc<LumGrid>>) {
+    GRID.with(|g| *g.borrow_mut() = grid);
+}
+
+/// Eases every adaptive element's ink (~300 ms). Returns true while anything
+/// still changes, so the caller re-renders.
+pub fn update_inks() -> bool {
+    let now = Instant::now();
+    let dt = LAST_EASE
+        .with(|c| c.replace(Some(now)))
+        .map(|t| (now - t).as_secs_f32().min(0.1))
+        .unwrap_or(0.016);
+    let step = dt / 0.3;
+    GRID.with(|g| {
+        let g = g.borrow();
+        let Some(grid) = g.as_ref() else { return false };
+        SCOPES.with(|s| {
+            let mut changed = false;
+            for e in s.borrow_mut().values_mut() {
+                let Some(lum) = e.bounds.and_then(|b| grid.sample(b)) else { continue };
+                let target = ink_for(lum);
+                if (e.ink - target).abs() > 0.001 {
+                    e.ink = if target > e.ink { (e.ink + step).min(target) } else { (e.ink - step).max(target) };
+                    changed = true;
+                }
+            }
+            changed
+        })
+    })
+}
+
+/// Ink for a background brightness: 0 light text, 1 dark text.
+///
+/// `lum` is the gamma-encoded (sRGB) luma the glow worker reports; WCAG
+/// contrast needs linear luminance, so convert first. White text stays until
+/// the background is genuinely bright (linear 0.30, white still ≈ 3:1 there),
+/// because dark text on a mid-grey glow reads far worse than white.
+pub fn ink_for(lum: f32) -> f32 {
+    let v = lum.clamp(0.0, 1.0);
+    let linear = if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    if linear > 0.30 { 1.0 } else { 0.0 }
+}
+
+fn ink_color(alpha_light: f32, alpha_dark: f32) -> Hsla {
+    let k = ink();
+    hsla(0.0, 0.0, 0.95 + (0.05 - 0.95) * k, alpha_light + (alpha_dark - alpha_light) * k)
+}
+
 pub fn text() -> Hsla {
-    hsla(0.0, 0.0, 0.93, 1.0)
+    ink_color(1.0, 1.0)
 }
 pub fn text_dim() -> Hsla {
-    hsla(0.0, 0.0, 0.93, 0.58)
+    ink_color(0.72, 0.82)
 }
 pub fn text_faint() -> Hsla {
-    hsla(0.0, 0.0, 0.93, 0.34)
+    ink_color(0.56, 0.70)
 }
 pub fn text_ghost() -> Hsla {
-    hsla(0.0, 0.0, 0.93, 0.18)
+    ink_color(0.22, 0.3)
 }
 /// Close-button red.
 pub fn danger() -> Hsla {
@@ -69,25 +245,42 @@ pub fn warn() -> Hsla {
 }
 
 pub fn text_xs() -> Pixels {
-    px(10.0)
+    px(11.5)
 }
 pub fn text_sm() -> Pixels {
-    px(11.0)
+    px(12.5)
 }
 pub fn text_md() -> Pixels {
-    px(12.5)
+    px(13.5)
 }
 pub fn text_lg() -> Pixels {
     px(16.0)
 }
 
-/// Registers the bundled JetBrains Mono (OFL, see assets/fonts/JetBrainsMono-OFL.txt).
+/// Flat accent (logo, active states) when no song palette is set.
+pub fn pink() -> Hsla {
+    gpui::rgb(0xff5fd2).into()
+}
+
+/// Flat card fill (#141414-like at 75 %).
+pub fn card() -> Hsla {
+    hsla(0.0, 0.0, 0.08, 0.75)
+}
+pub fn card_hover() -> Hsla {
+    hsla(0.0, 0.0, 0.12, 0.82)
+}
+
+/// Registers the bundled Inter and JetBrains Mono (both OFL, see assets/fonts/*-OFL.txt).
 pub fn load_fonts(cx: &App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Light.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
     ];
     if let Err(err) = cx.text_system().add_fonts(fonts) {
         tracing::error!("failed to load bundled fonts: {err:#}");

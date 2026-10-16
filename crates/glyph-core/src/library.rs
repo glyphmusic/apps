@@ -28,7 +28,13 @@ pub struct Library {
     /// Lyrics offsets in ms, keyed by normalised `title|artist`.
     #[serde(default)]
     pub lyrics_offsets: BTreeMap<String, i64>,
+    /// Songs picked from search, newest first (the search bar's dropdown).
+    #[serde(default)]
+    pub search_history: Vec<Track>,
 }
+
+/// Max entries in the search history.
+pub const SEARCH_HISTORY_LIMIT: usize = 20;
 
 impl Library {
     pub fn path() -> PathBuf {
@@ -79,6 +85,19 @@ impl Library {
         self.recent.retain(|t| !same_entry(t, &track));
         self.recent.insert(0, track);
         self.recent.truncate(RECENT_LIMIT);
+    }
+
+    /// Remember a song picked from search: front, deduped, capped.
+    pub fn push_search(&mut self, track: Track) {
+        self.search_history.retain(|t| !same_entry(t, &track));
+        self.search_history.insert(0, track);
+        self.search_history.truncate(SEARCH_HISTORY_LIMIT);
+    }
+
+    pub fn remove_search(&mut self, index: usize) {
+        if index < self.search_history.len() {
+            self.search_history.remove(index);
+        }
     }
 
     pub fn create_playlist(&mut self, name: &str) -> &mut Playlist {
@@ -203,6 +222,22 @@ mod tests {
 
     fn tr(id: &str, title: &str) -> Track {
         test_track(ProviderId::Audius, id, title, "Band", Some(180_000))
+    }
+
+    #[test]
+    fn search_history_front_dedupe_cap_remove() {
+        let mut lib = Library::default();
+        for i in 0..25 {
+            lib.push_search(tr(&i.to_string(), &format!("Song {i}")));
+        }
+        assert_eq!(lib.search_history.len(), SEARCH_HISTORY_LIMIT);
+        assert_eq!(lib.search_history[0].title, "Song 24");
+        lib.push_search(tr("20", "Song 20"));
+        assert_eq!(lib.search_history[0].title, "Song 20");
+        assert_eq!(lib.search_history.iter().filter(|t| t.title == "Song 20").count(), 1);
+        lib.remove_search(0);
+        assert_eq!(lib.search_history[0].title, "Song 24");
+        lib.remove_search(999);
     }
 
     #[test]

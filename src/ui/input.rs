@@ -102,7 +102,7 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         let shown: SharedString = if self.value.is_empty() {
-            self.placeholder.clone()
+            crate::i18n::t(&self.placeholder)
         } else if self.masked {
             "•".repeat(self.value.chars().count().min(32)).into()
         } else {
@@ -126,7 +126,9 @@ impl Render for TextInput {
             .min_w_0()
             .overflow_hidden()
             .size_full()
-            .text_color(if empty { theme::text_faint() } else { theme::text() })
+            // Inputs always sit on their own flat surface: fixed light ink,
+            // never the adaptive one (this entity renders outside any scope).
+            .text_color(if empty { theme::on_panel(theme::text_faint) } else { theme::on_panel(theme::text) })
             .child(div().flex_none().whitespace_nowrap().child(shown))
             .when(focused, |d| {
                 d.child(
@@ -134,7 +136,7 @@ impl Render for TextInput {
                         .ml(px(1.0))
                         .w(px(6.0))
                         .h(px(13.0))
-                        .bg(theme::text().opacity(0.75)),
+                        .bg(theme::on_panel(theme::text).opacity(0.75)),
                 )
             })
     }

@@ -7,6 +7,8 @@
 //! * Every `async fn` on `Backend` must be awaitable from a NON-tokio executor
 //!   (GPUI's). `Backend` owns a tokio runtime and internally spawns work on it,
 //!   handing results back through channels.
+//! * `Backend::config()` returns an `Arc<Config>` snapshot; `Backend::set_config`
+//!   swaps the config (and re-evaluates providers / server) without a restart.
 //! * [`Queue`] and [`Library`] are plain synchronous data structures.
 
 pub mod config;
@@ -136,7 +138,7 @@ impl ImportResult {
 }
 
 struct Inner {
-    config: Config,
+    config: Arc<Config>,
     mode: BackendMode,
     http: reqwest::Client,
     providers: Arc<Providers>,
@@ -149,7 +151,8 @@ struct Inner {
 }
 
 pub struct Backend {
-    inner: Arc<Inner>,
+    /// Current setup; replaced as a whole by `set_config`.
+    inner: std::sync::RwLock<Arc<Inner>>,
     rt: Option<tokio::runtime::Runtime>,
 }
 
@@ -158,7 +161,7 @@ fn user_agent(config: &Config) -> String {
 }
 
 impl Inner {
-    async fn build(config: Config) -> Result<Inner> {
+    async fn build(config: Config, old_cooldowns: Option<Arc<Cooldowns>>) -> Result<Inner> {
         let _ = std::fs::create_dir_all(paths::data_dir());
         let http = reqwest::Client::builder()
             .user_agent(user_agent(&config))
@@ -166,7 +169,7 @@ impl Inner {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
         let providers = Arc::new(Providers::build(&config, &http));
-        let cooldowns = Arc::new(Cooldowns::new());
+        let cooldowns = old_cooldowns.unwrap_or_else(|| Arc::new(Cooldowns::new()));
         let resolver = Arc::new(Resolver::new(
             providers.clone(),
             cooldowns.clone(),
@@ -197,7 +200,7 @@ impl Inner {
                 Err(e) => tracing::warn!("server {url} unreachable, using direct mode: {e}"),
             }
         }
-        Ok(Inner { config, mode, http, providers, cooldowns, resolver, server, covers, lyrics_cache })
+        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, covers, lyrics_cache })
     }
 
     async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
@@ -263,8 +266,8 @@ impl Backend {
             .thread_name("glyph-core")
             .enable_all()
             .build()?;
-        let inner = rt.spawn(Inner::build(config)).await.map_err(|e| anyhow!("backend start failed: {e}"))??;
-        Ok(Self { inner: Arc::new(inner), rt: Some(rt) })
+        let inner = rt.spawn(Inner::build(config, None)).await.map_err(|e| anyhow!("backend start failed: {e}"))??;
+        Ok(Self { inner: std::sync::RwLock::new(Arc::new(inner)), rt: Some(rt) })
     }
 
     /// Runs `fut` on the backend runtime; the returned future can be awaited
@@ -279,11 +282,28 @@ impl Backend {
     }
 
     pub fn mode(&self) -> BackendMode {
-        self.inner.mode.clone()
+        self.cur().mode.clone()
     }
 
-    pub fn config(&self) -> &Config {
-        &self.inner.config
+    /// Current config (after the latest [`Backend::set_config`]).
+    pub fn config(&self) -> Arc<Config> {
+        self.cur().config.clone()
+    }
+
+    fn cur(&self) -> Arc<Inner> {
+        self.inner.read().unwrap().clone()
+    }
+
+    /// Applies a changed config without restarting: provider set, priority and
+    /// server URL are re-evaluated (health check included); cooldowns and caches
+    /// are kept. In-flight calls finish on the old setup.
+    pub async fn set_config(&self, config: Config) -> anyhow::Result<()> {
+        let old = self.cur();
+        old.resolver.cache().flush();
+        let cooldowns = old.cooldowns.clone();
+        let inner = self.spawn(Inner::build(config, Some(cooldowns))).await??;
+        *self.inner.write().unwrap() = Arc::new(inner);
+        Ok(())
     }
 
     /// Unified search over all enabled providers, results arrive as they come
@@ -293,7 +313,7 @@ impl Backend {
     /// the merged `external_ids` (same `source` + `id`): replace by that key.
     pub fn search(&self, query: &str) -> BoxStream<'static, SearchEvent> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let inner = self.inner.clone();
+        let inner = self.cur();
         let q = query.trim().to_string();
         self.rt.as_ref().expect("runtime alive").spawn(async move {
             if let Some(server) = &inner.server {
@@ -319,18 +339,18 @@ impl Backend {
 
     /// Best legal full source (or a preview) for a track.
     pub async fn resolve(&self, track: &Track) -> anyhow::Result<Option<Resolved>> {
-        let (inner, track) = (self.inner.clone(), track.clone());
+        let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.resolve(&track).await }).await?
     }
 
     pub async fn lyrics(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
-        let (inner, track) = (self.inner.clone(), track.clone());
+        let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.lyrics(&track).await }).await?
     }
 
     /// Radio: similar tracks (Last.fm track.getSimilar), not yet resolved.
     pub async fn similar(&self, track: &Track) -> anyhow::Result<Vec<Track>> {
-        let (inner, track) = (self.inner.clone(), track.clone());
+        let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move {
             if let Some(server) = &inner.server {
                 match server.similar(&track.artist, &track.title).await {
@@ -350,7 +370,7 @@ impl Backend {
     /// fallback chain provider → Spotify/Deezer → Cover Art Archive.
     /// `None` = UI draws a generated ASCII pattern.
     pub async fn cover(&self, track: &Track) -> anyhow::Result<Option<PathBuf>> {
-        let (inner, track) = (self.inner.clone(), track.clone());
+        let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.covers.get(&track).await }).await?
     }
 
@@ -359,7 +379,7 @@ impl Backend {
         input: ImportInput,
         progress: flume_like::Sender<ImportProgress>,
     ) -> anyhow::Result<ImportResult> {
-        let inner = self.inner.clone();
+        let inner = self.cur();
         self.spawn(async move {
             let (list, origin) = import::fetch_list(&input, &inner.providers, inner.server.as_ref()).await?;
             let worker = inner.clone();
@@ -376,35 +396,35 @@ impl Backend {
 
     /// Provider is currently skipped (error / exhausted quota, 10 min).
     pub fn provider_cooling_down(&self, provider: ProviderId) -> bool {
-        self.inner.cooldowns.is_cooling(provider)
+        self.cur().cooldowns.is_cooling(provider)
     }
 
     /// Providers that are active (enabled, keys present).
     pub fn active_providers(&self) -> Vec<ProviderId> {
-        self.inner.providers.ids()
+        self.cur().providers.ids()
     }
 
     /// Changes the full-source priority for the running session.
     pub fn set_priority(&self, priority: Vec<ProviderId>) {
-        self.inner.resolver.set_priority(priority);
+        self.cur().resolver.set_priority(priority);
     }
 
     /// Connection test for the settings page (`GET /v1/health` of any URL).
     pub async fn test_server(&self, url: &str) -> anyhow::Result<Compat> {
-        let client = ServerClient::new(url, self.inner.http.clone(), server_client::install_id());
+        let client = ServerClient::new(url, self.cur().http.clone(), server_client::install_id());
         self.spawn(async move { client.check_compat().await }).await?
     }
 
     /// Checks GitHub releases (see [`updater`]) right now: the manual "Check
     /// for updates" action, never returns `Skipped`.
     pub async fn check_for_update(&self) -> anyhow::Result<UpdateStatus> {
-        let inner = self.inner.clone();
+        let inner = self.cur();
         self.spawn(async move { updater::check(&inner.http, &inner.config.updates, false).await }).await?
     }
 
     /// Start-up check: honours `check_on_start` and the 24 h throttle (`Skipped`).
     pub async fn check_for_update_auto(&self) -> anyhow::Result<UpdateStatus> {
-        let inner = self.inner.clone();
+        let inner = self.cur();
         self.spawn(async move { updater::check(&inner.http, &inner.config.updates, true).await }).await?
     }
 
@@ -414,19 +434,19 @@ impl Backend {
         info: UpdateInfo,
         progress: flume_like::Sender<(u64, u64)>,
     ) -> anyhow::Result<()> {
-        let inner = self.inner.clone();
+        let inner = self.cur();
         self.spawn(async move { updater::install(&inner.http, &info, progress).await }).await?
     }
 
     /// Persists caches (also done on drop).
     pub fn flush(&self) {
-        self.inner.resolver.cache().flush();
+        self.cur().resolver.cache().flush();
     }
 }
 
 impl Drop for Backend {
     fn drop(&mut self) {
-        self.inner.resolver.cache().flush();
+        self.cur().resolver.cache().flush();
         if let Some(rt) = self.rt.take() {
             // Safe even if dropped inside an async context.
             rt.shutdown_background();
@@ -441,5 +461,45 @@ pub mod flume_like {
     pub type Receiver<T> = tokio::sync::mpsc::UnboundedReceiver<T>;
     pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         tokio::sync::mpsc::unbounded_channel()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn set_config_reevaluates_providers_priority_and_server() {
+        let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
+        std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
+
+        let b = Backend::new(Config::default()).await.unwrap();
+        assert_eq!(b.mode(), BackendMode::Direct);
+        assert!(!b.active_providers().contains(&ProviderId::YouTube));
+        assert!(!b.active_providers().contains(&ProviderId::Jamendo));
+
+        let mut cfg = Config::default();
+        cfg.keys.youtube = Some("k".into());
+        cfg.keys.jamendo_client_id = Some("j".into());
+        cfg.providers.enabled.push(ProviderId::YouTube);
+        cfg.providers.priority = vec![ProviderId::YouTube, ProviderId::Audius];
+        cfg.language = "de".into();
+        b.provider_cooling_down(ProviderId::Audius);
+        b.set_config(cfg).await.unwrap();
+        let active = b.active_providers();
+        assert!(active.contains(&ProviderId::YouTube) && active.contains(&ProviderId::Jamendo));
+        assert_eq!(b.config().resolved_language(), "de");
+        assert_eq!(b.config().providers.priority[0], ProviderId::YouTube);
+
+        // unreachable server -> still direct, no error
+        let mut cfg2 = Config::clone(&b.config());
+        cfg2.server_url = "http://127.0.0.1:9".into();
+        b.set_config(cfg2).await.unwrap();
+        assert_eq!(b.mode(), BackendMode::Direct);
+
+        std::env::remove_var("GLYPH_DATA_DIR");
+        std::env::remove_var("GLYPH_CACHE_DIR");
     }
 }

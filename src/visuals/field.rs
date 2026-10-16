@@ -188,9 +188,9 @@ pub fn sample(p: Preset, x: f32, y: f32, aspect: f32, m: &Motion) -> (f32, f32) 
             let s = (px * ux + py * uy) / len;
             let d = (px * uy - py * ux).abs();
             let sc = s.clamp(0.0, 1.0);
-            let w = (0.025 + 0.30 * sc.powf(1.15)) * m.size;
+            let w = (0.02 + 0.17 * sc.powf(1.15)) * m.size;
             let core = gauss(d / w);
-            let halo = gauss(d / (w * 3.2)) * 0.38;
+            let halo = gauss(d / (w * 3.0)) * 0.26;
             let along = smoothstep(-0.05, 0.25, s) * (0.55 + 0.45 * sc);
             ((core + halo) * along, smoothstep(0.35, 1.0, s))
         }

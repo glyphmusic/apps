@@ -70,6 +70,11 @@ impl LocalServer {
         format!("http://127.0.0.1:{}/{}/player.html", self.port, self.token)
     }
 
+    /// Same page, flat layout without title strip (embedded in the app window).
+    pub fn page_url_host(&self) -> String {
+        format!("{}?host=1", self.page_url())
+    }
+
     pub fn push_script(&self, js: String) {
         self.queue.lock().unwrap().push_back(js);
         self.cv.notify_all();

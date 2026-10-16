@@ -1,47 +1,271 @@
 //! `GlowView`: the glow field + ASCII overlay as its own GPUI entity.
 //!
-//! GPUI has no custom-shader hook, so (per the plan's fallback) the field is
-//! computed on the CPU at cell resolution:
+//! Everything is rasterised on a worker thread; the UI thread only uploads
+//! two finished images per frame and draws them:
 //!
-//! * the glow itself is written into a small BGRA image (one pixel per half
-//!   character cell) and drawn stretched over the window; the GPU's linear
-//!   sampler turns it into the soft gaussian blobs;
-//! * the ASCII layer paints one cached glyph per cell (`window.paint_glyph`
-//!   with glyph ids resolved once), coloured with the lightened glow colour.
+//! * the glow: a small BGRA image (one pixel per 8×8 logical px) stretched over
+//!   the window — the GPU's linear sampler turns it into soft blobs;
+//! * the ASCII layer + titlebar dot grid: one full-resolution BGRA image,
+//!   drawn from a tiny pre-rasterised 5×7 bitmap font of the ramp characters
+//!   (no text shaping, no per-glyph draw calls). Refreshed at 15 fps.
 //!
-//! The view re-computes at 30 fps (10 fps while the window is inactive) and
-//! only notifies itself, so the rest of the UI is not re-rendered by it.
+//! The field runs at 30 fps, 10 fps while the window is inactive, and pauses
+//! while the window is being moved or resized. The worker also reports the
+//! displayed luminance per UI zone so the text colour can adapt.
 
-use super::field::{self, Motion, Preset};
+use super::field::{self, Motion, Preset, Ramp};
 use super::palette::{Palette, PaletteFade, Rgb};
 use crate::guard::guard;
 use crate::theme;
 use glyph_audio::{PlayerController, SPECTRUM_BANDS};
 use gpui::{
-    canvas, div, fill, font, point, px, size, Bounds, Context, FontId, GlyphId, Hsla,
-    IntoElement, ParentElement, Pixels, Render, RenderImage, Size, Styled, Task, TextRun, Window,
+    canvas, div, fill, px, size, Bounds, Context, IntoElement, ParentElement, Pixels, Render,
+    RenderImage, Size, Styled, Task, Window,
 };
 use noise::OpenSimplex;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Dark → bright.
 pub const RAMP: &str = " .-=+xX0S8#@";
-const FONT_SIZE: f32 = 10.0;
-const CELL_H: f32 = 12.0;
 const PRESET_FADE: f32 = 1.5;
+/// Glow sample pitch (logical px).
+const GLOW_PITCH: f32 = 8.0;
+/// ASCII cell (logical px). Sparse on purpose: the grid is texture, not content.
+const CELL_W: f32 = 10.0;
+const CELL_H: f32 = 16.0;
 
-struct GlyphCache {
-    font_id: FontId,
-    ids: Vec<Option<GlyphId>>,
-    cell_w: f32,
-    baseline: f32,
+/// Text zones whose background luminance is reported.
+#[derive(Debug, Clone, Copy)]
+pub enum Zone {
+    Titlebar = 0,
+    Sidebar = 1,
+    Main = 2,
+}
+pub const ZONES: usize = 3;
+
+// 5×7 bitmap font for the ramp (rows top→bottom, 5 bits each, MSB = left).
+const FONT: [[u8; 7]; 12] = [
+    [0, 0, 0, 0, 0, 0, 0],                                         // ' '
+    [0, 0, 0, 0, 0, 0b00100, 0],                                   // .
+    [0, 0, 0, 0b01110, 0, 0, 0],                                   // -
+    [0, 0, 0b11111, 0, 0b11111, 0, 0],                             // =
+    [0, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0],           // +
+    [0, 0, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001],           // x
+    [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001], // X
+    [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110], // 0
+    [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110], // S
+    [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110], // 8
+    [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010], // #
+    [0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01111], // @
+];
+
+/// Everything the worker needs for one frame (all `Copy`).
+#[derive(Clone, Copy)]
+struct Job {
+    w: f32,
+    h: f32,
+    scale: f32,
+    motion: Motion,
+    preset: Preset,
+    ramps: (Ramp, Ramp),
+    prev: Option<(Preset, (Ramp, Ramp), f32)>,
+    level: f32,
+    density: f32,
+    threshold: f32,
+    ascii: bool,
+    dot_level: f32,
+    blend: f32,
 }
 
-#[derive(Clone, Copy)]
-struct Cell {
-    ch: u8,
-    color: Hsla,
+struct FrameOut {
+    glow: image::RgbaImage,
+    ascii: Option<image::RgbaImage>,
+    zones: [f32; ZONES],
+    lum: Arc<theme::LumGrid>,
+    ms: f32,
+}
+
+struct Worker {
+    noise: OpenSimplex,
+    samples: Vec<(f32, Rgb)>,
+    ascii: Vec<u8>,
+    lum: Vec<f32>,
+}
+
+impl Worker {
+    fn run(&mut self, j: &Job) -> FrameOut {
+        let t0 = Instant::now();
+        let aspect = j.w / j.h;
+        let iw = ((j.w / GLOW_PITCH).ceil() as usize).max(2);
+        let ih = ((j.h / GLOW_PITCH).ceil() as usize).max(2);
+        let m = &j.motion;
+        let (cool, warm) = j.ramps;
+
+        // --- glow (low-res)
+        let mut glow = vec![0u8; iw * ih * 4];
+        self.samples.clear();
+        self.lum.clear();
+        for py in 0..ih {
+            let y = (py as f32 + 0.5) / ih as f32;
+            for px_ in 0..iw {
+                let x = (px_ as f32 + 0.5) / iw as f32 * aspect;
+                let sh = field::shimmer(&self.noise, x, y, m);
+                let eval = |p: Preset, cool: &Ramp, warm: &Ramp| {
+                    let (b, s) = field::sample(p, x, y, aspect, m);
+                    let b = ((b + sh * b.min(1.0) * 1.4) * m.gain).max(0.0);
+                    (b, cool.at(b).lerp(warm.at(b), s))
+                };
+                let (mut b, mut c) = eval(j.preset, &cool, &warm);
+                if let Some((pp, (pc, pw), pt)) = &j.prev {
+                    let (b2, c2) = eval(*pp, pc, pw);
+                    b = b2 + (b - b2) * pt;
+                    c = c2.lerp(c, *pt);
+                }
+                // Softer and darker than the raw field: it is a background.
+                let shade = c.scale(smoothstep(0.02, 1.1, b) * j.level * 0.5);
+                let o = (py * iw + px_) * 4;
+                glow[o] = u8c(shade.2);
+                glow[o + 1] = u8c(shade.1);
+                glow[o + 2] = u8c(shade.0);
+                glow[o + 3] = 255;
+                self.samples.push((b, c));
+                self.lum.push(shade.luma());
+            }
+        }
+        let glow = image::RgbaImage::from_raw(iw as u32, ih as u32, glow).expect("glow size");
+
+        // --- per-zone luminance (90th percentile of displayed glow + ASCII share)
+        let zone_rect = |z: Zone| -> (f32, f32, f32, f32) {
+            let top = theme::TITLEBAR_H;
+            match z {
+                Zone::Titlebar => (0.0, 0.0, j.w, top),
+                Zone::Sidebar => (0.0, top, theme::SIDEBAR_W + theme::GAP * 2.0, j.h - theme::PLAYER_H - 20.0),
+                Zone::Main => (theme::SIDEBAR_W + theme::GAP, top, j.w * 0.62, j.h - theme::PLAYER_H - 20.0),
+            }
+        };
+        let mut zones = [0f32; ZONES];
+        for (zi, z) in [Zone::Titlebar, Zone::Sidebar, Zone::Main].into_iter().enumerate() {
+            let (x0, y0, x1, y1) = zone_rect(z);
+            let (cx0, cy0) = ((x0 / GLOW_PITCH) as usize, (y0 / GLOW_PITCH) as usize);
+            let (cx1, cy1) = (((x1 / GLOW_PITCH) as usize).min(iw), ((y1 / GLOW_PITCH) as usize).min(ih));
+            let mut v: Vec<f32> = Vec::new();
+            for y in cy0..cy1 {
+                for x in cx0..cx1 {
+                    v.push(self.lum[y * iw + x] * 1.12);
+                }
+            }
+            if !v.is_empty() {
+                let k = ((v.len() as f32 * 0.9) as usize).min(v.len() - 1);
+                v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+                zones[zi] = v[k];
+            }
+        }
+
+        // --- ASCII layer + titlebar dots (full resolution, straight-alpha BGRA)
+        let ascii = j.ascii.then(|| {
+            let sw = (j.w * j.scale).round().max(1.0) as usize;
+            let sh_ = (j.h * j.scale).round().max(1.0) as usize;
+            self.ascii.clear();
+            self.ascii.resize(sw * sh_ * 4, 0);
+            let buf = &mut self.ascii;
+            let p = j.scale.round().max(1.0) as usize; // font pixel size
+            let cols = (j.w / CELL_W) as usize;
+            let rows = (j.h / CELL_H) as usize;
+            let sample = |lx: f32, ly: f32| -> (f32, Rgb) {
+                let gx = ((lx / GLOW_PITCH) as usize).min(iw - 1);
+                let gy = ((ly / GLOW_PITCH) as usize).min(ih - 1);
+                self.samples[gy * iw + gx]
+            };
+            for row in 0..rows {
+                let ly = row as f32 * CELL_H;
+                if ly < theme::TITLEBAR_H {
+                    continue;
+                }
+                for col in 0..cols {
+                    let lx = col as f32 * CELL_W;
+                    let (b, c) = sample(lx + CELL_W * 0.5, ly + CELL_H * 0.5);
+                    let dv = b * j.density;
+                    if dv < j.threshold {
+                        continue;
+                    }
+                    let idx = ((dv.min(1.0) * (RAMP.len() - 1) as f32).round() as usize).clamp(1, RAMP.len() - 1);
+                    let alpha = (0.16 + 0.16 * dv.min(1.0)) * j.level;
+                    let col_ = c.lighten(0.3);
+                    let (r, g, bl) = (u8c(col_.0), u8c(col_.1), u8c(col_.2));
+                    let a = u8c(alpha);
+                    let ox = ((lx + (CELL_W - 5.0) * 0.5) * j.scale) as usize;
+                    let oy = ((ly + (CELL_H - 7.0) * 0.5) * j.scale) as usize;
+                    for (ry, bits) in FONT[idx].iter().enumerate() {
+                        if *bits == 0 {
+                            continue;
+                        }
+                        for rx in 0..5 {
+                            if bits & (0b10000 >> rx) == 0 {
+                                continue;
+                            }
+                            for dy in 0..p {
+                                let y = oy + ry * p + dy;
+                                if y >= sh_ {
+                                    continue;
+                                }
+                                let base = (y * sw + ox + rx * p) * 4;
+                                for dx in 0..p {
+                                    let o = base + dx * 4;
+                                    if o + 3 < buf.len() {
+                                        buf[o] = bl;
+                                        buf[o + 1] = g;
+                                        buf[o + 2] = r;
+                                        buf[o + 3] = a;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Titlebar dot grid: 2 px dots, 4 px pitch, glow colour along the top.
+            let floor = Rgb::hex(0x0c1a6b);
+            let pitch = 4.0;
+            let dots_x = (j.w / pitch) as usize;
+            let dots_y = (theme::TITLEBAR_H / pitch) as usize;
+            let d = (2.0 * j.scale).round().max(1.0) as usize;
+            for i in 0..dots_x {
+                let lx = i as f32 * pitch + 1.0;
+                let (b, c) = sample(lx, 6.0);
+                let tint = floor.lerp(c, smoothstep(0.0, 0.6, b).max(j.blend * 0.55));
+                let (r, g, bl) = (u8c(tint.0), u8c(tint.1), u8c(tint.2));
+                for k in 0..dots_y {
+                    let fade = 1.0 - (k as f32 / dots_y as f32) * 0.35;
+                    let a = u8c(j.dot_level * fade);
+                    let ox = (lx * j.scale) as usize;
+                    let oy = ((k as f32 * pitch + 1.0) * j.scale) as usize;
+                    for dy in 0..d {
+                        for dx in 0..d {
+                            let o = ((oy + dy) * sw + ox + dx) * 4;
+                            if o + 3 < buf.len() {
+                                buf[o] = bl;
+                                buf[o + 1] = g;
+                                buf[o + 2] = r;
+                                buf[o + 3] = a;
+                            }
+                        }
+                    }
+                }
+            }
+            image::RgbaImage::from_raw(sw as u32, sh_ as u32, buf.clone()).expect("ascii size")
+        });
+
+        // Displayed luminance (glow + the ASCII layer's share) for per-element ink.
+        let lum = Arc::new(theme::LumGrid {
+            w: iw,
+            h: ih,
+            pitch: GLOW_PITCH,
+            data: self.lum.iter().map(|l| l * 1.12).collect(),
+        });
+        FrameOut { glow, ascii, zones, lum, ms: t0.elapsed().as_secs_f32() * 1000.0 }
+    }
 }
 
 pub struct GlowView {
@@ -56,32 +280,54 @@ pub struct GlowView {
     spectrum_ok: bool,
     playing_target: bool,
     playing: f32,
-    /// Smoothed bass / mids / highs.
     bands: [f32; 3],
-    /// Short pulse (lyric line change), decays.
     pulse: f32,
     intensity: f32,
     active: bool,
+    /// Last size change (resize in progress → hold the frame).
+    moved_at: Instant,
+    window_size: Size<Pixels>,
     view_size: Size<Pixels>,
-    glyphs: Option<GlyphCache>,
-    // Output of the last tick.
-    cols: usize,
-    rows: usize,
-    cell_w: f32,
-    image: Option<Arc<RenderImage>>,
+    scale: f32,
+    frame_no: u64,
+    jobs: mpsc::SyncSender<Job>,
+    results: mpsc::Receiver<FrameOut>,
+    busy: bool,
+    glow_img: Option<Arc<RenderImage>>,
+    ascii_img: Option<Arc<RenderImage>>,
     stale: Vec<Arc<RenderImage>>,
-    cells: Vec<Cell>,
-    dot_colors: Vec<Hsla>,
-    dot_level: f32,
+    zones: [f32; ZONES],
+    lum_grid: Option<Arc<theme::LumGrid>>,
+    stats: (f32, f32, u32, Instant),
     _task: Task<()>,
 }
 
 impl GlowView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(1);
+        let (out_tx, out_rx) = mpsc::sync_channel::<FrameOut>(1);
+        std::thread::Builder::new()
+            .name("glyph-glow".into())
+            .spawn(move || {
+                let mut w = Worker {
+                    noise: OpenSimplex::new(0x61_79_70_68),
+                    samples: Vec::new(),
+                    ascii: Vec::new(),
+                    lum: Vec::new(),
+                };
+                while let Ok(job) = job_rx.recv() {
+                    if out_tx.send(w.run(&job)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn glow worker");
+
         let task = cx.spawn(async move |this, cx| loop {
             let interval = match this.update(cx, |v, cx| {
-                v.tick();
-                cx.notify();
+                if v.tick() {
+                    cx.notify();
+                }
                 if v.active { 33 } else { 100 }
             }) {
                 Ok(ms) => ms,
@@ -93,6 +339,18 @@ impl GlowView {
         });
         cx.observe_window_activation(window, |v, window, _| {
             v.active = window.is_window_active();
+        })
+        .detach();
+        // Hold the last frame only while the window is being *resized* (the
+        // image would have to be recomputed for every size). A plain move
+        // changes nothing in the picture, so the field keeps running; pausing
+        // it there made the first frames after the drag hitch.
+        cx.observe_window_bounds(window, |v, window, _| {
+            let size = window.bounds().size;
+            if size != v.window_size {
+                v.window_size = size;
+                v.moved_at = Instant::now();
+            }
         })
         .detach();
         let now = Instant::now();
@@ -112,16 +370,20 @@ impl GlowView {
             pulse: 0.0,
             intensity: 0.8,
             active: true,
+            moved_at: now - Duration::from_secs(10),
+            window_size: window.bounds().size,
             view_size: size(px(0.0), px(0.0)),
-            glyphs: None,
-            cols: 0,
-            rows: 0,
-            cell_w: 6.0,
-            image: None,
+            scale: window.scale_factor(),
+            frame_no: 0,
+            jobs: job_tx,
+            results: out_rx,
+            busy: false,
+            glow_img: None,
+            ascii_img: None,
             stale: Vec::new(),
-            cells: Vec::new(),
-            dot_colors: Vec::new(),
-            dot_level: 0.3,
+            zones: [0.0; ZONES],
+            lum_grid: None,
+            stats: (0.0, 0.0, 0, now),
             _task: task,
         }
     }
@@ -139,9 +401,6 @@ impl GlowView {
     pub fn set_palette(&mut self, palette: Option<Palette>) {
         self.fade.set(palette);
     }
-    pub fn palette(&self) -> Option<Palette> {
-        self.fade.target()
-    }
     pub fn set_preset(&mut self, preset: Preset) {
         if preset != self.preset {
             self.prev_preset = self.preset;
@@ -155,6 +414,14 @@ impl GlowView {
     /// Short glow pulse, e.g. on every new lyric line.
     pub fn pulse(&mut self) {
         self.pulse = 1.0;
+    }
+    /// Displayed background luminance (0..1) per text zone.
+    pub fn zones(&self) -> [f32; ZONES] {
+        self.zones
+    }
+    /// Displayed background luminance grid of the last frame (window coords).
+    pub fn lum_grid(&self) -> Option<Arc<theme::LumGrid>> {
+        self.lum_grid.clone()
     }
 
     fn read_spectrum(&mut self) -> [f32; 3] {
@@ -172,12 +439,49 @@ impl GlowView {
         [avg(0..4), avg(4..16), avg(16..32)]
     }
 
-    fn tick(&mut self) {
+    /// Collects a finished frame and queues the next job. Returns true when
+    /// there is something new to draw.
+    fn tick(&mut self) -> bool {
+        let mut fresh = false;
+        if let Ok(out) = self.results.try_recv() {
+            self.busy = false;
+            let t0 = Instant::now();
+            let glow = Arc::new(RenderImage::new(vec![image::Frame::new(out.glow)]));
+            if let Some(old) = self.glow_img.replace(glow) {
+                self.stale.push(old);
+            }
+            if let Some(a) = out.ascii {
+                let a = Arc::new(RenderImage::new(vec![image::Frame::new(a)]));
+                if let Some(old) = self.ascii_img.replace(a) {
+                    self.stale.push(old);
+                }
+            }
+            self.zones = out.zones;
+            self.lum_grid = Some(out.lum);
+            let ui_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            self.stats.0 = self.stats.0.max(out.ms);
+            self.stats.1 = self.stats.1.max(ui_ms);
+            self.stats.2 += 1;
+            if self.stats.3.elapsed() > Duration::from_secs(5) {
+                tracing::debug!(
+                    "glow: worker max {:.2} ms, ui upload max {:.2} ms, {} frames / 5 s",
+                    self.stats.0,
+                    self.stats.1,
+                    self.stats.2
+                );
+                self.stats = (0.0, 0.0, 0, Instant::now());
+            }
+            fresh = true;
+        }
+
         let now = Instant::now();
         let dt = (now - self.last_tick).as_secs_f32().min(0.25);
         self.last_tick = now;
+        // Window move / resize in progress: hold the last frame.
+        if self.moved_at.elapsed() < Duration::from_millis(250) || self.busy {
+            return fresh;
+        }
         let t = (now - self.t0).as_secs_f32();
-
         let target = if self.playing_target { 1.0 } else { 0.0 };
         self.playing += (target - self.playing) * (1.0 - (-dt * 1.2).exp());
         let raw = self.read_spectrum();
@@ -190,179 +494,51 @@ impl GlowView {
         let w = f32::from(self.view_size.width);
         let h = f32::from(self.view_size.height);
         if w < 8.0 || h < 8.0 {
-            return;
+            return fresh;
         }
-        self.cell_w = self.glyphs.as_ref().map(|g| g.cell_w).unwrap_or(6.0);
-        let cols = (w / self.cell_w).ceil() as usize;
-        let rows = (h / CELL_H).ceil() as usize;
-        let (iw, ih) = (cols, rows * 2);
-        let aspect = w / h;
-
         let [bass, mids, highs] = self.bands;
-        let mut m = Motion::new(&self.noise, t, self.playing, bass, mids);
-        m.gain += self.pulse * 0.25;
+        let mut motion = Motion::new(&self.noise, t, self.playing, bass, mids);
+        motion.gain += self.pulse * 0.25;
         let (pal, blend) = self.fade.current();
-        let (cool, warm) = self.preset.ramps(pal.as_ref(), blend);
         let preset_t = (self.preset_since.elapsed().as_secs_f32() / PRESET_FADE).min(1.0);
-        let prev = (preset_t < 1.0).then(|| {
-            (self.prev_preset, self.prev_preset.ramps(pal.as_ref(), blend))
-        });
-        let level = 0.55 + 0.45 * self.intensity;
-
-        // --- glow image + per-pixel colour/brightness
-        let mut bytes = vec![0u8; iw * ih * 4];
-        let mut samples: Vec<(f32, Rgb)> = Vec::with_capacity(iw * ih);
-        for py in 0..ih {
-            let y = (py as f32 + 0.5) / ih as f32;
-            for px_ in 0..iw {
-                let x = (px_ as f32 + 0.5) / iw as f32 * aspect;
-                let sh = field::shimmer(&self.noise, x, y, &m);
-                let eval = |p: Preset, cool: &field::Ramp, warm: &field::Ramp| {
-                    let (b, s) = field::sample(p, x, y, aspect, &m);
-                    let b = ((b + sh * b.min(1.0) * 1.4) * m.gain).max(0.0);
-                    (b, cool.at(b).lerp(warm.at(b), s))
-                };
-                let (mut b, mut c) = eval(self.preset, &cool, &warm);
-                if let Some((pp, (pc, pw))) = &prev {
-                    let (b2, c2) = eval(*pp, pc, pw);
-                    b = b2 + (b - b2) * preset_t;
-                    c = c2.lerp(c, preset_t);
-                }
-                let shade = c.scale(smoothstep(0.015, 0.75, b) * level * 0.92);
-                let o = (py * iw + px_) * 4;
-                let [r, g, bl] = to_u8(shade);
-                bytes[o] = bl;
-                bytes[o + 1] = g;
-                bytes[o + 2] = r;
-                bytes[o + 3] = 255;
-                samples.push((b, c));
-            }
-        }
-        if let Some(buf) = image::RgbaImage::from_raw(iw as u32, ih as u32, bytes) {
-            let img = Arc::new(RenderImage::new(vec![image::Frame::new(buf)]));
-            if let Some(old) = self.image.replace(img) {
-                self.stale.push(old);
-            }
-        }
-
-        // --- ASCII cells (two image pixels per cell)
-        self.cells.clear();
-        self.cells.reserve(cols * rows);
-        let density = 0.82 + 0.5 * highs + 0.08 * self.playing;
-        let threshold = 0.11 - 0.05 * highs;
-        for row in 0..rows {
-            for col in 0..cols {
-                let a = samples[(row * 2) * iw + col];
-                let b = samples[(row * 2 + 1) * iw + col];
-                let v = (a.0 + b.0) * 0.5;
-                let c = a.1.lerp(b.1, 0.5);
-                let dv = v * density;
-                if dv < threshold {
-                    self.cells.push(Cell { ch: 0, color: Hsla::default() });
-                    continue;
-                }
-                let idx = ((dv.min(1.0)) * (RAMP.len() - 1) as f32).round() as usize;
-                let idx = idx.clamp(1, RAMP.len() - 1) as u8;
-                let alpha = (0.70 + 0.20 * dv.min(1.0)) * (0.6 + 0.4 * level);
-                self.cells.push(Cell { ch: idx, color: c.lighten(0.38).hsla(alpha) });
-            }
-        }
-        self.cols = cols;
-        self.rows = rows;
-
-        // --- titlebar dot colours: glow along the top edge, deep-blue floor.
-        let dots = (w / 4.0).ceil() as usize;
-        self.dot_colors.clear();
-        let floor = Rgb::hex(0x0c1a6b);
-        for i in 0..dots {
-            let x = (i as f32 + 0.5) / dots as f32 * aspect;
-            let (b, s) = field::sample(self.preset, x, 0.12, aspect, &m);
-            let c = cool.at(0.45 + b * 0.5).lerp(warm.at(0.45 + b * 0.5), s);
-            let tint = floor.lerp(c, smoothstep(0.0, 0.6, b).max(blend * 0.55));
-            self.dot_colors.push(tint.hsla(1.0));
-        }
-        self.dot_level = 0.20 + 0.16 * self.intensity + 0.30 * bass + 0.10 * self.pulse;
-    }
-
-    fn ensure_glyphs(&mut self, window: &mut Window) {
-        if self.glyphs.is_some() {
-            return;
-        }
-        let f = font(theme::FONT);
-        let ts = window.text_system().clone();
-        let font_id = ts.resolve_font(&f);
-        let run = TextRun {
-            len: RAMP.len(),
-            font: f,
-            color: Hsla::default(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
+        let job = Job {
+            w,
+            h,
+            scale: self.scale,
+            motion,
+            preset: self.preset,
+            ramps: self.preset.ramps(pal.as_ref(), blend),
+            prev: (preset_t < 1.0)
+                .then(|| (self.prev_preset, self.prev_preset.ramps(pal.as_ref(), blend), preset_t)),
+            level: 0.5 + 0.5 * self.intensity,
+            density: 0.75 + 0.45 * highs + 0.08 * self.playing,
+            threshold: 0.42 - 0.06 * highs,
+            ascii: self.frame_no % 2 == 0 || self.ascii_img.is_none(),
+            dot_level: 0.18 + 0.14 * self.intensity + 0.28 * bass + 0.10 * self.pulse,
+            blend,
         };
-        let line = ts.shape_line(RAMP.into(), px(FONT_SIZE), &[run], None);
-        let mut ids = vec![None; RAMP.len()];
-        for r in &line.runs {
-            for g in &r.glyphs {
-                if g.index < ids.len() && g.index > 0 {
-                    ids[g.index] = Some(g.id);
-                }
-            }
+        self.frame_no += 1;
+        if self.jobs.try_send(job).is_ok() {
+            self.busy = true;
         }
-        let cell_w = (f32::from(line.width) / RAMP.len() as f32).max(4.0);
-        let asc = f32::from(line.ascent);
-        let desc = f32::from(line.descent).abs();
-        let baseline = (CELL_H - asc - desc) / 2.0 + asc;
-        self.glyphs = Some(GlyphCache { font_id, ids, cell_w, baseline });
+        fresh
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
-        self.ensure_glyphs(window);
-        if bounds.size != self.view_size {
+        if bounds.size != self.view_size || window.scale_factor() != self.scale {
             self.view_size = bounds.size;
-            self.tick();
+            self.scale = window.scale_factor();
+            self.moved_at = Instant::now() - Duration::from_millis(240);
         }
         for old in self.stale.drain(..) {
             let _ = window.drop_image(old);
         }
         window.paint_quad(fill(bounds, theme::bg()));
-        if let Some(img) = self.image.clone() {
+        if let Some(img) = self.glow_img.clone() {
             let _ = window.paint_image(bounds, bounds, Default::default(), img, 0, false);
         }
-
-        // Titlebar dot grid: 2 px dots, 4 px pitch.
-        let rows = (theme::TITLEBAR_H / 4.0) as usize;
-        for (i, c) in self.dot_colors.iter().enumerate() {
-            let x = bounds.origin.x + px(i as f32 * 4.0 + 1.0);
-            for r in 0..rows {
-                let fadey = 1.0 - (r as f32 / rows as f32) * 0.35;
-                let y = bounds.origin.y + px(r as f32 * 4.0 + 1.0);
-                window.paint_quad(
-                    fill(Bounds::new(point(x, y), size(px(2.0), px(2.0))), c.opacity(self.dot_level * fadey))
-                        .corner_radii(px(1.0)),
-                );
-            }
-        }
-
-        let Some(g) = self.glyphs.as_ref() else { return };
-        let fs = px(FONT_SIZE);
-        let top = theme::TITLEBAR_H;
-        for row in 0..self.rows {
-            let y = row as f32 * CELL_H;
-            if y + CELL_H < top {
-                continue; // titlebar shows the dot grid instead
-            }
-            for col in 0..self.cols {
-                let cell = self.cells[row * self.cols + col];
-                if cell.ch == 0 {
-                    continue;
-                }
-                let Some(id) = g.ids[cell.ch as usize] else { continue };
-                let origin = point(
-                    bounds.origin.x + px(col as f32 * self.cell_w),
-                    bounds.origin.y + px(y + g.baseline),
-                );
-                let _ = window.paint_glyph(origin, g.font_id, id, fs, cell.color);
-            }
+        if let Some(img) = self.ascii_img.clone() {
+            let _ = window.paint_image(bounds, bounds, Default::default(), img, 0, false);
         }
     }
 }
@@ -387,10 +563,7 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn to_u8(c: Rgb) -> [u8; 3] {
-    [
-        (c.0.clamp(0.0, 1.0) * 255.0) as u8,
-        (c.1.clamp(0.0, 1.0) * 255.0) as u8,
-        (c.2.clamp(0.0, 1.0) * 255.0) as u8,
-    ]
+#[inline]
+fn u8c(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0) as u8
 }

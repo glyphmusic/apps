@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub struct Config {
     /// Empty string = direct mode.
     pub server_url: String,
+    /// "" = system language; otherwise "en" | "de" | "ru".
+    pub language: String,
     pub keys: ApiKeys,
     pub providers: ProvidersConfig,
     pub visuals: VisualsConfig,
@@ -65,7 +67,11 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         use ProviderId::*;
         Self {
-            enabled: ProviderId::ALL.to_vec(),
+            // YouTube / SoundCloud (embed players) are opt-in fallbacks.
+            enabled: ProviderId::ALL
+                .into_iter()
+                .filter(|p| !matches!(p, YouTube | SoundCloud))
+                .collect(),
             priority: vec![Audius, Jamendo, SoundCloud, YouTube],
             youtube_daily_searches: 90,
         }
@@ -111,6 +117,33 @@ fn env(name: &str) -> Option<String> {
 }
 
 impl Config {
+    /// UI language: the configured one, or the system language when empty;
+    /// only "en" | "de" | "ru" are supported, anything else becomes "en".
+    pub fn resolved_language(&self) -> &'static str {
+        let configured = self.language.trim();
+        if configured.is_empty() {
+            Self::language_from_locale(sys_locale::get_locale().as_deref())
+        } else {
+            Self::language_from_locale(Some(configured))
+        }
+    }
+
+    /// Maps a locale tag like "de-DE" / "ru_RU.UTF-8" to a supported language.
+    pub fn language_from_locale(locale: Option<&str>) -> &'static str {
+        let prefix = locale
+            .unwrap_or("")
+            .trim()
+            .split(|c: char| c == '-' || c == '_' || c == '.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match prefix.as_str() {
+            "de" => "de",
+            "ru" => "ru",
+            _ => "en",
+        }
+    }
+
     pub fn dir() -> PathBuf {
         dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("glyph")
     }
@@ -223,6 +256,31 @@ youtube = \"abc\"").unwrap();
         assert_eq!(cfg.keys.youtube.as_deref(), Some("abc"));
         assert!(cfg.updates.check_on_start);
         assert_eq!(cfg.providers.priority.len(), 4);
+    }
+
+    #[test]
+    fn default_providers_exclude_embed_sources() {
+        let e = Config::default().providers.enabled;
+        assert!(!e.contains(&ProviderId::YouTube) && !e.contains(&ProviderId::SoundCloud));
+        assert!(e.contains(&ProviderId::Audius) && e.contains(&ProviderId::LrcLib));
+        // priority is unchanged; disabled providers are simply ignored by the resolver
+        assert!(Config::default().providers.priority.contains(&ProviderId::YouTube));
+    }
+
+    #[test]
+    fn language_resolution() {
+        let mut c = Config::default();
+        assert_eq!(Config::language_from_locale(Some("de-DE")), "de");
+        assert_eq!(Config::language_from_locale(Some("ru_RU.UTF-8")), "ru");
+        assert_eq!(Config::language_from_locale(Some("fr-FR")), "en");
+        assert_eq!(Config::language_from_locale(None), "en");
+        c.language = "ru".into();
+        assert_eq!(c.resolved_language(), "ru");
+        c.language = "xx".into();
+        assert_eq!(c.resolved_language(), "en");
+        c.language = String::new();
+        assert!(["en", "de", "ru"].contains(&c.resolved_language()));
+        assert_eq!(Config::from_toml("language = \"de\"").unwrap().language, "de");
     }
 
     #[test]

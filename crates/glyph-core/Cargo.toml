@@ -21,6 +21,7 @@ dirs = "6"
 lru = "0.12"
 sha2 = "0.10"
 semver = "1"
+sys-locale = "0.3"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

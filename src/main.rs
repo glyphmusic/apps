@@ -3,6 +3,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod assets;
+mod config_ext;
+mod embed;
+mod i18n;
 mod guard;
 mod theme;
 mod ui;
@@ -23,7 +27,8 @@ fn main() {
         .init();
     guard::install_panic_hook();
 
-    gpui_platform::application().run(|cx: &mut App| {
+    crate::i18n::set_lang(crate::i18n::Lang::system());
+    gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
         theme::load_fonts(cx);
         ui::bind_keys(cx);
 

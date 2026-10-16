@@ -114,10 +114,12 @@ pub(crate) enum Cmd {
     Opened { id: u64, opened: native::Opened },
     DecodeError { id: u64, message: String },
     Embed(u64, embed::EmbedEvent),
+    HostAttached,
     Shutdown,
 }
 
 pub(crate) struct Shared {
+    pub host: Arc<embed::host::HostQueue>,
     pub state: Mutex<PlayerState>,
     pub spectrum: Mutex<[f32; SPECTRUM_BANDS]>,
     pub events_tx: Sender<PlayerEvent>,
@@ -133,6 +135,7 @@ impl PlayerController {
     pub fn new() -> anyhow::Result<Self> {
         let (events_tx, events_rx) = flume::unbounded();
         let shared = Arc::new(Shared {
+            host: Arc::new(embed::host::HostQueue::default()),
             state: Mutex::new(PlayerState {
                 status: Status::Idle,
                 track: None,
@@ -200,6 +203,43 @@ impl PlayerController {
     }
     pub fn set_mini_player_options(&self, options: MiniPlayerOptions) {
         self.send(Cmd::MiniOptions(options));
+    }
+}
+
+impl PlayerController {
+    /// Host the embed webview as a child of the app window. Must be called on the UI/main thread.
+    ///
+    /// The handle must stay valid for the life of the window. Returns an error
+    /// where child webviews are impossible (Wayland, missing WebView2, ...);
+    /// the popup/browser fallback then stays in effect. On Windows the child is
+    /// created on a background thread: this returns `Ok` immediately (never block
+    /// the UI thread here) and an eventual failure is logged and falls back.
+    pub fn attach_embed_host(&self, parent: raw_window_handle::RawWindowHandle) -> anyhow::Result<()> {
+        embed::host::attach(&self.shared.host, parent)?;
+        self.send(Cmd::HostAttached);
+        Ok(())
+    }
+
+    /// Logical-pixel rect inside the parent window (top-left origin) where the embed is shown.
+    /// Sizes below 200x200 (YouTube's minimum) are raised and a warning is logged.
+    pub fn set_embed_bounds(&self, x: f32, y: f32, width: f32, height: f32) {
+        let (b, changed) = embed::host::clamp_bounds(x, y, width, height);
+        if changed {
+            tracing::warn!("embed bounds {width}x{height} below the 200x200 minimum; using {}x{}", b.w, b.h);
+        }
+        self.shared.host.push(embed::host::HostCmd::Bounds(b));
+    }
+
+    /// Show/hide the embedded player (it is also hidden while a native track plays).
+    pub fn set_embed_visible(&self, visible: bool) {
+        self.shared.host.push(embed::host::HostCmd::UiVisible(visible));
+    }
+
+    /// Apply queued embed commands to the child webview. Call on the UI/main
+    /// thread (the one that called `attach_embed_host`), once per frame or at
+    /// least every ~16 ms while an embed is shown. Cheap when the queue is empty.
+    pub fn pump_embed(&self) {
+        embed::host::pump(&self.shared.host);
     }
 }
 

@@ -232,6 +232,7 @@ mod tests {
 
     #[test]
     fn install_id_is_stable() {
+        let _g = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("GLYPH_DATA_DIR", dir.path());
         let a = install_id();

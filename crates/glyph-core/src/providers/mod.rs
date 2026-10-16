@@ -145,6 +145,7 @@ mod tests {
         cfg.keys.jamendo_client_id = Some("x".into());
         cfg.keys.youtube = Some("k".into());
         cfg.providers.enabled.retain(|p| *p != ProviderId::Audius);
+        cfg.providers.enabled.push(ProviderId::YouTube);
         let ids = Providers::build(&cfg, &http).ids();
         assert!(ids.contains(&ProviderId::Jamendo) && ids.contains(&ProviderId::YouTube));
         assert!(!ids.contains(&ProviderId::Audius));

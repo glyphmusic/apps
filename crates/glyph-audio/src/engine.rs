@@ -222,6 +222,7 @@ impl Engine {
             Cmd::Opened { id, opened } => self.on_opened(id, opened),
             Cmd::DecodeError { id, message } => self.on_decode_error(id, message),
             Cmd::Embed(session, ev) => self.on_embed(session, ev),
+            Cmd::HostAttached => self.on_host_attached(),
             Cmd::Shutdown => {}
         }
     }
@@ -574,12 +575,20 @@ impl Engine {
             self.fail(format!("{} has no embed player", provider.display_name()));
             return;
         }
+        // Windows attaches the child webview asynchronously; give it a moment.
+        self.shared.host.wait_settled(Duration::from_secs(10));
+        // A popup/browser backend must be replaced once the host child webview exists.
+        if self.embed.as_ref().is_some_and(|e| !e.is_host()) && self.shared.host.is_attached() {
+            if let Some(mut e) = self.embed.take() {
+                e.park();
+            }
+        }
         if self.embed.is_none() {
             let tx = self.tx.clone();
             let sink: EventSink = Arc::new(move |s, ev| {
                 let _ = tx.send(Cmd::Embed(s, ev));
             });
-            match EmbedBackend::start(sink, self.mini_opts) {
+            match EmbedBackend::start(sink, self.mini_opts, Some(self.shared.host.clone())) {
                 Ok(e) => self.embed = Some(e),
                 Err(e) => {
                     self.fail(format!("mini-player unavailable: {e:#}"));
@@ -593,6 +602,21 @@ impl Engine {
         self.set_status(Status::Loading);
         if let Err(msg) = self.embed.as_mut().unwrap().load(provider, &embed_id, self.volume, session) {
             self.fail(msg);
+        }
+    }
+
+    fn on_host_attached(&mut self) {
+        let Some(e) = self.embed.as_mut() else { return };
+        if e.is_host() {
+            return;
+        }
+        // Move a running popup/browser embed into the main window.
+        e.park();
+        self.embed = None;
+        if self.backend() == Some(BackendKind::Embed) {
+            if let Some((t, s)) = self.last_load.clone() {
+                self.load(t, s);
+            }
         }
     }
 
