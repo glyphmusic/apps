@@ -1,7 +1,7 @@
 //! Settings as a modal (Liner layout): left navigation with search and
 //! grouped pages, right the page with rows (label + description left,
 //! control right). Pages: Playback, Audio, Appearance, Server, Cache &
-//! Storage, About, Support; "Docs" opens the guide on GitHub.
+//! Storage, About.
 
 use crate::app::{BackendState, ConnTest, Glyph, SettingsPage};
 use crate::i18n::{t, tf, Lang};
@@ -414,37 +414,6 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         col = col.child(div().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
         for (page, ic, label, _) in visible {
             col = col.child(item(page, ic, label, cx));
-        }
-    }
-    // Help: docs (external) + support page.
-    let help_docs = matches(&t("sp.docs"), "docs doku hilfe help guide");
-    let help_support = matches(&t("sp.support"), "support bug issue diagnostic hilfe help");
-    if help_docs || help_support {
-        col = col
-            .child(div().h(px(1.0)).mx(px(6.0)).my(px(8.0)).bg(white(0.06)))
-            .child(div().px(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(t("sp.group.help")));
-        if help_docs {
-            col = col.child(
-                div()
-                    .id("sp-nav-docs")
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(36.0))
-                    .px(px(10.0))
-                    .rounded(px(8.0))
-                    .cursor_pointer()
-                    .text_size(px(14.0))
-                    .text_color(white(0.75))
-                    .hover(|s| s.bg(white(0.04)).text_color(gpui::white()))
-                    .on_click(|_, _, cx| cx.open_url(DOCS_URL))
-                    .child(icon("book-open", 16.0, white(0.7)))
-                    .child(div().flex_1().child(t("sp.docs")))
-                    .child(icon("external-link", 12.0, white(0.4))),
-            );
-        }
-        if help_support {
-            col = col.child(item(SettingsPage::Support, "life-buoy", t("sp.support"), cx));
         }
     }
     col
