@@ -163,6 +163,7 @@ impl Render for Glyph {
         });
         let toast = self.toast.as_ref().map(|(m, _)| m.clone());
         let modal = self.settings_open.then(|| settings::modal(self, window, cx));
+        let dim = self.settings_open;
 
         div()
             .id("glyph-root")
@@ -220,7 +221,9 @@ impl Render for Glyph {
             .size_full()
             .flex()
             .flex_col()
-            .child(titlebar)
+            // Behind the settings modal only the (already soft) glow stays
+            // visible: GPUI has no backdrop blur, so the UI fades out instead.
+            .child(div().flex_none().when(dim, |d| d.opacity(0.08)).child(titlebar))
             .child(
                 div()
                     .flex_1()
@@ -228,11 +231,12 @@ impl Render for Glyph {
                     .flex()
                     .gap(px(theme::GAP))
                     .px(px(theme::GAP))
+                    .when(dim, |d| d.opacity(0.08))
                     .child(sidebar)
                     .child(main_panel)
                     .children(queue),
             )
-            .children(bar)
+            .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(0.08)).child(b)))
             .children(modal)
             .when_some(toast, |d, m| {
                 d.child(

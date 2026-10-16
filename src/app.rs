@@ -165,6 +165,8 @@ pub struct Glyph {
     pub settings_search: Entity<TextInput>,
     /// Which dropdown in the settings modal is open.
     pub open_select: Option<&'static str>,
+    /// "Advanced" sections in settings are expanded.
+    pub settings_advanced: bool,
     /// Storage breakdown for "Cache & Storage" (None = not measured yet).
     pub storage: Option<glyph_core::storage::StorageStats>,
     pub toast: Option<(String, Instant)>,
@@ -340,6 +342,7 @@ impl Glyph {
             settings_page: SettingsPage::Playback,
             settings_search,
             open_select: None,
+            settings_advanced: false,
             storage: None,
             toast: None,
             lang: crate::i18n::lang(),

@@ -213,6 +213,30 @@ fn select(
         .children(list)
 }
 
+/// "Advanced" disclosure row; the section below only shows when expanded.
+fn advanced_toggle(app: &Glyph, cx: &mut Context<Glyph>) -> AnyElement {
+    let open = app.settings_advanced;
+    div()
+        .id("sp-advanced")
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .pt(px(18.0))
+        .pb(px(4.0))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(white(0.55))
+        .hover(|s| s.text_color(gpui::white()))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.settings_advanced = !this.settings_advanced;
+            cx.notify();
+        }))
+        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.55)))
+        .child(t("sp.advanced"))
+        .into_any_element()
+}
+
 fn input_box(input: impl IntoElement) -> Div {
     div()
         .w(px(300.0))
@@ -239,7 +263,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
     let page = app.settings_page;
     let (title, sub, body) = match page {
         SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), playback(app, cx)),
-        SettingsPage::Audio => (t("sp.audio"), t("sp.audio.sub"), audio(app, cx)),
+        SettingsPage::Audio => (t("sp.playback"), t("sp.playback.sub"), playback(app, cx)),
         SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), appearance(app, cx)),
         SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), server(app, cx)),
         SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), storage(app, cx)),
@@ -310,7 +334,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .flex()
         .items_center()
         .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.55))
+        .bg(hsla(0.0, 0.0, 0.0, 0.30))
         .on_click(cx.listener(|this, _, w, cx| this.close_settings(w, cx)))
         .child(panel)
         .into_any_element()
@@ -324,8 +348,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         (
             t("sp.group.prefs"),
             vec![
-                (SettingsPage::Playback, "play", t("sp.playback"), "sources source quelle youtube soundcloud priority radio"),
-                (SettingsPage::Audio, "headphones", t("sp.audio"), "quality qualität kbps"),
+                (SettingsPage::Playback, "play", t("sp.playback"), "sources source quelle youtube soundcloud priority radio quality qualität audio"),
                 (SettingsPage::Appearance, "palette", t("sp.appearance"), "language sprache theme ascii cover glow"),
             ],
         ),
@@ -430,43 +453,58 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 // ------------------------------------------------------------------ pages
 
 fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
-    let enabled = app.config.providers.enabled.clone();
-    let mut items: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
+    // Everyday options first; sources and their order live under "Advanced".
+    let cur = app.config.audio.quality;
+    let options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
         .into_iter()
-        .map(|p| {
-            let cooling = app
-                .backend
-                .as_ref()
-                .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
-                .unwrap_or(false);
-            row(
-                p.display_name(),
-                Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
-                switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
-            )
+        .map(|q| {
+            let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_audio_quality(q, cx));
+            (quality_label(q), q == cur, f)
         })
         .collect();
-    items.push(row(
-        t("settings.sources.fallback"),
-        Some(t("settings.sources.fallback.hint")),
-        switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
-    ));
-    items.push(row(
-        t("sp.radio"),
-        Some(t("sp.radio.desc")),
-        switch("radio", app.radio).on_click(cx.listener(|this, _, _, cx| {
-            this.radio = !this.radio;
-            cx.notify();
-        })),
-    ));
+    let quality = select(app, "sel-quality", quality_label(cur), options, cx);
+    let basic = rows(vec![
+        row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality),
+        row(
+            t("settings.sources.fallback"),
+            Some(t("settings.sources.fallback.hint")),
+            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
+        ),
+        row(
+            t("sp.radio"),
+            Some(t("sp.radio.desc")),
+            switch("radio", app.radio).on_click(cx.listener(|this, _, _, cx| {
+                this.radio = !this.radio;
+                cx.notify();
+            })),
+        ),
+    ]);
 
-    div()
-        .flex()
-        .flex_col()
-        .child(rows(items))
-        .child(section_label(t("settings.priority")))
-        .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
-        .child(priority_list(app, cx))
+    let mut col = div().flex().flex_col().child(basic).child(advanced_toggle(app, cx));
+    if app.settings_advanced {
+        let enabled = app.config.providers.enabled.clone();
+        let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
+            .into_iter()
+            .map(|p| {
+                let cooling = app
+                    .backend
+                    .as_ref()
+                    .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
+                    .unwrap_or(false);
+                row(
+                    p.display_name(),
+                    Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
+                    switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
+                )
+            })
+            .collect();
+        col = col
+            .child(rows(sources))
+            .child(section_label(t("settings.priority")))
+            .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
+            .child(priority_list(app, cx));
+    }
+    col
 }
 
 /// The dragged priority entry: the whole row follows the cursor.
@@ -531,19 +569,6 @@ fn quality_label(q: AudioQuality) -> SharedString {
         AudioQuality::Standard => t("sp.audio.q.standard"),
         AudioQuality::High => t("sp.audio.q.high"),
     }
-}
-
-fn audio(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
-    let cur = app.config.audio.quality;
-    let options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
-        .into_iter()
-        .map(|q| {
-            let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_audio_quality(q, cx));
-            (quality_label(q), q == cur, f)
-        })
-        .collect();
-    let quality = select(app, "sel-quality", quality_label(cur), options, cx);
-    rows(vec![row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality)])
 }
 
 fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
@@ -617,14 +642,14 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .iter()
         .map(|(name, input)| row(t(&format!("settings.keys.{name}")), None, input_box(input.clone())))
         .collect();
-    items.truncate(2);
-    div()
-        .flex()
-        .flex_col()
-        .child(rows(items))
-        .child(section_label(t("settings.keys")))
-        .child(div().pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
-        .child(rows(keys))
+    let mut col = div().flex().flex_col().child(rows(items)).child(advanced_toggle(app, cx));
+    if app.settings_advanced {
+        col = col
+            .child(section_label(t("settings.keys")))
+            .child(div().pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
+            .child(rows(keys));
+    }
+    col
 }
 
 const STORAGE_COLORS: [u32; 4] = [0x22c3e6, 0xa970ff, 0xff5fa2, 0xf2b84b];
