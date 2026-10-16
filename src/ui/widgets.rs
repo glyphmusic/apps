@@ -487,14 +487,9 @@ pub fn cover(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Contex
                 .object_fit(ObjectFit::Cover),
         );
     }
-    if app.config.visuals.ascii_covers && !app.cover_loading(t) {
-        // No cover anywhere: generated pattern (end of the fallback chain).
-        let seed = format!("{}{}", t.artist, t.title);
-        let pal = Palette::from_seed(&seed);
-        return grid(pal.0[0].scale(0.3).hsla(1.0), pal.0[2].lighten(0.3).hsla(0.9))
-            .children(ascii::pattern(&seed, cols, rows).into_iter().map(|(l, _)| div().whitespace_nowrap().child(l)));
-    }
-    if app.cover_loading(t) {
+    // ASCII mode only ever shows the real cover; without one it is the same
+    // flat placeholder as the normal mode.
+    if app.cover_loading(t) || app.backend.is_none() {
         return skeleton(format!("cover-sk-{}-{size}", track_key(t)), size, size, radius);
     }
     base.flex()

@@ -474,6 +474,9 @@ impl Glyph {
                     None => BackendState::Ready(BackendMode::Direct),
                 };
                 self.backend = Some(b);
+                // Misses recorded without a backend are not real misses.
+                self.covers.retain(|_, v| v.is_some());
+                self.ascii_covers.clear();
                 if self.config.updates.check_on_start {
                     self.check_updates(false, cx);
                 }
@@ -1565,8 +1568,10 @@ impl Glyph {
         if let Some(v) = self.covers.get(&key) {
             return v.clone();
         }
-        self.covers.insert(key.clone(), None);
+        // Not cached as a miss before the backend exists: the home view renders
+        // before it is ready, and those covers must still load afterwards.
         let b = self.backend.clone()?;
+        self.covers.insert(key.clone(), None);
         let t = t.clone();
         self.covers_loading.insert(key.clone());
         cx.spawn(async move |this, cx| {
