@@ -38,6 +38,8 @@ pub enum View {
     List,
     /// Artist profile: `Glyph::open_artist`.
     Artist,
+    /// A user's profile: `Glyph::open_profile`.
+    Profile,
 }
 
 /// Which song list the list view shows.
@@ -60,6 +62,8 @@ pub struct NameDialog {
     pub tracks: Vec<Track>,
     /// Playlist id when renaming.
     pub rename: Option<String>,
+    /// Naming an equalizer preset instead of a playlist.
+    pub eq_preset: bool,
 }
 
 impl ListRef {
@@ -99,6 +103,7 @@ pub struct Route {
     pub view: View,
     pub list: Option<ListRef>,
     pub artist: Option<String>,
+    pub profile: Option<String>,
 }
 
 /// Artist profile data (loaded once per session and name).
@@ -211,9 +216,12 @@ pub enum SettingsPage {
     Appearance,
     Server,
     Account,
+    /// Picture, banner and privacy (signed in only).
+    Profile,
     Storage,
+    /// Export, share and import settings.
+    Transfer,
     About,
-    Support,
 }
 
 pub struct Glyph {
@@ -221,14 +229,18 @@ pub struct Glyph {
     pub view: View,
     pub open_list: Option<ListRef>,
     pub open_artist: Option<String>,
+    /// Handle of the open user profile (`View::Profile`).
+    pub open_profile: Option<String>,
     pub artists: std::collections::HashMap<String, ArtistPage>,
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
     /// When the menu opened (fade/slide in) and a menu that is fading out.
     pub ctx_opened: Instant,
     pub ctx_closing: Option<(CtxMenu, Instant)>,
-    /// Artist hero images rendered as ASCII, per source image (None = computing).
-    pub heroes: std::collections::HashMap<(PathBuf, bool), Option<Arc<gpui::RenderImage>>>,
+    /// Artist hero images rendered as ASCII, per source image and raster width
+    /// (None = computing), plus replaced ones waiting to leave the GPU atlas.
+    pub heroes: std::collections::HashMap<(PathBuf, bool, u32), Option<Arc<gpui::RenderImage>>>,
+    pub stale_heroes: Vec<Arc<gpui::RenderImage>>,
     /// Scroll state of the main view, the settings page, the queue and the lyrics
     /// (edge fades show only where there is more to scroll).
     pub main_scroll: gpui::ScrollHandle,
@@ -276,6 +288,10 @@ pub struct Glyph {
     pub backend: Option<Arc<Backend>>,
     /// Settings -> Account state and the sync loop.
     pub account: crate::ui::account::AccountUi,
+    /// User profiles (open page, own settings).
+    pub profile: crate::ui::profile::ProfileUi,
+    /// Settings export / import (Settings -> Backup & share).
+    pub transfer: crate::ui::transfer::TransferUi,
     pub backend_state: BackendState,
     pub player: Option<Arc<PlayerController>>,
     pub player_ok: bool,
@@ -298,6 +314,11 @@ pub struct Glyph {
     /// [`App::retry_expired_preview`]); reset whenever playback starts.
     pub retried_expired: Option<Track>,
     pub resolving: bool,
+    /// Next song handed to the player for a gapless start:
+    /// (queue `track_key`, resolved track the player knows it as).
+    preloaded: Option<(String, Track)>,
+    /// Volume to go back to when unmuting from the speaker icon.
+    unmute_volume: f32,
     pub palette: Option<Palette>,
     pub cover: Option<CoverArt>,
 
@@ -329,8 +350,8 @@ pub struct Glyph {
     pub settings_search: Entity<TextInput>,
     /// Which dropdown in the settings modal is open.
     pub open_select: Option<&'static str>,
-    /// "Advanced" sections in settings are expanded.
-    pub settings_advanced: bool,
+    /// Selected sub-tab of the settings page (see `ui::settings::subtabs`).
+    pub settings_sub: u8,
     /// Storage breakdown for "Cache & Storage" (None = not measured yet).
     pub storage: Option<glyph_core::storage::StorageStats>,
     /// Which storage kinds "Clear cache" removes (order of StorageKind::ALL).
@@ -552,12 +573,14 @@ impl Glyph {
             view: View::Home,
             open_list: None,
             open_artist: None,
+            open_profile: None,
             artists: Default::default(),
             history: Vec::new(),
             ctx_menu: None,
             ctx_opened: Instant::now(),
             ctx_closing: None,
             heroes: Default::default(),
+            stale_heroes: Vec::new(),
             main_scroll: gpui::ScrollHandle::new(),
             settings_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::ScrollHandle::new(),
@@ -608,6 +631,8 @@ impl Glyph {
             current_preview: false,
             retried_expired: None,
             resolving: false,
+            preloaded: None,
+            unmute_volume: 0.8,
             palette: None,
             cover: None,
             search: SearchState::default(),
@@ -628,9 +653,11 @@ impl Glyph {
             settings_closing: None,
             settings_page: SettingsPage::Playback,
             account: Default::default(),
+            profile: Default::default(),
+            transfer: Default::default(),
             settings_search,
             open_select: None,
-            settings_advanced: false,
+            settings_sub: 0,
             storage: None,
             // Downloads are offline songs: opt-in, never cleared by default.
             storage_selected: [true, false, true, true],
@@ -1070,6 +1097,7 @@ impl Glyph {
             || self.download_done.values().any(|at| at.elapsed().as_secs_f32() < crate::ui::widgets::DL_DONE_ANIM_S)
             || settings_anim
             || crate::ui::settings::select_animating()
+            || crate::ui::settings::flash_animating()
             || tip_anim
             || menu_anim
             || self.splash.is_some()
@@ -1312,7 +1340,7 @@ impl Glyph {
                 View::NowPlaying => Preset::Sonnenaufgang,
                 View::Settings => Preset::Horizont,
                 View::List => Preset::Horizont,
-                View::Artist => Preset::Sonnenaufgang,
+                View::Artist | View::Profile => Preset::Sonnenaufgang,
             };
             self.glow.update(cx, |g, _| g.set_preset(preset));
         }
@@ -1328,11 +1356,24 @@ impl Glyph {
     // ------------------------------------------------------------ search
 
     fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
-        // A pasted playlist code imports instead of searching.
-        if glyph_core::share::is_code(&q) {
+        // A pasted settings code opens the import in settings.
+        if glyph_core::settings_share::is_code(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_settings_text(&code, cx);
+            return;
+        }
+        // A pasted playlist code or link imports instead of searching.
+        if glyph_core::share::is_code(&q) || glyph_core::share::link_id(&q).is_some() {
             let code = q.clone();
             self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             self.import_share_code(&code, cx);
+            return;
+        }
+        if glyph_core::eq::is_code(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_eq_code(&code, cx);
             return;
         }
         self.search.query = q.clone();
@@ -1564,15 +1605,28 @@ impl Glyph {
     }
 
     pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.start_track(track, None, cx);
+    }
+
+    /// `adopted`: the player already moved on to this song gaplessly (as the
+    /// given resolved track), so only the UI follows; nothing is reloaded.
+    fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
         let key = track_key(&track);
         self.current = Some(track.clone());
-        self.current_source = Some(track.source);
-        self.current_preview = false;
+        self.current_source = Some(adopted.as_ref().map_or(track.source, |a| a.source));
+        self.current_preview = adopted.is_some() && self.player_state.as_ref().is_some_and(|s| s.is_preview);
         self.retried_expired = None;
-        self.resolving = true;
+        self.resolving = adopted.is_none();
+        if adopted.is_none() {
+            self.preloaded = None;
+            // Fade the old song out right away instead of letting it run
+            // until the new one has loaded.
+            self.with_player(|p| p.pause());
+        }
         if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
             self.library.record_play(&track);
             self.save_library(cx);
+            self.profile_recent_changed(cx);
         }
         let seed = format!("{}{}", track.artist, track.title);
         let palette = Palette::from_seed(&seed);
@@ -1581,6 +1635,11 @@ impl Glyph {
             g.set_palette(Some(palette));
             g.set_preset(Preset::from_seed(&seed));
         });
+        // The player bar and Now Playing cover "ASCII in" again with every new
+        // song, also when that cover was already shown somewhere before.
+        for size in [crate::ui::player_bar::COVER, crate::ui::now_playing::COVER] {
+            crate::ui::widgets::reset_reveals(&format!("cover:{key}:{size}"));
+        }
         self.cover = Some(CoverArt {
             key: key.clone(),
             path: None,
@@ -1601,39 +1660,43 @@ impl Glyph {
         };
 
         // Resolve → load → play.
-        let b = backend.clone();
-        let t = track.clone();
-        let k = key.clone();
-        cx.spawn(async move |this, cx| {
-            let r = guard_async(b.resolve(&t)).await;
-            this.update(cx, |s, cx| {
-                if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
-                    return;
-                }
-                s.resolving = false;
-                match r {
-                    Ok(Some(res)) => {
-                        s.current_source = Some(res.source.provider());
-                        s.current_preview =
-                            matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
-                        let src = res.source.clone();
-                        let tr = res.track.clone();
-                        s.with_player(move |p| {
-                            p.load(tr, src);
-                            p.play();
-                        });
-                        // Now that this song runs, get the next ones ready
-                        // (local yt-dlp only; one batch run, not one wait per song).
-                        s.prefetch_upcoming();
+        if adopted.is_some() {
+            self.prefetch_upcoming();
+        } else {
+            let b = backend.clone();
+            let t = track.clone();
+            let k = key.clone();
+            cx.spawn(async move |this, cx| {
+                let r = guard_async(b.resolve(&t)).await;
+                this.update(cx, |s, cx| {
+                    if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
+                        return;
                     }
-                    Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
-                    Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
-                }
-                cx.notify();
+                    s.resolving = false;
+                    match r {
+                        Ok(Some(res)) => {
+                            s.current_source = Some(res.source.provider());
+                            s.current_preview =
+                                matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
+                            let src = res.source.clone();
+                            let tr = res.track.clone();
+                            s.with_player(move |p| {
+                                p.load(tr, src);
+                                p.play();
+                            });
+                            // Now that this song runs, get the next ones ready
+                            // (local yt-dlp only; one batch run, not one wait per song).
+                            s.prefetch_upcoming();
+                        }
+                        Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
+                        Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
+                    }
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
 
         // Lyrics.
         let b = backend.clone();
@@ -1710,7 +1773,21 @@ impl Glyph {
     }
 
     pub fn set_volume(&mut self, v: f32) {
-        self.with_player(|p| p.set_volume(v.clamp(0.0, 1.0)));
+        let v = v.clamp(0.0, 1.0);
+        if v > 0.001 {
+            self.unmute_volume = v;
+        }
+        self.with_player(|p| p.set_volume(v));
+    }
+
+    /// Speaker icon: mute, or back to the volume before muting.
+    pub fn toggle_mute(&mut self) {
+        let muted = self.volume() <= 0.001;
+        if !muted {
+            self.unmute_volume = self.volume();
+        }
+        let v = if muted { self.unmute_volume } else { 0.0 };
+        self.with_player(|p| p.set_volume(v));
     }
 
     pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {
@@ -1719,8 +1796,17 @@ impl Glyph {
                 self.library.record_skip(&cur);
             }
         }
+        let preloaded = self.preloaded.take();
         match guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() }) {
-            Some(Some(t)) => self.play_track(t, cx),
+            Some(Some(t)) => {
+                // Ended on its own and the player already runs the preloaded
+                // next song: follow it instead of resolving and loading again.
+                let playing = self.player.as_ref().and_then(|p| guard(|| p.state().track)).flatten();
+                let adopted = preloaded.filter(|(k, r)| {
+                    auto && *k == track_key(&t) && playing.as_ref().is_some_and(|p| p.id == r.id && p.source == r.source)
+                });
+                self.start_track(t, adopted.map(|(_, r)| r), cx);
+            }
             Some(None) => {
                 if self.radio {
                     self.start_radio(cx);
@@ -1805,13 +1891,37 @@ impl Glyph {
     fn preload_next(&mut self, cx: &mut Context<Self>) {
         let Some(Some(next)) = guard(|| self.queue.peek_next().cloned()) else { return };
         let Some(b) = self.backend.clone() else { return };
+        let cur = self.current.as_ref().map(track_key);
+        let want = track_key(&next);
         cx.spawn(async move |this, cx| {
             if let Ok(Some(res)) = guard_async(b.resolve(&next)).await {
-                this.update(cx, |s, _| s.with_player(|p| p.preload_next(res.track, res.source)))
-                    .ok();
+                this.update(cx, |s, _| {
+                    // Resolving can take a while: if another song started or
+                    // the queue changed meanwhile, this one is not next anymore.
+                    if s.current.as_ref().map(track_key) != cur || s.next_key().as_deref() != Some(want.as_str()) {
+                        return;
+                    }
+                    s.preloaded = Some((want, res.track.clone()));
+                    s.with_player(|p| p.preload_next(res.track, res.source));
+                })
+                .ok();
             }
         })
         .detach();
+    }
+
+    fn next_key(&self) -> Option<String> {
+        guard(|| self.queue.peek_next().map(track_key)).flatten()
+    }
+
+    /// After a queue edit: a preloaded song that is no longer next must not
+    /// start after the current one (the player then asks for the new next).
+    fn queue_changed(&mut self) {
+        let stale = self.preloaded.as_ref().is_some_and(|(k, _)| self.next_key().as_deref() != Some(k.as_str()));
+        if stale {
+            self.preloaded = None;
+            self.with_player(|p| p.drop_next());
+        }
     }
 
     /// Queue finished: continue with similar tracks (Last.fm getSimilar).
@@ -1840,6 +1950,7 @@ impl Glyph {
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         let on = !self.shuffle();
         guard(|| self.queue.set_shuffle(on));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -1850,6 +1961,7 @@ impl Glyph {
             RepeatMode::One => RepeatMode::Off,
         };
         guard(|| self.queue.set_repeat(next));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -1873,16 +1985,19 @@ impl Glyph {
             Some(()) => self.toast_info(tf(if next { "toast.play_next" } else { "toast.queued" }, &[("title", &title)])),
             None => self.toast_info("[ QUEUE OFFLINE ]"),
         }
+        self.queue_changed();
         cx.notify();
     }
 
     pub fn queue_remove(&mut self, i: usize, cx: &mut Context<Self>) {
         guard(|| self.queue.remove(i));
+        self.queue_changed();
         cx.notify();
     }
 
     pub fn queue_move(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         guard(|| self.queue.move_item(from, to));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -1903,7 +2018,7 @@ impl Glyph {
         }
         if self.open_list == Some(ListRef::User(id.to_string())) {
             self.history.retain(|r| r.list != Some(ListRef::User(id.to_string())));
-            let back = self.history.pop().unwrap_or(Route { view: View::Library, list: None, artist: None });
+            let back = self.history.pop().unwrap_or(Route { view: View::Library, list: None, artist: None, profile: None });
             self.restore(back, cx);
         }
         cx.notify();
@@ -1911,34 +2026,107 @@ impl Glyph {
 
     /// Adds several songs at once (one toast).
     pub fn add_many_to_playlist(&mut self, id: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
-        let mut added = 0;
+        let mut added = Vec::new();
         let mut name = String::new();
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             name = p.name.clone();
             for t in tracks {
                 if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
-                    p.tracks.push(t);
-                    added += 1;
+                    p.tracks.push(t.clone());
+                    added.push(t);
                 }
             }
         }
-        if added > 0 {
+        if !added.is_empty() {
             self.save_library(cx);
-            self.toast(tf("toast.added_n_to_playlist", &[("n", &added), ("name", &name)]));
+            self.toast(tf("toast.added_n_to_playlist", &[("n", &added.len()), ("name", &name)]));
+            self.auto_download_added(id, added, cx);
         }
         cx.notify();
+    }
+
+    /// Music files / folders dropped onto playlist `id`: imported as local
+    /// songs (tags, embedded cover) and added at the end.
+    pub fn import_files_to_playlist(&mut self, id: String, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.toast_info(t("toast.dl_unready"));
+            cx.notify();
+            return;
+        };
+        // Folders are walked off the UI thread; plain files are checked here.
+        if !paths.iter().any(|p| p.is_dir() || glyph_core::import::local::is_audio(p)) {
+            self.toast_info(t("toast.import_none"));
+            cx.notify();
+            return;
+        }
+        self.toast(t("toast.import_started"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = b.import_local(paths).await;
+            this.update(cx, |s, cx| {
+                match res {
+                    Ok(r) => {
+                        if r.failed > 0 {
+                            s.toast_info(tf("toast.import_failed", &[("n", &r.failed)]));
+                        }
+                        let before = s.library.playlist(&id).map(|p| p.tracks.len()).unwrap_or(0);
+                        let n = r.tracks.len();
+                        s.add_many_to_playlist(&id, r.tracks, cx);
+                        let after = s.library.playlist(&id).map(|p| p.tracks.len()).unwrap_or(0);
+                        if n == 0 && r.failed == 0 {
+                            s.toast_info(t("toast.import_none"));
+                        } else if n > 0 && after == before {
+                            s.toast_info(t("toast.import_already"));
+                        }
+                    }
+                    Err(e) => s.toast_info(tf("toast.import_error", &[("e", &format!("{e:#}"))])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
-                p.tracks.push(t);
+                p.tracks.push(t.clone());
                 let name = p.name.clone();
                 self.save_library(cx);
                 self.toast(tf("toast.added_to_playlist", &[("name", &name)]));
+                self.auto_download_added(id, vec![t], cx);
             }
         }
         cx.notify();
+    }
+
+    pub fn is_auto_download(&self, id: &str) -> bool {
+        self.library_ok && self.library.playlist(id).is_some_and(|p| p.auto_download)
+    }
+
+    /// Turns "download new songs automatically" on or off for a playlist.
+    /// Songs already in it stay as they are ("Download all" covers those).
+    pub fn toggle_auto_download(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            self.toast_info(t("status.library_offline"));
+            return;
+        }
+        let Some(p) = self.library.playlist_mut(id) else { return };
+        p.auto_download = !p.auto_download;
+        let on = p.auto_download;
+        self.save_library(cx);
+        self.toast_info(t(if on { "toast.auto_dl_on" } else { "toast.auto_dl_off" }));
+        cx.notify();
+    }
+
+    /// Songs just added to playlist `id` (here or from another device):
+    /// downloads them if the playlist downloads new songs automatically.
+    pub(crate) fn auto_download_added(&mut self, id: &str, added: Vec<Track>, cx: &mut Context<Self>) {
+        if added.is_empty() || !self.is_auto_download(id) {
+            return;
+        }
+        self.download_tracks_with(added, true, cx);
     }
 
     pub fn share(&mut self, t: &Track, cx: &mut Context<Self>) {
@@ -1964,10 +2152,10 @@ impl Glyph {
     // ------------------------------------------------------------ lists & artists
 
     fn route(&self) -> Route {
-        Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone() }
+        Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone(), profile: self.open_profile.clone() }
     }
 
-    fn push_route(&mut self) {
+    pub(crate) fn push_route(&mut self) {
         let r = self.route();
         if self.history.last() != Some(&r) {
             self.history.push(r);
@@ -1984,6 +2172,10 @@ impl Glyph {
         self.open_artist = r.artist.clone();
         if let Some(a) = r.artist {
             self.load_artist(a, cx);
+        }
+        self.open_profile = r.profile.clone();
+        if let (View::Profile, Some(h)) = (r.view, r.profile) {
+            self.load_profile(h, cx);
         }
         self.ctx_menu = None;
         cx.notify();
@@ -2023,7 +2215,8 @@ impl Glyph {
         }
     }
 
-    /// Copies a share code for the list (songs, name) to the clipboard.
+    /// Copies a short link for the list (public server) or its share code
+    /// (songs, name) to the clipboard.
     pub fn share_list(&mut self, l: &ListRef, cx: &mut Context<Self>) {
         let tracks = self.list_tracks(l);
         if tracks.is_empty() {
@@ -2031,23 +2224,82 @@ impl Glyph {
             cx.notify();
             return;
         }
-        let code = glyph_core::share::encode(&self.list_title(l), &tracks);
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
-        self.toast_sub(t("toast.share_copied"), self.list_title(l));
-        cx.notify();
+        let title = self.list_title(l);
+        let Some(b) = self.backend.clone() else {
+            let code = glyph_core::share::encode(&title, &tracks);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+            self.toast_sub(t("toast.share_copied"), title);
+            cx.notify();
+            return;
+        };
+        // Artist albums carry no author; a list opened from a link keeps its link.
+        let kind = if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
+        let origin = match l {
+            ListRef::User(id) => self.library.playlist(id).and_then(|p| p.origin.clone()),
+            _ => None,
+        };
+        cx.spawn(async move |this, cx| {
+            let text = b.share_text(&title, &tracks, kind, origin).await;
+            this.update(cx, |s, cx| {
+                let key = if glyph_core::share::link_id(&text).is_some() { "toast.share_link_copied" } else { "toast.share_copied" };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                s.toast_sub(t(key), title);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    /// Imports a pasted share code as a new playlist and opens it.
+    /// Imports a pasted share code (or short link) as a new playlist and opens it.
     pub fn import_share_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if glyph_core::share::link_id(code).is_some() {
+            let Some(b) = self.backend.clone() else {
+                self.toast_info(t("status.library_offline"));
+                cx.notify();
+                return true;
+            };
+            let link = code.to_string();
+            cx.spawn(async move |this, cx| {
+                let r = b.resolve_share_link(&link).await;
+                this.update(cx, |s, cx| match r {
+                    Ok(p) if glyph_core::share::is_code(&p.code) => {
+                        let author = p.author.filter(|_| p.kind != "album");
+                        s.import_code(&p.code, Some(link.clone()), author, cx);
+                    }
+                    Ok(_) => {
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        tracing::info!("playlist link failed: {e:#}");
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return true;
+        }
         if !glyph_core::share::is_code(code) {
             return false;
         }
+        self.import_code(code, None, None, cx);
+        true
+    }
+
+    /// Adds the playlist of a share code; `origin` / `shared_by` come from a
+    /// short link (its URL and the author's handle).
+    fn import_code(&mut self, code: &str, origin: Option<String>, shared_by: Option<String>, cx: &mut Context<Self>) {
         match glyph_core::share::decode(code) {
             Ok((name, tracks)) if self.library_ok => {
                 let n = tracks.len();
                 let id = {
                     let p = self.library.create_playlist(&name);
                     p.tracks = tracks;
+                    p.origin = origin;
+                    p.shared_by = shared_by;
                     p.id.clone()
                 };
                 self.save_library(cx);
@@ -2058,7 +2310,6 @@ impl Glyph {
             Err(e) => self.toast_info(format!("{e:#}")),
         }
         cx.notify();
-        true
     }
 
     /// "2019 · EP"-style label for an album; looked up once, guessed from the
@@ -2247,14 +2498,24 @@ impl Glyph {
     /// Downloads the songs one after another; songs no source offers for
     /// download are skipped and counted in the closing toast.
     pub fn download_tracks(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.download_tracks_with(tracks, false, cx);
+    }
+
+    /// `auto`: started by a playlist that downloads new songs by itself, so
+    /// it starts silently and only reports what was saved or failed.
+    fn download_tracks_with(&mut self, tracks: Vec<Track>, auto: bool, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else {
-            self.toast_info(t("toast.dl_unready"));
+            if !auto {
+                self.toast_info(t("toast.dl_unready"));
+            }
             cx.notify();
             return;
         };
         let todo: Vec<Track> = tracks.into_iter().filter(|tr| !self.is_downloaded(tr) && !self.is_downloading(tr)).collect();
         if todo.is_empty() {
-            self.toast_info(t("toast.dl_already"));
+            if !auto {
+                self.toast_info(t("toast.dl_already"));
+            }
             cx.notify();
             return;
         }
@@ -2263,11 +2524,13 @@ impl Glyph {
         }
         let total = todo.len();
         let first_title = todo[0].title.clone();
-        self.toast(if total == 1 {
-            tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
-        } else {
-            tf("toast.dl_started", &[("n", &total)]).to_string()
-        });
+        if !auto {
+            self.toast(if total == 1 {
+                tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
+            } else {
+                tf("toast.dl_started", &[("n", &total)]).to_string()
+            });
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
@@ -2297,6 +2560,11 @@ impl Glyph {
                     cx.notify();
                 })
                 .ok();
+            }
+            // Songs no source offers for download are expected in an
+            // automatic run; it says nothing unless something happened.
+            if auto && ok + failed == 0 {
+                return;
             }
             let msg = if ok + failed == 0 {
                 t("toast.dl_none").to_string()
@@ -2654,6 +2922,7 @@ impl Glyph {
         for tr in tracks {
             guard(|| self.queue.push(tr));
         }
+        self.queue_changed();
         self.toast(tf("toast.queued_n", &[("n", &n)]));
         cx.notify();
     }
@@ -2807,7 +3076,7 @@ impl Glyph {
         let current = rename.as_ref().and_then(|id| self.library.playlist(id)).map(|p| p.name.clone()).unwrap_or_default();
         self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
         self.ctx_menu = None;
-        self.name_dialog = Some(NameDialog { tracks, rename });
+        self.name_dialog = Some(NameDialog { tracks, rename, eq_preset: false });
         let f = self.playlist_name.read(cx).focus.clone();
         window.focus(&f, cx);
         cx.notify();
@@ -2882,7 +3151,14 @@ impl Glyph {
     pub fn submit_name_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(d) = self.name_dialog.take() else { return };
         let typed = self.playlist_name.read(cx).value.trim().to_string();
-        if let Some(id) = d.rename {
+        if d.eq_preset {
+            let name = glyph_core::eq::clean_name(&typed);
+            if !name.is_empty() {
+                let gains = eq_gains(&self.config.audio.eq_gains);
+                self.add_eq_preset(glyph_core::eq::EqPreset::new(&name, gains), cx);
+                self.toast_sub(t("toast.eq_saved"), name);
+            }
+        } else if let Some(id) = d.rename {
             if !typed.is_empty() && guard(|| self.library.rename_playlist(&id, &typed)).is_some() {
                 self.save_library(cx);
             }
@@ -2931,6 +3207,9 @@ impl Glyph {
         self.settings_closing = None;
         self.settings_open = true;
         if let Some(p) = page {
+            if p != self.settings_page {
+                self.settings_sub = 0;
+            }
             self.settings_page = p;
         }
         self.open_select = None;
@@ -2953,13 +3232,25 @@ impl Glyph {
     }
 
     pub fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        self.set_settings_tab(page, 0, cx);
+    }
+
+    /// Opens a settings page at one of its sub-tabs.
+    pub fn set_settings_tab(&mut self, page: SettingsPage, sub: u8, cx: &mut Context<Self>) {
+        if (page, sub) != (self.settings_page, self.settings_sub) {
+            self.settings_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        }
         self.settings_page = page;
+        self.settings_sub = sub;
         self.open_select = None;
         if page == SettingsPage::Storage {
             self.refresh_storage(cx);
         }
         if page == SettingsPage::Account {
             self.account_page_opened(cx);
+        }
+        if page == SettingsPage::Profile {
+            self.profile_page_opened(cx);
         }
         cx.notify();
     }
@@ -3009,10 +3300,7 @@ impl Glyph {
     pub fn set_cache_limit(&mut self, mb: u64, cx: &mut Context<Self>) {
         self.config.storage.cache_limit_mb = mb;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3055,6 +3343,135 @@ impl Glyph {
         cx.notify();
     }
 
+    /// The curve as it is now, named after its preset (for sharing).
+    fn current_eq_preset(&self) -> glyph_core::eq::EqPreset {
+        let name = crate::ui::settings::eq_preset_label(&self.config.audio.eq_preset);
+        glyph_core::eq::EqPreset::new(&name, eq_gains(&self.config.audio.eq_gains))
+    }
+
+    /// Asks for a name and saves the current curve as an own preset.
+    pub fn open_eq_save_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.config.audio.eq_preset.strip_prefix("user:").unwrap_or_default().to_string();
+        self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
+        self.ctx_menu = None;
+        self.open_select = None;
+        self.name_dialog = Some(NameDialog { tracks: Vec::new(), rename: None, eq_preset: true });
+        let f = self.playlist_name.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    /// Adds an own preset (one with the same name is replaced) and selects it.
+    pub fn add_eq_preset(&mut self, p: glyph_core::eq::EqPreset, cx: &mut Context<Self>) {
+        let gains = p.gains();
+        let list = &mut self.config.audio.eq_user_presets;
+        match list.iter_mut().find(|e| e.name.eq_ignore_ascii_case(&p.name)) {
+            Some(e) => *e = p.clone(),
+            None => list.push(p.clone()),
+        }
+        self.set_eq(true, &format!("user:{}", p.name), gains, true, cx);
+    }
+
+    /// Removes an own preset; the curve stays as it is.
+    pub fn delete_eq_preset(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.config.audio.eq_user_presets.retain(|p| p.name != name);
+        if self.config.audio.eq_preset.strip_prefix("user:") == Some(name) {
+            self.config.audio.eq_preset = "custom".into();
+        }
+        self.open_select = None;
+        self.save_config(cx);
+        self.toast_sub(t("toast.eq_deleted"), name.to_string());
+        cx.notify();
+    }
+
+    /// Copies a share code for the current curve.
+    pub fn copy_eq_code(&mut self, cx: &mut Context<Self>) {
+        let p = self.current_eq_preset();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(glyph_core::eq::encode(&p)));
+        self.open_select = None;
+        self.toast_sub(t("toast.eq_copied"), p.name);
+        cx.notify();
+    }
+
+    /// Imports an equalizer share code as an own preset; false when the
+    /// text is no such code.
+    pub fn import_eq_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if !glyph_core::eq::is_code(code) && !code.trim().starts_with('{') {
+            return false;
+        }
+        match glyph_core::eq::decode(code) {
+            Ok(p) => {
+                let name = p.name.clone();
+                self.add_eq_preset(p, cx);
+                self.toast_sub(t("toast.eq_imported"), name);
+            }
+            Err(e) => self.toast_info(format!("{e:#}")),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Imports the equalizer code on the clipboard.
+    pub fn paste_eq_code(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        if !self.import_eq_code(&text, cx) {
+            self.toast_info(t("toast.eq_no_code"));
+            cx.notify();
+        }
+    }
+
+    /// Saves the current curve as a `.glyph-eq` file.
+    pub fn export_eq_file(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let p = self.current_eq_preset();
+        let file_name = format!("{}.{}", p.name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-"), glyph_core::eq::FILE_EXT);
+        let dir = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_else(glyph_core::paths::data_dir);
+        let rx = cx.prompt_for_new_path(&dir, Some(&file_name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let body = glyph_core::eq::to_file(&p);
+            let saved = cx.background_executor().spawn(async move { std::fs::write(&path, body).map_err(|e| e.to_string()) }).await;
+            this.update(cx, |s, cx| {
+                match saved {
+                    Ok(()) => s.toast_sub(t("toast.eq_exported"), p.name.clone()),
+                    Err(e) => s.toast_info(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Imports a `.glyph-eq` file as an own preset.
+    pub fn import_eq_file(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(t("sp.eq.import_file").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let text = cx.background_executor().spawn(async move { std::fs::read_to_string(path) }).await;
+            this.update(cx, |s, cx| {
+                match text {
+                    Ok(text) if s.import_eq_code(&text, cx) => {}
+                    Ok(_) => s.toast_info(t("toast.eq_no_code")),
+                    Err(e) => s.toast_info(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Re-reads the list of audio outputs (off the UI thread).
     pub fn refresh_output_devices(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -3091,10 +3508,7 @@ impl Glyph {
         self.config.audio.quality = q;
         self.open_select = None;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3103,10 +3517,7 @@ impl Glyph {
         self.config.audio.download_quality = q;
         self.open_select = None;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3308,9 +3719,25 @@ Language: {}",
         cx.notify();
     }
 
+    /// Rebuilds the backend with the current config (sources, qualities,
+    /// cache limit, update channel). The future must be awaited: dropping it
+    /// unpolled changed nothing.
+    fn push_config_to_backend(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        let cfg = self.config.clone();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = guard_async(b.set_config(cfg)).await {
+                tracing::warn!("applying settings to the backend: {e}");
+            }
+        })
+        .detach();
+    }
+
     pub fn set_update_channel(&mut self, prerelease: bool, cx: &mut Context<Self>) {
         self.config.updates.channel = if prerelease { "prerelease" } else { "stable" }.into();
         self.save_config(cx);
+        // The update check reads the backend's config.
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3417,12 +3844,23 @@ impl Glyph {
     }
 
     /// `path` as the artist hero (ASCII raster, or the faded photo when ASCII
-    /// covers are off), computed on a background thread.
-    pub fn hero_image(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+    /// covers are off), computed on a background thread. The fade is baked
+    /// into the raster, so it must never be cropped off: `min_w` is the
+    /// raster width needed for the hero to crop only at the sides
+    /// (`object-fit: cover`), bucketed so resizing re-renders rarely. While a
+    /// new width renders, the previous one stays up.
+    pub fn hero_image(&mut self, path: &std::path::Path, min_w: f32, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+        const H: u32 = 460;
+        const STEP: u32 = 320;
         let ascii = self.config.visuals.ascii_covers;
-        let key = (path.to_path_buf(), ascii);
-        if let Some(v) = self.heroes.get(&key) {
-            return v.clone();
+        let w = ((min_w.max(0.0) as u32).div_ceil(STEP) * STEP).max(1680);
+        let key = (path.to_path_buf(), ascii, w);
+        if let Some(Some(v)) = self.heroes.get(&key) {
+            return Some(v.clone());
+        }
+        let fallback = self.heroes.iter().find(|((p, a, _), v)| p == path && *a == ascii && v.is_some()).and_then(|(_, v)| v.clone());
+        if self.heroes.contains_key(&key) {
+            return fallback;
         }
         self.heroes.insert(key.clone(), None);
         cx.spawn(async move |this, cx| {
@@ -3431,14 +3869,21 @@ impl Glyph {
                 .background_executor()
                 .spawn(async move {
                     if ascii {
-                        crate::visuals::ascii::raster(&src, 1680, 460, 0.3)
+                        crate::visuals::ascii::raster(&src, w, H, 0.3)
                     } else {
-                        crate::visuals::ascii::photo_fade(&src, 1680, 460, 0.3)
+                        crate::visuals::ascii::photo_fade(&src, w, H, 0.3)
                     }
                 })
                 .await;
             this.update(cx, |s, cx| {
                 if let Some(img) = img {
+                    // Other finished widths of this picture are superseded.
+                    let old: Vec<_> = s.heroes.keys().filter(|k| k.0 == key.0 && k.1 == key.1 && k.2 != key.2).cloned().collect();
+                    for k in old {
+                        if let Some(Some(im)) = s.heroes.remove(&k) {
+                            s.stale_heroes.push(im);
+                        }
+                    }
                     s.heroes.insert(key, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
                 }
                 cx.notify();
@@ -3446,7 +3891,7 @@ impl Glyph {
             .ok();
         })
         .detach();
-        None
+        fallback
     }
 
     pub fn cover_loading(&self, t: &Track) -> bool {

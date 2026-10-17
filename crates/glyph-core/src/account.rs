@@ -13,8 +13,8 @@ use crate::{paths, Backend, Library};
 use anyhow::{anyhow, Context, Result};
 use glyph_protocol::{
     password_kdf, Account, AccountPatch, ApproveResponse, DevicesResponse, HandleCheck, LinkStartResponse,
-    LoginPollResponse, LoginStartResponse, PasswordLoginRequest, PasswordRegisterRequest, PasswordSetRequest, Session,
-    SyncItem, Track,
+    LoginPollResponse, LoginStartResponse, PasswordLoginRequest, PasswordRegisterRequest, PasswordSetRequest,
+    ProfilePatch, ProfilePlaylistSongs, ProfileSettings, PublicProfile, Session, SyncItem, Track,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -292,6 +292,54 @@ impl Backend {
     pub fn account(&self) -> Option<Stored> {
         let base = self.cur().server.as_ref()?.base_url().to_string();
         session().lock().unwrap().as_ref().map(|l| l.stored.clone()).filter(|s| s.server == base)
+    }
+
+    /// Text to share for a list: a short link when signed in on the public
+    /// server, else (or when that fails) the `glyph:playlist:` code. A list
+    /// opened from a link and not changed since shares that same link, so its
+    /// author stays the original one. `kind` is "album" for an artist's album.
+    pub async fn share_text(&self, name: &str, tracks: &[Track], kind: &str, origin: Option<String>) -> String {
+        let code = crate::share::encode(name, tracks);
+        let official = self.cur().config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(crate::config::DEFAULT_SERVER_URL);
+        if !official || self.account().is_none() {
+            return code;
+        }
+        let Ok(c) = self.account_client() else { return code };
+        let (code2, name, songs, kind) = (code.clone(), name.to_string(), tracks.len(), kind.to_string());
+        let r = self
+            .spawn(async move {
+                if let Some(link) = origin.filter(|o| crate::share::link_id(o).is_some()) {
+                    let id = crate::share::link_id(&link).unwrap_or_default();
+                    if c.shared_playlist(&id).await.is_ok_and(|p| crate::share::same_songs(&p.code, &code2)) {
+                        return Ok(link);
+                    }
+                }
+                with_auth(&c, |t| {
+                    let (c, code, name, kind) = (c.clone(), code2.clone(), name.clone(), kind.clone());
+                    async move { c.share_playlist(&t, &code, &name, songs, &kind).await }
+                })
+                .await
+            })
+            .await;
+        match r {
+            Ok(Ok(link)) => link,
+            Ok(Err(e)) | Err(e) => {
+                tracing::info!("short playlist link failed, sharing the code: {e:#}");
+                code
+            }
+        }
+    }
+
+    /// The playlist behind a short link (see [`crate::share::link_id`]).
+    pub async fn resolve_share_link(&self, link: &str) -> Result<crate::server_client::SharedPlaylist> {
+        let id = crate::share::link_id(link).ok_or_else(|| anyhow!("not a Glyph playlist link"))?;
+        let inner = self.cur();
+        let server = match inner.server.clone() {
+            Some(s) => s,
+            // Links always live on the public server.
+            None => ServerClient::new(crate::config::DEFAULT_SERVER_URL, inner.http.clone(), crate::server_client::install_id()),
+        };
+        self.spawn(async move { server.shared_playlist(&id).await }).await?
     }
 
     /// The current server offers accounts (`/v1/health`).
@@ -732,6 +780,88 @@ impl Backend {
             tracing::warn!("sync state: {e}");
         }
         applied
+    }
+}
+
+// ------------------------------------------------------------------ profiles
+
+impl Backend {
+    /// One signed-in call on the backend runtime.
+    async fn profile_call<T, F, Fut>(&self, f: F) -> Result<T>
+    where
+        F: Fn(ServerClient, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<T>> + Send,
+        T: Send + 'static,
+    {
+        let c = self.account_client()?;
+        self.spawn(async move { with_auth(&c, |t| f(c.clone(), t)).await }).await?
+    }
+
+    pub async fn profile_settings(&self) -> Result<ProfileSettings> {
+        self.profile_call(|c, t| async move { c.profile_settings(&t).await }).await
+    }
+
+    pub async fn profile_update(&self, patch: ProfilePatch) -> Result<ProfileSettings> {
+        self.profile_call(move |c, t| {
+            let p = patch.clone();
+            async move { c.profile_patch(&t, &p).await }
+        })
+        .await
+    }
+
+    /// Sets (or with `None` removes) the picture or the banner.
+    pub async fn profile_set_image(&self, banner: bool, bytes: Option<Vec<u8>>) -> Result<ProfileSettings> {
+        self.profile_call(move |c, t| {
+            let b = bytes.clone();
+            async move { c.profile_image(&t, banner, b).await }
+        })
+        .await
+    }
+
+    /// Songs played last, for profiles that show them.
+    pub async fn profile_push_recent(&self, tracks: Vec<Track>) -> Result<()> {
+        self.profile_call(move |c, t| {
+            let tr = tracks.clone();
+            async move { c.profile_recent(&t, tr).await }
+        })
+        .await
+    }
+
+    pub async fn profile(&self, handle: &str) -> Result<PublicProfile> {
+        let h = handle.to_string();
+        self.profile_call(move |c, t| {
+            let h = h.clone();
+            async move { c.profile(&t, &h).await }
+        })
+        .await
+    }
+
+    pub async fn profile_playlist(&self, handle: &str, id: &str) -> Result<ProfilePlaylistSongs> {
+        let (h, id) = (handle.to_string(), id.to_string());
+        self.profile_call(move |c, t| {
+            let (h, id) = (h.clone(), id.clone());
+            async move { c.profile_playlist(&t, &h, &id).await }
+        })
+        .await
+    }
+
+    /// A profile picture, banner or playlist cover as a local file (kept with
+    /// the synced covers, by hash).
+    pub async fn profile_image(&self, handle: &str, sha256: &str) -> Result<PathBuf> {
+        if let Some(p) = sync::synced_cover(sha256) {
+            return Ok(p);
+        }
+        let (h, sha) = (handle.to_string(), sha256.to_string());
+        let bytes = self
+            .profile_call(move |c, t| {
+                let (h, sha) = (h.clone(), sha.clone());
+                async move { c.profile_image_bytes(&t, &h, &sha).await }
+            })
+            .await?;
+        let _ = std::fs::create_dir_all(sync::synced_covers_dir());
+        let path = sync::synced_covers_dir().join(format!("{sha256}.{}", sync::image_ext(&bytes)));
+        paths::write_atomic(&path, &bytes)?;
+        Ok(path)
     }
 }
 

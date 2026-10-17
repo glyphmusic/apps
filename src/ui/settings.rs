@@ -1,7 +1,8 @@
 //! Settings as a modal (Liner layout): left navigation with search and
-//! grouped pages, right the page with rows (label + description left,
-//! control right). Pages: Playback, Audio, Appearance, Server, Cache &
-//! Storage, About.
+//! grouped pages (some with sub-tabs), right the page with rows (label +
+//! description left, control right). Pages: Playback, Audio, Appearance,
+//! Account, Server, Cache & Storage, Backup & share, About. The search finds
+//! pages, sub-tabs and single options (see [`OPTIONS`]).
 
 use crate::app::{BackendState, ConnTest, Glyph, SettingsPage};
 use crate::i18n::{t, tf, Lang};
@@ -17,10 +18,10 @@ use gpui::{anchored,
 };
 use std::rc::Rc;
 
-pub const REPO_URL: &str = "https://github.com/glyphmusic/glyph";
-const DOCS_URL: &str = "https://github.com/glyphmusic/glyph#readme";
-const ISSUES_URL: &str = "https://github.com/glyphmusic/glyph/issues/new";
-const RELEASES_URL: &str = "https://github.com/glyphmusic/glyph/releases";
+pub const REPO_URL: &str = "https://github.com/glyphmusic/desktop";
+const DOCS_URL: &str = "https://github.com/glyphmusic/desktop#readme";
+const ISSUES_URL: &str = "https://github.com/glyphmusic/desktop/issues/new";
+const RELEASES_URL: &str = "https://github.com/glyphmusic/desktop/releases";
 
 const PANEL_W: f32 = 920.0;
 const PANEL_H: f32 = 600.0;
@@ -32,7 +33,7 @@ pub(crate) fn white(a: f32) -> Hsla {
 
 // ------------------------------------------------------------------ pieces
 
-fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
+pub(crate) fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -47,9 +48,69 @@ fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
         .child(div().size(px(16.0)).rounded_full().bg(if on { gpui::black() } else { white(0.75) }))
 }
 
+thread_local! {
+    /// Option picked in the settings search: (label, since when, scrolled to).
+    /// Its row lights up briefly and scrolls into view.
+    static FLASH: std::cell::RefCell<Option<(String, std::time::Instant, bool)>> = const { std::cell::RefCell::new(None) };
+    /// Scroll state of the settings page (for scrolling to a found option).
+    static PAGE_SCROLL: std::cell::RefCell<Option<gpui::ScrollHandle>> = const { std::cell::RefCell::new(None) };
+}
+
+const FLASH_S: f32 = 1.8;
+
+/// Highlights the row labelled `label` on the next settings page shown.
+pub fn flash_option(label: impl Into<String>) {
+    FLASH.with(|f| *f.borrow_mut() = Some((label.into(), std::time::Instant::now(), false)));
+}
+
+/// A found option is still lit (the app keeps rendering).
+pub fn flash_animating() -> bool {
+    FLASH.with(|f| f.borrow().as_ref().is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < FLASH_S))
+}
+
+/// Highlight strength (1 -> 0) for the row labelled `label`, if it is the found one.
+fn flash_k(label: &str) -> Option<f32> {
+    FLASH.with(|f| {
+        let f = f.borrow();
+        let (l, at, _) = f.as_ref()?;
+        let e = at.elapsed().as_secs_f32();
+        (l == label && e < FLASH_S).then(|| if e < 0.7 { 1.0 } else { 1.0 - (e - 0.7) / (FLASH_S - 0.7) })
+    })
+}
+
+/// Scrolls the settings page so the found row (window bounds `b`) is in view; once.
+fn scroll_to_found(b: gpui::Bounds<Pixels>) {
+    let first = FLASH.with(|f| f.borrow_mut().as_mut().is_some_and(|fl| !std::mem::replace(&mut fl.2, true)));
+    if !first {
+        return;
+    }
+    PAGE_SCROLL.with(|h| {
+        let Some(h) = h.borrow().clone() else { return };
+        let vp = h.bounds();
+        let vh = f32::from(vp.size.height);
+        let top = f32::from(b.origin.y) - f32::from(vp.origin.y);
+        if top >= 0.0 && top + f32::from(b.size.height) <= vh {
+            return;
+        }
+        let max = f32::from(h.max_offset().y).max(0.0);
+        let y = (f32::from(h.offset().y) - (top - vh * 0.3)).clamp(-max, 0.0);
+        h.set_offset(point(px(0.0), px(y)));
+    });
+}
+
 /// Settings row: label + description left, control right.
 pub(crate) fn row(label: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> AnyElement {
+    let label: SharedString = label.into();
+    let lit = flash_k(&label);
     div()
+        .when_some(lit, |d, k| {
+            d.relative()
+                .mx(px(-10.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(theme::pink().opacity(0.14 * k))
+                .child(canvas(|b, _, _| scroll_to_found(b), |_, _, _, _| {}).absolute().inset_0())
+        })
         .flex()
         .items_center()
         .justify_between()
@@ -61,7 +122,7 @@ pub(crate) fn row(label: impl Into<SharedString>, desc: Option<SharedString>, co
                 .flex_col()
                 .min_w_0()
                 .gap(px(3.0))
-                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label.into()))
+                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label))
                 .when_some(desc, |d, s| d.child(div().text_size(px(12.5)).text_color(white(0.55)).child(s))),
         )
         .child(div().flex_none().flex().items_center().gap(px(8.0)).child(control))
@@ -87,26 +148,62 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 14] = [
     ("small_speakers", [5.0, 4.0, 3.5, 2.5, 1.0, 0.0, -1.0, -2.0, -2.5, -3.0]),
 ];
 
-fn eq_preset_label(key: &str) -> SharedString {
-    t(&format!("eq.preset.{key}"))
+/// Display name of a preset key: built-in (translated), own (`user:<name>`)
+/// or "custom".
+pub(crate) fn eq_preset_label(key: &str) -> SharedString {
+    match key.strip_prefix("user:") {
+        Some(name) => SharedString::from(name.to_string()),
+        None => t(&format!("eq.preset.{key}")),
+    }
 }
 
-/// Equalizer page: on/off, presets, one slider per band (-12..+12 dB).
+/// Preset key for a curve: the current preset while it still matches, else
+/// the first built-in or own preset with exactly these gains, else "custom".
+pub(crate) fn eq_match(current: &str, gains: &[f32; 10], user: &[glyph_core::eq::EqPreset]) -> String {
+    use glyph_core::eq::same_gains;
+    let builtin = EQ_PRESETS.iter().map(|(k, g)| (k.to_string(), *g));
+    let own = user.iter().map(|p| (format!("user:{}", p.name), p.gains()));
+    let all: Vec<(String, [f32; 10])> = builtin.chain(own).collect();
+    if all.iter().any(|(k, g)| k == current && same_gains(g, gains)) {
+        return current.to_string();
+    }
+    all.into_iter().find(|(_, g)| same_gains(g, gains)).map(|(k, _)| k).unwrap_or_else(|| "custom".into())
+}
+
+type EqPick = Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>;
+
+/// Equalizer page: on/off, presets (built-in and own), the curve, saving
+/// and sharing.
 fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let on = app.config.audio.eq_enabled;
     let gains = crate::app::eq_gains(&app.config.audio.eq_gains);
     let preset = app.config.audio.eq_preset.clone();
-    let mut options: Vec<(SharedString, bool, Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>)> = EQ_PRESETS
+    let mut options: Vec<(SharedString, bool, EqPick)> = EQ_PRESETS
         .iter()
         .map(|(k, g)| {
             let (k, g) = (*k, *g);
-            let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
+            let f: EqPick = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
             (eq_preset_label(k), preset == k, f)
         })
         .collect();
+    for p in &app.config.audio.eq_user_presets {
+        let key = format!("user:{}", p.name);
+        let g = p.gains();
+        let selected = preset == key;
+        let f: EqPick = Rc::new(move |this, cx| this.set_eq(true, &key, g, true, cx));
+        options.push((SharedString::from(p.name.clone()), selected, f));
+    }
     if preset == "custom" {
         options.push((eq_preset_label("custom"), true, Rc::new(|_: &mut Glyph, _: &mut Context<Glyph>| {})));
     }
+    let own = preset.strip_prefix("user:").map(str::to_string);
+    let action = |key: &str, f: fn(&mut Glyph, &mut Context<Glyph>)| -> (SharedString, bool, EqPick) { (t(key), false, Rc::new(f)) };
+    let share = vec![
+        action("sp.eq.copy_code", |this, cx| this.copy_eq_code(cx)),
+        action("sp.eq.paste_code", |this, cx| this.paste_eq_code(cx)),
+        action("sp.eq.export_file", |this, cx| this.export_eq_file(cx)),
+        action("sp.eq.import_file", |this, cx| this.import_eq_file(cx)),
+    ];
     let top = rows(vec![
         row(
             t("sp.eq.enable"),
@@ -117,7 +214,8 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 this.set_eq(!on, &p, g, true, cx)
             })),
         ),
-        row(t("sp.eq.preset"), None, select(app, "sel-eq", eq_preset_label(&preset), options, cx)),
+        row(t("sp.eq.preset"), Some(t("sp.eq.preset.desc")), select(app, "sel-eq", eq_preset_label(&preset), options, cx)),
+        row(t("sp.eq.share"), Some(t("sp.eq.share.desc")), select(app, "sel-eq-share", t("sp.eq.share.button"), share, cx)),
     ]);
     div()
         .flex()
@@ -128,11 +226,23 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .child(
             div()
                 .flex()
-                .justify_end()
-                .child(button("eq-reset", t("sp.eq.reset")).on_click(cx.listener(|this, _, _, cx| {
-                    let on = this.config.audio.eq_enabled;
-                    this.set_eq(on, "flat", [0.0; 10], true, cx)
-                }))),
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(div().text_size(px(12.0)).text_color(white(0.45)).child(t("sp.eq.hint")))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(button("eq-reset", t("sp.eq.reset")).on_click(cx.listener(|this, _, _, cx| {
+                            let on = this.config.audio.eq_enabled;
+                            this.set_eq(on, "flat", [0.0; 10], true, cx)
+                        })))
+                        .when_some(own, |d, name| {
+                            d.child(button("eq-delete", t("sp.eq.delete")).on_click(cx.listener(move |this, _, _, cx| this.delete_eq_preset(&name, cx))))
+                        })
+                        .child(primary_button("eq-save", t("sp.eq.save")).on_click(cx.listener(|this, _, w, cx| this.open_eq_save_dialog(w, cx)))),
+                ),
         )
 }
 
@@ -150,8 +260,10 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
     let view = cx.entity().downgrade();
     let accent = theme::pink();
     let plot = gpui::canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _app_cx| {
+        // Own hitbox, so a dropdown floating over the curve takes the click
+        // instead of the curve.
+        |bounds, window, _| window.insert_hitbox(bounds.dilate(px(8.0)), gpui::HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _app_cx| {
             let (x0, y0) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             let cell = w / 10.0;
@@ -211,6 +323,17 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
             let dragging = EQ_DRAG.with(|d| d.get());
             for (i, &(x, y)) in pts.iter().enumerate() {
                 let r = if dragging == Some(i) { 7.0 } else { 5.0 };
+                if dragging == Some(i) {
+                    // Soft ring around the dragged point.
+                    window.paint_quad(gpui::quad(
+                        gpui::Bounds { origin: gpui::point(px(x - 12.0), px(y - 12.0)), size: gpui::size(px(24.0), px(24.0)) },
+                        gpui::Corners::all(px(12.0)),
+                        accent.opacity(0.25),
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
                 window.paint_quad(gpui::quad(
                     gpui::Bounds { origin: gpui::point(px(x - r), px(y - r)), size: gpui::size(px(r * 2.0), px(r * 2.0)) },
                     gpui::Corners::all(px(r)),
@@ -223,23 +346,34 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
             // Dragging a point (anywhere in its column picks it).
             let gain_at = move |y: f32| (((12.0 - (y - y0) / h * 24.0) * 2.0).round() / 2.0).clamp(-12.0, 12.0);
             let band_at = move |x: f32| (((x - x0) / cell).floor() as i32).clamp(0, 9) as usize;
-            let hit = bounds.dilate(px(8.0));
             let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
             let apply = move |v: &gpui::WeakEntity<Glyph>, band: usize, g: f32, save: bool, cx: &mut gpui::App| {
                 v.update(cx, |this, cx| {
                     let mut gs = crate::app::eq_gains(&this.config.audio.eq_gains);
                     gs[band] = g;
-                    this.set_eq(true, "custom", gs, save, cx);
+                    // A curve that equals a preset shows that preset's name.
+                    let preset = eq_match(&this.config.audio.eq_preset, &gs, &this.config.audio.eq_user_presets);
+                    this.set_eq(true, &preset, gs, save, cx);
                 })
                 .ok();
             };
-            window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, _, cx| {
-                if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hit.contains(&e.position) {
+            window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hitbox.is_hovered_at(e.position, window) {
+                    return;
+                }
+                // Something else (an open dropdown) is in the way: let it close first.
+                if v1.upgrade().is_some_and(|v| v.read(cx).open_select.is_some()) {
                     return;
                 }
                 let band = band_at(f32::from(e.position.x));
-                EQ_DRAG.with(|d| d.set(Some(band)));
-                apply(&v1, band, gain_at(f32::from(e.position.y)), false, cx);
+                if e.click_count >= 2 {
+                    // Double-click puts a band back to 0 dB.
+                    EQ_DRAG.with(|d| d.set(None));
+                    apply(&v1, band, 0.0, true, cx);
+                } else {
+                    EQ_DRAG.with(|d| d.set(Some(band)));
+                    apply(&v1, band, gain_at(f32::from(e.position.y)), false, cx);
+                }
                 cx.stop_propagation();
             });
             window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
@@ -278,6 +412,16 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
                 .ml(px(LEFT))
                 .children(NAMES.iter().map(|n| div().flex_1().text_center().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(0.65)).child(*n))),
         )
+        .child(div().flex().ml(px(LEFT)).children(gains.iter().map(|g| {
+            let label = if g.abs() < 0.05 { "0".to_string() } else { format!("{g:+.1}") };
+            div()
+                .flex_1()
+                .text_center()
+                .text_size(px(11.5))
+                .font_family(theme::MONO)
+                .text_color(if g.abs() < 0.05 { white(0.35) } else { accent.opacity(0.9) })
+                .child(label)
+        })))
 }
 
 pub(crate) fn rows(items: Vec<AnyElement>) -> Div {
@@ -500,30 +644,6 @@ fn select(
         .children(list)
 }
 
-/// "Advanced" disclosure row; the section below only shows when expanded.
-fn advanced_toggle(app: &Glyph, cx: &mut Context<Glyph>) -> AnyElement {
-    let open = app.settings_advanced;
-    div()
-        .id("sp-advanced")
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .pt(px(18.0))
-        .pb(px(4.0))
-        .cursor_pointer()
-        .text_size(px(12.5))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(white(0.55))
-        .hover(|s| s.text_color(gpui::white()))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.settings_advanced = !this.settings_advanced;
-            cx.notify();
-        }))
-        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.55)))
-        .child(t("sp.advanced"))
-        .into_any_element()
-}
-
 pub(crate) fn input_box(input: impl IntoElement) -> Div {
     div()
         .w(px(300.0))
@@ -546,18 +666,102 @@ pub fn modal(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> A
     theme::on_panel(|| modal_inner(app, window, cx))
 }
 
+/// Title, subtitle and nav icon of a settings page.
+fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static str) {
+    match page {
+        SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), "play"),
+        SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), "volume-2"),
+        SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), "palette"),
+        SettingsPage::Account => (t("sp.account"), t("sp.account.sub"), "user-round"),
+        SettingsPage::Profile => (t("sp.profile"), t("sp.profile.sub"), "eye"),
+        SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), "server"),
+        SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), "database"),
+        SettingsPage::Transfer => (t("sp.transfer"), t("sp.transfer.sub"), "copy"),
+        SettingsPage::About => (t("sp.about"), t("sp.about.sub"), "info"),
+    }
+}
+
+/// Sub-tabs of a settings page (label keys); empty: the page has none.
+/// `app.settings_sub` indexes this list.
+pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
+    match page {
+        SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources"],
+        SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
+        SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
+        SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
+        SettingsPage::About => &["sp.sub.version", "sp.support"],
+        _ => &[],
+    }
+}
+
+/// Every option the settings search finds on its own: page, sub-tab, label
+/// key (the row's label, so the row can light up), extra search words.
+const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
+    (SettingsPage::Playback, 0, "sp.audio.quality", "streaming quality qualität bitrate"),
+    (SettingsPage::Playback, 0, "sp.audio.dl_quality", "download quality qualität flac"),
+    (SettingsPage::Playback, 0, "sp.crossfade", "crossfade überblenden fade"),
+    (SettingsPage::Playback, 0, "sp.output", "output ausgabe device gerät speaker lautsprecher headphones kopfhörer"),
+    (SettingsPage::Playback, 0, "sp.level", "volume lautstärke level"),
+    (SettingsPage::Playback, 0, "sp.normalize", "normalize normalisieren loudness lautheit"),
+    (SettingsPage::Playback, 1, "sp.explicit", "explicit explizit"),
+    (SettingsPage::Playback, 1, "sp.radio", "radio autoplay"),
+    (SettingsPage::Playback, 1, "sp.hidden", "hidden ausgeblendet blocked artists künstler"),
+    (SettingsPage::Playback, 2, "settings.sources.fallback", "youtube soundcloud embed fallback"),
+    (SettingsPage::Playback, 2, "ytdlp.title", "yt-dlp ytdlp youtube"),
+    (SettingsPage::Playback, 2, "settings.priority", "priority priorität order reihenfolge audius jamendo archive"),
+    (SettingsPage::Audio, 0, "sp.eq.enable", "equalizer eq"),
+    (SettingsPage::Audio, 0, "sp.eq.preset", "preset bass treble höhen tiefen"),
+    (SettingsPage::Audio, 0, "sp.eq.share", "share teilen export import code datei file"),
+    (SettingsPage::Appearance, 0, "settings.language", "language sprache"),
+    (SettingsPage::Appearance, 0, "settings.visuals.intensity", "background hintergrund glow intensity intensität"),
+    (SettingsPage::Appearance, 0, "settings.visuals.ascii_covers", "ascii cover"),
+    (SettingsPage::Appearance, 0, "sp.appearance.startup", "startup start animation splash"),
+    (SettingsPage::Account, 0, "account.handle", "handle name rename umbenennen"),
+    (SettingsPage::Account, 0, "account.keys", "sync api keys schlüssel"),
+    (SettingsPage::Account, 0, "account.limit", "device limit gerätelimit"),
+    (SettingsPage::Account, 1, "account.pair", "pair koppeln code device gerät add hinzufügen"),
+    (SettingsPage::Account, 2, "account.password.change", "password passwort"),
+    (SettingsPage::Account, 2, "account.passkey.add", "passkey"),
+    (SettingsPage::Account, 2, "account.recovery", "recovery wiederherstellung code"),
+    (SettingsPage::Account, 2, "account.delete", "delete löschen account"),
+    (SettingsPage::Profile, 0, "profile.avatar", "profile profil picture bild avatar pfp foto photo"),
+    (SettingsPage::Profile, 0, "profile.banner", "profile profil banner header titelbild"),
+    (SettingsPage::Profile, 1, "profile.public", "privacy privatsphäre public öffentlich private privat profile profil"),
+    (SettingsPage::Profile, 1, "profile.show_recent", "privacy privatsphäre recent zuletzt songs history verlauf"),
+    (SettingsPage::Server, 0, "settings.server.url", "server url adresse"),
+    (SettingsPage::Server, 1, "settings.keys.lastfm", "api key lastfm last.fm"),
+    (SettingsPage::Server, 1, "settings.keys.youtube", "api key youtube"),
+    (SettingsPage::Server, 1, "settings.keys.spotify_client_id", "api key spotify"),
+    (SettingsPage::Server, 1, "settings.keys.jamendo_client_id", "api key jamendo"),
+    (SettingsPage::Storage, 0, "sp.storage.limit", "cache limit size größe"),
+    (SettingsPage::Storage, 0, "sp.storage.usage", "clear leeren cache downloads covers lyrics speicher"),
+    (SettingsPage::Transfer, 0, "sp.transfer.code", "share teilen export code copy kopieren"),
+    (SettingsPage::Transfer, 0, "sp.transfer.file", "export file datei save speichern backup"),
+    (SettingsPage::Transfer, 0, "sp.transfer.import", "import apply übernehmen paste einfügen"),
+    (SettingsPage::About, 0, "update.auto", "auto update automatisch"),
+    (SettingsPage::About, 0, "update.channel", "prerelease beta channel kanal"),
+    (SettingsPage::About, 1, "sp.support.issue", "bug issue report melden"),
+    (SettingsPage::About, 1, "sp.support.diag", "diagnostics diagnose"),
+    (SettingsPage::About, 1, "sp.support.data", "data daten folder ordner"),
+];
+
 fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     select_anim_tick(app.open_select);
+    PAGE_SCROLL.with(|h| *h.borrow_mut() = Some(app.settings_scroll.clone()));
     let page = app.settings_page;
-    let (title, sub, body) = match page {
-        SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), playback(app, cx)),
-        SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), equalizer(app, cx)),
-        SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), appearance(app, cx)),
-        SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), server(app, cx)),
-        SettingsPage::Account => (t("sp.account"), t("sp.account.sub"), crate::ui::account::page(app, cx)),
-        SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), storage(app, cx)),
-        SettingsPage::About => (t("sp.about"), t("sp.about.sub"), about(app, cx)),
-        SettingsPage::Support => (t("sp.support"), t("sp.support.sub"), support(app, cx)),
+    let (title, sub, _) = page_info(page);
+    let tab = subtabs(app, page).get(app.settings_sub as usize).map(|k| t(k));
+    let body = match page {
+        SettingsPage::Playback => playback(app, cx),
+        SettingsPage::Audio => equalizer(app, cx),
+        SettingsPage::Appearance => appearance(app, cx),
+        SettingsPage::Server => server(app, cx),
+        SettingsPage::Account => crate::ui::account::page(app, cx),
+        SettingsPage::Profile => crate::ui::profile::settings_page(app, cx),
+        SettingsPage::Storage => storage(app, cx),
+        SettingsPage::Transfer => crate::ui::transfer::page(app, cx),
+        SettingsPage::About if app.settings_sub == 1 => support(app, cx),
+        SettingsPage::About => about(app, cx),
     };
 
     // Outer shell holds the navigation; the page sits in its own inset,
@@ -588,7 +792,16 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                             .flex_col()
                             .gap(px(4.0))
                             .pr(px(36.0))
-                            .child(div().text_size(px(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .text_size(px(17.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(div().text_color(if tab.is_some() { white(0.5) } else { gpui::white() }).child(title))
+                                    .when_some(tab, |d, tab| d.child(icon("chevron-right", 16.0, white(0.4))).child(div().text_color(gpui::white()).child(tab))),
+                            )
                             .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
                     )
                     .child(div().pt(px(10.0)).child(body)),
@@ -654,53 +867,53 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .into_any_element()
 }
 
-fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
     let q = app.settings_search.read(cx).value.trim().to_lowercase();
-    let current = app.settings_page;
-    // (page, icon, label, extra search words)
-    let groups: [(SharedString, Vec<(SettingsPage, &'static str, SharedString, &'static str)>); 2] = [
+    let (current, current_sub) = (app.settings_page, app.settings_sub);
+    let signed_in = app.signed_in().is_some();
+    // (page, extra search words)
+    let groups: [(SharedString, Vec<(SettingsPage, &'static str)>); 2] = [
         (
             t("sp.group.prefs"),
             vec![
-                (SettingsPage::Playback, "play", t("sp.playback"), "sources source quelle youtube soundcloud priority radio quality qualität audio"),
-                (SettingsPage::Audio, "volume-2", t("sp.eq"), "equalizer eq bass treble höhen tiefen klang sound preset"),
-                (SettingsPage::Appearance, "palette", t("sp.appearance"), "language sprache theme ascii cover glow"),
+                (SettingsPage::Playback, "sources source quelle youtube soundcloud priority radio quality qualität audio"),
+                (SettingsPage::Audio, "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file"),
+                (SettingsPage::Appearance, "language sprache theme ascii cover glow"),
             ],
         ),
         (
             t("sp.group.app"),
             vec![
-                (SettingsPage::Account, "user-round", t("sp.account"), "account konto login sign in anmelden sync devices geräte handle passkey"),
-                (SettingsPage::Server, "server", t("sp.server"), "url api key keys schlüssel"),
-                (SettingsPage::Storage, "database", t("sp.storage"), "cache download downloads speicher"),
-                (SettingsPage::About, "info", t("sp.about"), "update version"),
+                (SettingsPage::Account, "account konto login sign in anmelden sync devices geräte handle passkey"),
+                (SettingsPage::Profile, "profile profil privacy privatsphäre picture bild banner public öffentlich"),
+                (SettingsPage::Server, "url api key keys schlüssel"),
+                (SettingsPage::Storage, "cache download downloads speicher"),
+                (SettingsPage::Transfer, "backup export import share teilen code datei file"),
+                (SettingsPage::About, "update version support hilfe help"),
             ],
         ),
     ];
-    let matches = |label: &SharedString, words: &str| q.is_empty() || label.to_lowercase().contains(&q) || words.contains(&q);
-    let item = |page: SettingsPage, icon_name: &'static str, label: SharedString, cx: &mut Context<Glyph>| {
-        let on = page == current;
-        div()
-            .id(("sp-nav", page as usize))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .h(px(36.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .text_size(px(14.0))
-            .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
-            .when(!on, |d| d.text_color(white(0.75)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
-            .on_click(cx.listener(move |this, _, _, cx| this.set_settings_page(page, cx)))
-            .child(icon(icon_name, 16.0, if on { gpui::white() } else { white(0.7) }))
-            .child(label)
+    let hit = |text: &str| q.is_empty() || text.to_lowercase().contains(&q);
+
+    // Single options matching the search (with their page / sub-tab).
+    let found: Vec<(SettingsPage, u8, SharedString)> = if q.is_empty() {
+        Vec::new()
+    } else {
+        OPTIONS
+            .iter()
+            .filter(|(p, _, _, _)| !matches!(p, SettingsPage::Account | SettingsPage::Profile) || signed_in)
+            .filter(|(_, _, key, words)| hit(&t(key)) || words.contains(&q))
+            .map(|(p, s, key, _)| (*p, *s, t(key)))
+            .take(14)
+            .collect()
     };
 
     let mut col = div()
+        .id("sp-nav")
         .flex_none()
         .w(px(NAV_W))
         .h_full()
+        .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -708,6 +921,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .child(
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(8.0))
                 .h(px(34.0))
@@ -720,13 +934,112 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(div().flex_1().min_w_0().child(app.settings_search.clone())),
         );
     for (group, items) in groups {
-        let visible: Vec<_> = items.into_iter().filter(|(_, _, l, w)| matches(l, w)).collect();
+        let mut visible = Vec::new();
+        for (page, words) in items {
+            if page == SettingsPage::Profile && !signed_in {
+                continue;
+            }
+            let (label, _, icon_name) = page_info(page);
+            let subs = subtabs(app, page);
+            let sub_hit: Vec<bool> = subs.iter().map(|k| !q.is_empty() && hit(&t(k))).collect();
+            let page_hit = hit(&label) || words.contains(&q) || found.iter().any(|f| f.0 == page);
+            if page_hit || sub_hit.contains(&true) {
+                visible.push((page, label, icon_name, subs, sub_hit));
+            }
+        }
         if visible.is_empty() {
             continue;
         }
-        col = col.child(div().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
-        for (page, ic, label, _) in visible {
-            col = col.child(item(page, ic, label, cx));
+        col = col.child(div().flex_none().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
+        for (page, label, icon_name, subs, sub_hit) in visible {
+            let on = page == current;
+            let open = !subs.is_empty() && (on || sub_hit.contains(&true));
+            col = col.child(
+                div()
+                    .id(("sp-nav", page as usize))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(36.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(14.0))
+                    .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
+                    .when(!on, |d| d.text_color(white(0.75)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.settings_page != page {
+                            this.set_settings_page(page, cx);
+                        }
+                    }))
+                    .child(icon(icon_name, 16.0, if on { gpui::white() } else { white(0.7) }))
+                    .child(div().flex_1().child(label))
+                    .when(!subs.is_empty(), |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.45)))),
+            );
+            if open {
+                // Sub-tabs hang off a thin line under the page's icon.
+                col = col.child(
+                    div()
+                        .flex_none()
+                        .ml(px(18.0))
+                        .my(px(2.0))
+                        .pl(px(8.0))
+                        .border_l_1()
+                        .border_color(white(0.10))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .children(subs.iter().enumerate().map(|(i, key)| {
+                            let sel = on && current_sub as usize == i;
+                            let sub = i as u8;
+                            div()
+                                .id(("sp-sub", page as usize * 8 + i))
+                                .flex()
+                                .items_center()
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .rounded(px(7.0))
+                                .cursor_pointer()
+                                .text_size(px(13.5))
+                                .when(sel, |d| d.bg(white(0.08)).text_color(gpui::white()).font_weight(FontWeight::MEDIUM))
+                                .when(!sel, |d| d.text_color(white(0.6)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_settings_tab(page, sub, cx)))
+                                .child(t(key))
+                        })),
+                );
+            }
+        }
+    }
+    if !found.is_empty() {
+        col = col.child(div().flex_none().px(px(10.0)).pt(px(14.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(t("sp.group.options")));
+        for (i, (page, sub, label)) in found.into_iter().enumerate() {
+            let (page_label, _, _) = page_info(page);
+            let crumb: SharedString = match subtabs(app, page).get(sub as usize) {
+                Some(k) => format!("{page_label} › {}", t(k)).into(),
+                None => page_label,
+            };
+            let l = label.clone();
+            col = col.child(
+                div()
+                    .id(("sp-found", i))
+                    .flex()
+                    .flex_none()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(1.0))
+                    .py(px(6.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(white(0.05)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        flash_option(l.to_string());
+                        this.set_settings_tab(page, sub, cx);
+                    }))
+                    .child(div().text_size(px(13.5)).text_color(white(0.9)).truncate().child(label))
+                    .child(div().text_size(px(11.5)).text_color(white(0.45)).truncate().child(crumb)),
+            );
         }
     }
     col
@@ -735,7 +1048,12 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 // ------------------------------------------------------------------ pages
 
 fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
-    // Everyday options first; sources and their order live under "Advanced".
+    // Sub-tabs: general (sound and output), content (what plays), sources.
+    match app.settings_sub {
+        1 => return content(app, cx),
+        2 => return sources(app, cx),
+        _ => {}
+    }
     let cur = app.config.audio.quality;
     let options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
         .into_iter()
@@ -754,7 +1072,7 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         })
         .collect();
     let dl_quality = select(app, "sel-dl-quality", quality_label(cur_dl), dl_options, cx);
-    let basic = rows(vec![
+    rows(vec![
         row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality),
         row(t("sp.audio.dl_quality"), Some(t("sp.audio.dl_quality.desc")), dl_quality),
         row(t("sp.crossfade"), Some(t("sp.crossfade.desc")), {
@@ -813,6 +1131,12 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             Some(t("sp.normalize.desc")),
             switch("normalize", app.config.audio.normalize).on_click(cx.listener(|this, _, _, cx| this.toggle_normalize(cx))),
         ),
+    ])
+}
+
+/// Playback > Content: what shows up and what plays next.
+fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    let content = rows(vec![
         row(
             t("sp.explicit"),
             Some(t("sp.explicit.desc")),
@@ -822,13 +1146,6 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 cx.notify();
             })),
         ),
-        row(
-            t("settings.sources.fallback"),
-            Some(t("settings.sources.fallback.hint")),
-            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
-        ),
-        // Local yt-dlp plays YouTube directly (only matters with YouTube on).
-        row(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)),
         row(
             t("sp.radio"),
             Some(t("sp.radio.desc")),
@@ -877,31 +1194,46 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 )
         })),
     );
-    let mut col = div().flex().flex_col().child(basic).child(rows(vec![hidden_row])).child(advanced_toggle(app, cx));
-    if app.settings_advanced {
-        let enabled = app.config.providers.enabled.clone();
-        let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
-            .into_iter()
-            .map(|p| {
-                let cooling = app
-                    .backend
-                    .as_ref()
-                    .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
-                    .unwrap_or(false);
-                row(
-                    p.display_name(),
-                    Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
-                    switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
-                )
-            })
-            .collect();
-        col = col
-            .child(rows(sources))
-            .child(section_label(t("settings.priority")))
-            .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
-            .child(priority_list(app, cx));
-    }
-    col
+    div().flex().flex_col().child(content).child(div().border_t_1().border_color(white(0.06)).child(hidden_row))
+}
+
+/// Playback > Sources: YouTube / SoundCloud fallback, yt-dlp, the free
+/// sources and their order.
+fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    let top = rows(vec![
+        row(
+            t("settings.sources.fallback"),
+            Some(t("settings.sources.fallback.hint")),
+            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
+        ),
+        // Local yt-dlp plays YouTube directly (only matters with YouTube on).
+        row(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)),
+    ]);
+    let enabled = app.config.providers.enabled.clone();
+    let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
+        .into_iter()
+        .map(|p| {
+            let cooling = app
+                .backend
+                .as_ref()
+                .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
+                .unwrap_or(false);
+            row(
+                p.display_name(),
+                Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
+                switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
+            )
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .child(top)
+        .child(section_label(t("settings.sources")))
+        .child(rows(sources))
+        .child(section_label(t("settings.priority")))
+        .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
+        .child(priority_list(app, cx))
 }
 
 /// The dragged priority entry: the whole row follows the cursor.
@@ -980,7 +1312,7 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let language = select(app, "sel-lang", cur.native_name().into(), options, cx);
 
     let weak = cx.entity().downgrade();
-    let set_int: Pick = Rc::new(move |f, _, cx| {
+    let set_int: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
         weak.update(cx, |this, cx| this.set_intensity(f, cx)).ok();
     });
     let intensity = app.config.visuals.intensity;
@@ -1039,7 +1371,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         Some(ConnTest::Ok(s)) => Some((s.clone(), theme::ok())),
         Some(ConnTest::Failed(s)) => Some((s.clone(), theme::warn())),
     };
-    let mut items = vec![
+    let items = vec![
         row(t("settings.server.url"), Some(t("sp.server.url.desc")), input_box(app.server_input.clone())),
         row(
             mode,
@@ -1056,14 +1388,14 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .iter()
         .map(|(name, input)| row(t(&format!("settings.keys.{name}")), None, input_box(input.clone())))
         .collect();
-    let mut col = div().flex().flex_col().child(rows(items)).child(advanced_toggle(app, cx));
-    if app.settings_advanced {
-        col = col
-            .child(section_label(t("settings.keys")))
-            .child(div().pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
+    if app.settings_sub == 1 {
+        return div()
+            .flex()
+            .flex_col()
+            .child(div().pt(px(6.0)).pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
             .child(rows(keys));
     }
-    col
+    rows(items)
 }
 
 const STORAGE_COLORS: [u32; 4] = [0x22c3e6, 0xa970ff, 0xff5fa2, 0xf2b84b];

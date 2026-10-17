@@ -2526,6 +2526,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "symphonia",
  "sys-locale",
  "tar",
  "tempfile",

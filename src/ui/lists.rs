@@ -12,7 +12,7 @@ use crate::theme;
 use crate::ui::widgets::*;
 use glyph_protocol::Track;
 use gpui::{
-    anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId,
+    anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId, ExternalPaths,
     FontWeight, Hsla, MouseButton, MouseDownEvent, ObjectFit, SharedString, Stateful, Window,
 };
 use std::rc::Rc;
@@ -66,7 +66,7 @@ fn meta_line(tracks: &[Track], color: Hsla) -> gpui::Div {
 }
 
 /// Floating "Back" pill (only when there is history).
-fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+pub(crate) fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
     (!app.history.is_empty()).then(|| {
         div()
             .id("nav-back")
@@ -518,7 +518,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         ListRef::Album { .. } => t("list.kind.album"),
         _ => t("list.kind.playlist"),
     };
-    // Only albums and "liked by artist" have a subtitle (the artist).
+    // Albums and "liked by artist" show the artist, shared playlists their author.
     let sub: Option<AnyElement> = match &l {
         ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => Some(
             div()
@@ -528,6 +528,15 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .child(artist_link("list-artist", artist, cx))
                 .into_any_element(),
         ),
+        // Opened from a short link: who shared it.
+        ListRef::User(id) => app.library.playlist(id).and_then(|p| p.shared_by.clone()).map(|h| {
+            div()
+                .flex()
+                .text_size(theme::text_sm())
+                .text_color(theme::text_dim())
+                .child(tf("list.shared_by", &[("handle", &h)]).to_string())
+                .into_any_element()
+        }),
         _ => None,
     };
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
@@ -542,6 +551,8 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     };
 
     let l_more = l.clone();
+    // Playlists can download songs added later by themselves.
+    let auto_dl = user_id.as_ref().map(|id| (id.clone(), app.is_auto_download(id)));
     let all_dl = has && tracks.iter().all(|tr| app.is_downloaded(tr));
     let dl_view = if has { app.downloads_view(&tracks) } else { crate::ui::widgets::DlView::None };
     let t_dl = tracks.clone();
@@ -610,6 +621,14 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     })))
                     .child(icon_button("list-queue", "list-plus", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
                 })
+                .when_some(auto_dl, |d, (id, on)| {
+                    let key: SharedString = "list-auto-dl".into();
+                    let k = key.clone();
+                    d.child(toggle_button(key, "arrow-down-to-line", 16.0, on, Some(theme::pink())).on_click(cx.listener(move |this, _, _, cx| {
+                        mark_toggled(k.clone());
+                        this.toggle_auto_download(&id, cx)
+                    })))
+                })
                 .when(saveable, |d| {
                     let key: SharedString = "list-save".into();
                     let k = key.clone();
@@ -636,6 +655,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
             ListRef::Liked | ListRef::ArtistLiked(_) => (t("library.liked.empty"), t("library.liked.empty.sub")),
             ListRef::Recent => (t("home.empty.title"), t("library.recent.empty.sub")),
             ListRef::Downloads => (t("library.downloads.empty"), t("library.downloads.empty.sub")),
+            ListRef::User(_) => (t("library.playlist.empty"), t("list.empty.sub.user")),
             _ => (t("library.playlist.empty"), t("list.empty.sub")),
         };
         ascii_state(ART_EMPTY, a, b).into_any_element()
@@ -646,6 +666,12 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         div().flex().flex_col().children(rows).into_any_element()
     };
 
+    // Own playlists take music files / folders dropped from the file manager.
+    let drop_id = match &l {
+        ListRef::User(id) => Some(id.clone()),
+        _ => None,
+    };
+
     // The cover column stays put; only the songs scroll.
     div()
         .size_full()
@@ -654,6 +680,12 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         .gap(px(16.0))
         .px(px(32.0))
         .pt(px(20.0))
+        .when_some(drop_id, |d, id| {
+            d.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(theme::hover()))
+                .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                    this.import_files_to_playlist(id.clone(), paths.paths().to_vec(), cx)
+                }))
+        })
         .children(back_button(app, cx).map(|b| div().flex_none().flex().child(b)))
         .child(
             div()
@@ -679,7 +711,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
 
 // ------------------------------------------------------------------ artist
 
-pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(name) = app.open_artist.clone() else { return div().into_any_element() };
     let (tracks, loading, info, info_loading, show_all, about_open) = match app.artists.get(&name) {
         Some(p) => (p.tracks.clone(), p.loading, p.info.clone(), p.info_loading, p.show_all, p.about_open),
@@ -690,7 +722,13 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .as_ref()
         .and_then(|i| i.image.clone())
         .or_else(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx)));
-    let hero_img = src.as_ref().and_then(|p| app.hero_image(p, cx));
+    // The hero is never wider than the window; a raster at least that wide
+    // (for the hero's 420 px height) keeps its bottom fade in view.
+    for im in app.stale_heroes.drain(..) {
+        let _ = window.drop_image(im);
+    }
+    let min_w = f32::from(window.viewport_size().width) * 460.0 / 420.0;
+    let hero_img = src.as_ref().and_then(|p| app.hero_image(p, min_w, cx));
     let still_loading = hero_img.is_none() && (src.is_some() || info_loading || loading);
 
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
@@ -1510,7 +1548,16 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             }
             ListRef::User(id) => {
                 body.push(sep().into_any_element());
-                let (id1, id2) = (id.clone(), id.clone());
+                let (id1, id2, id3) = (id.clone(), id.clone(), id.clone());
+                let auto = app.is_auto_download(id);
+                body.push(
+                    ctx_item("lctx-auto-dl".into(), "arrow-down-to-line", t("ctx.auto_download"), if auto { theme::pink() } else { white(0.7) }, true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_ctx_close();
+                            this.toggle_auto_download(&id3, cx)
+                        }))
+                        .into_any_element(),
+                );
                 body.push(
                     ctx_item("lctx-rename".into(), "pencil", t("list.edit"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id1.clone()), w, cx)))
@@ -1685,6 +1732,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
 pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
     let editing = app.name_dialog.as_ref().and_then(|d| d.rename.clone());
     let renaming = editing.is_some();
+    let eq = app.name_dialog.as_ref().is_some_and(|d| d.eq_preset);
     let input = app.playlist_name.clone();
     let picture = editing.map(|id| {
         let l = ListRef::User(id.clone());
@@ -1736,7 +1784,13 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .text_size(px(16.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(white(0.95))
-                .child(if renaming { t("dialog.playlist.rename") } else { t("dialog.playlist.title") }),
+                .child(if eq {
+                    t("dialog.eq.title")
+                } else if renaming {
+                    t("dialog.playlist.rename")
+                } else {
+                    t("dialog.playlist.title")
+                }),
         )
         .children(picture)
         .child(
@@ -1759,7 +1813,7 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .gap(px(8.0))
                 .child(button("dialog-cancel", t("dialog.cancel")).on_click(cx.listener(|this, _, _, cx| this.close_name_dialog(cx))))
                 .child(
-                    primary_button("dialog-ok", if renaming { t("dialog.save") } else { t("dialog.create") })
+                    primary_button("dialog-ok", if renaming || eq { t("dialog.save") } else { t("dialog.create") })
                         .on_click(cx.listener(|this, _, _, cx| this.submit_name_dialog(cx))),
                 ),
         );

@@ -415,6 +415,82 @@ pub struct DevicePatch {
     pub name: String,
 }
 
+// ---------------------------------------------------------------- profiles
+// Picture, banner and a page other signed-in users open by handle. Private
+// until the owner makes it public (server: `accounts/profile.rs`).
+
+/// `GET|PATCH /v1/profile`: the owner's settings.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProfileSettings {
+    pub public: bool,
+    pub show_recent: bool,
+    /// Ids of the playlists shown on the profile.
+    #[serde(default)]
+    pub playlists: Vec<String>,
+    /// sha256 of the picture / banner (`/v1/profiles/{handle}/images/{sha}`).
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
+}
+
+/// `PATCH /v1/profile`
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProfilePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_recent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlists: Option<Vec<String>>,
+}
+
+/// `PUT /v1/profile/recent`: songs played last, newest first (at most 20 kept).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileRecent {
+    pub tracks: Vec<Track>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfilePlaylist {
+    pub id: String,
+    pub name: String,
+    pub songs: u32,
+    #[serde(default)]
+    pub cover: Option<String>,
+}
+
+/// `GET /v1/profiles/{handle}`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublicProfile {
+    pub handle: String,
+    pub created_at: u64,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// Private: no playlists and no songs (except on the owner's own view).
+    pub private: bool,
+    /// The viewer's own profile.
+    #[serde(default)]
+    pub own: bool,
+    #[serde(default)]
+    pub playlists: Vec<ProfilePlaylist>,
+    #[serde(default)]
+    pub recent: Vec<Track>,
+}
+
+/// `GET /v1/profiles/{handle}/playlists/{id}`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfilePlaylistSongs {
+    pub id: String,
+    pub name: String,
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub cover: Option<String>,
+    pub handle: String,
+}
+
 /// Item kinds the app syncs. Servers accept any short lowercase kind, so new
 /// kinds need no server change; clients ignore kinds they do not know.
 pub mod sync_kind {

@@ -14,6 +14,19 @@ use tokio::sync::mpsc::UnboundedSender;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// `GET /v1/share/<id>`: a playlist behind a short link.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SharedPlaylist {
+    pub code: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    /// Handle of the account that shared it (none for artist albums).
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
 /// Non-2xx answer of the server.
 #[derive(Debug, thiserror::Error)]
 #[error("server error {status}: {code} {message}")]
@@ -174,6 +187,12 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `GET /v1/share/<id>`: the playlist behind a short link.
+    pub async fn shared_playlist(&self, id: &str) -> Result<SharedPlaylist> {
+        let resp = Self::check(self.get(&format!("/v1/share/{id}")).timeout(Duration::from_secs(10)).send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Route public media and metadata through the Worker allowlist.
     pub fn upstream_url(&self, upstream: &str) -> String {
         reqwest::Url::parse_with_params(&self.url("/v1/upstream"), &[("url", upstream)])
@@ -318,6 +337,14 @@ impl ServerClient {
         Self::json_of(self.post("/v1/account/password/login").json(body)).await
     }
 
+    /// `POST /v1/share` (signed in): stores a playlist code under the
+    /// account and returns its short link.
+    pub async fn share_playlist(&self, token: &str, code: &str, name: &str, songs: usize, kind: &str) -> Result<String> {
+        let body = serde_json::json!({ "code": code, "name": name, "songs": songs, "kind": kind });
+        let value: serde_json::Value = Self::json_of(self.authed(reqwest::Method::POST, "/v1/share", token).json(&body)).await?;
+        value["url"].as_str().map(str::to_string).ok_or_else(|| anyhow!("server sent no link"))
+    }
+
     pub async fn set_password(&self, token: &str, body: &PasswordSetRequest) -> Result<Account> {
         Self::json_of(self.authed(reqwest::Method::PUT, "/v1/account/password", token).json(body)).await
     }
@@ -397,6 +424,46 @@ impl ServerClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    // ---------------------------------------------------------- profiles
+
+    pub async fn profile_settings(&self, token: &str) -> Result<ProfileSettings> {
+        Self::json_of(self.authed(reqwest::Method::GET, "/v1/profile", token)).await
+    }
+
+    pub async fn profile_patch(&self, token: &str, patch: &ProfilePatch) -> Result<ProfileSettings> {
+        Self::json_of(self.authed(reqwest::Method::PATCH, "/v1/profile", token).json(patch)).await
+    }
+
+    /// `banner`: the banner instead of the picture; `None` removes it.
+    pub async fn profile_image(&self, token: &str, banner: bool, bytes: Option<Vec<u8>>) -> Result<ProfileSettings> {
+        let path = if banner { "/v1/profile/banner" } else { "/v1/profile/avatar" };
+        let req = match bytes {
+            Some(b) => self.authed(reqwest::Method::PUT, path, token).body(b),
+            None => self.authed(reqwest::Method::DELETE, path, token),
+        };
+        Self::json_of(req).await
+    }
+
+    pub async fn profile_recent(&self, token: &str, tracks: Vec<Track>) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::PUT, "/v1/profile/recent", token).json(&ProfileRecent { tracks }).send().await?).await?;
+        Ok(())
+    }
+
+    pub async fn profile(&self, token: &str, handle: &str) -> Result<PublicProfile> {
+        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/profiles/{}", clean_handle(handle)), token)).await
+    }
+
+    pub async fn profile_playlist(&self, token: &str, handle: &str, id: &str) -> Result<ProfilePlaylistSongs> {
+        let id: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/profiles/{}/playlists/{id}", clean_handle(handle)), token)).await
+    }
+
+    pub async fn profile_image_bytes(&self, token: &str, handle: &str, sha256: &str) -> Result<Vec<u8>> {
+        let sha: String = sha256.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let resp = Self::check(self.authed(reqwest::Method::GET, &format!("/v1/profiles/{}/images/{sha}", clean_handle(handle)), token).send().await?).await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// The server's cached copy of a cover image (allow-listed hosts only).
     pub fn cached_cover_url(&self, url: &str) -> Option<String> {
         use sha2::Digest;
@@ -406,6 +473,11 @@ impl ServerClient {
         let name: String = sha2::Sha256::digest(url.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
         reqwest::Url::parse_with_params(&self.url(&format!("/v1/covers/{name}")), &[("u", url)]).ok().map(String::from)
     }
+}
+
+/// `@Name` -> `name`, only the characters a handle can have.
+fn clean_handle(h: &str) -> String {
+    h.trim().trim_start_matches('@').chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>().to_ascii_lowercase()
 }
 
 /// HTTP status and API code of a failed server call, if it was one.

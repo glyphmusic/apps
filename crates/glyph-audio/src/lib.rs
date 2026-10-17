@@ -106,6 +106,8 @@ pub struct MiniPlayerOptions {
 pub(crate) enum Cmd {
     Load(Track, PlaybackSource),
     Preload(Track, PlaybackSource),
+    /// Forget the preloaded next song (the queue changed).
+    DropNext,
     Play,
     Pause,
     Toggle,
@@ -173,6 +175,10 @@ impl PlayerController {
     /// Gapless: decode/buffer the next native track ahead of time.
     pub fn preload_next(&self, track: Track, source: PlaybackSource) {
         self.send(Cmd::Preload(track, source));
+    }
+    /// Drops a preloaded next song so it does not start after the current one.
+    pub fn drop_next(&self) {
+        self.send(Cmd::DropNext);
     }
     pub fn play(&self) {
         self.send(Cmd::Play);
