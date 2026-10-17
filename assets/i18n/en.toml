@@ -245,3 +245,4 @@
 "sp.appearance.startup" = "Startup animation"
 "sp.appearance.startup.desc" = "Streams of light form the logo when Glyph starts"
 "sp.server.url.desc" = "Leave empty to query sources directly, or enter your Glyph server."
+"search.kind.artist" = "Artist"

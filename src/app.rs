@@ -1007,6 +1007,73 @@ impl Glyph {
 
     // ------------------------------------------------------------ playback
 
+    /// Artists in the current results, best matches for the query first:
+    /// (name, a song of theirs for the picture).
+    pub fn search_artists(&self, max: usize) -> Vec<(String, Track)> {
+        let q = self.search.query.trim().to_lowercase();
+        let mut found: Vec<(String, Track, usize)> = Vec::new();
+        for tr in &self.search.results {
+            let name = primary_artist(&tr.artist);
+            if name.is_empty() {
+                continue;
+            }
+            match found.iter_mut().find(|(n, _, _)| n.eq_ignore_ascii_case(&name)) {
+                Some(f) => f.2 += 1,
+                None => found.push((name, tr.clone(), 1)),
+            }
+        }
+        let score = |n: &str, count: usize| -> i32 {
+            let l = n.to_lowercase();
+            let m = if l == q {
+                1000
+            } else if l.starts_with(&q) {
+                500
+            } else if l.contains(&q) || (!l.is_empty() && q.contains(&l)) {
+                200
+            } else {
+                0
+            };
+            m + count as i32
+        };
+        // Only artists that match the query, or that clearly dominate the results.
+        found.retain(|(n, _, c)| score(n, 0) > 0 || *c >= 3);
+        found.sort_by_key(|(n, _, c)| -score(n, *c));
+        found.into_iter().take(max).map(|(n, t, _)| (n, t)).collect()
+    }
+
+    /// Query completions taken from the current results (titles and artists
+    /// that contain what was typed), for the chips above the results.
+    pub fn search_completions(&self, max: usize) -> Vec<String> {
+        let q = self.search.query.trim().to_lowercase();
+        if q.len() < 2 {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::new();
+        for tr in &self.search.results {
+            for cand in [tr.title.as_str(), primary_artist(&tr.artist).as_str()] {
+                // Drop bracketed extras ("(Radio Edit)", "[Official]") for a clean suggestion.
+                let clean = cand.split(['(', '[']).next().unwrap_or(cand).trim().to_string();
+                let l = clean.to_lowercase();
+                if l.len() <= q.len() || !l.contains(&q) || clean.chars().count() > 40 {
+                    continue;
+                }
+                if !out.iter().any(|o| o.to_lowercase() == l) {
+                    out.push(clean);
+                }
+            }
+            if out.len() >= max {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Runs a search for `q` as if it had been typed.
+    pub fn search_for(&mut self, q: String, cx: &mut Context<Self>) {
+        self.search_input.update(cx, |i, cx| i.set_value(q.clone(), cx));
+        self.on_query(q, true, cx);
+    }
+
     /// Songs for the search dropdown: search history, else recently played.
     pub fn search_suggestions(&self) -> (bool, Vec<Track>) {
         if !self.library.search_history.is_empty() {

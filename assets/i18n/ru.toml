@@ -245,3 +245,4 @@
 "sp.appearance.startup" = "Анимация при запуске"
 "sp.appearance.startup.desc" = "Потоки света собирают логотип при запуске"
 "sp.server.url.desc" = "Оставьте пустым для прямых запросов или укажите свой сервер Glyph."
+"search.kind.artist" = "Исполнитель"

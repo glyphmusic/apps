@@ -198,7 +198,38 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
         match filter {
             SearchFilter::All | SearchFilter::Tracks => {
                 let r = app.search.results.clone();
-                track_list(app, r, "search-row", cx).into_any_element()
+                // Matching artists on top (Spotify-style mixed list), then songs.
+                let artists = if filter == SearchFilter::All { app.search_artists(3) } else { Vec::new() };
+                let artist_rows: Vec<_> = artists
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (name, tr))| {
+                        let art = cover(app, &tr, 48.0, 24.0, cx);
+                        let n2 = name.clone();
+                        div()
+                            .id(("search-artist", i))
+                            .flex()
+                            .items_center()
+                            .gap(px(14.0))
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::card()))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n2, cx)))
+                            .child(art)
+                            .child(div().flex_1().min_w_0().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(name))
+                            .child(kind_chip(t("search.kind.artist")))
+                            .child(div().w(px(60.0)))
+                    })
+                    .collect();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(artist_rows)
+                    .child(track_list(app, r, "search-row", cx))
+                    .into_any_element()
             }
             SearchFilter::Albums | SearchFilter::Artists => {
                 let mut groups: Vec<(String, String, Vec<Track>)> = Vec::new();
@@ -268,6 +299,31 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             }
         }
     };
+    // Query completions as chips: click to search for that.
+    let completions = app.search_completions(6);
+    let suggest = (!completions.is_empty()).then(|| {
+        div().flex().flex_wrap().gap(px(8.0)).children(completions.into_iter().enumerate().map(|(i, c)| {
+            let q = c.clone();
+            div()
+                .id(("search-sugg", i))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(28.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(gpui::hsla(0.0, 0.0, 1.0, 0.06))
+                .border_1()
+                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.06))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.85))
+                .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 1.0, 0.11)))
+                .on_click(cx.listener(move |this, _, _, cx| this.search_for(q.clone(), cx)))
+                .child(icon("search", 12.0, gpui::hsla(0.0, 0.0, 1.0, 0.5)))
+                .child(c)
+        }))
+    });
     let s = &app.search;
     let footer = div()
         .flex()
@@ -283,6 +339,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             .gap(px(18.0))
             .child(heading(if query.trim().is_empty() { t("nav.search") } else { format!("\u{201c}{query}\u{201d}").into() }))
             .child(chips)
+            .children(suggest)
             .child(body)
             .child(footer),
     )

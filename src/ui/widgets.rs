@@ -611,6 +611,21 @@ pub fn skeleton_lyrics(n: usize) -> Div {
     }))
 }
 
+/// Small type label ("Song", "Artist") in mixed search results.
+pub fn kind_chip(label: SharedString) -> Div {
+    div()
+        .flex_none()
+        .px(px(6.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+        .text_size(px(11.0))
+        .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.6))
+        .child(label)
+}
+
 /// Quiet track row: cover 48 px, title, artist, badges, duration, actions.
 pub fn track_row(
     app: &mut Glyph,
@@ -673,6 +688,7 @@ pub fn track_row(
                         .when_some(t.album.clone(), |d, a| d.child(div().min_w_0().truncate().child(format!(" · {a}")))),
                 ),
         )
+        .when(id_prefix == "search-row", |d| d.child(kind_chip(tr("search.kind.song"))))
         .child(badges(&t))
         .child(
             div()
