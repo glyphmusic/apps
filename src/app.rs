@@ -301,6 +301,8 @@ pub struct Glyph {
     /// Next song handed to the player for a gapless start:
     /// (queue `track_key`, resolved track the player knows it as).
     preloaded: Option<(String, Track)>,
+    /// Volume to go back to when unmuting from the speaker icon.
+    unmute_volume: f32,
     pub palette: Option<Palette>,
     pub cover: Option<CoverArt>,
 
@@ -612,6 +614,7 @@ impl Glyph {
             retried_expired: None,
             resolving: false,
             preloaded: None,
+            unmute_volume: 0.8,
             palette: None,
             cover: None,
             search: SearchState::default(),
@@ -1735,7 +1738,21 @@ impl Glyph {
     }
 
     pub fn set_volume(&mut self, v: f32) {
-        self.with_player(|p| p.set_volume(v.clamp(0.0, 1.0)));
+        let v = v.clamp(0.0, 1.0);
+        if v > 0.001 {
+            self.unmute_volume = v;
+        }
+        self.with_player(|p| p.set_volume(v));
+    }
+
+    /// Speaker icon: mute, or back to the volume before muting.
+    pub fn toggle_mute(&mut self) {
+        let muted = self.volume() <= 0.001;
+        if !muted {
+            self.unmute_volume = self.volume();
+        }
+        let v = if muted { self.unmute_volume } else { 0.0 };
+        self.with_player(|p| p.set_volume(v));
     }
 
     pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {

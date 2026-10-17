@@ -210,7 +210,13 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .items_center()
                 .gap(px(6.0))
                 .px(px(4.0))
-                .child(icon(if app.volume() <= 0.001 { "volume-x" } else { "volume-2" }, 15.0, theme::text_dim()))
+                .child(
+                    icon_button("mute", if app.volume() <= 0.001 { "volume-x" } else { "volume-2" }, 15.0, theme::text_dim())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_mute();
+                            cx.notify();
+                        })),
+                )
                 .child(thin_bar("vol", 80.0, app.volume(), vol, Some(Rc::new(|f: f32| format!("{:.0}%", f * 100.0)) as BarLabel), cx)),
         )
         .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_on_top, None).on_click(cx.listener(|this, _, _, cx| {
