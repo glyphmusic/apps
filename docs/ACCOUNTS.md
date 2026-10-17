@@ -202,6 +202,10 @@ text link switches to the in-app form.
 | POST | `/v1/devices/self/signout` | access token |
 | POST / GET | `/v1/sync/push`, `/v1/sync/pull` | access token |
 | GET | `/v1/sync/export` (all items as JSON) | access token |
+| GET / PATCH | `/v1/profile` (public, show_recent, shown playlist ids) | access token |
+| PUT / DELETE | `/v1/profile/avatar`, `/v1/profile/banner` (raw image, 512 KB / 2 MB) | access token |
+| PUT | `/v1/profile/recent {tracks}` (kept only while show_recent is on) | access token |
+| GET | `/v1/profiles/{handle}`, `.../playlists/{id}`, `.../images/{sha256}` | access token |
 
 Rate limits use the existing limiter: 10 login starts / 10 min per install id,
 handle checks 30 / min. Errors use the existing `ApiError` with codes such as
@@ -210,13 +214,19 @@ handle checks 30 / min. Errors use the existing `ApiError` with codes such as
 ## 7. Privacy
 
 Stored: handle, passkey public keys, recovery-code hash, device name/platform/
-first and last seen, the synced items above. Not stored: passwords, IPs, play
-history, audio. The Worker never returns another user's data; handles are only
-checked for availability, there are no public profiles (shared playlists keep
-using share codes).
+first and last seen, the synced items above, profile settings. Not stored: passwords, IPs, play
+history (beyond the opt-in profile songs), audio. The Worker never returns another user's data except a profile; handles are only
+checked for availability.
+
+Profiles (17.10.2026): every account may set a picture and a banner, which any
+signed-in user sees under `@handle`. Everything else is off until the owner
+turns it on in Settings -> Profile & privacy: a public profile shows only the
+playlists switched on one by one, and the last 20 songs only with "show
+recently played" (turning it off deletes them on the server). Profiles are
+never visible without signing in.
 
 Delete account: Settings -> Account -> Delete (type the handle to confirm) ->
-`DELETE /v1/account` removes users, passkeys, devices, sync items and the user's
+`DELETE /v1/account` removes users, passkeys, devices, sync items, the profile and the user's
 R2 folder in one go; the handle is held for 30 days. `GET /v1/sync/export` gives a
 JSON copy before that. The local library on each device stays.
 

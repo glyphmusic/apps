@@ -33,7 +33,7 @@ pub(crate) fn white(a: f32) -> Hsla {
 
 // ------------------------------------------------------------------ pieces
 
-fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
+pub(crate) fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -673,6 +673,7 @@ fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static str) {
         SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), "volume-2"),
         SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), "palette"),
         SettingsPage::Account => (t("sp.account"), t("sp.account.sub"), "user-round"),
+        SettingsPage::Profile => (t("sp.profile"), t("sp.profile.sub"), "eye"),
         SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), "server"),
         SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), "database"),
         SettingsPage::Transfer => (t("sp.transfer"), t("sp.transfer.sub"), "copy"),
@@ -686,6 +687,7 @@ pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
     match page {
         SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources"],
         SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
+        SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
         SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
         SettingsPage::About => &["sp.sub.version", "sp.support"],
         _ => &[],
@@ -722,6 +724,10 @@ const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Account, 2, "account.passkey.add", "passkey"),
     (SettingsPage::Account, 2, "account.recovery", "recovery wiederherstellung code"),
     (SettingsPage::Account, 2, "account.delete", "delete löschen account"),
+    (SettingsPage::Profile, 0, "profile.avatar", "profile profil picture bild avatar pfp foto photo"),
+    (SettingsPage::Profile, 0, "profile.banner", "profile profil banner header titelbild"),
+    (SettingsPage::Profile, 1, "profile.public", "privacy privatsphäre public öffentlich private privat profile profil"),
+    (SettingsPage::Profile, 1, "profile.show_recent", "privacy privatsphäre recent zuletzt songs history verlauf"),
     (SettingsPage::Server, 0, "settings.server.url", "server url adresse"),
     (SettingsPage::Server, 1, "settings.keys.lastfm", "api key lastfm last.fm"),
     (SettingsPage::Server, 1, "settings.keys.youtube", "api key youtube"),
@@ -751,6 +757,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         SettingsPage::Appearance => appearance(app, cx),
         SettingsPage::Server => server(app, cx),
         SettingsPage::Account => crate::ui::account::page(app, cx),
+        SettingsPage::Profile => crate::ui::profile::settings_page(app, cx),
         SettingsPage::Storage => storage(app, cx),
         SettingsPage::Transfer => crate::ui::transfer::page(app, cx),
         SettingsPage::About if app.settings_sub == 1 => support(app, cx),
@@ -878,6 +885,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
             t("sp.group.app"),
             vec![
                 (SettingsPage::Account, "account konto login sign in anmelden sync devices geräte handle passkey"),
+                (SettingsPage::Profile, "profile profil privacy privatsphäre picture bild banner public öffentlich"),
                 (SettingsPage::Server, "url api key keys schlüssel"),
                 (SettingsPage::Storage, "cache download downloads speicher"),
                 (SettingsPage::Transfer, "backup export import share teilen code datei file"),
@@ -893,7 +901,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
     } else {
         OPTIONS
             .iter()
-            .filter(|(p, _, _, _)| *p != SettingsPage::Account || signed_in)
+            .filter(|(p, _, _, _)| !matches!(p, SettingsPage::Account | SettingsPage::Profile) || signed_in)
             .filter(|(_, _, key, words)| hit(&t(key)) || words.contains(&q))
             .map(|(p, s, key, _)| (*p, *s, t(key)))
             .take(14)
@@ -928,6 +936,9 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
     for (group, items) in groups {
         let mut visible = Vec::new();
         for (page, words) in items {
+            if page == SettingsPage::Profile && !signed_in {
+                continue;
+            }
             let (label, _, icon_name) = page_info(page);
             let subs = subtabs(app, page);
             let sub_hit: Vec<bool> = subs.iter().map(|k| !q.is_empty() && hit(&t(k))).collect();

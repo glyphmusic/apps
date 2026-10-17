@@ -366,6 +366,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             .child(heading(if query.trim().is_empty() { t("nav.search") } else { format!("\u{201c}{query}\u{201d}").into() }))
             .child(chips)
             .children(suggest)
+            .children(crate::ui::profile::search_hit(app, &query, cx))
             .child(body)
             .child(footer),
     )
