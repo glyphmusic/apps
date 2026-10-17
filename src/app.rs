@@ -193,6 +193,8 @@ pub struct Glyph {
     pub name_dialog: Option<NameDialog>,
     /// Sidebar icon under the mouse and since when (hover animation).
     pub nav_hover: Option<(View, Instant)>,
+    /// Startup animation while it runs.
+    pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
     pub nav_leave: Option<(View, Instant, f32)>,
     pub playlist_name: Entity<TextInput>,
@@ -410,6 +412,7 @@ impl Glyph {
             queue_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
             nav_hover: None,
+            splash: Some(crate::ui::splash::Splash::new()),
             nav_leave: None,
             playlist_name,
             glow,
@@ -748,6 +751,7 @@ impl Glyph {
         let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700))
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
         toast_fading
+            || self.splash.is_some()
             || nav_anim
             || self.bar_slide.running()
             || self.search.loading

@@ -10,6 +10,7 @@ pub mod lists;
 pub mod now_playing;
 pub mod player_bar;
 pub mod settings;
+pub mod splash;
 pub mod views;
 pub mod widgets;
 
@@ -177,6 +178,23 @@ impl Render for Glyph {
         });
         let modal = self.settings_open.then(|| settings::modal(self, window, cx));
         let menu = lists::ctx_menu(self, window, cx);
+        if self.splash.as_ref().is_some_and(|s| !s.active()) {
+            self.splash = None;
+        }
+        let splash = self.splash.as_ref().map(|s| {
+            div()
+                .id("splash")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    if let Some(s) = this.splash.as_mut() {
+                        s.skipped = true;
+                    }
+                    cx.notify();
+                }))
+                .child(s.element())
+        });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
         let dim = self.settings_open;
 
@@ -259,6 +277,7 @@ impl Render for Glyph {
             .children(modal)
             .children(menu)
             .children(dialog)
+            .children(splash)
             .when_some(toast, |d, (m, alpha)| {
                 // Centred above the player bar; fades and lifts in, fades out.
                 let bottom = if shown > 0.0 { (theme::PLAYER_H + theme::GAP * 2.0) * shown + 12.0 } else { 24.0 };
