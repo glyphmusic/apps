@@ -227,8 +227,10 @@ pub struct Glyph {
     /// When the menu opened (fade/slide in) and a menu that is fading out.
     pub ctx_opened: Instant,
     pub ctx_closing: Option<(CtxMenu, Instant)>,
-    /// Artist hero images rendered as ASCII, per source image (None = computing).
-    pub heroes: std::collections::HashMap<(PathBuf, bool), Option<Arc<gpui::RenderImage>>>,
+    /// Artist hero images rendered as ASCII, per source image and raster width
+    /// (None = computing), plus replaced ones waiting to leave the GPU atlas.
+    pub heroes: std::collections::HashMap<(PathBuf, bool, u32), Option<Arc<gpui::RenderImage>>>,
+    pub stale_heroes: Vec<Arc<gpui::RenderImage>>,
     /// Scroll state of the main view, the settings page, the queue and the lyrics
     /// (edge fades show only where there is more to scroll).
     pub main_scroll: gpui::ScrollHandle,
@@ -558,6 +560,7 @@ impl Glyph {
             ctx_opened: Instant::now(),
             ctx_closing: None,
             heroes: Default::default(),
+            stale_heroes: Vec::new(),
             main_scroll: gpui::ScrollHandle::new(),
             settings_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::ScrollHandle::new(),
@@ -3417,12 +3420,23 @@ impl Glyph {
     }
 
     /// `path` as the artist hero (ASCII raster, or the faded photo when ASCII
-    /// covers are off), computed on a background thread.
-    pub fn hero_image(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+    /// covers are off), computed on a background thread. The fade is baked
+    /// into the raster, so it must never be cropped off: `min_w` is the
+    /// raster width needed for the hero to crop only at the sides
+    /// (`object-fit: cover`), bucketed so resizing re-renders rarely. While a
+    /// new width renders, the previous one stays up.
+    pub fn hero_image(&mut self, path: &std::path::Path, min_w: f32, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+        const H: u32 = 460;
+        const STEP: u32 = 320;
         let ascii = self.config.visuals.ascii_covers;
-        let key = (path.to_path_buf(), ascii);
-        if let Some(v) = self.heroes.get(&key) {
-            return v.clone();
+        let w = ((min_w.max(0.0) as u32).div_ceil(STEP) * STEP).max(1680);
+        let key = (path.to_path_buf(), ascii, w);
+        if let Some(Some(v)) = self.heroes.get(&key) {
+            return Some(v.clone());
+        }
+        let fallback = self.heroes.iter().find(|((p, a, _), v)| p == path && *a == ascii && v.is_some()).and_then(|(_, v)| v.clone());
+        if self.heroes.contains_key(&key) {
+            return fallback;
         }
         self.heroes.insert(key.clone(), None);
         cx.spawn(async move |this, cx| {
@@ -3431,14 +3445,21 @@ impl Glyph {
                 .background_executor()
                 .spawn(async move {
                     if ascii {
-                        crate::visuals::ascii::raster(&src, 1680, 460, 0.3)
+                        crate::visuals::ascii::raster(&src, w, H, 0.3)
                     } else {
-                        crate::visuals::ascii::photo_fade(&src, 1680, 460, 0.3)
+                        crate::visuals::ascii::photo_fade(&src, w, H, 0.3)
                     }
                 })
                 .await;
             this.update(cx, |s, cx| {
                 if let Some(img) = img {
+                    // Other finished widths of this picture are superseded.
+                    let old: Vec<_> = s.heroes.keys().filter(|k| k.0 == key.0 && k.1 == key.1 && k.2 != key.2).cloned().collect();
+                    for k in old {
+                        if let Some(Some(im)) = s.heroes.remove(&k) {
+                            s.stale_heroes.push(im);
+                        }
+                    }
                     s.heroes.insert(key, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
                 }
                 cx.notify();
@@ -3446,7 +3467,7 @@ impl Glyph {
             .ok();
         })
         .detach();
-        None
+        fallback
     }
 
     pub fn cover_loading(&self, t: &Track) -> bool {
