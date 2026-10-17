@@ -711,7 +711,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
 
 // ------------------------------------------------------------------ artist
 
-pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(name) = app.open_artist.clone() else { return div().into_any_element() };
     let (tracks, loading, info, info_loading, show_all, about_open) = match app.artists.get(&name) {
         Some(p) => (p.tracks.clone(), p.loading, p.info.clone(), p.info_loading, p.show_all, p.about_open),
@@ -722,7 +722,13 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .as_ref()
         .and_then(|i| i.image.clone())
         .or_else(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx)));
-    let hero_img = src.as_ref().and_then(|p| app.hero_image(p, cx));
+    // The hero is never wider than the window; a raster at least that wide
+    // (for the hero's 420 px height) keeps its bottom fade in view.
+    for im in app.stale_heroes.drain(..) {
+        let _ = window.drop_image(im);
+    }
+    let min_w = f32::from(window.viewport_size().width) * 460.0 / 420.0;
+    let hero_img = src.as_ref().and_then(|p| app.hero_image(p, min_w, cx));
     let still_loading = hero_img.is_none() && (src.is_some() || info_loading || loading);
 
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
