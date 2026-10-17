@@ -174,6 +174,21 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `POST /v1/share`: stores a playlist code and returns its short link.
+    pub async fn share_playlist(&self, code: &str, name: &str, songs: usize) -> Result<String> {
+        let body = serde_json::json!({ "code": code, "name": name, "songs": songs });
+        let resp = Self::check(self.post("/v1/share").timeout(Duration::from_secs(10)).json(&body).send().await?).await?;
+        let value: serde_json::Value = resp.json().await?;
+        value["url"].as_str().map(str::to_string).ok_or_else(|| anyhow!("server sent no link"))
+    }
+
+    /// `GET /v1/share/<id>`: the playlist code behind a short link.
+    pub async fn shared_playlist(&self, id: &str) -> Result<String> {
+        let resp = Self::check(self.get(&format!("/v1/share/{id}")).timeout(Duration::from_secs(10)).send().await?).await?;
+        let value: serde_json::Value = resp.json().await?;
+        value["code"].as_str().map(str::to_string).ok_or_else(|| anyhow!("server sent no playlist"))
+    }
+
     /// Route public media and metadata through the Worker allowlist.
     pub fn upstream_url(&self, upstream: &str) -> String {
         reqwest::Url::parse_with_params(&self.url("/v1/upstream"), &[("url", upstream)])

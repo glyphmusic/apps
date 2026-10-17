@@ -687,6 +687,35 @@ impl Backend {
         self.spawn(async move { catalog::artist_stats(&inner.http, &name).await }).await?
     }
 
+    /// Text to share for a playlist: a short link when connected to the
+    /// public server, else (or when that fails) the `glyph:playlist:` code.
+    pub async fn share_text(&self, name: &str, tracks: &[Track]) -> String {
+        let code = share::encode(name, tracks);
+        let inner = self.cur();
+        let official = inner.config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(config::DEFAULT_SERVER_URL);
+        let Some(server) = inner.server.clone().filter(|_| official) else { return code };
+        let (c, n, songs) = (code.clone(), name.to_string(), tracks.len());
+        match self.spawn(async move { server.share_playlist(&c, &n, songs).await }).await {
+            Ok(Ok(link)) => link,
+            Ok(Err(e)) | Err(e) => {
+                tracing::info!("short playlist link failed, sharing the code: {e:#}");
+                code
+            }
+        }
+    }
+
+    /// The playlist code behind a short link (see [`share::link_id`]).
+    pub async fn resolve_share_link(&self, link: &str) -> anyhow::Result<String> {
+        let id = share::link_id(link).ok_or_else(|| anyhow!("not a Glyph playlist link"))?;
+        let inner = self.cur();
+        let server = match inner.server.clone() {
+            Some(s) => s,
+            // Links always live on the public server.
+            None => ServerClient::new(config::DEFAULT_SERVER_URL, inner.http.clone(), server_client::install_id()),
+        };
+        self.spawn(async move { server.shared_playlist(&id).await }).await?
+    }
+
     /// Release year + type (album, EP, single) of an album.
     pub async fn album_meta(&self, title: &str, artist: &str) -> anyhow::Result<Option<catalog::AlbumMeta>> {
         let (inner, title, artist) = (self.cur(), title.to_string(), artist.to_string());

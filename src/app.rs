@@ -1328,8 +1328,8 @@ impl Glyph {
     // ------------------------------------------------------------ search
 
     fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
-        // A pasted playlist code imports instead of searching.
-        if glyph_core::share::is_code(&q) {
+        // A pasted playlist code or link imports instead of searching.
+        if glyph_core::share::is_code(&q) || glyph_core::share::link_id(&q).is_some() {
             let code = q.clone();
             self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             self.import_share_code(&code, cx);
@@ -2023,7 +2023,8 @@ impl Glyph {
         }
     }
 
-    /// Copies a share code for the list (songs, name) to the clipboard.
+    /// Copies a short link for the list (public server) or its share code
+    /// (songs, name) to the clipboard.
     pub fn share_list(&mut self, l: &ListRef, cx: &mut Context<Self>) {
         let tracks = self.list_tracks(l);
         if tracks.is_empty() {
@@ -2031,14 +2032,57 @@ impl Glyph {
             cx.notify();
             return;
         }
-        let code = glyph_core::share::encode(&self.list_title(l), &tracks);
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
-        self.toast_sub(t("toast.share_copied"), self.list_title(l));
-        cx.notify();
+        let title = self.list_title(l);
+        let Some(b) = self.backend.clone() else {
+            let code = glyph_core::share::encode(&title, &tracks);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+            self.toast_sub(t("toast.share_copied"), title);
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let text = b.share_text(&title, &tracks).await;
+            this.update(cx, |s, cx| {
+                let key = if glyph_core::share::link_id(&text).is_some() { "toast.share_link_copied" } else { "toast.share_copied" };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                s.toast_sub(t(key), title);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    /// Imports a pasted share code as a new playlist and opens it.
+    /// Imports a pasted share code (or short link) as a new playlist and opens it.
     pub fn import_share_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if glyph_core::share::link_id(code).is_some() {
+            let Some(b) = self.backend.clone() else {
+                self.toast_info(t("status.library_offline"));
+                cx.notify();
+                return true;
+            };
+            let link = code.to_string();
+            cx.spawn(async move |this, cx| {
+                let r = b.resolve_share_link(&link).await;
+                this.update(cx, |s, cx| match r {
+                    Ok(code) if glyph_core::share::is_code(&code) => {
+                        s.import_share_code(&code, cx);
+                    }
+                    Ok(_) => {
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        tracing::info!("playlist link failed: {e:#}");
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return true;
+        }
         if !glyph_core::share::is_code(code) {
             return false;
         }

@@ -10,6 +10,8 @@
 "home.recent" = "Zuletzt gehört"
 "ctx.share_list" = "Playlist teilen"
 "toast.share_copied" = "Playlist-Code kopiert"
+"toast.share_link_copied" = "Playlist-Link kopiert"
+"toast.share_link_failed" = "Playlist-Link konnte nicht geöffnet werden"
 "toast.share_imported" = "{n} Songs importiert"
 "toast.share_empty" = "Noch nichts zum Teilen"
 "artist.fans" = "{n} FANS"

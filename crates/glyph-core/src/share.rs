@@ -3,6 +3,9 @@
 //! The code carries the name and, per song, title, artist, album, source id,
 //! ISRC and length: enough for any Glyph to rebuild the playlist and resolve
 //! every song again. Paste it into the search bar to import.
+//!
+//! On the public server the code is stored there and shared as a short link
+//! (`https://glyph.my/p/<id>`, see [`link_id`]); pasting the link imports too.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
@@ -60,6 +63,22 @@ pub fn encode(name: &str, tracks: &[Track]) -> String {
     let _ = z.write_all(&json);
     let packed = z.finish().unwrap_or_default();
     format!("{PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(packed))
+}
+
+/// Hosts whose `/p/<id>` links are Glyph playlists.
+pub const LINK_HOSTS: [&str; 2] = ["glyph.my", "api.glyph.my"];
+
+/// The id of a short playlist link (`https://glyph.my/p/AbC123xy`).
+pub fn link_id(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+    let (host, path) = rest.split_once('/')?;
+    if !LINK_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h)) {
+        return None;
+    }
+    let id = path.strip_prefix("p/")?.trim_end_matches('/');
+    let id = id.split(['?', '#']).next().unwrap_or_default();
+    ((id.len() == 8 || id.len() == 12) && id.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| id.to_string())
 }
 
 /// Text that looks like a share code (whitespace around it is fine).
@@ -128,5 +147,13 @@ mod tests {
         assert_eq!(back[0].album.as_deref(), Some("LP"));
         assert!(back[0].explicit);
         assert!(decode("glyph:playlist:@@@").is_err());
+    }
+
+    #[test]
+    fn short_links() {
+        assert_eq!(link_id(" https://glyph.my/p/AbC123xy \n").as_deref(), Some("AbC123xy"));
+        assert_eq!(link_id("glyph.my/p/AbC123xyAbC1/").as_deref(), Some("AbC123xyAbC1"));
+        assert_eq!(link_id("https://evil.example/p/AbC123xy"), None);
+        assert_eq!(link_id("https://glyph.my/p/short"), None);
     }
 }

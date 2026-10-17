@@ -10,6 +10,8 @@
 "home.recent" = "Недавно прослушанные"
 "ctx.share_list" = "Поделиться плейлистом"
 "toast.share_copied" = "Код плейлиста скопирован"
+"toast.share_link_copied" = "Ссылка на плейлист скопирована"
+"toast.share_link_failed" = "Не удалось открыть ссылку на плейлист"
 "toast.share_imported" = "Импортировано треков: {n}"
 "toast.share_empty" = "Пока нечем делиться"
 "artist.fans" = "{n} ФАНАТОВ"
