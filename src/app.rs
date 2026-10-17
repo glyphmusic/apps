@@ -38,6 +38,8 @@ pub enum View {
     List,
     /// Artist profile: `Glyph::open_artist`.
     Artist,
+    /// A user's profile: `Glyph::open_profile`.
+    Profile,
 }
 
 /// Which song list the list view shows.
@@ -101,6 +103,7 @@ pub struct Route {
     pub view: View,
     pub list: Option<ListRef>,
     pub artist: Option<String>,
+    pub profile: Option<String>,
 }
 
 /// Artist profile data (loaded once per session and name).
@@ -213,6 +216,8 @@ pub enum SettingsPage {
     Appearance,
     Server,
     Account,
+    /// Picture, banner and privacy (signed in only).
+    Profile,
     Storage,
     /// Export, share and import settings.
     Transfer,
@@ -224,6 +229,8 @@ pub struct Glyph {
     pub view: View,
     pub open_list: Option<ListRef>,
     pub open_artist: Option<String>,
+    /// Handle of the open user profile (`View::Profile`).
+    pub open_profile: Option<String>,
     pub artists: std::collections::HashMap<String, ArtistPage>,
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
@@ -281,6 +288,8 @@ pub struct Glyph {
     pub backend: Option<Arc<Backend>>,
     /// Settings -> Account state and the sync loop.
     pub account: crate::ui::account::AccountUi,
+    /// User profiles (open page, own settings).
+    pub profile: crate::ui::profile::ProfileUi,
     /// Settings export / import (Settings -> Backup & share).
     pub transfer: crate::ui::transfer::TransferUi,
     pub backend_state: BackendState,
@@ -564,6 +573,7 @@ impl Glyph {
             view: View::Home,
             open_list: None,
             open_artist: None,
+            open_profile: None,
             artists: Default::default(),
             history: Vec::new(),
             ctx_menu: None,
@@ -643,6 +653,7 @@ impl Glyph {
             settings_closing: None,
             settings_page: SettingsPage::Playback,
             account: Default::default(),
+            profile: Default::default(),
             transfer: Default::default(),
             settings_search,
             open_select: None,
@@ -1329,7 +1340,7 @@ impl Glyph {
                 View::NowPlaying => Preset::Sonnenaufgang,
                 View::Settings => Preset::Horizont,
                 View::List => Preset::Horizont,
-                View::Artist => Preset::Sonnenaufgang,
+                View::Artist | View::Profile => Preset::Sonnenaufgang,
             };
             self.glow.update(cx, |g, _| g.set_preset(preset));
         }
@@ -1615,6 +1626,7 @@ impl Glyph {
         if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
             self.library.record_play(&track);
             self.save_library(cx);
+            self.profile_recent_changed(cx);
         }
         let seed = format!("{}{}", track.artist, track.title);
         let palette = Palette::from_seed(&seed);
@@ -2006,7 +2018,7 @@ impl Glyph {
         }
         if self.open_list == Some(ListRef::User(id.to_string())) {
             self.history.retain(|r| r.list != Some(ListRef::User(id.to_string())));
-            let back = self.history.pop().unwrap_or(Route { view: View::Library, list: None, artist: None });
+            let back = self.history.pop().unwrap_or(Route { view: View::Library, list: None, artist: None, profile: None });
             self.restore(back, cx);
         }
         cx.notify();
@@ -2140,10 +2152,10 @@ impl Glyph {
     // ------------------------------------------------------------ lists & artists
 
     fn route(&self) -> Route {
-        Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone() }
+        Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone(), profile: self.open_profile.clone() }
     }
 
-    fn push_route(&mut self) {
+    pub(crate) fn push_route(&mut self) {
         let r = self.route();
         if self.history.last() != Some(&r) {
             self.history.push(r);
@@ -2160,6 +2172,10 @@ impl Glyph {
         self.open_artist = r.artist.clone();
         if let Some(a) = r.artist {
             self.load_artist(a, cx);
+        }
+        self.open_profile = r.profile.clone();
+        if let (View::Profile, Some(h)) = (r.view, r.profile) {
+            self.load_profile(h, cx);
         }
         self.ctx_menu = None;
         cx.notify();
@@ -3232,6 +3248,9 @@ impl Glyph {
         }
         if page == SettingsPage::Account {
             self.account_page_opened(cx);
+        }
+        if page == SettingsPage::Profile {
+            self.profile_page_opened(cx);
         }
         cx.notify();
     }

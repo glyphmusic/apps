@@ -66,7 +66,7 @@ fn meta_line(tracks: &[Track], color: Hsla) -> gpui::Div {
 }
 
 /// Floating "Back" pill (only when there is history).
-fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+pub(crate) fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
     (!app.history.is_empty()).then(|| {
         div()
             .id("nav-back")

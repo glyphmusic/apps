@@ -10,6 +10,7 @@ pub mod input;
 pub mod lists;
 pub mod now_playing;
 pub mod player_bar;
+pub mod profile;
 pub mod settings;
 pub mod splash;
 pub mod toasts;
@@ -144,6 +145,7 @@ impl Render for Glyph {
             View::Library => lists::library(self, window, cx),
             View::List => lists::list_view(self, window, cx),
             View::Artist => lists::artist_view(self, window, cx),
+            View::Profile => profile::view(self, window, cx),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),
