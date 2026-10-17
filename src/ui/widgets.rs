@@ -627,8 +627,16 @@ pub fn track_row(
     let (t_next, t_q, t_like, t_share) = (t.clone(), t.clone(), t.clone(), t.clone());
     let art = cover(app, &t, 44.0, 6.0, cx);
 
+    let t_menu = t.clone();
     div()
         .id((id_prefix, i))
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.open_ctx(t_menu.clone(), e.position, None, cx)
+            }),
+        )
         .group(group.clone())
         .flex()
         .items_center()
@@ -657,13 +665,12 @@ pub fn track_row(
                 )
                 .child(
                     div()
-                        .truncate()
+                        .flex()
+                        .min_w_0()
                         .text_size(theme::text_sm())
                         .text_color(theme::text_dim())
-                        .child(match &t.album {
-                            Some(a) => format!("{} · {a}", t.artist),
-                            None => t.artist.clone(),
-                        }),
+                        .child(crate::ui::lists::artist_link((id_prefix, i * 10 + 5), &t.artist, cx))
+                        .when_some(t.album.clone(), |d, a| d.child(div().min_w_0().truncate().child(format!(" · {a}")))),
                 ),
         )
         .child(badges(&t))

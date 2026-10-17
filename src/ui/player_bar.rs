@@ -68,7 +68,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .gap(px(6.0))
                 .items_center()
                 .min_w_0()
-                .child(div().truncate().text_size(theme::text_sm()).text_color(theme::text_dim()).child(tr.artist.clone()))
+                .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link("bar-artist", &tr.artist, cx)))
                 .when_some(app.current_source, |d, p| d.child(badge(p)))
                 .when(app.current_preview, |d| {
                     d.child(mono().flex_none().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))

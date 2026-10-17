@@ -123,7 +123,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                         .items_center()
                         .gap(px(6.0))
                         .child(badges(&track))
-                        .child(div().text_size(theme::text_md()).text_color(theme::text_dim()).child(track.artist.clone()))
+                        .child(div().flex().text_size(theme::text_md()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link("np-artist", &track.artist, cx)))
                         .when(app.current_preview, |d| d.child(mono().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))),
                 ),
         )

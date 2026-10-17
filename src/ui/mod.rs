@@ -6,6 +6,7 @@
 
 pub mod chrome;
 pub mod input;
+pub mod lists;
 pub mod now_playing;
 pub mod player_bar;
 pub mod settings;
@@ -125,7 +126,9 @@ impl Render for Glyph {
         let main = match self.view {
             View::Home => views::home(self, window, cx).into_any_element(),
             View::Search => views::search(self, window, cx).into_any_element(),
-            View::Library => views::library(self, window, cx).into_any_element(),
+            View::Library => lists::library(self, window, cx),
+            View::List => lists::list_view(self, window, cx),
+            View::Artist => lists::artist_view(self, window, cx),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),
@@ -163,6 +166,7 @@ impl Render for Glyph {
         });
         let toast = self.toast.as_ref().map(|(m, _)| m.clone());
         let modal = self.settings_open.then(|| settings::modal(self, window, cx));
+        let menu = lists::ctx_menu(self, cx);
         let dim = self.settings_open;
 
         div()
@@ -191,7 +195,9 @@ impl Render for Glyph {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
-                if this.open_select.is_some() {
+                if this.ctx_menu.is_some() {
+                    this.close_ctx(cx);
+                } else if this.open_select.is_some() {
                     this.open_select = None;
                     cx.notify();
                 } else if this.settings_open {
@@ -238,6 +244,7 @@ impl Render for Glyph {
             )
             .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(0.08)).child(b)))
             .children(modal)
+            .children(menu)
             .when_some(toast, |d, m| {
                 d.child(
                     div()

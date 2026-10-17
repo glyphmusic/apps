@@ -116,3 +116,72 @@ pub fn pattern(seed: &str, cols: u32, rows: u32) -> Vec<AsciiRow> {
     }
     out
 }
+
+/// A photo rasterised as coloured ASCII (the background's 5×7 bitmap font),
+/// `w × h` pixels, cropped to fill like `object-fit: cover`. `focus_y` picks
+/// the vertical crop centre (0 top .. 1 bottom; portraits look best ~0.3).
+/// Returns straight-alpha BGRA for `RenderImage`.
+pub fn raster(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaImage> {
+    use super::glow::FONT;
+    const CW: u32 = 7; // cell incl. spacing; the glyph is 5×7 px
+    const CH: u32 = 10;
+    const P: u32 = 1;
+    let img = image::open(path).ok()?.to_rgb8();
+    let cols = w / CW;
+    let rows = h / CH;
+    // Crop the source to the grid's aspect, then sample one pixel per cell.
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let want = (cols * CW) as f32 / (rows * CH) as f32;
+    let (cw, ch) = if iw / ih > want { (ih * want, ih) } else { (iw, iw / want) };
+    let x0 = (iw - cw) / 2.0;
+    let y0 = ((ih - ch) * focus_y.clamp(0.0, 1.0)).max(0.0);
+    let cropped = image::imageops::crop_imm(&img, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
+    let small = image::imageops::resize(&cropped, cols, rows, image::imageops::FilterType::Triangle);
+    let lumas: Vec<f32> = small
+        .pixels()
+        .map(|p| Rgb(p.0[0] as f32 / 255.0, p.0[1] as f32 / 255.0, p.0[2] as f32 / 255.0).luma())
+        .collect();
+    let lo = lumas.iter().cloned().fold(1.0f32, f32::min);
+    let hi = lumas.iter().cloned().fold(0.0f32, f32::max);
+    let span = (hi - lo).max(0.08);
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let n = RAMP.len();
+    for r in 0..rows {
+        for c in 0..cols {
+            let p = small.get_pixel(c, r).0;
+            let col = Rgb(p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
+            let l = ((lumas[(r * cols + c) as usize] - lo) / span).clamp(0.0, 1.0);
+            let idx = (l * (n - 1) as f32).round() as usize;
+            if idx == 0 {
+                continue;
+            }
+            let mx = col.0.max(col.1).max(col.2).max(0.001);
+            let shown = col.scale((0.45 + 0.55 * mx).min(1.0) / mx);
+            let (rr, gg, bb) = ((shown.0 * 255.0) as u8, (shown.1 * 255.0) as u8, (shown.2 * 255.0) as u8);
+            let a = (90.0 + 165.0 * l) as u8;
+            let ox = c * CW + 1;
+            let oy = r * CH + 1;
+            for (ry, bits) in FONT[idx].iter().enumerate() {
+                for rx in 0..5u32 {
+                    if bits & (0b10000 >> rx) == 0 {
+                        continue;
+                    }
+                    for dy in 0..P {
+                        for dx in 0..P {
+                            let x = ox + rx * P + dx;
+                            let y = oy + ry as u32 * P + dy;
+                            if x < w && y < h {
+                                let o = ((y * w + x) * 4) as usize;
+                                buf[o] = bb;
+                                buf[o + 1] = gg;
+                                buf[o + 2] = rr;
+                                buf[o + 3] = a;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    image::RgbaImage::from_raw(w, h, buf)
+}

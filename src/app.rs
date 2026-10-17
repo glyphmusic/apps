@@ -31,13 +31,62 @@ pub enum View {
     Library,
     NowPlaying,
     Settings,
+    /// A song list (Liked, Recent, a playlist or an album): `Glyph::open_list`.
+    List,
+    /// Artist profile: `Glyph::open_artist`.
+    Artist,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LibTab {
+/// Which song list the list view shows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListRef {
     Liked,
     Recent,
-    Playlists,
+    User(String),
+    Album { title: String, artist: String, tracks: Vec<Track> },
+}
+
+/// One step of the back history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Route {
+    pub view: View,
+    pub list: Option<ListRef>,
+    pub artist: Option<String>,
+}
+
+/// Artist profile data (loaded once per session and name).
+pub struct ArtistPage {
+    pub name: String,
+    pub tracks: Vec<Track>,
+    pub loading: bool,
+    pub info: Option<glyph_core::artist::ArtistInfo>,
+    pub info_loading: bool,
+    pub show_all: bool,
+    pub about_open: bool,
+    _tasks: Vec<Task<()>>,
+}
+
+/// Right-click menu for a song.
+#[derive(Debug, Clone)]
+pub struct CtxMenu {
+    pub track: Track,
+    pub pos: gpui::Point<gpui::Pixels>,
+    /// The list and index the song was opened from (for "remove from …").
+    pub from: Option<(ListRef, usize)>,
+    /// Showing the "add to playlist" list instead of the main items.
+    pub playlists: bool,
+}
+
+/// First artist of "A, B", "A & B", "A feat. B", "A x B".
+pub fn primary_artist(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut cut = s.len();
+    for sep in [",", " & ", " feat", " ft.", " x ", " и ", " / "] {
+        if let Some(i) = lower.find(sep) {
+            cut = cut.min(i);
+        }
+    }
+    s[..cut].trim().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +164,13 @@ pub enum SettingsPage {
 pub struct Glyph {
     pub focus: FocusHandle,
     pub view: View,
-    pub lib_tab: LibTab,
-    pub open_playlist: Option<String>,
+    pub open_list: Option<ListRef>,
+    pub open_artist: Option<String>,
+    pub artists: std::collections::HashMap<String, ArtistPage>,
+    pub history: Vec<Route>,
+    pub ctx_menu: Option<CtxMenu>,
+    /// Artist hero images rendered as ASCII, per source image (None = computing).
+    pub heroes: std::collections::HashMap<PathBuf, Option<Arc<gpui::RenderImage>>>,
     pub glow: Entity<GlowView>,
     pub search_input: Entity<TextInput>,
     pub server_input: Entity<TextInput>,
@@ -227,6 +281,16 @@ impl Slide {
     }
 }
 
+/// The song is (co-)credited to `name`.
+fn by_artist(name: &str, credit: &str) -> bool {
+    let lower = credit.to_lowercase();
+    let mut parts = vec![lower.as_str()];
+    for sep in [",", " & ", " feat. ", " feat ", " ft. ", " x ", " / "] {
+        parts = parts.iter().flat_map(|p| p.split(sep)).collect();
+    }
+    parts.iter().any(|p| glyph_core::dedupe::artist_similarity(name, p.trim()) >= 0.85)
+}
+
 pub fn track_key(t: &Track) -> String {
     format!("{:?}:{}", t.source, t.id)
 }
@@ -301,8 +365,12 @@ impl Glyph {
         let mut this = Self {
             focus: cx.focus_handle(),
             view: View::Home,
-            lib_tab: LibTab::Liked,
-            open_playlist: None,
+            open_list: None,
+            open_artist: None,
+            artists: Default::default(),
+            history: Vec::new(),
+            ctx_menu: None,
+            heroes: Default::default(),
             glow,
             search_input,
             server_input,
@@ -742,6 +810,9 @@ impl Glyph {
             self.open_settings(None, cx);
             return;
         }
+        // Sidebar navigation starts a fresh history.
+        self.history.clear();
+        self.ctx_menu = None;
         self.view = view;
         if view == View::Search {
             let f = self.search_input.read(cx).focus.clone();
@@ -754,6 +825,8 @@ impl Glyph {
                 View::Library => Preset::Horizont,
                 View::NowPlaying => Preset::Sonnenaufgang,
                 View::Settings => Preset::Horizont,
+                View::List => Preset::Horizont,
+                View::Artist => Preset::Sonnenaufgang,
             };
             self.glow.update(cx, |g, _| g.set_preset(preset));
         }
@@ -1185,8 +1258,10 @@ impl Glyph {
         if guard(|| self.library.delete_playlist(id)).is_some() {
             self.save_library(cx);
         }
-        if self.open_playlist.as_deref() == Some(id) {
-            self.open_playlist = None;
+        if self.open_list == Some(ListRef::User(id.to_string())) {
+            self.history.retain(|r| r.list != Some(ListRef::User(id.to_string())));
+            let back = self.history.pop().unwrap_or(Route { view: View::Library, list: None, artist: None });
+            self.restore(back, cx);
         }
         cx.notify();
     }
@@ -1221,6 +1296,235 @@ impl Glyph {
             self.save_library(cx);
         }
         cx.notify();
+    }
+
+    // ------------------------------------------------------------ lists & artists
+
+    fn route(&self) -> Route {
+        Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone() }
+    }
+
+    fn push_route(&mut self) {
+        let r = self.route();
+        if self.history.last() != Some(&r) {
+            self.history.push(r);
+        }
+        if self.history.len() > 50 {
+            self.history.remove(0);
+        }
+    }
+
+    fn restore(&mut self, r: Route, cx: &mut Context<Self>) {
+        self.view = r.view;
+        self.open_list = r.list;
+        self.open_artist = r.artist.clone();
+        if let Some(a) = r.artist {
+            self.load_artist(a, cx);
+        }
+        self.ctx_menu = None;
+        cx.notify();
+    }
+
+    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.history.pop() {
+            self.restore(r, cx);
+        }
+    }
+
+    /// Opens a song list (never starts playback).
+    pub fn open_list(&mut self, l: ListRef, cx: &mut Context<Self>) {
+        if self.view == View::List && self.open_list.as_ref() == Some(&l) {
+            return;
+        }
+        self.push_route();
+        self.view = View::List;
+        self.open_list = Some(l);
+        self.open_artist = None;
+        self.ctx_menu = None;
+        cx.notify();
+    }
+
+    pub fn list_tracks(&self, l: &ListRef) -> Vec<Track> {
+        match l {
+            ListRef::Liked => self.library.liked.clone(),
+            ListRef::Recent => self.library.recent.clone(),
+            ListRef::User(id) => self.library.playlist(id).map(|p| p.tracks.clone()).unwrap_or_default(),
+            ListRef::Album { tracks, .. } => tracks.clone(),
+        }
+    }
+
+    pub fn list_title(&self, l: &ListRef) -> String {
+        match l {
+            ListRef::Liked => t("library.liked").to_string(),
+            ListRef::Recent => t("library.recent").to_string(),
+            ListRef::User(id) => self.library.playlist(id).map(|p| p.name.clone()).unwrap_or_default(),
+            ListRef::Album { title, .. } => title.clone(),
+        }
+    }
+
+    /// Opens the artist profile (first artist of a "A, B" credit).
+    pub fn open_artist(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = primary_artist(name);
+        if name.is_empty() || (self.view == View::Artist && self.open_artist.as_deref() == Some(name.as_str())) {
+            return;
+        }
+        self.push_route();
+        self.view = View::Artist;
+        self.open_artist = Some(name.clone());
+        self.open_list = None;
+        self.ctx_menu = None;
+        self.load_artist(name, cx);
+        cx.notify();
+    }
+
+    fn load_artist(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.artists.contains_key(&name) {
+            return;
+        }
+        let Some(b) = self.backend.clone() else { return };
+        // Songs: a normal search for the name, keeping the artist's own songs.
+        let songs = {
+            let (b, name) = (b.clone(), name.clone());
+            cx.spawn(async move |this, cx| {
+                let mut found: Vec<Track> = Vec::new();
+                if let Some(mut stream) = guard(|| b.search(&name)) {
+                    use futures::StreamExt;
+                    while let Some(ev) = stream.next().await {
+                        match ev {
+                            SearchEvent::Results { tracks, .. } => {
+                                let mut changed = false;
+                                for tr in tracks {
+                                    let dup = found.iter().any(|x| {
+                                        glyph_core::dedupe::normalize_title(&x.title)
+                                            == glyph_core::dedupe::normalize_title(&tr.title)
+                                    });
+                                    if by_artist(&name, &tr.artist) && !dup {
+                                        found.push(tr);
+                                        changed = true;
+                                    }
+                                }
+                                if changed {
+                                    let list = found.clone();
+                                    let n = name.clone();
+                                    this.update(cx, |s, cx| {
+                                        if let Some(p) = s.artists.get_mut(&n) {
+                                            p.tracks = list;
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                                }
+                            }
+                            SearchEvent::Done => break,
+                            _ => {}
+                        }
+                    }
+                }
+                this.update(cx, |s, cx| {
+                    if let Some(p) = s.artists.get_mut(&name) {
+                        p.loading = false;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
+        let info = {
+            let (name, lang) = (name.clone(), self.lang.code());
+            cx.spawn(async move |this, cx| {
+                let r = guard_async(b.artist_info(&name, lang)).await;
+                this.update(cx, |s, cx| {
+                    if let Some(p) = s.artists.get_mut(&name) {
+                        p.info_loading = false;
+                        if let Ok(Some(i)) = r {
+                            p.info = Some(i);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
+        self.artists.insert(
+            name.clone(),
+            ArtistPage {
+                name,
+                tracks: Vec::new(),
+                loading: true,
+                info: None,
+                info_loading: true,
+                show_all: false,
+                about_open: false,
+                _tasks: vec![songs, info],
+            },
+        );
+    }
+
+    /// Plays `tracks` from a random song with shuffle on.
+    pub fn play_shuffled(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let i = (self.started.elapsed().as_nanos() as usize) % tracks.len();
+        let track = tracks[i].clone();
+        guard(|| {
+            self.queue.set(tracks, i);
+            self.queue.set_shuffle(true);
+        });
+        self.play_track(track, cx);
+    }
+
+    /// Adds every song to the end of the queue.
+    pub fn queue_all(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let n = tracks.len();
+        for tr in tracks {
+            guard(|| self.queue.push(tr));
+        }
+        self.toast(tf("toast.queued_n", &[("n", &n)]));
+        cx.notify();
+    }
+
+    pub fn open_ctx(&mut self, track: Track, pos: gpui::Point<gpui::Pixels>, from: Option<(ListRef, usize)>, cx: &mut Context<Self>) {
+        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false });
+        cx.notify();
+    }
+
+    pub fn close_ctx(&mut self, cx: &mut Context<Self>) {
+        if self.ctx_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Removes the song at `i` from a list (unlike for Liked Songs).
+    pub fn remove_from_list(&mut self, l: &ListRef, i: usize, cx: &mut Context<Self>) {
+        match l {
+            ListRef::Liked => {
+                if let Some(tr) = self.library.liked.get(i).cloned() {
+                    self.toggle_like(&tr, cx);
+                }
+            }
+            ListRef::Recent => {
+                if i < self.library.recent.len() {
+                    self.library.recent.remove(i);
+                    self.save_library(cx);
+                }
+            }
+            ListRef::User(id) => {
+                if guard(|| self.library.remove_from_playlist(id, i)).is_some() {
+                    self.save_library(cx);
+                }
+            }
+            ListRef::Album { .. } => {}
+        }
+        cx.notify();
+    }
+
+    /// Creates a new playlist and adds `tr` to it.
+    pub fn new_playlist_with(&mut self, tr: Option<Track>, cx: &mut Context<Self>) {
+        self.create_playlist(cx);
+        if let (Some(tr), Some(id)) = (tr, self.library.playlists.last().map(|p| p.id.clone())) {
+            self.add_to_playlist(&id, tr, cx);
+        }
     }
 
     // ------------------------------------------------------------ settings
@@ -1605,6 +1909,31 @@ impl Glyph {
             this.update(cx, |s, cx| {
                 // Undecodable image: empty rows, the caller shows the image.
                 s.ascii_covers.insert(key, Some(rows_.unwrap_or_default()));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    /// `path` as a wide ASCII raster for the artist hero (background thread).
+    pub fn ascii_hero(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+        if let Some(v) = self.heroes.get(path) {
+            return v.clone();
+        }
+        self.heroes.insert(path.to_path_buf(), None);
+        let p = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let src = p.clone();
+            let img = cx
+                .background_executor()
+                .spawn(async move { crate::visuals::ascii::raster(&src, 1680, 420, 0.3) })
+                .await;
+            this.update(cx, |s, cx| {
+                if let Some(img) = img {
+                    s.heroes.insert(p, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
+                }
                 cx.notify();
             })
             .ok();

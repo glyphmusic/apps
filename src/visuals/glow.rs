@@ -46,7 +46,7 @@ pub enum Zone {
 pub const ZONES: usize = 3;
 
 // 5×7 bitmap font for the ramp (rows top→bottom, 5 bits each, MSB = left).
-const FONT: [[u8; 7]; 12] = [
+pub(crate) const FONT: [[u8; 7]; 12] = [
     [0, 0, 0, 0, 0, 0, 0],                                         // ' '
     [0, 0, 0, 0, 0, 0b00100, 0],                                   // .
     [0, 0, 0, 0b01110, 0, 0, 0],                                   // -

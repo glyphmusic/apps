@@ -12,6 +12,7 @@
 //! * [`Queue`] and [`Library`] are plain synchronous data structures.
 
 pub mod config;
+pub mod artist;
 pub mod cover;
 pub mod dedupe;
 pub mod import;
@@ -351,6 +352,12 @@ impl Backend {
     pub async fn lyrics(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
         let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.lyrics(&track).await }).await?
+    }
+
+    /// Bio + photo for the artist page (Wikipedia in `lang`, then English).
+    pub async fn artist_info(&self, name: &str, lang: &str) -> anyhow::Result<Option<artist::ArtistInfo>> {
+        let (inner, name, lang) = (self.cur(), name.to_string(), lang.to_string());
+        self.spawn(async move { artist::lookup(&inner.http, &name, &lang).await }).await?
     }
 
     /// Radio: similar tracks (Last.fm track.getSimilar), not yet resolved.
