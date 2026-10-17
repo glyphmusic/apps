@@ -306,7 +306,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                         .child(div().text_size(px(19.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
                         .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
                 )
-                .child(div().pt(px(10.0)).child(body)), hsla(0.0, 0.0, 0.055, 1.0), 26.0, Some(&app.settings_scroll)).flex_1().min_w_0().h_full().child(scrollbar(&app.settings_scroll, cx)))
+                .child(div().pt(px(10.0)).child(body)), hsla(0.0, 0.0, 0.055, 1.0), 26.0, Some(&app.settings_scroll)).flex_1().min_w_0().h_full().child(scrollbar(&app.settings_scroll, true, cx)))
         .child(
             div()
                 .id("settings-close")
@@ -431,6 +431,19 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let quality = select(app, "sel-quality", quality_label(cur), options, cx);
     let basic = rows(vec![
         row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality),
+        row(t("sp.crossfade"), Some(t("sp.crossfade.desc")), {
+            const STEPS: [u32; 9] = [0, 2, 4, 6, 8, 10, 12, 15, 20];
+            let cur = app.config.audio.crossfade_s;
+            let label = |s: u32| -> SharedString { if s == 0 { t("sp.crossfade.off") } else { format!("{s} s").into() } };
+            let options = STEPS
+                .into_iter()
+                .map(|s| {
+                    let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_crossfade(s, cx));
+                    (label(s), s == cur, f)
+                })
+                .collect();
+            select(app, "sel-crossfade", label(cur), options, cx)
+        }),
         row(
             t("settings.sources.fallback"),
             Some(t("settings.sources.fallback.hint")),
@@ -600,7 +613,7 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(thin_bar("intensity", 160.0, intensity, set_int, cx))
+                .child(thin_bar("intensity", 160.0, intensity, set_int, None, cx))
                 .child(mono().w(px(36.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(format!("{:.0}%", intensity * 100.0))),
         ),
         row(
@@ -627,7 +640,15 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let mode: String = match &app.backend_state {
         BackendState::Connecting => format!("{} {}", app.spinner(), t("status.connecting")),
-        BackendState::Ready(BackendMode::Server { url, server_version }) => format!("server {url} · v{server_version}"),
+        BackendState::Ready(BackendMode::Server { url, server_version }) => {
+            // The public server is just "Glyph server"; your own shows its host.
+            let name = if url.trim_end_matches('/') == glyph_core::config::DEFAULT_SERVER_URL {
+                t("settings.server.public").to_string()
+            } else {
+                url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string()
+            };
+            tf("settings.server.connected", &[("name", &name), ("v", server_version)]).to_string()
+        }
         BackendState::Ready(BackendMode::Direct) => t("status.direct").to_string(),
         BackendState::Ready(BackendMode::Incompatible { protocol_version, .. }) => tf("status.incompatible", &[("v", protocol_version)]).to_string(),
         BackendState::Offline(e) => format!("{} {e}", t("status.backend_offline")),

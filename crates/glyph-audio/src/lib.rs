@@ -110,6 +110,7 @@ pub(crate) enum Cmd {
     Stop,
     Seek(Duration),
     Volume(f32),
+    Crossfade(Duration),
     MiniOptions(MiniPlayerOptions),
     Opened { id: u64, opened: native::Opened },
     DecodeError { id: u64, message: String },
@@ -191,6 +192,10 @@ impl PlayerController {
             self.shared.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
         }
         self.send(Cmd::Volume(volume));
+    }
+    /// Overlap between native tracks (0 = gapless, no fade).
+    pub fn set_crossfade(&self, d: Duration) {
+        self.send(Cmd::Crossfade(d.min(Duration::from_secs(20))));
     }
     pub fn state(&self) -> PlayerState {
         self.shared.state.lock().unwrap().clone()

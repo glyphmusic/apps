@@ -114,8 +114,9 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         let l = list.clone();
         let art = cover(app, &tr, 56.0, 8.0, cx);
         let card = base(("card", i).into()).on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)));
+        let artist = artist_link(("card-artist", i), &tr.artist, cx);
         cards.push(
-            with_menu(card, tr.clone(), None, cx)
+            with_menu(card, tr.clone(), Some((ListRef::Recent, i)), cx)
                 .child(art)
                 .child(
                     div()
@@ -124,7 +125,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
                         .min_w_0()
                         .gap(px(2.0))
                         .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tr.title.clone()))
-                        .child(div().truncate().text_size(theme::text_sm()).text_color(theme::text_dim()).child(tr.artist.clone())),
+                        .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist)),
                 )
                 .into_any_element(),
         );
@@ -156,7 +157,7 @@ fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut
                 .child(art)
                 .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tr.title.clone()))
                 .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist));
-            with_menu(el, tr, None, cx)
+            with_menu(el, tr, Some((ListRef::Recent, i)), cx)
         })
         .collect();
     div().id(prefix).flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().children(items)
@@ -434,7 +435,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             }
                         })))
                         .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_remove(i, cx))))
-                })), theme::panel_strong(), 18.0, Some(&app.queue_scroll)).flex_1().min_h_0().child(scrollbar(&app.queue_scroll, cx)))
+                })), theme::panel_strong(), 18.0, Some(&app.queue_scroll)).flex_1().min_h_0().child(scrollbar(&app.queue_scroll, true, cx)))
         .child(
             div()
                 .px(px(14.0))

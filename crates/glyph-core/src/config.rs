@@ -87,6 +87,9 @@ pub enum AudioQuality {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    /// Seconds two songs overlap (0 = off, max 20).
+    #[serde(default)]
+    pub crossfade_s: u32,
     pub quality: AudioQuality,
 }
 

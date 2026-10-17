@@ -476,6 +476,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         _ => None,
     };
 
+    let l_more = l.clone();
     let left = div()
         .flex_none()
         .w(px(248.0))
@@ -489,70 +490,59 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(format!("[{}]", kind.to_uppercase())))
-                .child(div().text_size(px(22.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title.clone()))
+                // Type label sits tight on the title.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(mono().text_size(px(11.0)).line_height(px(14.0)).text_color(theme::text_faint()).child(format!("[{}]", kind.to_uppercase())))
+                        .child(div().text_size(px(22.0)).line_height(px(28.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title.clone())),
+                )
                 .children(sub)
                 .child(meta_line(&tracks, theme::text_faint())),
         )
         .when(has, |d| {
             d.child(
-                play_pill("list-play", t("list.play_all"))
-                    .w_full()
-                    .on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))),
-            )
-            .child(
                 div()
                     .flex()
                     .gap(px(8.0))
-                    .child(
-                        button("list-queue", t("list.add_queue"))
-                            .flex_1()
-                            .justify_center()
-                            .h(px(34.0))
-                            .on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))),
-                    )
-                    .child(round_icon_button("list-shuffle", "shuffle", 34.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
-                    .when(saveable, |d| {
-                        let key: SharedString = "list-save".into();
-                        let k = key.clone();
-                        let l2 = l_save.clone();
-                        d.child(
-                            div()
-                                .flex_none()
-                                .size(px(34.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(8.0))
-                                .bg(black(0.35))
-                                .border_1()
-                                .border_color(white(0.14))
-                                .child(toggle_button(key, "heart", 16.0, saved, Some(theme::pink())).on_click(cx.listener(move |this, _, _, cx| {
-                                    mark_toggled(k.clone());
-                                    this.toggle_saved(&l2, cx)
-                                }))),
-                        )
-                    }),
+                    .child(play_pill("list-play", t("list.play_all")).flex_1().on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))))
+                    .child(round_icon_button("list-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx)))),
             )
         })
-        .when_some(user_id, |d, id| {
-            let id2 = id.clone();
-            d.child(
-                div()
-                    .flex()
-                    .gap(px(4.0))
-                    .child(
-                        text_button("list-rename", t("list.edit"))
-                            .text_size(theme::text_sm())
-                            .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id2.clone()), w, cx))),
-                    )
-                    .child(
-                        text_button("list-delete", t("list.delete"))
-                            .text_size(theme::text_sm())
-                            .on_click(cx.listener(move |this, _, _, cx| this.delete_playlist(&id, cx))),
-                    ),
-            )
-        });
+        // Secondary actions: download, queue, save / edit, more.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .when(has, |d| {
+                    d.child(icon_button("list-download", "download", 16.0, theme::text_dim()).on_click(cx.listener(|this, _, _, cx| {
+                        this.toast(t("toast.downloads_soon"));
+                        cx.notify();
+                    })))
+                    .child(icon_button("list-queue", "list-plus", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
+                })
+                .when(saveable, |d| {
+                    let key: SharedString = "list-save".into();
+                    let k = key.clone();
+                    let l2 = l_save.clone();
+                    d.child(toggle_button(key, "heart", 16.0, saved, Some(theme::pink())).on_click(cx.listener(move |this, _, _, cx| {
+                        mark_toggled(k.clone());
+                        this.toggle_saved(&l2, cx)
+                    })))
+                })
+                .when_some(user_id, |d, id| {
+                    d.child(icon_button("list-edit", "pencil", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id.clone()), w, cx))))
+                })
+                .child(icon_button("list-more", "ellipsis-vertical", 16.0, theme::text_dim()).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_list_ctx(l_more.clone(), e.position, cx)
+                    }),
+                )),
+        );
 
     let right: AnyElement = if tracks.is_empty() {
         let (a, b) = match &l {
@@ -568,20 +558,33 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         div().flex().flex_col().children(rows).into_any_element()
     };
 
+    // The cover column stays put; only the songs scroll.
     div()
-        .id("list-scroll")
-        .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
         .px(px(32.0))
-        .py(px(20.0))
+        .pt(px(20.0))
+        .children(back_button(app, cx).map(|b| div().flex_none().flex().child(b)))
         .child(
             div()
+                .flex_1()
+                .min_h_0()
                 .flex()
-                .flex_col()
-                .gap(px(16.0))
-                .children(back_button(app, cx).map(|b| div().flex().child(b)))
-                .child(div().flex().items_start().gap(px(36.0)).child(left).child(div().flex_1().min_w_0().child(right))),
+                .gap(px(36.0))
+                .child(left)
+                .child(
+                    div()
+                        .id("list-scroll")
+                        .track_scroll(&app.main_scroll)
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .pb(px(20.0))
+                        .child(right),
+                ),
         )
         .into_any_element()
 }
@@ -1065,6 +1068,12 @@ fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Gly
                 .into_any_element()
 }
 
+/// Destructive row (remove, hide, delete): turns red on hover.
+fn danger_item(id: ElementId, name: &str, label: SharedString, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    ctx_item(id, name, label, gpui::hsla(0.0, 0.75, 0.68, 0.9), true, cx)
+        .hover(|s| s.bg(gpui::hsla(0.0, 0.7, 0.5, 0.18)).text_color(gpui::hsla(0.0, 0.85, 0.75, 1.0)))
+}
+
 /// One menu row. `closes_sub`: hovering it closes the playlist flyout.
 fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_sub: bool, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
     div()
@@ -1209,14 +1218,11 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(sep().into_any_element());
         let hidden = app.library.is_hidden(&name);
         body.push(
-            ctx_item(
-                "actx-hide".into(),
-                if hidden { "eye" } else { "eye-off" },
-                if hidden { t("ctx.show_artist") } else { t("ctx.hide_artist") },
-                white(0.7),
-                true,
-                cx,
-            )
+            if hidden {
+                ctx_item("actx-hide".into(), "eye", t("ctx.show_artist"), white(0.7), true, cx)
+            } else {
+                danger_item("actx-hide".into(), "eye-off", t("ctx.hide_artist"), cx)
+            }
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.begin_ctx_close();
                 this.toggle_hidden_artist(&n3, cx)
@@ -1330,7 +1336,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                         .into_any_element(),
                 );
                 body.push(
-                    ctx_item("lctx-delete".into(), "trash-2", t("list.delete"), white(0.7), true, cx)
+                    danger_item("lctx-delete".into(), "trash-2", t("list.delete"), cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.begin_ctx_close();
                             this.delete_playlist(&id2, cx)
@@ -1412,7 +1418,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         if let Some((l, i)) = m.from.clone().filter(|(l, _)| matches!(l, ListRef::User(_) | ListRef::Recent)) {
             let label = if l == ListRef::Recent { t("ctx.remove_recent") } else { t("ctx.remove") };
             body.push(
-                ctx_item("ctx-remove".into(), "circle-minus", label, white(0.7), true, cx)
+                danger_item("ctx-remove".into(), "circle-minus", label, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.begin_ctx_close();
                         this.remove_from_list(&l, i, cx)

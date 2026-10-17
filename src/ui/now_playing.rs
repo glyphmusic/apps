@@ -133,7 +133,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(10.0))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(fmt_time(pos)))
-                .child(thin_bar("np-seek", 250.0, frac, seek, cx))
+                .child(thin_bar("np-seek", 250.0, frac, seek, dur.map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()))),
         )
         .child(
@@ -162,7 +162,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(10.0))
                 .child(icon("volume-2", 16.0, theme::text_dim()))
-                .child(thin_bar("np-vol", 150.0, app.volume(), vol, cx))
+                .child(thin_bar("np-vol", 150.0, app.volume(), vol, Some(Rc::new(|f: f32| format!("{:.0}%", f * 100.0)) as BarLabel), cx))
                 .child(
                     toggle_button("np-like", "heart", 16.0, liked, Some(theme::pink()))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -241,8 +241,11 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
     let synced = !l.synced.is_empty();
     let centered = app.lyrics_only;
 
-    let info = div().flex().justify_center().gap(px(8.0)).child(mode_switch(app, cx)).child(
-        pill()
+    // Mode switch on the left; provider / offset / match tucked behind an
+    // info button on the right that grows open.
+    let open_for = app.lyrics_info.map(|at| at.elapsed().as_secs_f32());
+    let grow = open_for.map(|t| 1.0 - (1.0 - (t / 0.22).min(1.0)).powi(3)).unwrap_or(0.0);
+    let details = pill()
             .px(px(6.0))
             .h(px(32.0))
             .gap(px(4.0))
@@ -266,8 +269,21 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
                         if synced { "lyrics.match_synced" } else { "lyrics.match_plain" },
                         &[("p", &format!("{:.1}", l.match_score * 100.0))],
                     )),
-            ),
-    );
+            );
+    let info_btn = toggle_button("lyrics-info", "info", 15.0, open_for.is_some(), None).on_click(cx.listener(|this, _, _, cx| {
+        mark_toggled("lyrics-info");
+        this.lyrics_info = if this.lyrics_info.is_some() { None } else { Some(std::time::Instant::now()) };
+        cx.notify();
+    }));
+    let info = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .when(centered, |d| d.justify_center())
+        .child(mode_switch(app, cx))
+        .child(div().flex_1())
+        .when(open_for.is_some(), |d| d.child(div().opacity(grow).ml(px(24.0 * (1.0 - grow))).child(details)))
+        .child(pill().px(px(3.0)).h(px(32.0)).child(info_btn));
 
     let body: gpui::AnyElement = if synced {
         let center = active.unwrap_or(0);
@@ -340,6 +356,6 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .gap(px(16.0))
         .pt(px(20.0))
         .child(info)
-        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full().child(scrollbar(&app.lyrics_scroll, cx)))
+        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full().child(scrollbar(&app.lyrics_scroll, true, cx)))
         .into_any_element()
 }

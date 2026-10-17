@@ -20,12 +20,20 @@ const PROMOTE_GRACE: Duration = Duration::from_millis(3000);
 
 // ------------------------------------------------------------------ pure parts
 
-/// `NearEnd` is due once, when at most [`NEAR_END`] remain.
-pub fn near_end_due(position: Duration, duration: Option<Duration>, already_sent: bool) -> bool {
+/// `NearEnd` is due once, when at most [`NEAR_END`] remain (plus the
+/// crossfade, so the next song is ready before the fade starts).
+pub fn near_end_due(position: Duration, duration: Option<Duration>, already_sent: bool, crossfade: Duration) -> bool {
     match duration {
-        Some(d) if !already_sent && !d.is_zero() => d.saturating_sub(position) <= NEAR_END,
+        Some(d) if !already_sent && !d.is_zero() => d.saturating_sub(position) <= NEAR_END + crossfade,
         _ => false,
     }
+}
+
+/// Equal-power gains (old, new) at fade progress `k` (0..1).
+pub fn fade_gains(k: f32) -> (f32, f32) {
+    let k = k.clamp(0.0, 1.0);
+    let a = k * std::f32::consts::FRAC_PI_2;
+    (a.cos(), a.sin())
 }
 
 fn same_track(a: &Track, b: &Track) -> bool {
@@ -110,6 +118,12 @@ pub(crate) struct Engine {
     embed_session: u64,
     mini_opts: MiniPlayerOptions,
     promoted: Option<(Instant, Track)>,
+    /// Crossfade length (0 = gapless).
+    crossfade: Duration,
+    /// With crossfade the next track waits on its own player.
+    next_player: Option<rodio::Player>,
+    /// The previous track while it fades out: (player, slot, fade start).
+    fading: Option<(rodio::Player, Slot, Instant)>,
 }
 
 impl Engine {
@@ -136,6 +150,9 @@ impl Engine {
             embed_session: 0,
             mini_opts: MiniPlayerOptions { always_on_top: false, position: None },
             promoted: None,
+            crossfade: Duration::ZERO,
+            next_player: None,
+            fading: None,
         }
     }
 
@@ -213,6 +230,7 @@ impl Engine {
             Cmd::Stop => self.stop(),
             Cmd::Seek(p) => self.seek(p),
             Cmd::Volume(v) => self.set_volume(v),
+            Cmd::Crossfade(d) => self.crossfade = d,
             Cmd::MiniOptions(o) => {
                 self.mini_opts = o;
                 if let Some(e) = self.embed.as_mut() {
@@ -246,7 +264,7 @@ impl Engine {
         }
         // Next track was preloaded and queued behind the current one: switch gaplessly.
         if matches!(source, PlaybackSource::Stream { .. } | PlaybackSource::Preview { .. }) {
-            if self.next.as_ref().is_some_and(|n| same_track(&n.track, &track)) && self.player.is_some() {
+            if self.next.as_ref().is_some_and(|n| same_track(&n.track, &track)) && self.player.is_some() && self.next_player.is_none() {
                 if let Some(cur) = self.cur.take() {
                     cur.ctl.stop.store(true, Ordering::SeqCst);
                 }
@@ -309,6 +327,10 @@ impl Engine {
 
     /// Stop everything native (decoders + output).
     fn stop_native(&mut self) {
+        self.finish_fade();
+        if let Some(p) = self.next_player.take() {
+            p.stop();
+        }
         for s in [self.cur.take(), self.next.take()].into_iter().flatten() {
             s.ctl.stop.store(true, Ordering::SeqCst);
         }
@@ -389,7 +411,16 @@ impl Engine {
             }
             let slot = self.make_slot(id, p.track, p.is_preview, &opened);
             let src = TrackSource::new(opened, slot.shared.clone(), self.tap.clone());
-            self.player.as_ref().unwrap().append(src);
+            if self.crossfade.is_zero() {
+                self.player.as_ref().unwrap().append(src);
+            } else if let Some(dev) = self.device.as_ref() {
+                // Waits paused on its own player until the fade starts.
+                let p = rodio::Player::connect_new(dev.mixer());
+                p.set_volume(0.0);
+                p.pause();
+                p.append(src);
+                self.next_player = Some(p);
+            }
             self.next = Some(slot);
         } else {
             opened.ctl.stop.store(true, Ordering::SeqCst); // cancelled meanwhile
@@ -487,6 +518,9 @@ impl Engine {
                 if let Some(p) = &self.player {
                     p.play();
                 }
+                if let Some((p, _, _)) = &self.fading {
+                    p.play();
+                }
             }
             None => {
                 if let Some((t, s)) = self.last_load.clone() {
@@ -498,6 +532,9 @@ impl Engine {
 
     fn pause(&mut self) {
         self.want_play = false;
+        if let Some((p, _, _)) = &self.fading {
+            p.pause();
+        }
         match self.backend() {
             Some(BackendKind::Embed) => {
                 if let Some(e) = self.embed.as_mut() {
@@ -528,6 +565,8 @@ impl Engine {
                 self.shared.state.lock().unwrap().position = pos;
             }
             Some(BackendKind::Native) => {
+                // Seeking ends a running fade right away.
+                self.finish_fade();
                 if self.pending_cur.is_some() {
                     self.pending_seek = Some(pos);
                 } else if self.cur.as_ref().is_some_and(|c| !c.ctl.done.load(Ordering::SeqCst))
@@ -561,7 +600,9 @@ impl Engine {
         self.volume = v;
         self.shared.state.lock().unwrap().volume = v;
         if let Some(p) = &self.player {
-            p.set_volume(v);
+            if self.fading.is_none() {
+                p.set_volume(v);
+            }
         }
         if let Some(e) = self.embed.as_mut() {
             e.set_volume(v);
@@ -661,7 +702,12 @@ impl Engine {
             let started = cur.shared.started.load(Ordering::Relaxed);
             let pos = Duration::from_secs_f64(cur.shared.pos_frames.load(Ordering::Relaxed) as f64 / cur.rate.max(1) as f64);
             let duration = cur.duration;
-            let due = near_end_due(pos, duration, cur.near_end_sent);
+            let due = near_end_due(pos, duration, cur.near_end_sent, self.crossfade);
+            let fade_due = !self.crossfade.is_zero()
+                && self.fading.is_none()
+                && self.next_player.is_some()
+                && started
+                && duration.is_some_and(|d| d.saturating_sub(pos) <= self.crossfade);
             if due {
                 cur.near_end_sent = true;
             }
@@ -697,13 +743,59 @@ impl Engine {
                     *self.shared.spectrum.lock().unwrap() = bands;
                     analysed = true;
                 }
+                if fade_due {
+                    self.start_fade();
+                }
             } else {
                 self.on_current_finished();
             }
         }
+        self.step_fade();
         if !analysed {
             let bands = self.analyzer.decay();
             *self.shared.spectrum.lock().unwrap() = bands;
+        }
+    }
+
+    // ---- crossfade
+
+    /// The next song starts on its own player while the current one fades out.
+    fn start_fade(&mut self) {
+        let (Some(next_player), Some(old_player), Some(old)) = (self.next_player.take(), self.player.take(), self.cur.take()) else {
+            return;
+        };
+        next_player.set_volume(0.0);
+        if self.want_play {
+            next_player.play();
+        }
+        self.player = Some(next_player);
+        self.fading = Some((old_player, old, Instant::now()));
+        // The UI moves on now (its `load()` of this track is ignored as promoted).
+        self.emit(PlayerEvent::Ended);
+        self.promote_next();
+    }
+
+    fn step_fade(&mut self) {
+        let Some((old_player, _, at)) = &self.fading else { return };
+        let k = at.elapsed().as_secs_f32() / self.crossfade.as_secs_f32().max(0.001);
+        let (g_old, g_new) = fade_gains(k);
+        old_player.set_volume(self.volume * g_old);
+        if let Some(p) = &self.player {
+            p.set_volume(self.volume * g_new);
+        }
+        if k >= 1.0 {
+            self.finish_fade();
+        }
+    }
+
+    /// Drops the faded-out track and puts the new one at full volume.
+    fn finish_fade(&mut self) {
+        if let Some((old_player, old, _)) = self.fading.take() {
+            old.ctl.stop.store(true, Ordering::SeqCst);
+            old_player.stop();
+            if let Some(p) = &self.player {
+                p.set_volume(self.volume);
+            }
         }
     }
 
@@ -747,10 +839,22 @@ mod tests {
     #[test]
     fn near_end_fires_once_within_ten_seconds() {
         let d = Some(Duration::from_secs(100));
-        assert!(!near_end_due(Duration::from_secs(80), d, false));
-        assert!(near_end_due(Duration::from_secs(90), d, false));
-        assert!(!near_end_due(Duration::from_secs(95), d, true));
-        assert!(!near_end_due(Duration::from_secs(95), None, false));
+        let z = Duration::ZERO;
+        assert!(!near_end_due(Duration::from_secs(80), d, false, z));
+        assert!(near_end_due(Duration::from_secs(90), d, false, z));
+        assert!(!near_end_due(Duration::from_secs(95), d, true, z));
+        assert!(!near_end_due(Duration::from_secs(95), None, false, z));
+        // With a 12 s crossfade the next song is requested 22 s before the end.
+        assert!(near_end_due(Duration::from_secs(78), d, false, Duration::from_secs(12)));
+    }
+
+    #[test]
+    fn crossfade_gains_are_equal_power() {
+        assert_eq!(fade_gains(0.0), (1.0, 0.0));
+        let (a, b) = fade_gains(0.5);
+        assert!((a * a + b * b - 1.0).abs() < 1e-5);
+        let (a, b) = fade_gains(1.0);
+        assert!(a.abs() < 1e-6 && (b - 1.0).abs() < 1e-6);
     }
 
     #[test]

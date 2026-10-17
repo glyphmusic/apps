@@ -236,6 +236,8 @@ pub struct Glyph {
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
     pub nav_leave: Option<(View, Instant, f32)>,
+    /// Lyrics options open (since when, for the grow animation).
+    pub lyrics_info: Option<Instant>,
     /// Sidebar list tile under the mouse (tooltip).
     pub side_hover: Option<(usize, Instant)>,
     pub playlist_name: Entity<TextInput>,
@@ -464,6 +466,7 @@ impl Glyph {
                 .unwrap_or(true)
                 .then(crate::ui::splash::Splash::new),
             nav_leave: None,
+            lyrics_info: None,
             side_hover: None,
             playlist_name,
             glow,
@@ -570,6 +573,7 @@ impl Glyph {
                 match player {
                     Ok(p) => {
                         let p = Arc::new(p);
+                        p.set_crossfade(Duration::from_secs(s.config.audio.crossfade_s as u64));
                         s.player_events = guard(|| p.events());
                         s.player_ok = true;
                         s.glow.update(cx, |g, _| g.set_player(Some(p.clone())));
@@ -625,6 +629,9 @@ impl Glyph {
         let intensity = config.visuals.intensity;
         self.glow.update(cx, |g, _| g.set_intensity(intensity));
         self.config = config;
+        if let Some(p) = &self.player {
+            p.set_crossfade(Duration::from_secs(self.config.audio.crossfade_s as u64));
+        }
         cx.notify();
     }
 
@@ -765,6 +772,9 @@ impl Glyph {
         if crate::theme::update_inks() {
             dirty = true;
         }
+        if crate::ui::widgets::step_smooth_scroll() {
+            dirty = true;
+        }
         // Requests from another launch (jump list click, second start).
         while let Some(req) = crate::instance::try_recv() {
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
@@ -811,7 +821,9 @@ impl Glyph {
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
         let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200)) || self.ctx_closing.is_some();
         let tip_anim = self.side_hover.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(600));
+        let info_anim = self.lyrics_info.is_some_and(|at| at.elapsed() < Duration::from_millis(300));
         toast_fading
+            || info_anim
             || tip_anim
             || menu_anim
             || self.splash.is_some()
@@ -970,6 +982,7 @@ impl Glyph {
         let seq = self.search.seq;
         if self.view != View::Search && !q.trim().is_empty() {
             self.view = View::Search;
+            self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         }
         if q.trim().is_empty() {
             self.search.task = None;
@@ -2163,6 +2176,16 @@ impl Glyph {
             let cfg = self.config.clone();
             guard(|| b.set_config(cfg));
         }
+        cx.notify();
+    }
+
+    /// Crossfade between songs, 0 (off) to 20 s.
+    pub fn set_crossfade(&mut self, secs: u32, cx: &mut Context<Self>) {
+        self.config.audio.crossfade_s = secs.min(20);
+        if let Some(p) = &self.player {
+            p.set_crossfade(Duration::from_secs(self.config.audio.crossfade_s as u64));
+        }
+        self.save_config(cx);
         cx.notify();
     }
 

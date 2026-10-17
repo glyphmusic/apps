@@ -350,20 +350,24 @@ pub fn fmt_ms(ms: Option<u64>) -> String {
 thread_local! {
     /// Bar being dragged: (bar id, current fraction).
     static BAR_DRAG: std::cell::Cell<Option<(&'static str, f32)>> = const { std::cell::Cell::new(None) };
-    /// Bar under the mouse (shows the knob).
+    /// Bar under the mouse (shows the knob) and the mouse fraction on it.
     static BAR_HOVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static BAR_HOVER_AT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
+
+/// Formats a bar fraction for the little label above it ("1:23", "64%").
+pub type BarLabel = Rc<dyn Fn(f32) -> String>;
 
 /// Thin progress / volume bar: click or drag anywhere on it. Volume-like bars
 /// apply while dragging; seek bars (`id` contains "seek") show the dragged
 /// position and seek once on release.
-pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, cx: &mut Context<crate::app::Glyph>) -> Div {
+pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: Option<BarLabel>, cx: &mut Context<crate::app::Glyph>) -> Div {
     let view = cx.entity().downgrade();
     let live = !id.contains("seek");
     div().flex_none().w(px(width)).h(px(14.0)).child(
         gpui::canvas(
             |_, _, _| (),
-            move |bounds, _, window, _| {
+            move |bounds, _, window, app_cx| {
                 let drag = BAR_DRAG.with(|d| d.get()).filter(|(d, _)| *d == id);
                 let shown = drag.map(|(_, f)| f).unwrap_or(frac).clamp(0.0, 1.0);
                 let hot = drag.is_some() || BAR_HOVER.with(|h| h.get()) == Some(id);
@@ -386,6 +390,26 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, cx: &mut
                     let knob = gpui::Bounds { origin: gpui::point(px(x0 + fill_w - k / 2.0), px(cy - k / 2.0)), size: gpui::size(px(k), px(k)) };
                     window.paint_quad(quad(knob, k / 2.0, gpui::white()));
                 }
+                // Value above the bar: where you drag to, or where the mouse points.
+                if let Some(fmt) = label.as_ref().filter(|_| hot) {
+                    let at = drag.map(|(_, f)| f).unwrap_or_else(|| BAR_HOVER_AT.with(|h| h.get())).clamp(0.0, 1.0);
+                    let text: SharedString = fmt(at).into();
+                    let run = gpui::TextRun {
+                        len: text.len(),
+                        font: gpui::font(theme::MONO),
+                        color: gpui::hsla(0.0, 0.0, 1.0, 0.95),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let line = window.text_system().shape_line(text, px(11.0), &[run], None);
+                    let tw = f32::from(line.width) + 12.0;
+                    let lx = (x0 + w * at - tw / 2.0).clamp(x0 - 20.0, x0 + w + 20.0 - tw);
+                    let ly = cy - 30.0;
+                    let pill = gpui::Bounds { origin: gpui::point(px(lx), px(ly)), size: gpui::size(px(tw), px(19.0)) };
+                    window.paint_quad(quad(pill, 5.0, gpui::hsla(0.0, 0.0, 0.12, 0.98)));
+                    let _ = line.paint(gpui::point(px(lx + 6.0), px(ly + 2.0)), px(15.0), gpui::TextAlign::Left, None, window, app_cx);
+                }
                 let frac_at = move |x: f32| ((x - x0) / w.max(1.0)).clamp(0.0, 1.0);
                 let (p1, p2, p3) = (on_pick.clone(), on_pick.clone(), on_pick.clone());
                 let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
@@ -406,6 +430,10 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, cx: &mut
                 window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, window, cx| {
                     let over = hit.contains(&e.position);
                     let was = BAR_HOVER.with(|h| h.get()) == Some(id);
+                    if over {
+                        BAR_HOVER_AT.with(|h| h.set(frac_at(f32::from(e.position.x))));
+                        v2.update(cx, |_, cx| cx.notify()).ok();
+                    }
                     if over != was {
                         BAR_HOVER.with(|h| h.set(if over { Some(id) } else { None }));
                         v2.update(cx, |_, cx| cx.notify()).ok();
@@ -870,6 +898,29 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
 // ---- scrollbar ------------------------------------------------------------
 
 thread_local! {
+    /// Smooth wheel scrolling in progress: (handle, target offset y).
+    static SMOOTH: std::cell::RefCell<Option<(gpui::ScrollHandle, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One animation step of smooth wheel scrolling; true while it still moves.
+/// Called from the app's 16 ms poll.
+pub fn step_smooth_scroll() -> bool {
+    SMOOTH.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some((h, target)) = s.as_ref() else { return false };
+        let cur = f32::from(h.offset().y);
+        let next = cur + (*target - cur) * 0.28;
+        if (target - next).abs() < 0.5 {
+            h.set_offset(gpui::point(px(0.0), px(*target)));
+            *s = None;
+        } else {
+            h.set_offset(gpui::point(px(0.0), px(next)));
+        }
+        true
+    })
+}
+
+thread_local! {
     /// Thumb being dragged: (scroll handle, mouse y at grab, scroll y at grab).
     static SCROLL_DRAG: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
 }
@@ -877,7 +928,7 @@ thread_local! {
 /// Thin overlay scrollbar for a frame tracked by `handle` (shown only when
 /// there is something to scroll). The thumb can be dragged; clicking the
 /// track jumps there.
-pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph>) -> AnyElement {
+pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<crate::app::Glyph>) -> AnyElement {
     let handle = handle.clone();
     let view = cx.entity().downgrade();
     // What the edge fades / this bar were rendered with. The handle only learns
@@ -895,6 +946,11 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
                     let max = f32::from(handle.max_offset().y);
+                    // A page shorter than the one before can be left scrolled
+                    // past its end (nothing to scroll back with): clamp it.
+                    if -f32::from(handle.offset().y) > max.max(0.0) + 0.5 {
+                        handle.set_offset(gpui::point(px(0.0), px(-max.max(0.0))));
+                    }
                     let now = (f32::from(handle.offset().y), max);
                     if (now.0 - rendered.0).abs() > 0.5 || (now.1 - rendered.1).abs() > 0.5 {
                         let v = view.clone();
@@ -904,6 +960,30 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph
                     }
                     if max <= 1.0 {
                         return;
+                    }
+                    // Mouse wheel: take the step over (before the scroll view
+                    // jumps) and glide there over a few frames.
+                    if smooth {
+                        let hs = handle.clone();
+                        let vs = view.clone();
+                        window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                            if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
+                                return;
+                            }
+                            let gpui::ScrollDelta::Lines(lines) = e.delta else { return };
+                            if lines.y == 0.0 {
+                                return;
+                            }
+                            let max = f32::from(hs.max_offset().y);
+                            let base = SMOOTH.with(|s| {
+                                s.borrow().as_ref().filter(|(h, _)| h.bounds() == hs.bounds()).map(|(_, t)| *t)
+                            });
+                            let from = base.unwrap_or_else(|| f32::from(hs.offset().y));
+                            let target = (from + lines.y * 56.0).clamp(-max, 0.0);
+                            SMOOTH.with(|s| *s.borrow_mut() = Some((hs.clone(), target)));
+                            cx.stop_propagation();
+                            vs.update(cx, |_, cx| cx.notify()).ok();
+                        });
                     }
                     let track_h = f32::from(bounds.size.height);
                     let view_h = f32::from(handle.bounds().size.height).max(1.0);
