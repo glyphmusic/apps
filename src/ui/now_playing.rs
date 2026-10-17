@@ -12,7 +12,7 @@ use gpui::{canvas, div, prelude::*, px, Context, FontWeight, SharedString, Windo
 use std::rc::Rc;
 use std::time::Duration;
 
-const COVER: f32 = 280.0;
+pub(crate) const COVER: f32 = 280.0;
 
 pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let Some(track) = app.current.clone() else {

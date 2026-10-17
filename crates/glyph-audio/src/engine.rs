@@ -260,6 +260,7 @@ impl Engine {
         match cmd {
             Cmd::Load(track, source) => self.load(track, source),
             Cmd::Preload(track, source) => self.preload(track, source),
+            Cmd::DropNext => self.drop_next(),
             Cmd::Play => self.play(),
             Cmd::Pause => self.pause(),
             Cmd::Toggle => {
@@ -593,6 +594,23 @@ impl Engine {
         let id = self.alloc_id();
         self.pending_next = Some(Pending { id, track, is_preview });
         native::spawn_decoder(id, url, mime, self.tx.clone());
+    }
+
+    /// The queue changed after the next song was preloaded: drop it, so the
+    /// current song ends normally and the UI starts the real next one.
+    fn drop_next(&mut self) {
+        self.pending_next = None;
+        if let Some(n) = self.next.take() {
+            // A gapless next sits behind the current one on the same player;
+            // stopped, it ends at once when reached.
+            n.ctl.stop.store(true, Ordering::SeqCst);
+        }
+        if let Some(p) = self.next_player.take() {
+            p.stop();
+        }
+        if let Some(cur) = self.cur.as_mut() {
+            cur.near_end_sent = false;
+        }
     }
 
     fn promote_next(&mut self) {
@@ -964,8 +982,9 @@ impl Engine {
         self.player = Some(next_player);
         self.fading = Some((old_player, old, Instant::now()));
         // The UI moves on now (its `load()` of this track is ignored as promoted).
-        self.emit(PlayerEvent::Ended);
+        // Promote first so the UI already sees the new track with `Ended`.
         self.promote_next();
+        self.emit(PlayerEvent::Ended);
     }
 
     fn step_fade(&mut self) {
@@ -999,8 +1018,8 @@ impl Engine {
             }
         }
         if self.next.is_some() {
-            self.emit(PlayerEvent::Ended);
             self.promote_next();
+            self.emit(PlayerEvent::Ended);
         } else {
             self.cur = None;
             if let Some(p) = self.player.take() {

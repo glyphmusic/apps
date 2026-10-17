@@ -377,6 +377,12 @@ impl Iterator for TrackSource {
 
     fn next(&mut self) -> Option<f32> {
         if self.idx >= self.cur.len() {
+            // Dropped (e.g. a preloaded next song that is no longer next):
+            // end now instead of playing what is still buffered.
+            if self.ctl.stop.load(Ordering::SeqCst) {
+                self.shared.finished.store(true, Ordering::SeqCst);
+                return None;
+            }
             let gen = self.ctl.gen.load(Ordering::SeqCst);
             loop {
                 match self.rx.try_recv() {

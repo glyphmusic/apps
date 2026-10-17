@@ -303,6 +303,11 @@ pub struct Glyph {
     /// [`App::retry_expired_preview`]); reset whenever playback starts.
     pub retried_expired: Option<Track>,
     pub resolving: bool,
+    /// Next song handed to the player for a gapless start:
+    /// (queue `track_key`, resolved track the player knows it as).
+    preloaded: Option<(String, Track)>,
+    /// Volume to go back to when unmuting from the speaker icon.
+    unmute_volume: f32,
     pub palette: Option<Palette>,
     pub cover: Option<CoverArt>,
 
@@ -613,6 +618,8 @@ impl Glyph {
             current_preview: false,
             retried_expired: None,
             resolving: false,
+            preloaded: None,
+            unmute_volume: 0.8,
             palette: None,
             cover: None,
             search: SearchState::default(),
@@ -1584,12 +1591,24 @@ impl Glyph {
     }
 
     pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        self.start_track(track, None, cx);
+    }
+
+    /// `adopted`: the player already moved on to this song gaplessly (as the
+    /// given resolved track), so only the UI follows; nothing is reloaded.
+    fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
         let key = track_key(&track);
         self.current = Some(track.clone());
-        self.current_source = Some(track.source);
-        self.current_preview = false;
+        self.current_source = Some(adopted.as_ref().map_or(track.source, |a| a.source));
+        self.current_preview = adopted.is_some() && self.player_state.as_ref().is_some_and(|s| s.is_preview);
         self.retried_expired = None;
-        self.resolving = true;
+        self.resolving = adopted.is_none();
+        if adopted.is_none() {
+            self.preloaded = None;
+            // Fade the old song out right away instead of letting it run
+            // until the new one has loaded.
+            self.with_player(|p| p.pause());
+        }
         if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
             self.library.record_play(&track);
             self.save_library(cx);
@@ -1601,6 +1620,11 @@ impl Glyph {
             g.set_palette(Some(palette));
             g.set_preset(Preset::from_seed(&seed));
         });
+        // The player bar and Now Playing cover "ASCII in" again with every new
+        // song, also when that cover was already shown somewhere before.
+        for size in [crate::ui::player_bar::COVER, crate::ui::now_playing::COVER] {
+            crate::ui::widgets::reset_reveals(&format!("cover:{key}:{size}"));
+        }
         self.cover = Some(CoverArt {
             key: key.clone(),
             path: None,
@@ -1621,39 +1645,43 @@ impl Glyph {
         };
 
         // Resolve → load → play.
-        let b = backend.clone();
-        let t = track.clone();
-        let k = key.clone();
-        cx.spawn(async move |this, cx| {
-            let r = guard_async(b.resolve(&t)).await;
-            this.update(cx, |s, cx| {
-                if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
-                    return;
-                }
-                s.resolving = false;
-                match r {
-                    Ok(Some(res)) => {
-                        s.current_source = Some(res.source.provider());
-                        s.current_preview =
-                            matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
-                        let src = res.source.clone();
-                        let tr = res.track.clone();
-                        s.with_player(move |p| {
-                            p.load(tr, src);
-                            p.play();
-                        });
-                        // Now that this song runs, get the next ones ready
-                        // (local yt-dlp only; one batch run, not one wait per song).
-                        s.prefetch_upcoming();
+        if adopted.is_some() {
+            self.prefetch_upcoming();
+        } else {
+            let b = backend.clone();
+            let t = track.clone();
+            let k = key.clone();
+            cx.spawn(async move |this, cx| {
+                let r = guard_async(b.resolve(&t)).await;
+                this.update(cx, |s, cx| {
+                    if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
+                        return;
                     }
-                    Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
-                    Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
-                }
-                cx.notify();
+                    s.resolving = false;
+                    match r {
+                        Ok(Some(res)) => {
+                            s.current_source = Some(res.source.provider());
+                            s.current_preview =
+                                matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
+                            let src = res.source.clone();
+                            let tr = res.track.clone();
+                            s.with_player(move |p| {
+                                p.load(tr, src);
+                                p.play();
+                            });
+                            // Now that this song runs, get the next ones ready
+                            // (local yt-dlp only; one batch run, not one wait per song).
+                            s.prefetch_upcoming();
+                        }
+                        Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
+                        Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
+                    }
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
 
         // Lyrics.
         let b = backend.clone();
@@ -1730,7 +1758,21 @@ impl Glyph {
     }
 
     pub fn set_volume(&mut self, v: f32) {
-        self.with_player(|p| p.set_volume(v.clamp(0.0, 1.0)));
+        let v = v.clamp(0.0, 1.0);
+        if v > 0.001 {
+            self.unmute_volume = v;
+        }
+        self.with_player(|p| p.set_volume(v));
+    }
+
+    /// Speaker icon: mute, or back to the volume before muting.
+    pub fn toggle_mute(&mut self) {
+        let muted = self.volume() <= 0.001;
+        if !muted {
+            self.unmute_volume = self.volume();
+        }
+        let v = if muted { self.unmute_volume } else { 0.0 };
+        self.with_player(|p| p.set_volume(v));
     }
 
     pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {
@@ -1739,8 +1781,17 @@ impl Glyph {
                 self.library.record_skip(&cur);
             }
         }
+        let preloaded = self.preloaded.take();
         match guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() }) {
-            Some(Some(t)) => self.play_track(t, cx),
+            Some(Some(t)) => {
+                // Ended on its own and the player already runs the preloaded
+                // next song: follow it instead of resolving and loading again.
+                let playing = self.player.as_ref().and_then(|p| guard(|| p.state().track)).flatten();
+                let adopted = preloaded.filter(|(k, r)| {
+                    auto && *k == track_key(&t) && playing.as_ref().is_some_and(|p| p.id == r.id && p.source == r.source)
+                });
+                self.start_track(t, adopted.map(|(_, r)| r), cx);
+            }
             Some(None) => {
                 if self.radio {
                     self.start_radio(cx);
@@ -1825,13 +1876,37 @@ impl Glyph {
     fn preload_next(&mut self, cx: &mut Context<Self>) {
         let Some(Some(next)) = guard(|| self.queue.peek_next().cloned()) else { return };
         let Some(b) = self.backend.clone() else { return };
+        let cur = self.current.as_ref().map(track_key);
+        let want = track_key(&next);
         cx.spawn(async move |this, cx| {
             if let Ok(Some(res)) = guard_async(b.resolve(&next)).await {
-                this.update(cx, |s, _| s.with_player(|p| p.preload_next(res.track, res.source)))
-                    .ok();
+                this.update(cx, |s, _| {
+                    // Resolving can take a while: if another song started or
+                    // the queue changed meanwhile, this one is not next anymore.
+                    if s.current.as_ref().map(track_key) != cur || s.next_key().as_deref() != Some(want.as_str()) {
+                        return;
+                    }
+                    s.preloaded = Some((want, res.track.clone()));
+                    s.with_player(|p| p.preload_next(res.track, res.source));
+                })
+                .ok();
             }
         })
         .detach();
+    }
+
+    fn next_key(&self) -> Option<String> {
+        guard(|| self.queue.peek_next().map(track_key)).flatten()
+    }
+
+    /// After a queue edit: a preloaded song that is no longer next must not
+    /// start after the current one (the player then asks for the new next).
+    fn queue_changed(&mut self) {
+        let stale = self.preloaded.as_ref().is_some_and(|(k, _)| self.next_key().as_deref() != Some(k.as_str()));
+        if stale {
+            self.preloaded = None;
+            self.with_player(|p| p.drop_next());
+        }
     }
 
     /// Queue finished: continue with similar tracks (Last.fm getSimilar).
@@ -1860,6 +1935,7 @@ impl Glyph {
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         let on = !self.shuffle();
         guard(|| self.queue.set_shuffle(on));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -1870,6 +1946,7 @@ impl Glyph {
             RepeatMode::One => RepeatMode::Off,
         };
         guard(|| self.queue.set_repeat(next));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -1893,16 +1970,19 @@ impl Glyph {
             Some(()) => self.toast_info(tf(if next { "toast.play_next" } else { "toast.queued" }, &[("title", &title)])),
             None => self.toast_info("[ QUEUE OFFLINE ]"),
         }
+        self.queue_changed();
         cx.notify();
     }
 
     pub fn queue_remove(&mut self, i: usize, cx: &mut Context<Self>) {
         guard(|| self.queue.remove(i));
+        self.queue_changed();
         cx.notify();
     }
 
     pub fn queue_move(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         guard(|| self.queue.move_item(from, to));
+        self.queue_changed();
         cx.notify();
     }
 
@@ -2721,6 +2801,7 @@ impl Glyph {
         for tr in tracks {
             guard(|| self.queue.push(tr));
         }
+        self.queue_changed();
         self.toast(tf("toast.queued_n", &[("n", &n)]));
         cx.notify();
     }

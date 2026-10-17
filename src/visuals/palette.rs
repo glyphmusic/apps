@@ -235,4 +235,9 @@ impl PaletteFade {
     pub fn target(&self) -> Option<Palette> {
         self.to
     }
+
+    /// The last fade has finished (the colours no longer change).
+    pub fn settled(&self) -> bool {
+        self.progress() >= 1.0
+    }
 }

@@ -292,7 +292,6 @@ impl Worker {
 
 pub struct GlowView {
     noise: OpenSimplex,
-    t0: Instant,
     last_tick: Instant,
     preset: Preset,
     prev_preset: Preset,
@@ -305,6 +304,13 @@ pub struct GlowView {
     bands: [f32; 3],
     pulse: f32,
     intensity: f32,
+    /// Field clock (s). Stands still while the intensity is 0.
+    anim_t: f32,
+    /// How much the field moves (1 = normal, 0 = still at intensity 0).
+    motion_k: f32,
+    /// Size + scroll of the last frame drawn while still: nothing new to
+    /// compute until one of them changes.
+    still_drawn: Option<(f32, f32, f32)>,
     active: bool,
     /// Last size change (resize in progress → hold the frame).
     moved_at: Instant,
@@ -382,7 +388,6 @@ impl GlowView {
         let now = Instant::now();
         Self {
             noise: OpenSimplex::new(0x61_79_70_68),
-            t0: now,
             last_tick: now,
             preset: Preset::Strahl,
             prev_preset: Preset::Strahl,
@@ -395,6 +400,9 @@ impl GlowView {
             bands: [0.0; 3],
             pulse: 0.0,
             intensity: 0.8,
+            anim_t: 0.0,
+            motion_k: 1.0,
+            still_drawn: None,
             active: true,
             moved_at: now - Duration::from_secs(10),
             window_size: window.bounds().size,
@@ -519,7 +527,14 @@ impl GlowView {
         if self.moved_at.elapsed() < Duration::from_millis(250) || self.busy {
             return fresh;
         }
-        let t = (now - self.t0).as_secs_f32();
+        // Intensity 0: the background stands still (eases to a stop).
+        let k_target = if self.intensity > 0.0 { 1.0 } else { 0.0 };
+        self.motion_k += (k_target - self.motion_k) * (1.0 - (-dt * 3.0).exp());
+        if (k_target - self.motion_k).abs() < 0.002 {
+            self.motion_k = k_target;
+        }
+        self.anim_t += dt * self.motion_k;
+        let t = self.anim_t;
         let target = if self.playing_target { 1.0 } else { 0.0 };
         self.playing += (target - self.playing) * (1.0 - (-dt * 1.2).exp());
         let raw = self.read_spectrum();
@@ -534,11 +549,23 @@ impl GlowView {
         if w < 8.0 || h < 8.0 {
             return fresh;
         }
-        let [bass, mids, highs] = self.bands;
-        let mut motion = Motion::new(&self.noise, t, self.playing, bass, mids);
-        motion.gain += self.pulse * 0.25;
-        let (pal, blend) = self.fade.current();
+        let mk = self.motion_k;
+        let [bass, mids, highs] = self.bands.map(|b| b * mk);
+        let pulse = self.pulse * mk;
         let preset_t = (self.preset_since.elapsed().as_secs_f32() / PRESET_FADE).min(1.0);
+        let mut still_key = None;
+        if mk == 0.0 {
+            // Still: draw again only when the picture can differ.
+            let key = (w, h, self.scroll);
+            let settled = self.fade.settled() && preset_t >= 1.0 && (target - self.playing).abs() < 0.001;
+            if settled && self.glow_img.is_some() && self.ascii_img.is_some() && self.still_drawn == Some(key) {
+                return fresh;
+            }
+            still_key = settled.then_some(key);
+        }
+        let mut motion = Motion::new(&self.noise, t, self.playing, bass, mids);
+        motion.gain += pulse * 0.25;
+        let (pal, blend) = self.fade.current();
         let job = Job {
             w,
             h,
@@ -551,9 +578,10 @@ impl GlowView {
             level: 0.5 + 0.5 * self.intensity,
             density: 0.75 + 0.45 * highs + 0.08 * self.playing,
             threshold: 0.42 - 0.06 * highs,
-            // 15 fps normally, every frame while the page scrolls.
-            ascii: self.frame_no % 2 == 0 || self.ascii_img.is_none() || (self.scroll - self.ascii_scroll).abs() > 0.5,
-            dot_level: 0.18 + 0.14 * self.intensity + 0.28 * bass + 0.10 * self.pulse,
+            // 15 fps normally, every frame while the page scrolls or stands still
+            // (a still frame is the last one for a while).
+            ascii: self.frame_no % 2 == 0 || mk == 0.0 || self.ascii_img.is_none() || (self.scroll - self.ascii_scroll).abs() > 0.5,
+            dot_level: 0.18 + 0.14 * self.intensity + 0.28 * bass + 0.10 * pulse,
             blend,
             scroll: self.scroll,
         };
@@ -563,6 +591,7 @@ impl GlowView {
         self.frame_no += 1;
         if self.jobs.try_send(job).is_ok() {
             self.busy = true;
+            self.still_drawn = still_key;
         }
         fresh
     }
