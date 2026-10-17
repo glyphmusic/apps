@@ -309,32 +309,51 @@ pub fn window_pill() -> impl IntoElement {
         .child(btn("win-close", "x", WindowControlArea::Close))
 }
 
+/// Seconds an icon takes to ease back after the mouse leaves.
+pub const NAV_EASE_BACK: f32 = 0.3;
+
+/// (rotation rad, lift px, scale) of a sidebar icon `t` seconds into hover.
+fn nav_motion(view: View, t: f32) -> (f32, f32, f32) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    match view {
+        View::NowPlaying => (t * TAU / 1.4, 0.0, 1.0),
+        View::Settings => {
+            let k = (t / 0.5).min(1.0);
+            ((1.0 - (1.0 - k).powi(3)) * FRAC_PI_2, 0.0, 1.0)
+        }
+        View::Home => {
+            let k = (t / 0.35).min(1.0);
+            (0.0, -3.0 * (k * PI).sin(), 1.0)
+        }
+        View::Search => (0.25 * (t * 18.0).sin() * (-t * 5.0).exp(), 0.0, 1.0),
+        _ => {
+            let k = (t / 0.3).min(1.0);
+            (0.0, 0.0, 1.0 + 0.16 * (k * PI).sin())
+        }
+    }
+}
+
 pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let item = |id: &'static str, name: &'static str, view: View, cx: &mut Context<Glyph>| {
         let active = if view == View::Settings { app.settings_open } else { app.view == view && !app.settings_open };
         // Hover animation per icon: the disc spins, the gear turns, the house
-        // hops, the magnifier wiggles, the library pops.
-        let t = app.nav_hover.filter(|(v, _)| *v == view).map(|(_, at)| at.elapsed().as_secs_f32());
-        let tf = match t {
-            None => gpui::Transformation::rotate(gpui::radians(0.0)),
-            Some(t) => match view {
-                View::NowPlaying => gpui::Transformation::rotate(gpui::radians(t * std::f32::consts::TAU / 1.4)),
-                View::Settings => {
-                    let k = (t / 0.5).min(1.0);
-                    gpui::Transformation::rotate(gpui::radians((1.0 - (1.0 - k).powi(3)) * std::f32::consts::FRAC_PI_2))
-                }
-                View::Home => {
-                    let k = (t / 0.35).min(1.0);
-                    gpui::Transformation::translate(gpui::point(px(0.0), px(-3.0 * (k * std::f32::consts::PI).sin())))
-                }
-                View::Search => gpui::Transformation::rotate(gpui::radians(0.25 * (t * 18.0).sin() * (-t * 5.0).exp())),
-                _ => {
-                    let k = (t / 0.3).min(1.0);
-                    let s = 1.0 + 0.16 * (k * std::f32::consts::PI).sin();
-                    gpui::Transformation::scale(gpui::size(s, s))
-                }
-            },
+        // hops, the magnifier wiggles, the library pops. On leave it eases back.
+        let (angle, dy, scale) = match (app.nav_hover, app.nav_leave) {
+            (Some((v, at)), _) if v == view => nav_motion(view, at.elapsed().as_secs_f32()),
+            (_, Some((v, at, t_left))) if v == view => {
+                let k = (at.elapsed().as_secs_f32() / NAV_EASE_BACK).min(1.0);
+                let back = 1.0 - (1.0 - k).powi(3);
+                let (a, dy, s) = nav_motion(view, t_left);
+                // The disc finishes its turn instead of spinning backwards.
+                let a = a.rem_euclid(std::f32::consts::TAU);
+                let target = if view == View::NowPlaying && a > std::f32::consts::PI { std::f32::consts::TAU } else { 0.0 };
+                (a + (target - a) * back, dy * (1.0 - back), 1.0 + (s - 1.0) * (1.0 - back))
+            }
+            _ => (0.0, 0.0, 1.0),
         };
+        let tf = gpui::Transformation::rotate(gpui::radians(angle))
+            .with_translation(gpui::point(px(0.0), px(dy)))
+            .with_scaling(gpui::size(scale, scale));
         div()
             .id(id)
             .w(px(44.0))
@@ -349,8 +368,9 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.nav_hover = Some((view, std::time::Instant::now()));
-                } else if this.nav_hover.is_some_and(|(v, _)| v == view) {
+                } else if let Some((v, at)) = this.nav_hover.filter(|(v, _)| *v == view) {
                     this.nav_hover = None;
+                    this.nav_leave = Some((v, std::time::Instant::now(), at.elapsed().as_secs_f32()));
                 }
                 cx.notify();
             }))
