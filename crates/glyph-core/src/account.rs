@@ -294,6 +294,54 @@ impl Backend {
         session().lock().unwrap().as_ref().map(|l| l.stored.clone()).filter(|s| s.server == base)
     }
 
+    /// Text to share for a list: a short link when signed in on the public
+    /// server, else (or when that fails) the `glyph:playlist:` code. A list
+    /// opened from a link and not changed since shares that same link, so its
+    /// author stays the original one. `kind` is "album" for an artist's album.
+    pub async fn share_text(&self, name: &str, tracks: &[Track], kind: &str, origin: Option<String>) -> String {
+        let code = crate::share::encode(name, tracks);
+        let official = self.cur().config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(crate::config::DEFAULT_SERVER_URL);
+        if !official || self.account().is_none() {
+            return code;
+        }
+        let Ok(c) = self.account_client() else { return code };
+        let (code2, name, songs, kind) = (code.clone(), name.to_string(), tracks.len(), kind.to_string());
+        let r = self
+            .spawn(async move {
+                if let Some(link) = origin.filter(|o| crate::share::link_id(o).is_some()) {
+                    let id = crate::share::link_id(&link).unwrap_or_default();
+                    if c.shared_playlist(&id).await.is_ok_and(|p| crate::share::same_songs(&p.code, &code2)) {
+                        return Ok(link);
+                    }
+                }
+                with_auth(&c, |t| {
+                    let (c, code, name, kind) = (c.clone(), code2.clone(), name.clone(), kind.clone());
+                    async move { c.share_playlist(&t, &code, &name, songs, &kind).await }
+                })
+                .await
+            })
+            .await;
+        match r {
+            Ok(Ok(link)) => link,
+            Ok(Err(e)) | Err(e) => {
+                tracing::info!("short playlist link failed, sharing the code: {e:#}");
+                code
+            }
+        }
+    }
+
+    /// The playlist behind a short link (see [`crate::share::link_id`]).
+    pub async fn resolve_share_link(&self, link: &str) -> Result<crate::server_client::SharedPlaylist> {
+        let id = crate::share::link_id(link).ok_or_else(|| anyhow!("not a Glyph playlist link"))?;
+        let inner = self.cur();
+        let server = match inner.server.clone() {
+            Some(s) => s,
+            // Links always live on the public server.
+            None => ServerClient::new(crate::config::DEFAULT_SERVER_URL, inner.http.clone(), crate::server_client::install_id()),
+        };
+        self.spawn(async move { server.shared_playlist(&id).await }).await?
+    }
+
     /// The current server offers accounts (`/v1/health`).
     pub async fn accounts_available(&self) -> bool {
         let Ok(c) = self.account_client() else { return false };

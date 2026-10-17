@@ -226,6 +226,7 @@
 "list.kind.recent" = "Zuletzt gehört"
 "list.kind.playlist" = "Playlist"
 "list.kind.album" = "Album"
+"list.shared_by" = "Geteilt von @{handle}"
 "list.play_all" = "Alle abspielen"
 "list.add_queue" = "Zur Warteschlange"
 "list.delete" = "Playlist löschen"

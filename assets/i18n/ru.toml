@@ -226,6 +226,7 @@
 "list.kind.recent" = "Недавно прослушанные"
 "list.kind.playlist" = "Плейлист"
 "list.kind.album" = "Альбом"
+"list.shared_by" = "Поделился @{handle}"
 "list.play_all" = "Слушать всё"
 "list.add_queue" = "В очередь"
 "list.delete" = "Удалить плейлист"

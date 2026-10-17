@@ -226,6 +226,7 @@
 "list.kind.recent" = "Recently played"
 "list.kind.playlist" = "Playlist"
 "list.kind.album" = "Album"
+"list.shared_by" = "Shared by @{handle}"
 "list.play_all" = "Play all"
 "list.add_queue" = "Add to queue"
 "list.delete" = "Delete playlist"

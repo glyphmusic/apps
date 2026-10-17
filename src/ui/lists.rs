@@ -518,7 +518,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         ListRef::Album { .. } => t("list.kind.album"),
         _ => t("list.kind.playlist"),
     };
-    // Only albums and "liked by artist" have a subtitle (the artist).
+    // Albums and "liked by artist" show the artist, shared playlists their author.
     let sub: Option<AnyElement> = match &l {
         ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => Some(
             div()
@@ -528,6 +528,15 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .child(artist_link("list-artist", artist, cx))
                 .into_any_element(),
         ),
+        // Opened from a short link: who shared it.
+        ListRef::User(id) => app.library.playlist(id).and_then(|p| p.shared_by.clone()).map(|h| {
+            div()
+                .flex()
+                .text_size(theme::text_sm())
+                .text_color(theme::text_dim())
+                .child(tf("list.shared_by", &[("handle", &h)]).to_string())
+                .into_any_element()
+        }),
         _ => None,
     };
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());

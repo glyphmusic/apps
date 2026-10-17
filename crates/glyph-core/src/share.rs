@@ -81,6 +81,14 @@ pub fn link_id(s: &str) -> Option<String> {
     ((id.len() == 8 || id.len() == 12) && id.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| id.to_string())
 }
 
+/// Both codes hold the same songs in the same order (names may differ).
+pub fn same_songs(a: &str, b: &str) -> bool {
+    match (decode(a), decode(b)) {
+        (Ok((_, x)), Ok((_, y))) => x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| p.source == q.source && p.id == q.id),
+        _ => false,
+    }
+}
+
 /// Text that looks like a share code (whitespace around it is fine).
 pub fn is_code(s: &str) -> bool {
     s.trim().starts_with(PREFIX)
@@ -155,5 +163,15 @@ mod tests {
         assert_eq!(link_id("glyph.my/p/AbC123xyAbC1/").as_deref(), Some("AbC123xyAbC1"));
         assert_eq!(link_id("https://evil.example/p/AbC123xy"), None);
         assert_eq!(link_id("https://glyph.my/p/short"), None);
+    }
+
+    #[test]
+    fn same_songs_ignores_the_name() {
+        let t = Track {
+            id: "1".into(), source: ProviderId::Audius, title: "S".into(), artist: "A".into(), album: None, duration_ms: None,
+            cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        };
+        assert!(same_songs(&encode("a", &[t.clone()]), &encode("b", &[t.clone()])));
+        assert!(!same_songs(&encode("a", &[t.clone()]), &encode("a", &[t.clone(), t])));
     }
 }

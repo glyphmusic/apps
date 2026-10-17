@@ -102,7 +102,7 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
         push(k(kind::LIKED, track_id(t)), serde_json::to_value(t).unwrap_or_default());
     }
     for p in &lib.playlists {
-        let mut v = serde_json::json!({ "name": p.name, "tracks": p.tracks, "origin": p.origin });
+        let mut v = serde_json::json!({ "name": p.name, "tracks": p.tracks, "origin": p.origin, "shared_by": p.shared_by });
         if let Some(bytes) = p.cover.as_deref().and_then(|c| std::fs::read(c).ok()) {
             let sha = sha_hex(&bytes);
             v["cover"] = Value::String(sha.clone());
@@ -289,6 +289,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                         origin: v["origin"].as_str().map(str::to_string),
                         // A picture not fetched yet keeps the old one.
                         cover: if v.get("cover").is_some() { cover.or(old_cover) } else { None },
+                        shared_by: v["shared_by"].as_str().map(str::to_string),
                     };
                     match pos {
                         Some(p) => lib.playlists[p] = pl,
