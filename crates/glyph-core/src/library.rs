@@ -21,6 +21,10 @@ pub struct Playlist {
     /// Picture chosen by the user (local file in the data dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<String>,
+    /// Songs in it are downloaded automatically, newly added ones included.
+    /// Per device: not synced.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_download: bool,
 }
 
 /// A song list the library can point at (sidebar "recent", saved albums).
@@ -281,6 +285,7 @@ impl Library {
             tracks: vec![],
             origin: None,
             cover: None,
+            auto_download: false,
         });
         self.playlists.last_mut().expect("just pushed")
     }
@@ -430,7 +435,7 @@ mod tests {
         lib.push_recent_list(ListKey::Playlist { id: "5".into() });
         assert_eq!(lib.recent_lists.len(), RECENT_LISTS_LIMIT);
         assert_eq!(lib.recent_lists[0], ListKey::Playlist { id: "5".into() });
-        lib.playlists.push(Playlist { id: "5".into(), name: "x".into(), tracks: vec![], origin: None, cover: None });
+        lib.playlists.push(Playlist { id: "5".into(), name: "x".into(), tracks: vec![], origin: None, cover: None, auto_download: false });
         lib.delete_playlist("5");
         assert!(!lib.recent_lists.contains(&ListKey::Playlist { id: "5".into() }));
     }

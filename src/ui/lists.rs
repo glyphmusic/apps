@@ -542,6 +542,8 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     };
 
     let l_more = l.clone();
+    // Playlists can download songs added later by themselves.
+    let auto_dl = user_id.as_ref().map(|id| (id.clone(), app.is_auto_download(id)));
     let all_dl = has && tracks.iter().all(|tr| app.is_downloaded(tr));
     let dl_view = if has { app.downloads_view(&tracks) } else { crate::ui::widgets::DlView::None };
     let t_dl = tracks.clone();
@@ -609,6 +611,14 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                         }
                     })))
                     .child(icon_button("list-queue", "list-plus", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
+                })
+                .when_some(auto_dl, |d, (id, on)| {
+                    let key: SharedString = "list-auto-dl".into();
+                    let k = key.clone();
+                    d.child(toggle_button(key, "arrow-down-to-line", 16.0, on, Some(theme::pink())).on_click(cx.listener(move |this, _, _, cx| {
+                        mark_toggled(k.clone());
+                        this.toggle_auto_download(&id, cx)
+                    })))
                 })
                 .when(saveable, |d| {
                     let key: SharedString = "list-save".into();
@@ -1510,7 +1520,16 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             }
             ListRef::User(id) => {
                 body.push(sep().into_any_element());
-                let (id1, id2) = (id.clone(), id.clone());
+                let (id1, id2, id3) = (id.clone(), id.clone(), id.clone());
+                let auto = app.is_auto_download(id);
+                body.push(
+                    ctx_item("lctx-auto-dl".into(), "arrow-down-to-line", t("ctx.auto_download"), if auto { theme::pink() } else { white(0.7) }, true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_ctx_close();
+                            this.toggle_auto_download(&id3, cx)
+                        }))
+                        .into_any_element(),
+                );
                 body.push(
                     ctx_item("lctx-rename".into(), "pencil", t("list.edit"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id1.clone()), w, cx)))

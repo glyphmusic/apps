@@ -8,6 +8,7 @@ mod config_ext;
 mod embed;
 mod i18n;
 mod instance;
+mod integrate;
 #[cfg(windows)]
 mod jumplist;
 #[cfg(windows)]
@@ -35,6 +36,8 @@ fn main() {
     if !instance::claim_or_forward(&instance::request_from_args()) {
         return;
     }
+    // Start menu / launcher entry named "Glyph" (no installer does it).
+    integrate::register();
 
     crate::i18n::set_lang(crate::i18n::Lang::system());
     gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
@@ -45,7 +48,7 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("glyph".into()),
+                title: Some("Glyph".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(14.0), px(12.0))),
             }),
