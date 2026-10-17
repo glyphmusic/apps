@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Public Glyph server used when `server_url` is empty, so nobody has to set
-/// anything up. `server_url = "off"` switches to direct mode. Empty until the
-/// public worker (glyphmusic.workers.dev) is live: then the app runs direct.
-pub const DEFAULT_SERVER_URL: &str = "";
+/// anything up. `server_url = "off"` switches to direct mode.
+pub const DEFAULT_SERVER_URL: &str = "https://glyph-server.glyphmusic.workers.dev";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

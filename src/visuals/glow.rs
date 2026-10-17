@@ -35,8 +35,9 @@ const GLOW_PITCH: f32 = 8.0;
 /// ASCII cell (logical px). Sparse on purpose: the grid is texture, not content.
 const CELL_W: f32 = 10.0;
 const CELL_H: f32 = 16.0;
-/// How far the field follows the page when the main view scrolls (0..1).
-const PARALLAX: f32 = 0.5;
+/// How far the ASCII layer follows the page when the main view scrolls
+/// (0..1). 0: it stays put, which reads calmer than any half-step motion.
+const PARALLAX: f32 = 0.0;
 
 /// Text zones whose background luminance is reported.
 #[derive(Debug, Clone, Copy)]
