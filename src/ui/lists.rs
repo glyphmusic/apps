@@ -1685,6 +1685,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
 pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
     let editing = app.name_dialog.as_ref().and_then(|d| d.rename.clone());
     let renaming = editing.is_some();
+    let eq = app.name_dialog.as_ref().is_some_and(|d| d.eq_preset);
     let input = app.playlist_name.clone();
     let picture = editing.map(|id| {
         let l = ListRef::User(id.clone());
@@ -1736,7 +1737,13 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .text_size(px(16.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(white(0.95))
-                .child(if renaming { t("dialog.playlist.rename") } else { t("dialog.playlist.title") }),
+                .child(if eq {
+                    t("dialog.eq.title")
+                } else if renaming {
+                    t("dialog.playlist.rename")
+                } else {
+                    t("dialog.playlist.title")
+                }),
         )
         .children(picture)
         .child(
@@ -1759,7 +1766,7 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .gap(px(8.0))
                 .child(button("dialog-cancel", t("dialog.cancel")).on_click(cx.listener(|this, _, _, cx| this.close_name_dialog(cx))))
                 .child(
-                    primary_button("dialog-ok", if renaming { t("dialog.save") } else { t("dialog.create") })
+                    primary_button("dialog-ok", if renaming || eq { t("dialog.save") } else { t("dialog.create") })
                         .on_click(cx.listener(|this, _, _, cx| this.submit_name_dialog(cx))),
                 ),
         );

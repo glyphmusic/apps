@@ -87,26 +87,62 @@ pub const EQ_PRESETS: [(&str, [f32; 10]); 14] = [
     ("small_speakers", [5.0, 4.0, 3.5, 2.5, 1.0, 0.0, -1.0, -2.0, -2.5, -3.0]),
 ];
 
-fn eq_preset_label(key: &str) -> SharedString {
-    t(&format!("eq.preset.{key}"))
+/// Display name of a preset key: built-in (translated), own (`user:<name>`)
+/// or "custom".
+pub(crate) fn eq_preset_label(key: &str) -> SharedString {
+    match key.strip_prefix("user:") {
+        Some(name) => SharedString::from(name.to_string()),
+        None => t(&format!("eq.preset.{key}")),
+    }
 }
 
-/// Equalizer page: on/off, presets, one slider per band (-12..+12 dB).
+/// Preset key for a curve: the current preset while it still matches, else
+/// the first built-in or own preset with exactly these gains, else "custom".
+pub(crate) fn eq_match(current: &str, gains: &[f32; 10], user: &[glyph_core::eq::EqPreset]) -> String {
+    use glyph_core::eq::same_gains;
+    let builtin = EQ_PRESETS.iter().map(|(k, g)| (k.to_string(), *g));
+    let own = user.iter().map(|p| (format!("user:{}", p.name), p.gains()));
+    let all: Vec<(String, [f32; 10])> = builtin.chain(own).collect();
+    if all.iter().any(|(k, g)| k == current && same_gains(g, gains)) {
+        return current.to_string();
+    }
+    all.into_iter().find(|(_, g)| same_gains(g, gains)).map(|(k, _)| k).unwrap_or_else(|| "custom".into())
+}
+
+type Pick = Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>;
+
+/// Equalizer page: on/off, presets (built-in and own), the curve, saving
+/// and sharing.
 fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let on = app.config.audio.eq_enabled;
     let gains = crate::app::eq_gains(&app.config.audio.eq_gains);
     let preset = app.config.audio.eq_preset.clone();
-    let mut options: Vec<(SharedString, bool, Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>)> = EQ_PRESETS
+    let mut options: Vec<(SharedString, bool, Pick)> = EQ_PRESETS
         .iter()
         .map(|(k, g)| {
             let (k, g) = (*k, *g);
-            let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
+            let f: Pick = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
             (eq_preset_label(k), preset == k, f)
         })
         .collect();
+    for p in &app.config.audio.eq_user_presets {
+        let key = format!("user:{}", p.name);
+        let g = p.gains();
+        let selected = preset == key;
+        let f: Pick = Rc::new(move |this, cx| this.set_eq(true, &key, g, true, cx));
+        options.push((SharedString::from(p.name.clone()), selected, f));
+    }
     if preset == "custom" {
         options.push((eq_preset_label("custom"), true, Rc::new(|_: &mut Glyph, _: &mut Context<Glyph>| {})));
     }
+    let own = preset.strip_prefix("user:").map(str::to_string);
+    let action = |key: &str, f: fn(&mut Glyph, &mut Context<Glyph>)| -> (SharedString, bool, Pick) { (t(key), false, Rc::new(f)) };
+    let share = vec![
+        action("sp.eq.copy_code", |this, cx| this.copy_eq_code(cx)),
+        action("sp.eq.paste_code", |this, cx| this.paste_eq_code(cx)),
+        action("sp.eq.export_file", |this, cx| this.export_eq_file(cx)),
+        action("sp.eq.import_file", |this, cx| this.import_eq_file(cx)),
+    ];
     let top = rows(vec![
         row(
             t("sp.eq.enable"),
@@ -117,7 +153,8 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 this.set_eq(!on, &p, g, true, cx)
             })),
         ),
-        row(t("sp.eq.preset"), None, select(app, "sel-eq", eq_preset_label(&preset), options, cx)),
+        row(t("sp.eq.preset"), Some(t("sp.eq.preset.desc")), select(app, "sel-eq", eq_preset_label(&preset), options, cx)),
+        row(t("sp.eq.share"), Some(t("sp.eq.share.desc")), select(app, "sel-eq-share", t("sp.eq.share.button"), share, cx)),
     ]);
     div()
         .flex()
@@ -128,11 +165,23 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .child(
             div()
                 .flex()
-                .justify_end()
-                .child(button("eq-reset", t("sp.eq.reset")).on_click(cx.listener(|this, _, _, cx| {
-                    let on = this.config.audio.eq_enabled;
-                    this.set_eq(on, "flat", [0.0; 10], true, cx)
-                }))),
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(div().text_size(px(12.0)).text_color(white(0.45)).child(t("sp.eq.hint")))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(button("eq-reset", t("sp.eq.reset")).on_click(cx.listener(|this, _, _, cx| {
+                            let on = this.config.audio.eq_enabled;
+                            this.set_eq(on, "flat", [0.0; 10], true, cx)
+                        })))
+                        .when_some(own, |d, name| {
+                            d.child(button("eq-delete", t("sp.eq.delete")).on_click(cx.listener(move |this, _, _, cx| this.delete_eq_preset(&name, cx))))
+                        })
+                        .child(primary_button("eq-save", t("sp.eq.save")).on_click(cx.listener(|this, _, w, cx| this.open_eq_save_dialog(w, cx)))),
+                ),
         )
 }
 
@@ -150,8 +199,10 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
     let view = cx.entity().downgrade();
     let accent = theme::pink();
     let plot = gpui::canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _app_cx| {
+        // Own hitbox, so a dropdown floating over the curve takes the click
+        // instead of the curve.
+        |bounds, window, _| window.insert_hitbox(bounds.dilate(px(8.0)), gpui::HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _app_cx| {
             let (x0, y0) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             let cell = w / 10.0;
@@ -211,6 +262,17 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
             let dragging = EQ_DRAG.with(|d| d.get());
             for (i, &(x, y)) in pts.iter().enumerate() {
                 let r = if dragging == Some(i) { 7.0 } else { 5.0 };
+                if dragging == Some(i) {
+                    // Soft ring around the dragged point.
+                    window.paint_quad(gpui::quad(
+                        gpui::Bounds { origin: gpui::point(px(x - 12.0), px(y - 12.0)), size: gpui::size(px(24.0), px(24.0)) },
+                        gpui::Corners::all(px(12.0)),
+                        accent.opacity(0.25),
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
                 window.paint_quad(gpui::quad(
                     gpui::Bounds { origin: gpui::point(px(x - r), px(y - r)), size: gpui::size(px(r * 2.0), px(r * 2.0)) },
                     gpui::Corners::all(px(r)),
@@ -223,23 +285,34 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
             // Dragging a point (anywhere in its column picks it).
             let gain_at = move |y: f32| (((12.0 - (y - y0) / h * 24.0) * 2.0).round() / 2.0).clamp(-12.0, 12.0);
             let band_at = move |x: f32| (((x - x0) / cell).floor() as i32).clamp(0, 9) as usize;
-            let hit = bounds.dilate(px(8.0));
             let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
             let apply = move |v: &gpui::WeakEntity<Glyph>, band: usize, g: f32, save: bool, cx: &mut gpui::App| {
                 v.update(cx, |this, cx| {
                     let mut gs = crate::app::eq_gains(&this.config.audio.eq_gains);
                     gs[band] = g;
-                    this.set_eq(true, "custom", gs, save, cx);
+                    // A curve that equals a preset shows that preset's name.
+                    let preset = eq_match(&this.config.audio.eq_preset, &gs, &this.config.audio.eq_user_presets);
+                    this.set_eq(true, &preset, gs, save, cx);
                 })
                 .ok();
             };
-            window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, _, cx| {
-                if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hit.contains(&e.position) {
+            window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hitbox.is_hovered_at(e.position, window) {
+                    return;
+                }
+                // Something else (an open dropdown) is in the way: let it close first.
+                if v1.upgrade().is_some_and(|v| v.read(cx).open_select.is_some()) {
                     return;
                 }
                 let band = band_at(f32::from(e.position.x));
-                EQ_DRAG.with(|d| d.set(Some(band)));
-                apply(&v1, band, gain_at(f32::from(e.position.y)), false, cx);
+                if e.click_count >= 2 {
+                    // Double-click puts a band back to 0 dB.
+                    EQ_DRAG.with(|d| d.set(None));
+                    apply(&v1, band, 0.0, true, cx);
+                } else {
+                    EQ_DRAG.with(|d| d.set(Some(band)));
+                    apply(&v1, band, gain_at(f32::from(e.position.y)), false, cx);
+                }
                 cx.stop_propagation();
             });
             window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
@@ -278,6 +351,16 @@ fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
                 .ml(px(LEFT))
                 .children(NAMES.iter().map(|n| div().flex_1().text_center().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(0.65)).child(*n))),
         )
+        .child(div().flex().ml(px(LEFT)).children(gains.iter().map(|g| {
+            let label = if g.abs() < 0.05 { "0".to_string() } else { format!("{g:+.1}") };
+            div()
+                .flex_1()
+                .text_center()
+                .text_size(px(11.5))
+                .font_family(theme::MONO)
+                .text_color(if g.abs() < 0.05 { white(0.35) } else { accent.opacity(0.9) })
+                .child(label)
+        })))
 }
 
 pub(crate) fn rows(items: Vec<AnyElement>) -> Div {
@@ -663,7 +746,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             t("sp.group.prefs"),
             vec![
                 (SettingsPage::Playback, "play", t("sp.playback"), "sources source quelle youtube soundcloud priority radio quality qualität audio"),
-                (SettingsPage::Audio, "volume-2", t("sp.eq"), "equalizer eq bass treble höhen tiefen klang sound preset"),
+                (SettingsPage::Audio, "volume-2", t("sp.eq"), "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file"),
                 (SettingsPage::Appearance, "palette", t("sp.appearance"), "language sprache theme ascii cover glow"),
             ],
         ),

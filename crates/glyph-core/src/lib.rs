@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod cover;
 pub mod dedupe;
 pub mod downloads;
+pub mod eq;
 pub mod import;
 pub mod library;
 pub mod lyrics;
