@@ -313,9 +313,12 @@ pub fn pump(queue: &HostQueue) {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // The UI pumps every frame, including before attach initialises GTK.
         #[cfg(target_os = "linux")]
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
+        if gtk::is_initialized_main_thread() {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
         }
         HOST.with(|h| {
             let mut h = h.borrow_mut();
@@ -381,7 +384,9 @@ mod tests {
         let q = HostQueue::default();
         q.push(HostCmd::Eval("x".into()));
         pump(&q);
-        // nothing attached on this thread: commands stay consumed-or-queued, never panic
+        pump(&q);
+        // Keep commands queued until a webview is attached on this thread.
         assert!(!q.is_attached());
+        assert_eq!(q.drain(), vec![HostCmd::Eval("x".into())]);
     }
 }

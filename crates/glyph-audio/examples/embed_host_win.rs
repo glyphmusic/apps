@@ -4,20 +4,27 @@
 //! the bug this design avoids; the example counts them and fails on any.
 //!
 //! `cargo run -p glyph-audio --example embed_host_win -- [youtube-id]`
-use glyph_audio::*;
-use glyph_protocol::{PlaybackSource, ProviderId, Track};
-use raw_window_handle::HasWindowHandle;
-use std::cell::RefCell;
-use std::time::{Duration, Instant};
-use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop};
-use tao::window::WindowBuilder;
 
-thread_local! { static STATE: RefCell<u64> = const { RefCell::new(0) }; }
-static REENTRANT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-static IN_BORROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+#[cfg(not(target_os = "windows"))]
 fn main() {
+    eprintln!("The embed_host_win example only runs on Windows.");
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    use glyph_audio::*;
+    use glyph_protocol::{PlaybackSource, ProviderId, Track};
+    use raw_window_handle::HasWindowHandle;
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+    use tao::event::{Event, WindowEvent};
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::window::WindowBuilder;
+
+    thread_local! { static STATE: RefCell<u64> = const { RefCell::new(0) }; }
+    static REENTRANT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static IN_BORROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     use std::sync::atomic::Ordering::SeqCst;
     let id = std::env::args().nth(1).unwrap_or_else(|| "jNQXAC9IVRw".into());
     let mut event_loop = EventLoop::new();
