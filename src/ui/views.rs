@@ -374,7 +374,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             }
                         })))
                         .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_remove(i, cx))))
-                })), theme::panel_strong(), 18.0, Some(&app.queue_scroll)).flex_1().min_h_0())
+                })), theme::panel_strong(), 18.0, Some(&app.queue_scroll)).flex_1().min_h_0().child(scrollbar(&app.queue_scroll, cx)))
         .child(
             div()
                 .px(px(14.0))

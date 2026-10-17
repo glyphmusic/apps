@@ -115,3 +115,19 @@ pub fn tf(key: &str, args: &[(&str, &dyn std::fmt::Display)]) -> SharedString {
     }
     s.into()
 }
+
+#[cfg(test)]
+mod tests {
+    /// A single bad line makes a whole language fall back to raw keys, so
+    /// every file must parse and carry the same keys as English.
+    #[test]
+    fn language_files_parse_and_match_english() {
+        let load = |src: &str| src.parse::<toml::Table>().expect("valid TOML");
+        let en = load(include_str!("../assets/i18n/en.toml"));
+        for (name, src) in [("de", include_str!("../assets/i18n/de.toml")), ("ru", include_str!("../assets/i18n/ru.toml"))] {
+            let other = load(src);
+            let missing: Vec<_> = en.keys().filter(|k| !other.contains_key(*k)).collect();
+            assert!(missing.is_empty(), "{name} lacks {missing:?}");
+        }
+    }
+}

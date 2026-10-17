@@ -1,34 +1,93 @@
-//! Startup animation: points of light stream in from beyond the window edges
-//! in a few curved currents and build the Glyph logo (dark plate and pink
-//! note) cell by cell in the centre; then the splash lifts off. The logo is
-//! never drawn as an image: the icon file only tells each particle where to
-//! land and in which colour.
-//!
-//! Everything is painted with plain quads on one canvas (no text shaping),
-//! so it stays cheap even with ~500 particles and their trails.
+//! Startup animation: ASCII characters stream in from beyond the window edges
+//! in a few curved currents and assemble the Glyph note (the same character
+//! raster as the app icon, without its plate) in the centre; then the splash
+//! lifts off. Nothing is drawn as an image: every character is real text.
 
-use gpui::{canvas, div, fill, point, prelude::*, px, size, AnyElement, Bounds, Hsla, Pixels};
+use gpui::{canvas, div, point, prelude::*, px, AnyElement, App, Bounds, Hsla, Pixels, SharedString, TextAlign, TextRun};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/icon-256.png");
-/// Sampling grid over the icon (cells per side).
-const GRID: u32 = 40;
-/// Number of currents the particles arrive in.
+// The icon's character raster (read off icon-1024.png: 31 columns x 29 rows).
+const ART: [&str; 29] = [
+    "                         ..+.. ",
+    "                       ----#+ .",
+    "                  ...-++-++++. ",
+    "              ..-----+####+0.  ",
+    "           .--.-++++##++++++.  ",
+    "         +++++++++++---.. ++.  ",
+    "        .+++++++.+....   .#+.  ",
+    "        +0...+.++.        ++.  ",
+    "        +++...            .+.  ",
+    "        .+.               ++.  ",
+    "        .+.               .0.  ",
+    "        .+.               .+.  ",
+    "        .+.               .+.  ",
+    "        .+.               .+.  ",
+    "        .+.               .+.  ",
+    "        .+.               ++.  ",
+    "        .+.           ... .+.  ",
+    "        .+.         ..++++.+.  ",
+    "        .+.        .+.++++0..  ",
+    "        .+.       ...-+#+++0+  ",
+    "  -++++ .+.       +.+####++++  ",
+    " .+.+++#.+.       ..++.0++++.  ",
+    ".+++###+0+.        +..+.+++.   ",
+    ".+.+###++0+         ....+..    ",
+    "..+###+++++           ...      ",
+    "..+..0++++.                    ",
+    " ....++++.                     ",
+    "  ....+..                      ",
+    "    ...                        ",
+];
+/// `p` = pink (highlight), `w` = white.
+const TINT: [&str; 29] = [
+    "                         wwwww ",
+    "                       wwwwpp w",
+    "                  wwwwwwwpwwww ",
+    "              wwwwwwwpppppwww  ",
+    "           wwwwwwwpppppwwwwww  ",
+    "         wwwpwppppppwwwww www  ",
+    "        wwwpppwwwwwwww   wwww  ",
+    "        wwwwwwwwww        wpw  ",
+    "        wwwwww            www  ",
+    "        www               www  ",
+    "        www               www  ",
+    "        www               www  ",
+    "        wpw               wpw  ",
+    "        www               www  ",
+    "        www               www  ",
+    "        wpw               wpw  ",
+    "        www           www www  ",
+    "        www         wwwwwwwww  ",
+    "        wpw        wwwpppwwww  ",
+    "        wpw       wwwwpppwwww  ",
+    "  wwwww www       wwwwpppppww  ",
+    " wwwwppwwww       wwwwwwwppww  ",
+    "wwwwpppwwww        wwwwwwpww   ",
+    "wwwppppwwww         wwwwwww    ",
+    "wwwwpppppww           www      ",
+    "wwwwwwppwww                    ",
+    " wwwwwwwww                     ",
+    "  wwwwwww                      ",
+    "    www                        ",
+];
+/// Character cell aspect of the icon raster (height / width).
+const CELL_ASPECT: f32 = 25.2 / 19.85;
+/// Number of currents the characters arrive in.
 const STREAMS: u32 = 6;
 /// Timeline (seconds).
-/// When the plate cells have landed they close up into solid tiles.
-const T_SOLID: f32 = 1.9;
-const T_SOLID_DUR: f32 = 0.3;
-const T_OUT_START: f32 = 2.5;
+const T_OUT_START: f32 = 2.45;
 const T_OUT: f32 = 0.45;
 pub const TOTAL: f32 = T_OUT_START + T_OUT;
 
 #[derive(Clone, Copy)]
 struct Particle {
-    /// Target in icon space, -0.5..0.5.
-    tx: f32,
-    ty: f32,
+    ch: char,
+    pink: bool,
+    /// Target cell (column, row).
+    col: f32,
+    row: f32,
     /// Direction it comes from (radians) and its sideways offset in the stream.
     angle: f32,
     lane: f32,
@@ -36,9 +95,6 @@ struct Particle {
     swirl: f32,
     delay: f32,
     dur: f32,
-    color: Hsla,
-    /// Part of the note (bright, arrives last) or the plate.
-    note: bool,
 }
 
 pub struct Splash {
@@ -71,41 +127,28 @@ fn smooth(t: f32) -> f32 {
 
 impl Splash {
     pub fn new() -> Self {
-        let img = image::load_from_memory(ICON_PNG).ok().map(|i| i.to_rgba8());
         let mut particles = Vec::new();
-        if let Some(img) = &img {
-            let small = image::imageops::resize(img, GRID, GRID, image::imageops::FilterType::Triangle);
-            let mut i = 0u32;
-            for y in 0..GRID {
-                for x in 0..GRID {
-                    let p = small.get_pixel(x, y).0;
-                    let (r, g, b, a) = (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0, p[3] as f32 / 255.0);
-                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                    // Transparent corners stay empty, so the rounded plate emerges.
-                    if a < 0.5 {
-                        continue;
-                    }
-                    let note = luma > 0.28;
-                    let stream = (rnd(i, 1) * STREAMS as f32) as u32 % STREAMS;
-                    let base = stream as f32 / STREAMS as f32 * std::f32::consts::TAU + 0.4;
-                    let swirl = if stream % 2 == 0 { 0.9 } else { -0.9 } * (0.75 + 0.5 * rnd(stream, 7));
-                    // The plate is near black; lift it a touch so it reads on the black splash.
-                    let lift = if note { 0.0 } else { 0.07 };
-                    let color = Hsla::from(gpui::Rgba { r: r + lift, g: g + lift, b: b + lift * 1.3, a: 1.0 });
-                    particles.push(Particle {
-                        tx: (x as f32 + 0.5) / GRID as f32 - 0.5,
-                        ty: (y as f32 + 0.5) / GRID as f32 - 0.5,
-                        angle: base + (rnd(i, 2) - 0.5) * 0.35,
-                        lane: rnd(i, 3) - 0.5,
-                        swirl,
-                        // Plate first, the note streams in on top of it.
-                        delay: stream as f32 * 0.06 + rnd(i, 4) * 0.45 + if note { 0.35 } else { 0.0 },
-                        dur: 0.8 + rnd(i, 5) * 0.35,
-                        color,
-                        note,
-                    });
-                    i += 1;
+        let mut i = 0u32;
+        for (row, (line, tint)) in ART.iter().zip(TINT.iter()).enumerate() {
+            for (col, (ch, t)) in line.chars().zip(tint.chars()).enumerate() {
+                if ch == ' ' {
+                    continue;
                 }
+                let stream = (rnd(i, 1) * STREAMS as f32) as u32 % STREAMS;
+                let base = stream as f32 / STREAMS as f32 * std::f32::consts::TAU + 0.4;
+                let swirl = if stream % 2 == 0 { 0.9 } else { -0.9 } * (0.75 + 0.5 * rnd(stream, 7));
+                particles.push(Particle {
+                    ch,
+                    pink: t == 'p',
+                    col: col as f32,
+                    row: row as f32,
+                    angle: base + (rnd(i, 2) - 0.5) * 0.35,
+                    lane: rnd(i, 3) - 0.5,
+                    swirl,
+                    delay: stream as f32 * 0.07 + rnd(i, 4) * 0.6,
+                    dur: 0.85 + rnd(i, 5) * 0.35,
+                });
+                i += 1;
             }
         }
         Self { started: Instant::now(), particles: Arc::new(particles), skipped: false }
@@ -125,8 +168,8 @@ impl Splash {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |bounds: Bounds<Pixels>, _, window, _| {
-                        paint(bounds, t, &particles, fade_out, window);
+                    move |bounds: Bounds<Pixels>, _, window, cx| {
+                        paint(bounds, t, &particles, fade_out, window, cx);
                     },
                 )
                 .size_full(),
@@ -135,54 +178,77 @@ impl Splash {
     }
 }
 
-fn paint(bounds: Bounds<Pixels>, t: f32, particles: &[Particle], fade_out: f32, window: &mut gpui::Window) {
+fn paint(bounds: Bounds<Pixels>, t: f32, particles: &[Particle], fade_out: f32, window: &mut gpui::Window, cx: &mut App) {
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-    let (cx, cy) = (ox + w / 2.0, oy + h / 2.0);
-    window.paint_quad(fill(bounds, gpui::hsla(0.0, 0.0, 0.0, fade_out)));
+    let (cx_, cy_) = (ox + w / 2.0, oy + h / 2.0);
+    window.paint_quad(gpui::fill(bounds, gpui::hsla(0.0, 0.0, 0.0, fade_out)));
     if fade_out <= 0.0 {
         return;
     }
 
-    let icon_size = (w.min(h) * 0.26).clamp(130.0, 240.0);
-    let cell = icon_size / GRID as f32;
-    // Landed cells grow from dots into seamless tiles: the finished logo.
-    let solid = smooth((t - T_SOLID) / T_SOLID_DUR);
-    let dot_flying = (cell * 0.7).max(1.5);
-    let dot_landed = cell * (0.7 + 0.32 * solid);
+    let cols = ART[0].len() as f32;
+    let rows = ART.len() as f32;
+    // The note is about a third of the smaller window side tall.
+    let cell_w = ((h.min(w) * 0.36) / (rows * CELL_ASPECT)).clamp(5.0, 12.0);
+    let cell_h = cell_w * CELL_ASPECT;
+    let font_size = px(cell_w * 1.25);
+    let (left, top) = (cx_ - cols * cell_w / 2.0, cy_ - rows * cell_h / 2.0);
     let reach = w.max(h) * 0.78;
-    // Slight settle of the whole logo once it is complete.
-    let settle = 1.0 + 0.03 * (solid * std::f32::consts::PI).sin();
-    let dots_alpha = fade_out;
+    let font = gpui::Font { weight: gpui::FontWeight::BOLD, ..gpui::font(crate::theme::MONO) };
+    let white = gpui::hsla(0.0, 0.0, 0.96, 1.0);
+    let pink = crate::theme::pink();
+
+    // One shaped glyph per (character, colour, alpha step), reused for every copy.
+    let mut shaped: HashMap<(char, bool, u8), gpui::ShapedLine> = HashMap::new();
+    let mut glyph = |ch: char, is_pink: bool, alpha: f32, window: &mut gpui::Window| -> gpui::ShapedLine {
+        let step = (alpha.clamp(0.0, 1.0) * 12.0).round() as u8;
+        shaped
+            .entry((ch, is_pink, step))
+            .or_insert_with(|| {
+                let base: Hsla = if is_pink { pink } else { white };
+                let s: SharedString = ch.to_string().into();
+                window.text_system().shape_line(
+                    s,
+                    font_size,
+                    &[TextRun {
+                        len: ch.len_utf8(),
+                        font: font.clone(),
+                        color: Hsla { a: step as f32 / 12.0, ..base },
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+            })
+            .clone()
+    };
 
     let at = |p: &Particle, e: f32| -> (f32, f32) {
         let a = p.angle;
-        // Start beyond the edge, a little apart across the stream.
         let side = (a + std::f32::consts::FRAC_PI_2).sin_cos();
-        let (sx, sy) = (cx + reach * a.cos() + side.1 * p.lane * 120.0, cy + reach * a.sin() + side.0 * p.lane * 120.0);
+        let (sx, sy) = (cx_ + reach * a.cos() + side.1 * p.lane * 120.0, cy_ + reach * a.sin() + side.0 * p.lane * 120.0);
         // The control point is turned by the stream's swirl: curved currents.
         let ca = a + p.swirl;
-        let (kx, ky) = (cx + reach * 0.55 * ca.cos(), cy + reach * 0.55 * ca.sin());
-        let (tx, ty) = (cx + p.tx * icon_size * settle, cy + p.ty * icon_size * settle);
+        let (kx, ky) = (cx_ + reach * 0.55 * ca.cos(), cy_ + reach * 0.55 * ca.sin());
+        let (tx, ty) = (left + p.col * cell_w, top + p.row * cell_h);
         let u = 1.0 - e;
         (u * u * sx + 2.0 * u * e * kx + e * e * tx, u * u * sy + 2.0 * u * e * ky + e * e * ty)
     };
 
-    if dots_alpha > 0.0 {
-        for p in particles {
-            let raw = ((t - p.delay) / p.dur).clamp(0.0, 1.0);
-            if raw <= 0.0 {
-                continue;
-            }
-            let e = ease_in_out(raw);
-            // Trail while moving: two fainter copies a bit behind.
-            let trail: &[(f32, f32)] = if raw < 1.0 { &[(0.0, 1.0), (0.035, 0.45), (0.07, 0.2)] } else { &[(0.0, 1.0)] };
-            for (back, alpha) in trail {
-                let (x, y) = at(p, (e - back).max(0.0));
-                let s = if raw >= 1.0 { dot_landed * settle } else if *back > 0.0 { dot_flying * 0.75 } else { dot_flying };
-                let c = Hsla { a: p.color.a * alpha * dots_alpha, ..p.color };
-                window.paint_quad(fill(Bounds { origin: point(px(x - s / 2.0), px(y - s / 2.0)), size: size(px(s), px(s)) }, c));
-            }
+    for p in particles {
+        let raw = ((t - p.delay) / p.dur).clamp(0.0, 1.0);
+        if raw <= 0.0 {
+            continue;
+        }
+        let e = ease_in_out(raw);
+        // Trail while moving: two fainter copies a little behind.
+        let trail: &[(f32, f32)] = if raw < 1.0 { &[(0.07, 0.18), (0.035, 0.4), (0.0, 1.0)] } else { &[(0.0, 1.0)] };
+        for (back, alpha) in trail {
+            let (x, y) = at(p, (e - back).max(0.0));
+            let line = glyph(p.ch, p.pink, alpha * fade_out, window);
+            let _ = line.paint(point(px(x), px(y)), px(cell_h), TextAlign::Left, None, window, cx);
         }
     }
 }

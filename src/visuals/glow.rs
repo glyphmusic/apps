@@ -111,7 +111,6 @@ impl Worker {
         // Only the ASCII layer follows the page (parallax); the glow stays put
         // so the titlebar and window edges never shift.
         let shift = j.scroll * PARALLAX;
-        let y_shift = shift / j.h;
         let noise = &self.noise;
         // Field value + colour at normalised (x, y).
         let field_at = |x: f32, y: f32| -> (f32, Rgb) {
@@ -204,12 +203,10 @@ impl Worker {
                 }
                 for col in 0..cols {
                     let lx = col as f32 * CELL_W;
-                    // Evaluated at the scrolled position, so the art moves with the page.
-                    let (b, c) = if shift.abs() < 0.01 {
-                        sample(lx + CELL_W * 0.5, ly + CELL_H * 0.5)
-                    } else {
-                        field_at((lx + CELL_W * 0.5) / j.w * aspect, (ly + CELL_H * 0.5) / j.h + y_shift)
-                    };
+                    // The rows slide with the page, but each character takes its
+                    // brightness from the glow right behind it, so the art never
+                    // drifts away from the light (or out of the window).
+                    let (b, c) = sample(lx + CELL_W * 0.5, ly + CELL_H * 0.5);
                     let dv = b * j.density;
                     if dv < j.threshold {
                         continue;

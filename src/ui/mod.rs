@@ -140,7 +140,8 @@ impl Render for Glyph {
         let main = if self.view == View::NowPlaying {
             main
         } else {
-            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.55), 22.0, Some(&self.main_scroll)).size_full().into_any_element()
+            let bar = widgets::scrollbar(&self.main_scroll, cx);
+            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.55), 22.0, Some(&self.main_scroll)).size_full().child(bar).into_any_element()
         };
         let main_panel = div().flex_1().min_w_0().h_full().overflow_hidden().child(main);
         let queue = self

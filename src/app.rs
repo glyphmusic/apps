@@ -183,6 +183,9 @@ pub struct Glyph {
     pub artists: std::collections::HashMap<String, ArtistPage>,
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
+    /// When the menu opened (fade/slide in) and a menu that is fading out.
+    pub ctx_opened: Instant,
+    pub ctx_closing: Option<(CtxMenu, Instant)>,
     /// Artist hero images rendered as ASCII, per source image (None = computing).
     pub heroes: std::collections::HashMap<(PathBuf, bool), Option<Arc<gpui::RenderImage>>>,
     /// Scroll state of the main view, the settings page, the queue and the lyrics
@@ -406,6 +409,8 @@ impl Glyph {
             artists: Default::default(),
             history: Vec::new(),
             ctx_menu: None,
+            ctx_opened: Instant::now(),
+            ctx_closing: None,
             heroes: Default::default(),
             main_scroll: gpui::ScrollHandle::new(),
             settings_scroll: gpui::ScrollHandle::new(),
@@ -754,7 +759,9 @@ impl Glyph {
         });
         let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700))
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
+        let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200)) || self.ctx_closing.is_some();
         toast_fading
+            || menu_anim
             || self.splash.is_some()
             || nav_anim
             || self.bar_slide.running()
@@ -1565,6 +1572,8 @@ impl Glyph {
 
     pub fn open_ctx(&mut self, track: Track, pos: gpui::Point<gpui::Pixels>, from: Option<(ListRef, usize)>, cx: &mut Context<Self>) {
         self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, list: None });
+        self.ctx_opened = Instant::now();
+        self.ctx_closing = None;
         cx.notify();
     }
 
@@ -1590,12 +1599,22 @@ impl Glyph {
             None => return,
         };
         self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: Some(l) });
+        self.ctx_opened = Instant::now();
+        self.ctx_closing = None;
         cx.notify();
     }
 
     pub fn close_ctx(&mut self, cx: &mut Context<Self>) {
-        if self.ctx_menu.take().is_some() {
+        if self.ctx_menu.is_some() {
+            self.begin_ctx_close();
             cx.notify();
+        }
+    }
+
+    /// Lets the open menu fade out (the caller notifies).
+    pub fn begin_ctx_close(&mut self) {
+        if let Some(m) = self.ctx_menu.take() {
+            self.ctx_closing = Some((m, Instant::now()));
         }
     }
 

@@ -938,7 +938,20 @@ fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_
 }
 
 pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> Option<AnyElement> {
-    let m = app.ctx_menu.clone()?;
+    // Open: fade + slide in (140 ms). Closing: fade out (110 ms), not clickable.
+    const IN: f32 = 0.14;
+    const OUT: f32 = 0.11;
+    if app.ctx_closing.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() >= OUT) {
+        app.ctx_closing = None;
+    }
+    let (m, alpha, live) = match (&app.ctx_menu, &app.ctx_closing) {
+        (Some(m), _) => {
+            let k = (app.ctx_opened.elapsed().as_secs_f32() / IN).min(1.0);
+            (m.clone(), 1.0 - (1.0 - k).powi(3), true)
+        }
+        (None, Some((m, at))) => (m.clone(), 1.0 - (at.elapsed().as_secs_f32() / OUT).min(1.0), false),
+        _ => return None,
+    };
     let tr = m.track.clone();
     let sep = || div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(white(0.07));
     let mut body: Vec<AnyElement> = Vec::new();
@@ -969,7 +982,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             sub.push(
                 ctx_item(("ctx-pl", i).into(), "list-music", name.into(), white(0.7), false, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ctx_menu = None;
+                        this.begin_ctx_close();
                         this.add_many_to_playlist(&id, t_add.clone(), cx)
                     }))
                     .into_any_element(),
@@ -1009,7 +1022,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             body.push(
                 ctx_item("lctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ctx_menu = None;
+                        this.begin_ctx_close();
                         this.play_list(s1.clone(), 0, cx)
                     }))
                     .into_any_element(),
@@ -1017,7 +1030,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             body.push(
                 ctx_item("lctx-shuffle".into(), "shuffle", t("ctx.shuffle"), white(0.7), true, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ctx_menu = None;
+                        this.begin_ctx_close();
                         this.play_shuffled(s2.clone(), cx)
                     }))
                     .into_any_element(),
@@ -1025,7 +1038,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             body.push(
                 ctx_item("lctx-queue".into(), "list-plus", t("ctx.queue"), white(0.7), true, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ctx_menu = None;
+                        this.begin_ctx_close();
                         this.queue_all(s3.clone(), cx)
                     }))
                     .into_any_element(),
@@ -1036,7 +1049,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("lctx-open".into(), "list-music", t("ctx.open"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.open_list(l_open.clone(), cx)
                 }))
                 .into_any_element(),
@@ -1050,7 +1063,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 body.push(
                     ctx_item("lctx-artist".into(), "user-round", t("ctx.artist"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.ctx_menu = None;
+                            this.begin_ctx_close();
                             this.open_artist(&a, cx)
                         }))
                         .into_any_element(),
@@ -1067,7 +1080,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 body.push(
                     ctx_item("lctx-delete".into(), "trash-2", t("list.delete"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.ctx_menu = None;
+                            this.begin_ctx_close();
                             this.delete_playlist(&id2, cx)
                         }))
                         .into_any_element(),
@@ -1100,7 +1113,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("ctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.play_list(vec![t1.clone()], 0, cx)
                 }))
                 .into_any_element(),
@@ -1109,7 +1122,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("ctx-next".into(), "list-start", t("ctx.play_next"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.queue_add(t2.clone(), true, cx)
                 }))
                 .into_any_element(),
@@ -1118,7 +1131,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("ctx-queue".into(), "list-plus", t("ctx.queue"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.queue_add(t3.clone(), false, cx)
                 }))
                 .into_any_element(),
@@ -1136,7 +1149,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 cx,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.ctx_menu = None;
+                this.begin_ctx_close();
                 this.toggle_like(&t4.clone(), cx)
             }))
             .into_any_element(),
@@ -1149,7 +1162,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             body.push(
                 ctx_item("ctx-remove".into(), "circle-minus", label, white(0.7), true, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ctx_menu = None;
+                        this.begin_ctx_close();
                         this.remove_from_list(&l, i, cx)
                     }))
                     .into_any_element(),
@@ -1160,7 +1173,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("ctx-artist".into(), "user-round", t("ctx.artist"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.open_artist(&artist, cx)
                 }))
                 .into_any_element(),
@@ -1169,7 +1182,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         body.push(
             ctx_item("ctx-link".into(), "link-2", t("ctx.copy_link"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
+                    this.begin_ctx_close();
                     this.share(&t5, cx);
                     cx.notify();
                 }))
@@ -1190,21 +1203,21 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         .font_family(theme::FONT)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .opacity(alpha)
+        .mt(px(-6.0 * (1.0 - alpha)))
         .children(body);
-    Some(
-        deferred(
-            div()
-                .id("ctx-backdrop")
-                .absolute()
-                .inset_0()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
-                .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
-                .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_ctx(cx)))
-                .child(anchored().position(m.pos).snap_to_window_with_margin(px(8.0)).child(menu)),
-        )
-        .with_priority(3)
-        .into_any_element(),
-    )
+    let layer = div().id("ctx-backdrop").absolute().inset_0();
+    let layer = if live {
+        layer
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_ctx(cx)))
+            .child(anchored().position(m.pos).snap_to_window_with_margin(px(8.0)).child(menu))
+    } else {
+        // Fading out: drawn only; the page behind takes clicks again.
+        layer.child(anchored().position(m.pos).snap_to_window_with_margin(px(8.0)).child(menu))
+    };
+    Some(deferred(layer).with_priority(3).into_any_element())
 }
 
 // ------------------------------------------------------------------ name dialog

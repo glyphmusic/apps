@@ -763,3 +763,89 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
     };
     div().relative().child(el).when(show_top, |d| d.child(edge(true))).when(show_bottom, |d| d.child(edge(false)))
 }
+
+// ---- scrollbar ------------------------------------------------------------
+
+thread_local! {
+    /// Thumb being dragged: (scroll handle, mouse y at grab, scroll y at grab).
+    static SCROLL_DRAG: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Thin overlay scrollbar for a frame tracked by `handle` (shown only when
+/// there is something to scroll). The thumb can be dragged; clicking the
+/// track jumps there.
+pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph>) -> AnyElement {
+    let handle = handle.clone();
+    let view = cx.entity().downgrade();
+    div()
+        .absolute()
+        .top(px(4.0))
+        .bottom(px(4.0))
+        .right(px(3.0))
+        .w(px(8.0))
+        .child(
+            gpui::canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let max = f32::from(handle.max_offset().y);
+                    if max <= 1.0 {
+                        return;
+                    }
+                    let track_h = f32::from(bounds.size.height);
+                    let view_h = f32::from(handle.bounds().size.height).max(1.0);
+                    let thumb_h = (track_h * view_h / (view_h + max)).clamp(28.0, track_h);
+                    let y = (-f32::from(handle.offset().y)).clamp(0.0, max);
+                    let top = f32::from(bounds.origin.y) + (track_h - thumb_h) * (y / max);
+                    let dragging = SCROLL_DRAG.with(|d| d.borrow().as_ref().is_some_and(|(h, _, _)| h.bounds() == handle.bounds()));
+                    let thumb = gpui::Bounds {
+                        origin: gpui::point(bounds.origin.x + px(2.0), px(top)),
+                        size: gpui::size(px(4.0), px(thumb_h)),
+                    };
+                    window.paint_quad(gpui::quad(
+                        thumb,
+                        gpui::Corners::all(px(2.0)),
+                        gpui::hsla(0.0, 0.0, 1.0, if dragging { 0.4 } else { 0.18 }),
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                    let per_px = max / (track_h - thumb_h).max(1.0);
+                    let (h1, h2, v1, v2) = (handle.clone(), handle.clone(), view.clone(), view.clone());
+                    window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, _, cx| {
+                        if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !bounds.contains(&e.position) {
+                            return;
+                        }
+                        let my = f32::from(e.position.y);
+                        let mut start = (-f32::from(h1.offset().y)).clamp(0.0, max);
+                        if my < top || my > top + thumb_h {
+                            // Track click: centre the thumb on the mouse.
+                            start = ((my - f32::from(bounds.origin.y) - thumb_h / 2.0) * per_px).clamp(0.0, max);
+                            h1.set_offset(gpui::point(px(0.0), px(-start)));
+                        }
+                        SCROLL_DRAG.with(|d| *d.borrow_mut() = Some((h1.clone(), my, start)));
+                        cx.stop_propagation();
+                        v1.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                    window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
+                        let Some((h, grab_y, grab_scroll)) = SCROLL_DRAG.with(|d| d.borrow().clone()) else { return };
+                        if h.bounds() != h2.bounds() {
+                            return;
+                        }
+                        if e.pressed_button != Some(gpui::MouseButton::Left) {
+                            SCROLL_DRAG.with(|d| *d.borrow_mut() = None);
+                            v2.update(cx, |_, cx| cx.notify()).ok();
+                            return;
+                        }
+                        let y = (grab_scroll + (f32::from(e.position.y) - grab_y) * per_px).clamp(0.0, max);
+                        h.set_offset(gpui::point(px(0.0), px(-y)));
+                        v2.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| {
+                        SCROLL_DRAG.with(|d| *d.borrow_mut() = None);
+                    });
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
