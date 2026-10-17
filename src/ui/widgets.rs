@@ -738,7 +738,7 @@ pub fn track_row(
                         .text_size(theme::text_sm())
                         .text_color(theme::text_dim())
                         .child(crate::ui::lists::artist_link((id_prefix, i * 10 + 5), &t.artist, cx))
-                        .when_some(t.album.clone(), |d, a| d.child(div().min_w_0().truncate().child(format!(" · {a}")))),
+                        .when_some(crate::ui::lists::album_link((id_prefix, i * 10 + 6), &t, cx), |d, link| d.child(div().flex_none().child(" · ")).child(link)),
                 ),
         )
         .when(id_prefix == "search-row", |d| d.child(kind_chip(tr("search.kind.song"))))

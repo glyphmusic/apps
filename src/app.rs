@@ -226,6 +226,8 @@ pub struct Glyph {
     pub name_dialog: Option<NameDialog>,
     /// Sidebar icon under the mouse and since when (hover animation).
     pub nav_hover: Option<(View, Instant)>,
+    /// Fills the open album with its other songs (search in the background).
+    album_task: Option<Task<()>>,
     /// Startup animation while it runs.
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
@@ -450,6 +452,7 @@ impl Glyph {
             lyrics_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
             nav_hover: None,
+            album_task: None,
             // Read straight from disk: the async config load comes too late for the first frame.
             splash: Config::load()
                 .map(|c| c.visuals.startup_animation)
@@ -1697,6 +1700,54 @@ impl Glyph {
                 _tasks: vec![songs, info],
             },
         );
+    }
+
+    /// Opens the album of `seed` and fills in its other songs: from the
+    /// library if saved, otherwise by searching "artist album" in the background.
+    pub fn open_album(&mut self, title: &str, artist: &str, seed: Track, cx: &mut Context<Self>) {
+        let artist = primary_artist(artist);
+        let probe = ListRef::Album { title: title.to_string(), artist: artist.clone(), tracks: vec![seed] };
+        if let Some(saved) = self.library.saved_albums.iter().find(|k| k.same(&probe.key())).cloned() {
+            self.open_list(ListRef::from_key(&saved), cx);
+            return;
+        }
+        self.open_list(probe, cx);
+        let Some(b) = self.backend.clone() else { return };
+        let (title, q) = (title.to_string(), format!("{artist} {title}"));
+        self.album_task = Some(cx.spawn(async move |this, cx| {
+            let Some(mut stream) = guard(|| b.search(&q)) else { return };
+            use futures::StreamExt;
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    SearchEvent::Results { tracks, .. } => {
+                        let hits: Vec<Track> = tracks
+                            .into_iter()
+                            .filter(|t| t.album.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(&title)) && by_artist(&artist, &t.artist))
+                            .collect();
+                        if hits.is_empty() {
+                            continue;
+                        }
+                        let (t2, a2) = (title.clone(), artist.clone());
+                        this.update(cx, |s, cx| {
+                            if let Some(ListRef::Album { title, artist, tracks }) = s.open_list.as_mut() {
+                                if title.eq_ignore_ascii_case(&t2) && artist.eq_ignore_ascii_case(&a2) {
+                                    for h in hits {
+                                        let n = glyph_core::dedupe::normalize_title(&h.title);
+                                        if !tracks.iter().any(|x| glyph_core::dedupe::normalize_title(&x.title) == n) {
+                                            tracks.push(h);
+                                        }
+                                    }
+                                    cx.notify();
+                                }
+                            }
+                        })
+                        .ok();
+                    }
+                    SearchEvent::Done => break,
+                    _ => {}
+                }
+            }
+        }));
     }
 
     /// Plays `tracks` from a random song with shuffle on.

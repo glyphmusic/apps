@@ -85,6 +85,26 @@ pub fn artist_link(id: impl Into<ElementId>, name: &str, cx: &mut Context<Glyph>
         .child(name.to_string())
 }
 
+/// Clickable album name: opens the album page.
+pub fn album_link(id: impl Into<ElementId>, tr: &Track, cx: &mut Context<Glyph>) -> Option<Stateful<gpui::Div>> {
+    let title = tr.album.clone().filter(|a| !a.trim().is_empty())?;
+    let seed = tr.clone();
+    let t2 = title.clone();
+    Some(
+        div()
+            .id(id)
+            .min_w_0()
+            .truncate()
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.open_album(&t2, &seed.artist, seed.clone(), cx)
+            }))
+            .child(title),
+    )
+}
+
 /// Right-click on an album / playlist tile opens the list menu.
 pub fn with_list_menu(el: Stateful<gpui::Div>, l: ListRef, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
     el.on_mouse_down(
@@ -269,7 +289,8 @@ pub fn song_row(
                     .truncate()
                     .text_size(theme::text_sm())
                     .text_color(theme::text_faint())
-                    .child(tr.album.clone().unwrap_or_default()),
+                    .flex()
+                    .children(album_link((prefix, i * 8 + 3), &tr, cx)),
             )
         })
         .child({
@@ -664,14 +685,19 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
 
     // Full-bleed hero: the ASCII photo is the page background here and fades
     // out at the bottom (baked into the raster), so it melts into the glow.
+    // Rounded top corners like the panels around it (GPUI clips to rectangles,
+    // so the picture rounds its own corners too).
     let hero = div()
         .relative()
-        .mx(px(-32.0))
-        .mt(px(-20.0))
+        .mx(px(-24.0))
+        .mt(px(-12.0))
         .h(px(420.0))
+        .rounded_t(px(14.0))
         .overflow_hidden()
-        .when_some(hero_img, |d, im| d.child(div().absolute().inset_0().child(img(im).size_full().object_fit(ObjectFit::Cover))))
-        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 420.0, 0.0))))
+        .when_some(hero_img, |d, im| {
+            d.child(div().absolute().inset_0().child(img(im).size_full().rounded_t(px(14.0)).object_fit(ObjectFit::Cover)))
+        })
+        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 420.0, 14.0))))
         .children(back_button(app, cx).map(|b| div().absolute().top(px(20.0)).left(px(32.0)).child(b)))
         .child(
             div()
