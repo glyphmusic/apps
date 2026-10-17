@@ -333,6 +333,46 @@ fn nav_motion(view: View, t: f32) -> (f32, f32, f32) {
     }
 }
 
+/// Recently opened lists as small covers under the navigation (newest first).
+fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyElement> {
+    let lists = app.recent_lists(5);
+    if lists.is_empty() {
+        return None;
+    }
+    let open = if app.view == View::List { app.open_list.clone() } else { None };
+    let items: Vec<_> = lists
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let active = open.as_ref().is_some_and(|o| o.same(&l));
+            let art = crate::ui::lists::list_cover(app, &l, 36.0, cx);
+            let lm = l.clone();
+            crate::ui::lists::with_list_menu(div().id(("side-list", i)), lm, cx)
+                .size(px(44.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(10.0))
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme::active()))
+                .hover(|s| s.bg(theme::hover()))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
+                .child(art)
+                .into_any_element()
+        })
+        .collect();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .child(div().w(px(24.0)).h(px(1.0)).my(px(4.0)).bg(gpui::hsla(0.0, 0.0, 1.0, 0.08)))
+            .children(items)
+            .into_any_element(),
+    )
+}
+
 pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let item = |id: &'static str, name: &'static str, view: View, cx: &mut Context<Glyph>| {
         let active = if view == View::Settings { app.settings_open } else { app.view == view && !app.settings_open };
@@ -396,6 +436,7 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .child(search)
         .child(lib)
         .child(np)
+        .children(recent_lists(app, cx))
         .child(div().flex_1())
         .child(settings)
 }

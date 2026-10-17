@@ -28,7 +28,7 @@ pub mod storage;
 pub mod updater;
 
 pub use config::Config;
-pub use library::{Library, Playlist};
+pub use library::{Library, ListKey, Playlist};
 pub use lyrics::Lyrics;
 pub use queue::{Queue, RepeatMode};
 pub use updater::{UpdateInfo, UpdateStatus};

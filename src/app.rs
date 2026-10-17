@@ -57,6 +57,35 @@ pub struct NameDialog {
     pub rename: Option<String>,
 }
 
+impl ListRef {
+    pub fn key(&self) -> glyph_core::ListKey {
+        use glyph_core::ListKey as K;
+        match self {
+            ListRef::Liked => K::Liked,
+            ListRef::Recent => K::Recent,
+            ListRef::User(id) => K::Playlist { id: id.clone() },
+            ListRef::Album { title, artist, tracks } => K::Album { title: title.clone(), artist: artist.clone(), tracks: tracks.clone() },
+            ListRef::ArtistLiked(a) => K::ArtistLiked { artist: a.clone() },
+        }
+    }
+
+    pub fn from_key(k: &glyph_core::ListKey) -> Self {
+        use glyph_core::ListKey as K;
+        match k {
+            K::Liked => ListRef::Liked,
+            K::Recent => ListRef::Recent,
+            K::Playlist { id } => ListRef::User(id.clone()),
+            K::Album { title, artist, tracks } => ListRef::Album { title: title.clone(), artist: artist.clone(), tracks: tracks.clone() },
+            K::ArtistLiked { artist } => ListRef::ArtistLiked(artist.clone()),
+        }
+    }
+
+    /// Same list (albums by title + artist).
+    pub fn same(&self, other: &ListRef) -> bool {
+        self.key().same(&other.key())
+    }
+}
+
 /// One step of the back history.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
@@ -1483,6 +1512,9 @@ impl Glyph {
         self.push_route();
         self.view = View::List;
         self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        if self.library_ok && guard(|| self.library.push_recent_list(l.key())).is_some() {
+            self.save_library(cx);
+        }
         self.open_list = Some(l);
         self.open_artist = None;
         self.ctx_menu = None;
@@ -1497,6 +1529,37 @@ impl Glyph {
             ListRef::Album { tracks, .. } => tracks.clone(),
             ListRef::ArtistLiked(name) => self.liked_by(name),
         }
+    }
+
+    pub fn is_saved(&self, l: &ListRef) -> bool {
+        self.library_ok && self.library.is_saved(&l.key())
+    }
+
+    /// Heart on an album: save it to / remove it from the library.
+    pub fn toggle_saved(&mut self, l: &ListRef, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            self.toast(t("status.library_offline"));
+            return;
+        }
+        if let Some(saved) = guard(|| self.library.toggle_saved(l.key())) {
+            self.save_library(cx);
+            self.toast(if saved { t("toast.saved_to_library") } else { t("toast.removed_from_library") });
+        }
+        cx.notify();
+    }
+
+    /// Recently opened lists that still exist (sidebar).
+    pub fn recent_lists(&self, max: usize) -> Vec<ListRef> {
+        self.library
+            .recent_lists
+            .iter()
+            .filter(|k| match k {
+                glyph_core::ListKey::Playlist { id } => self.library.playlist(id).is_some(),
+                _ => true,
+            })
+            .take(max)
+            .map(ListRef::from_key)
+            .collect()
     }
 
     /// Liked songs (co-)credited to `name`.

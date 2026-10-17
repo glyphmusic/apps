@@ -246,3 +246,7 @@
 "sp.appearance.startup.desc" = "Потоки света собирают логотип при запуске"
 "sp.server.url.desc" = "Оставьте пустым для прямых запросов или укажите свой сервер Glyph."
 "search.kind.artist" = "Исполнитель"
+"ctx.save" = "Сохранить в медиатеку"
+"ctx.unsave" = "Убрать из медиатеки"
+"toast.saved_to_library" = "Сохранено в медиатеку"
+"toast.removed_from_library" = "Убрано из медиатеки"

@@ -246,3 +246,7 @@
 "sp.appearance.startup.desc" = "Lichtströme formen beim Start das Logo"
 "sp.server.url.desc" = "Leer lassen, um Quellen direkt abzufragen, oder deinen Glyph-Server eintragen."
 "search.kind.artist" = "Künstler"
+"ctx.save" = "In Bibliothek speichern"
+"ctx.unsave" = "Aus Bibliothek entfernen"
+"toast.saved_to_library" = "In deiner Bibliothek gespeichert"
+"toast.removed_from_library" = "Aus deiner Bibliothek entfernt"

@@ -23,6 +23,32 @@ pub struct Playlist {
     pub cover: Option<String>,
 }
 
+/// A song list the library can point at (sidebar "recent", saved albums).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ListKey {
+    Liked,
+    Recent,
+    Playlist { id: String },
+    Album { title: String, artist: String, tracks: Vec<Track> },
+    ArtistLiked { artist: String },
+}
+
+impl ListKey {
+    /// Same list (albums compare by title + artist, not by their songs).
+    pub fn same(&self, other: &ListKey) -> bool {
+        match (self, other) {
+            (ListKey::Album { title: a, artist: b, .. }, ListKey::Album { title: c, artist: d, .. }) => {
+                a.eq_ignore_ascii_case(c) && b.eq_ignore_ascii_case(d)
+            }
+            _ => self == other,
+        }
+    }
+}
+
+/// Max entries in "recently opened lists".
+pub const RECENT_LISTS_LIMIT: usize = 8;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Library {
     pub liked: Vec<Track>,
@@ -34,6 +60,12 @@ pub struct Library {
     /// Songs picked from search, newest first (the search bar's dropdown).
     #[serde(default)]
     pub search_history: Vec<Track>,
+    /// Albums saved with the heart (shown in the library).
+    #[serde(default)]
+    pub saved_albums: Vec<ListKey>,
+    /// Lists opened recently, newest first (sidebar).
+    #[serde(default)]
+    pub recent_lists: Vec<ListKey>,
 }
 
 /// Max entries in the search history.
@@ -103,6 +135,28 @@ impl Library {
         }
     }
 
+    pub fn is_saved(&self, key: &ListKey) -> bool {
+        self.saved_albums.iter().any(|k| k.same(key))
+    }
+
+    /// Saves or unsaves an album. Returns true when it is now saved.
+    pub fn toggle_saved(&mut self, key: ListKey) -> bool {
+        if let Some(i) = self.saved_albums.iter().position(|k| k.same(&key)) {
+            self.saved_albums.remove(i);
+            false
+        } else {
+            self.saved_albums.insert(0, key);
+            true
+        }
+    }
+
+    /// Remembers an opened list: front, deduped, capped.
+    pub fn push_recent_list(&mut self, key: ListKey) {
+        self.recent_lists.retain(|k| !k.same(&key));
+        self.recent_lists.insert(0, key);
+        self.recent_lists.truncate(RECENT_LISTS_LIMIT);
+    }
+
     pub fn create_playlist(&mut self, name: &str) -> &mut Playlist {
         self.playlists.push(Playlist {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -136,6 +190,7 @@ impl Library {
 
     pub fn delete_playlist(&mut self, id: &str) {
         self.playlists.retain(|p| p.id != id);
+        self.recent_lists.retain(|k| k != &ListKey::Playlist { id: id.to_string() });
     }
 
     /// Appends a song unless the playlist already has it. Returns `true` if added.
@@ -232,6 +287,26 @@ mod tests {
 
     fn tr(id: &str, title: &str) -> Track {
         test_track(ProviderId::Audius, id, title, "Band", Some(180_000))
+    }
+
+    #[test]
+    fn saved_albums_and_recent_lists() {
+        let mut lib = Library::default();
+        let a = ListKey::Album { title: "Discovery".into(), artist: "Daft Punk".into(), tracks: vec![tr("1", "One")] };
+        let same = ListKey::Album { title: "discovery".into(), artist: "daft punk".into(), tracks: vec![] };
+        assert!(lib.toggle_saved(a.clone()));
+        assert!(lib.is_saved(&same));
+        assert!(!lib.toggle_saved(same));
+        assert!(lib.saved_albums.is_empty());
+        for i in 0..10 {
+            lib.push_recent_list(ListKey::Playlist { id: i.to_string() });
+        }
+        lib.push_recent_list(ListKey::Playlist { id: "5".into() });
+        assert_eq!(lib.recent_lists.len(), RECENT_LISTS_LIMIT);
+        assert_eq!(lib.recent_lists[0], ListKey::Playlist { id: "5".into() });
+        lib.playlists.push(Playlist { id: "5".into(), name: "x".into(), tracks: vec![], origin: None, cover: None });
+        lib.delete_playlist("5");
+        assert!(!lib.recent_lists.contains(&ListKey::Playlist { id: "5".into() }));
     }
 
     #[test]

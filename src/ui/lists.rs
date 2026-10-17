@@ -407,6 +407,10 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     };
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
     let has = !tracks.is_empty();
+    // Albums (and artist collections) can be saved to the library with the heart.
+    let saveable = matches!(l, ListRef::Album { .. });
+    let saved = app.is_saved(&l);
+    let l_save = l.clone();
     let user_id = match &l {
         ListRef::User(id) => Some(id.clone()),
         _ => None,
@@ -447,7 +451,28 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                             .h(px(34.0))
                             .on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))),
                     )
-                    .child(round_icon_button("list-shuffle", "shuffle", 34.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx)))),
+                    .child(round_icon_button("list-shuffle", "shuffle", 34.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+                    .when(saveable, |d| {
+                        let key: SharedString = "list-save".into();
+                        let k = key.clone();
+                        let l2 = l_save.clone();
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(34.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(8.0))
+                                .bg(black(0.35))
+                                .border_1()
+                                .border_color(white(0.14))
+                                .child(toggle_button(key, "heart", 16.0, saved, Some(theme::pink())).on_click(cx.listener(move |this, _, _, cx| {
+                                    mark_toggled(k.clone());
+                                    this.toggle_saved(&l2, cx)
+                                }))),
+                        )
+                    }),
             )
         })
         .when_some(user_id, |d, id| {
@@ -836,6 +861,14 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
     for p in &app.library.playlists {
         lists.push((ListRef::User(p.id.clone()), t("list.kind.playlist").to_string()));
     }
+    for k in &app.library.saved_albums {
+        let l = ListRef::from_key(k);
+        let by = match &l {
+            ListRef::Album { artist, .. } => format!("{} · {artist}", t("list.kind.album")),
+            _ => t("list.kind.album").to_string(),
+        };
+        lists.push((l, by));
+    }
     let tiles: Vec<AnyElement> = lists
         .into_iter()
         .enumerate()
@@ -1056,6 +1089,25 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         );
         if has {
             body.push(add_pl_row(m.playlists, flip, sub, cx));
+        }
+        if matches!(l, ListRef::Album { .. }) {
+            let saved = app.is_saved(&l);
+            let l_s = l.clone();
+            body.push(
+                ctx_item(
+                    "lctx-save".into(),
+                    if saved { "heart-fill" } else { "heart" },
+                    if saved { t("ctx.unsave") } else { t("ctx.save") },
+                    if saved { theme::pink() } else { white(0.7) },
+                    true,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_ctx_close();
+                    this.toggle_saved(&l_s, cx)
+                }))
+                .into_any_element(),
+            );
         }
         match &l {
             ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => {
