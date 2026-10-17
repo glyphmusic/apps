@@ -292,6 +292,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .child(nav(app, cx))
         .child(fade_edges(div()
                 .id("settings-page")
+                .track_scroll(&app.settings_scroll)
                 .size_full()
                 .overflow_y_scroll()
                 .px(px(32.0))
@@ -305,7 +306,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                         .child(div().text_size(px(19.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
                         .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
                 )
-                .child(div().pt(px(10.0)).child(body)), hsla(0.0, 0.0, 0.055, 1.0), 26.0).flex_1().min_w_0().h_full())
+                .child(div().pt(px(10.0)).child(body)), hsla(0.0, 0.0, 0.055, 1.0), 26.0, Some(&app.settings_scroll)).flex_1().min_w_0().h_full())
         .child(
             div()
                 .id("settings-close")

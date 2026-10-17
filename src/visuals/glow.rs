@@ -35,6 +35,8 @@ const GLOW_PITCH: f32 = 8.0;
 /// ASCII cell (logical px). Sparse on purpose: the grid is texture, not content.
 const CELL_W: f32 = 10.0;
 const CELL_H: f32 = 16.0;
+/// How far the field follows the page when the main view scrolls (0..1).
+const PARALLAX: f32 = 0.5;
 
 /// Text zones whose background luminance is reported.
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +79,8 @@ struct Job {
     ascii: bool,
     dot_level: f32,
     blend: f32,
+    /// Main view scroll (logical px, >= 0 when scrolled down).
+    scroll: f32,
 }
 
 struct FrameOut {
@@ -102,13 +106,16 @@ impl Worker {
         let ih = ((j.h / GLOW_PITCH).ceil() as usize).max(2);
         let m = &j.motion;
         let (cool, warm) = j.ramps;
+        // The field drifts with the page (parallax): sample it shifted.
+        let shift = j.scroll * PARALLAX;
+        let y_shift = shift / j.h;
 
         // --- glow (low-res)
         let mut glow = vec![0u8; iw * ih * 4];
         self.samples.clear();
         self.lum.clear();
         for py in 0..ih {
-            let y = (py as f32 + 0.5) / ih as f32;
+            let y = (py as f32 + 0.5) / ih as f32 + y_shift;
             for px_ in 0..iw {
                 let x = (px_ as f32 + 0.5) / iw as f32 * aspect;
                 let sh = field::shimmer(&self.noise, x, y, m);
@@ -172,15 +179,18 @@ impl Worker {
             let buf = &mut self.ascii;
             let p = j.scale.round().max(1.0) as usize; // font pixel size
             let cols = (j.w / CELL_W) as usize;
-            let rows = (j.h / CELL_H) as usize;
+            let rows = (j.h / CELL_H) as usize + 1;
+            // Characters move with the page too (sub-cell offset), so the art
+            // scrolls instead of flickering in place.
+            let sub = shift.rem_euclid(CELL_H);
             let sample = |lx: f32, ly: f32| -> (f32, Rgb) {
                 let gx = ((lx / GLOW_PITCH) as usize).min(iw - 1);
                 let gy = ((ly / GLOW_PITCH) as usize).min(ih - 1);
                 self.samples[gy * iw + gx]
             };
             for row in 0..rows {
-                let ly = row as f32 * CELL_H;
-                if ly < theme::TITLEBAR_H {
+                let ly = row as f32 * CELL_H - sub;
+                if ly < theme::TITLEBAR_H || ly + CELL_H > j.h {
                     continue;
                 }
                 for col in 0..cols {
@@ -298,6 +308,8 @@ pub struct GlowView {
     stale: Vec<Arc<RenderImage>>,
     zones: [f32; ZONES],
     lum_grid: Option<Arc<theme::LumGrid>>,
+    scroll: f32,
+    ascii_scroll: f32,
     stats: (f32, f32, u32, Instant),
     _task: Task<()>,
 }
@@ -383,6 +395,8 @@ impl GlowView {
             stale: Vec::new(),
             zones: [0.0; ZONES],
             lum_grid: None,
+            scroll: 0.0,
+            ascii_scroll: 0.0,
             stats: (0.0, 0.0, 0, now),
             _task: task,
         }
@@ -410,6 +424,10 @@ impl GlowView {
     }
     pub fn preset(&self) -> Preset {
         self.preset
+    }
+    /// Scroll position of the main view (px scrolled down).
+    pub fn set_scroll(&mut self, y: f32) {
+        self.scroll = y.max(0.0);
     }
     /// Short glow pulse, e.g. on every new lyric line.
     pub fn pulse(&mut self) {
@@ -513,10 +531,15 @@ impl GlowView {
             level: 0.5 + 0.5 * self.intensity,
             density: 0.75 + 0.45 * highs + 0.08 * self.playing,
             threshold: 0.42 - 0.06 * highs,
-            ascii: self.frame_no % 2 == 0 || self.ascii_img.is_none(),
+            // 15 fps normally, every frame while the page scrolls.
+            ascii: self.frame_no % 2 == 0 || self.ascii_img.is_none() || (self.scroll - self.ascii_scroll).abs() > 0.5,
             dot_level: 0.18 + 0.14 * self.intensity + 0.28 * bass + 0.10 * self.pulse,
             blend,
+            scroll: self.scroll,
         };
+        if job.ascii {
+            self.ascii_scroll = self.scroll;
+        }
         self.frame_no += 1;
         if self.jobs.try_send(job).is_ok() {
             self.busy = true;

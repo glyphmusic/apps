@@ -735,9 +735,18 @@ pub fn tr(key: &str) -> SharedString {
 }
 
 /// Soft fade at the top and bottom edge of a scroll frame: `el` plus two
-/// gradient overlays in `color` (the surface behind it). The caller sizes the
-/// returned wrapper; `el` should fill it.
-pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32) -> Div {
+/// gradient overlays in `color` (the surface behind it). With a scroll handle
+/// an edge only shows while there is more content beyond it (none at the very
+/// top / bottom). The caller sizes the returned wrapper; `el` should fill it.
+pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpui::ScrollHandle>) -> Div {
+    let (show_top, show_bottom) = match scroll {
+        Some(s) => {
+            let y = -f32::from(s.offset().y);
+            let max = f32::from(s.max_offset().y);
+            (y > 1.0, max > 1.0 && y < max - 1.0)
+        }
+        None => (true, true),
+    };
     let edge = |top: bool| {
         div()
             .absolute()
@@ -752,5 +761,5 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32) -> Div {
                 gpui::linear_color_stop(color.opacity(0.0), 1.0),
             ))
     };
-    div().relative().child(el).child(edge(true)).child(edge(false))
+    div().relative().child(el).when(show_top, |d| d.child(edge(true))).when(show_bottom, |d| d.child(edge(false)))
 }

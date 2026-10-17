@@ -192,3 +192,31 @@ pub fn raster(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaIm
     }
     image::RgbaImage::from_raw(w, h, buf)
 }
+
+/// The photo itself (no ASCII), cropped like `object-fit: cover`, slightly
+/// dimmed and faded out over the lower part. Straight-alpha BGRA.
+pub fn photo_fade(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaImage> {
+    let img = image::open(path).ok()?.to_rgb8();
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let want = w as f32 / h as f32;
+    let (cw, ch) = if iw / ih > want { (ih * want, ih) } else { (iw, iw / want) };
+    let x0 = (iw - cw) / 2.0;
+    let y0 = ((ih - ch) * focus_y.clamp(0.0, 1.0)).max(0.0);
+    let cropped = image::imageops::crop_imm(&img, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
+    let small = image::imageops::resize(&cropped, w, h, image::imageops::FilterType::Triangle);
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        let fy = (y as f32 + 0.5) / h as f32;
+        let f = 1.0 - ((fy - 0.4) / 0.6).clamp(0.0, 1.0);
+        let a = (f * f * (3.0 - 2.0 * f) * 255.0) as u8;
+        for x in 0..w {
+            let px_ = small.get_pixel(x, y).0;
+            let o = ((y * w + x) * 4) as usize;
+            buf[o] = (px_[2] as f32 * 0.8) as u8;
+            buf[o + 1] = (px_[1] as f32 * 0.8) as u8;
+            buf[o + 2] = (px_[0] as f32 * 0.8) as u8;
+            buf[o + 3] = a;
+        }
+    }
+    image::RgbaImage::from_raw(w, h, buf)
+}

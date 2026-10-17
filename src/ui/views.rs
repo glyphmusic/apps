@@ -36,7 +36,7 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
         cover_row(app, recent, "home-row", cx).into_any_element()
     };
 
-    scroll_area("home-scroll").child(
+    scroll_area("home-scroll").track_scroll(&app.main_scroll).child(
         div()
             .flex()
             .flex_col()
@@ -264,7 +264,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
         .when(s.loading && !s.results.is_empty(), |d| d.child(spinner_line(app.spinner(), t("search.more"))))
         .children(s.errors.iter().map(|(p, m)| status_line(format!("[{}] {} -> {}", p.badge(), p.display_name(), m))));
 
-    scroll_area("search-scroll").child(
+    scroll_area("search-scroll").track_scroll(&app.main_scroll).child(
         div()
             .flex()
             .flex_col()
@@ -323,6 +323,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .child(div().px(px(14.0)).pb(px(6.0)).text_size(theme::text_sm()).text_color(theme::text_dim()).child(tf("queue.next_n", &[("n", &n)])))
         .child(fade_edges(div()
                 .id("q-scroll")
+                .track_scroll(&app.queue_scroll)
                 .size_full()
                 .overflow_y_scroll()
                 .px(px(6.0))
@@ -361,7 +362,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             }
                         })))
                         .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_remove(i, cx))))
-                })), theme::panel_strong(), 18.0).flex_1().min_h_0())
+                })), theme::panel_strong(), 18.0, Some(&app.queue_scroll)).flex_1().min_h_0())
         .child(
             div()
                 .px(px(14.0))

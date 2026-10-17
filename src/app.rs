@@ -181,7 +181,12 @@ pub struct Glyph {
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
     /// Artist hero images rendered as ASCII, per source image (None = computing).
-    pub heroes: std::collections::HashMap<PathBuf, Option<Arc<gpui::RenderImage>>>,
+    pub heroes: std::collections::HashMap<(PathBuf, bool), Option<Arc<gpui::RenderImage>>>,
+    /// Scroll state of the main view, the settings page, the queue and the lyrics
+    /// (edge fades show only where there is more to scroll).
+    pub main_scroll: gpui::ScrollHandle,
+    pub settings_scroll: gpui::ScrollHandle,
+    pub queue_scroll: gpui::ScrollHandle,
     pub name_dialog: Option<NameDialog>,
     pub playlist_name: Entity<TextInput>,
     pub glow: Entity<GlowView>,
@@ -304,6 +309,9 @@ fn by_artist(name: &str, credit: &str) -> bool {
     parts.iter().any(|p| glyph_core::dedupe::artist_similarity(name, p.trim()) >= 0.85)
 }
 
+/// How long a toast stays.
+pub const TOAST_FOR: Duration = Duration::from_millis(3500);
+
 pub fn track_key(t: &Track) -> String {
     format!("{:?}:{}", t.source, t.id)
 }
@@ -390,6 +398,9 @@ impl Glyph {
             history: Vec::new(),
             ctx_menu: None,
             heroes: Default::default(),
+            main_scroll: gpui::ScrollHandle::new(),
+            settings_scroll: gpui::ScrollHandle::new(),
+            queue_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
             playlist_name,
             glow,
@@ -691,6 +702,8 @@ impl Glyph {
         if crate::theme::update_inks() {
             dirty = true;
         }
+        let scroll = -f32::from(self.main_scroll.offset().y);
+        self.glow.update(cx, |g, _| g.set_scroll(scroll));
         let zones = self.glow.read(cx).zones();
         for (ink, lum) in self.ink.iter_mut().zip(zones) {
             let target = crate::theme::ink_for(lum);
@@ -701,7 +714,7 @@ impl Glyph {
             }
         }
         if let Some((_, at)) = &self.toast {
-            if at.elapsed() > Duration::from_secs(5) {
+            if at.elapsed() > TOAST_FOR {
                 self.toast = None;
                 dirty = true;
             }
@@ -715,7 +728,12 @@ impl Glyph {
     }
 
     pub fn is_animating(&self) -> bool {
-        self.bar_slide.running()
+        let toast_fading = self.toast.as_ref().is_some_and(|(_, at)| {
+            let e = at.elapsed();
+            e < Duration::from_millis(250) || e > TOAST_FOR - Duration::from_millis(400)
+        });
+        toast_fading
+            || self.bar_slide.running()
             || self.search.loading
             || self.resolving
             || self.lyrics.loading
@@ -832,6 +850,7 @@ impl Glyph {
             return;
         }
         // Sidebar navigation starts a fresh history.
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.history.clear();
         self.ctx_menu = None;
         self.view = view;
@@ -1322,6 +1341,7 @@ impl Glyph {
 
     fn restore(&mut self, r: Route, cx: &mut Context<Self>) {
         self.view = r.view;
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.open_list = r.list;
         self.open_artist = r.artist.clone();
         if let Some(a) = r.artist {
@@ -1344,6 +1364,7 @@ impl Glyph {
         }
         self.push_route();
         self.view = View::List;
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.open_list = Some(l);
         self.open_artist = None;
         self.ctx_menu = None;
@@ -1383,6 +1404,7 @@ impl Glyph {
         }
         self.push_route();
         self.view = View::Artist;
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         self.open_artist = Some(name.clone());
         self.open_list = None;
         self.ctx_menu = None;
@@ -1972,22 +1994,30 @@ impl Glyph {
         None
     }
 
-    /// `path` as a wide ASCII raster for the artist hero (background thread).
-    pub fn ascii_hero(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
-        if let Some(v) = self.heroes.get(path) {
+    /// `path` as the artist hero (ASCII raster, or the faded photo when ASCII
+    /// covers are off), computed on a background thread.
+    pub fn hero_image(&mut self, path: &std::path::Path, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+        let ascii = self.config.visuals.ascii_covers;
+        let key = (path.to_path_buf(), ascii);
+        if let Some(v) = self.heroes.get(&key) {
             return v.clone();
         }
-        self.heroes.insert(path.to_path_buf(), None);
-        let p = path.to_path_buf();
+        self.heroes.insert(key.clone(), None);
         cx.spawn(async move |this, cx| {
-            let src = p.clone();
+            let src = key.0.clone();
             let img = cx
                 .background_executor()
-                .spawn(async move { crate::visuals::ascii::raster(&src, 1680, 420, 0.3) })
+                .spawn(async move {
+                    if ascii {
+                        crate::visuals::ascii::raster(&src, 1680, 460, 0.3)
+                    } else {
+                        crate::visuals::ascii::photo_fade(&src, 1680, 460, 0.3)
+                    }
+                })
                 .await;
             this.update(cx, |s, cx| {
                 if let Some(img) = img {
-                    s.heroes.insert(p, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
+                    s.heroes.insert(key, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
                 }
                 cx.notify();
             })

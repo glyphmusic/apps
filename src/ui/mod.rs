@@ -139,7 +139,7 @@ impl Render for Glyph {
         let main = if self.view == View::NowPlaying {
             main
         } else {
-            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.55), 22.0).size_full().into_any_element()
+            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.55), 22.0, Some(&self.main_scroll)).size_full().into_any_element()
         };
         let main_panel = div().flex_1().min_w_0().h_full().overflow_hidden().child(main);
         let queue = self
@@ -170,7 +170,11 @@ impl Render for Glyph {
                 )
                 .into_any_element()
         });
-        let toast = self.toast.as_ref().map(|(m, _)| m.clone());
+        let toast = self.toast.as_ref().map(|(m, at)| {
+            let e = at.elapsed().as_secs_f32();
+            let left = crate::app::TOAST_FOR.as_secs_f32() - e;
+            (m.clone(), ((e / 0.2).min(1.0) * (left / 0.35).clamp(0.0, 1.0)).clamp(0.0, 1.0))
+        });
         let modal = self.settings_open.then(|| settings::modal(self, window, cx));
         let menu = lists::ctx_menu(self, window, cx);
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
@@ -255,21 +259,34 @@ impl Render for Glyph {
             .children(modal)
             .children(menu)
             .children(dialog)
-            .when_some(toast, |d, m| {
+            .when_some(toast, |d, (m, alpha)| {
+                // Centred above the player bar; fades and lifts in, fades out.
+                let bottom = if shown > 0.0 { (theme::PLAYER_H + theme::GAP * 2.0) * shown + 12.0 } else { 24.0 };
                 d.child(
                     div()
                         .absolute()
-                        .right(px(18.0))
-                        .bottom(px(theme::PLAYER_H + 26.0))
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(theme::panel_strong())
-                        .border_1()
-                        .border_color(theme::border())
-                        .text_size(theme::text_sm())
-                        .text_color(theme::text())
-                        .child(m),
+                        .left_0()
+                        .right_0()
+                        .bottom(px(bottom + (1.0 - alpha) * 8.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(14.0))
+                                .h(px(34.0))
+                                .rounded(px(8.0))
+                                .bg(gpui::hsla(0.0, 0.0, 0.1, 0.97))
+                                .border_1()
+                                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                                .opacity(alpha)
+                                .text_size(px(13.0))
+                                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
+                                .child(widgets::icon("circle-check", 14.0, gpui::hsla(0.0, 0.0, 1.0, 0.7)))
+                                .child(m),
+                        ),
                 )
             })
     }

@@ -440,6 +440,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
 
     div()
         .id("list-scroll")
+        .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
         .px(px(32.0))
@@ -468,7 +469,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .as_ref()
         .and_then(|i| i.image.clone())
         .or_else(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx)));
-    let hero_img = src.as_ref().and_then(|p| app.ascii_hero(p, cx));
+    let hero_img = src.as_ref().and_then(|p| app.hero_image(p, cx));
     let still_loading = hero_img.is_none() && (src.is_some() || info_loading || loading);
 
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
@@ -493,10 +494,13 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(0.95)).child(t("artist.about")))
                 .child(
                     div()
+                        .id("about-text")
                         .text_size(px(12.5))
                         .line_height(px(18.0))
                         .text_color(white(0.72))
-                        .when(!about_open, |d| d.line_clamp(4))
+                        .overflow_hidden()
+                        .when(!about_open, |d| d.max_h(px(18.0 * 4.0)))
+                        .when(about_open, |d| d.max_h(px(18.0 * 11.0)).overflow_y_scroll())
                         .child(i.about.clone()),
                 )
                 .child(
@@ -565,17 +569,10 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .relative()
         .mx(px(-32.0))
         .mt(px(-20.0))
-        .h(px(380.0))
+        .h(px(420.0))
         .overflow_hidden()
         .when_some(hero_img, |d, im| d.child(div().absolute().inset_0().child(img(im).size_full().object_fit(ObjectFit::Cover))))
-        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 380.0, 0.0))))
-        // Readability behind the name: soft dark wash from the left.
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(linear_gradient(90.0, linear_color_stop(black(0.55), 0.0), linear_color_stop(black(0.0), 0.55))),
-        )
+        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 420.0, 0.0))))
         .children(back_button(app, cx).map(|b| div().absolute().top(px(20.0)).left(px(32.0)).child(b)))
         .child(
             div()
@@ -744,7 +741,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                     .child(div().id("artist-albums").flex().gap(px(20.0)).overflow_x_scroll().children(album_cards)),
             )
         });
-    div().id("artist-scroll").size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
+    div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
 }
 
 // ------------------------------------------------------------------ library
@@ -778,6 +775,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
     if !app.library_ok {
         return div()
             .id("lib-scroll")
+        .track_scroll(&app.main_scroll)
             .size_full()
             .px(px(32.0))
             .py(px(20.0))
@@ -818,6 +816,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
         .collect();
     div()
         .id("lib-scroll")
+        .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
         .px(px(32.0))
