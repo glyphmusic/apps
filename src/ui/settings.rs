@@ -1301,7 +1301,7 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let language = select(app, "sel-lang", cur.native_name().into(), options, cx);
 
     let weak = cx.entity().downgrade();
-    let set_int: Pick = Rc::new(move |f, _, cx| {
+    let set_int: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
         weak.update(cx, |this, cx| this.set_intensity(f, cx)).ok();
     });
     let intensity = app.config.visuals.intensity;
@@ -1360,7 +1360,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         Some(ConnTest::Ok(s)) => Some((s.clone(), theme::ok())),
         Some(ConnTest::Failed(s)) => Some((s.clone(), theme::warn())),
     };
-    let mut items = vec![
+    let items = vec![
         row(t("settings.server.url"), Some(t("sp.server.url.desc")), input_box(app.server_input.clone())),
         row(
             mode,
