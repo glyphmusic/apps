@@ -19,7 +19,7 @@ icons!(
     "refresh-cw", "repeat-1", "repeat", "search", "settings", "shuffle", "skip-back",
     "skip-forward", "square", "timer", "trash-2", "volume-2", "volume-x", "x",
     "info", "check", "database", "server", "headphones", "book-open", "life-buoy", "github", "external-link", "palette", "folder-open", "circle-check",
-    "ellipsis-vertical", "arrow-left", "history", "user-round", "circle-minus",
+    "ellipsis-vertical", "arrow-left", "history", "user-round", "circle-minus", "pencil",
 );
 
 pub struct Assets;

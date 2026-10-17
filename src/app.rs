@@ -1632,6 +1632,66 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Lets the user pick a picture for playlist `id` (file dialog); it is
+    /// copied into the data dir as a 512 px JPEG.
+    pub fn pick_playlist_cover(&mut self, id: String, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(t("dialog.playlist.pick").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(src) = paths.into_iter().next() else { return };
+            let pid = id.clone();
+            let saved = cx
+                .background_executor()
+                .spawn(async move {
+                    let img = image::open(&src).map_err(|e| e.to_string())?;
+                    // Square crop from the centre, 512 px.
+                    let side = img.width().min(img.height());
+                    let img = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side).thumbnail(512, 512);
+                    let dir = glyph_core::paths::data_dir().join("playlist-covers");
+                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    // New name per change: GPUI caches images by path.
+                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                    let path = dir.join(format!("{pid}-{stamp}.jpg"));
+                    img.to_rgb8().save(&path).map_err(|e| e.to_string())?;
+                    Ok::<_, String>(path)
+                })
+                .await;
+            this.update(cx, |s, cx| {
+                match saved {
+                    Ok(path) => {
+                        let old = s.library.playlist(&id).and_then(|p| p.cover.clone());
+                        if guard(|| s.library.set_playlist_cover(&id, Some(path.display().to_string()))).is_some() {
+                            s.save_library(cx);
+                            if let Some(old) = old {
+                                let _ = std::fs::remove_file(old);
+                            }
+                        }
+                    }
+                    Err(e) => s.toast(tf("toast.cover_error", &[("e", &e)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn remove_playlist_cover(&mut self, id: &str, cx: &mut Context<Self>) {
+        let old = self.library.playlist(id).and_then(|p| p.cover.clone());
+        if guard(|| self.library.set_playlist_cover(id, None)).is_some() {
+            self.save_library(cx);
+            if let Some(old) = old {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+        cx.notify();
+    }
+
     pub fn close_name_dialog(&mut self, cx: &mut Context<Self>) {
         if self.name_dialog.take().is_some() {
             cx.notify();

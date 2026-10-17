@@ -129,6 +129,10 @@ pub fn list_cover(app: &mut Glyph, l: &ListRef, size: f32, cx: &mut Context<Glyp
     match l {
         ListRef::Liked | ListRef::ArtistLiked(_) => tile(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0), "heart-fill", theme::pink()),
         ListRef::Recent => tile(theme::card(), "history", white(0.75)),
+        ListRef::User(id) if app.library.playlist(id).is_some_and(|p| p.cover.is_some()) => {
+            let p = app.library.playlist(id).and_then(|p| p.cover.clone()).unwrap_or_default();
+            img(std::path::PathBuf::from(p)).flex_none().size(px(size)).rounded(px(r)).object_fit(ObjectFit::Cover).into_any_element()
+        }
         ListRef::User(_) => {
             // Distinct covers (by path) for the mosaic.
             let mut paths: Vec<std::path::PathBuf> = Vec::new();
@@ -355,6 +359,36 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     let tracks = app.list_tracks(&l);
     let title = app.list_title(&l);
     let art = list_cover(app, &l, 248.0, cx);
+    let art: AnyElement = match &l {
+        ListRef::User(id) => {
+            let id = id.clone();
+            div()
+                .id("list-cover-edit")
+                .relative()
+                .group("list-cover")
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id.clone()), w, cx)))
+                .child(art)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(12.0))
+                        .bg(black(0.55))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.0))
+                        .opacity(0.0)
+                        .group_hover("list-cover", |s| s.opacity(1.0))
+                        .child(icon("pencil", 28.0, white(0.95)))
+                        .child(div().text_size(theme::text_sm()).text_color(white(0.95)).child(t("list.edit"))),
+                )
+                .into_any_element()
+        }
+        _ => art,
+    };
     let kind = match &l {
         ListRef::Album { .. } => t("list.kind.album"),
         _ => t("list.kind.playlist"),
@@ -423,7 +457,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     .flex()
                     .gap(px(4.0))
                     .child(
-                        text_button("list-rename", t("list.rename"))
+                        text_button("list-rename", t("list.edit"))
                             .text_size(theme::text_sm())
                             .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id2.clone()), w, cx))),
                     )
@@ -1026,7 +1060,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 body.push(sep().into_any_element());
                 let (id1, id2) = (id.clone(), id.clone());
                 body.push(
-                    ctx_item("lctx-rename".into(), "text-center", t("list.rename"), white(0.7), true, cx)
+                    ctx_item("lctx-rename".into(), "pencil", t("list.edit"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id1.clone()), w, cx)))
                         .into_any_element(),
                 );
@@ -1177,8 +1211,40 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
 
 /// "New playlist" / "Rename playlist": a small centred dialog with one field.
 pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
-    let renaming = app.name_dialog.as_ref().is_some_and(|d| d.rename.is_some());
+    let editing = app.name_dialog.as_ref().and_then(|d| d.rename.clone());
+    let renaming = editing.is_some();
     let input = app.playlist_name.clone();
+    let picture = editing.map(|id| {
+        let l = ListRef::User(id.clone());
+        let art = list_cover(app, &l, 112.0, cx);
+        let has = app.library.playlist(&id).is_some_and(|p| p.cover.is_some());
+        let (id1, id2) = (id.clone(), id.clone());
+        div()
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .id("dialog-cover")
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_playlist_cover(id1.clone(), cx)))
+                    .child(art),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(button("dialog-pick", t("dialog.playlist.pick")).on_click(cx.listener(move |this, _, _, cx| this.pick_playlist_cover(id.clone(), cx))))
+                    .when(has, |d| {
+                        d.child(
+                            text_button("dialog-unpick", t("dialog.playlist.unpick"))
+                                .text_size(theme::text_sm())
+                                .on_click(cx.listener(move |this, _, _, cx| this.remove_playlist_cover(&id2, cx))),
+                        )
+                    }),
+            )
+    });
     let panel = div()
         .id("name-dialog")
         .occlude()
@@ -1200,6 +1266,7 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .text_color(white(0.95))
                 .child(if renaming { t("dialog.playlist.rename") } else { t("dialog.playlist.title") }),
         )
+        .children(picture)
         .child(
             div()
                 .h(px(38.0))

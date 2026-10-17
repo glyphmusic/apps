@@ -18,6 +18,9 @@ pub struct Playlist {
     pub tracks: Vec<Track>,
     /// Where it was imported from (URL), so a re-import only adds new songs.
     pub origin: Option<String>,
+    /// Picture chosen by the user (local file in the data dir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -106,6 +109,7 @@ impl Library {
             name: name.trim().to_string(),
             tracks: vec![],
             origin: None,
+            cover: None,
         });
         self.playlists.last_mut().expect("just pushed")
     }
@@ -121,6 +125,12 @@ impl Library {
     pub fn rename_playlist(&mut self, id: &str, name: &str) {
         if let Some(p) = self.playlist_mut(id) {
             p.name = name.trim().to_string();
+        }
+    }
+
+    pub fn set_playlist_cover(&mut self, id: &str, cover: Option<String>) {
+        if let Some(p) = self.playlist_mut(id) {
+            p.cover = cover;
         }
     }
 
