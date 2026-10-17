@@ -313,8 +313,9 @@ pub fn pump(queue: &HostQueue) {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // gtk panics on any call before init (no host attached yet, tests).
         #[cfg(target_os = "linux")]
-        while gtk::events_pending() {
+        while gtk::is_initialized_main_thread() && gtk::events_pending() {
             gtk::main_iteration_do(false);
         }
         HOST.with(|h| {
