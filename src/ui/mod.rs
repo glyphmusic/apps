@@ -32,7 +32,12 @@ actions!(
         ToggleLyrics,
         ToggleQueue,
         CloseOverlay,
-        Quit
+        Quit,
+        PlayRecent0,
+        PlayRecent1,
+        PlayRecent2,
+        PlayRecent3,
+        PlayRecent4
     ]
 );
 
@@ -214,6 +219,12 @@ impl Render for Glyph {
             }))
             .on_action(cx.listener(|this, _: &NextTrack, _, cx| this.next(false, cx)))
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.previous(cx)))
+            // Taskbar jump list / dock menu: recently played.
+            .on_action(cx.listener(|this, _: &PlayRecent0, _, cx| this.play_recent(0, cx)))
+            .on_action(cx.listener(|this, _: &PlayRecent1, _, cx| this.play_recent(1, cx)))
+            .on_action(cx.listener(|this, _: &PlayRecent2, _, cx| this.play_recent(2, cx)))
+            .on_action(cx.listener(|this, _: &PlayRecent3, _, cx| this.play_recent(3, cx)))
+            .on_action(cx.listener(|this, _: &PlayRecent4, _, cx| this.play_recent(4, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, w, cx| this.focus_search(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleLyrics, w, cx| {
                 if this.view == View::NowPlaying {

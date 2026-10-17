@@ -290,3 +290,6 @@
 "sp.hidden" = "Ausgeblendete Künstler"
 "sp.hidden.none" = "Keine. Blende Künstler über das Menü auf ihrer Seite aus."
 "sp.hidden.desc" = "Erscheinen nicht in Suche und Radio"
+"dock.play_pause" = "Abspielen / Pause"
+"dock.next" = "Weiter"
+"dock.previous" = "Zurück"

@@ -230,6 +230,8 @@ pub struct Glyph {
     pub nav_hover: Option<(View, Instant)>,
     /// Fills the open album with its other songs (search in the background).
     album_task: Option<Task<()>>,
+    /// Recently played keys last put into the taskbar / dock menu.
+    dock_keys: Vec<String>,
     /// Startup animation while it runs.
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
@@ -456,6 +458,7 @@ impl Glyph {
             nav_hover: None,
             album_task: None,
             // Read straight from disk: the async config load comes too late for the first frame.
+            dock_keys: Vec::new(),
             splash: Config::load()
                 .map(|c| c.visuals.startup_animation)
                 .unwrap_or(true)
@@ -762,6 +765,14 @@ impl Glyph {
         if crate::theme::update_inks() {
             dirty = true;
         }
+        // Requests from another launch (jump list click, second start).
+        while let Some(req) = crate::instance::try_recv() {
+            if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
+                cx.perform_dock_menu_action(n);
+            }
+            cx.activate(true);
+        }
+        self.update_dock_menu(cx);
         let scroll = -f32::from(self.main_scroll.offset().y);
         self.glow.update(cx, |g, cx| {
             if g.set_scroll(scroll) {
@@ -1770,6 +1781,43 @@ impl Glyph {
                 }
             }
         }));
+    }
+
+    /// Plays the `i`-th recently played song (taskbar jump list / dock menu).
+    pub fn play_recent(&mut self, i: usize, cx: &mut Context<Self>) {
+        let list = self.library.recent.clone();
+        if i < list.len() {
+            self.play_list(list, i, cx);
+        }
+    }
+
+    /// Recently played songs + transport in the taskbar jump list (Windows)
+    /// and the dock menu (macOS). Linux has no such menu; nothing happens there.
+    fn update_dock_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            return;
+        }
+        let keys: Vec<String> = self.library.recent.iter().take(5).map(track_key).collect();
+        if keys == self.dock_keys {
+            return;
+        }
+        self.dock_keys = keys;
+        use crate::ui::{NextTrack, PlayRecent0, PlayRecent1, PlayRecent2, PlayRecent3, PlayRecent4, PrevTrack, TogglePlay};
+        let mut items: Vec<gpui::MenuItem> = Vec::new();
+        for (i, tr) in self.library.recent.iter().take(5).enumerate() {
+            let name = format!("{} · {}", tr.title, tr.artist);
+            items.push(match i {
+                0 => gpui::MenuItem::action(name, PlayRecent0),
+                1 => gpui::MenuItem::action(name, PlayRecent1),
+                2 => gpui::MenuItem::action(name, PlayRecent2),
+                3 => gpui::MenuItem::action(name, PlayRecent3),
+                _ => gpui::MenuItem::action(name, PlayRecent4),
+            });
+        }
+        items.push(gpui::MenuItem::action(t("dock.play_pause"), TogglePlay));
+        items.push(gpui::MenuItem::action(t("dock.next"), NextTrack));
+        items.push(gpui::MenuItem::action(t("dock.previous"), PrevTrack));
+        cx.set_dock_menu(items);
     }
 
     /// Plays `tracks` from a random song with shuffle on.

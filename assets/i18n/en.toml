@@ -290,3 +290,6 @@
 "sp.hidden" = "Hidden artists"
 "sp.hidden.none" = "None. Hide an artist from their page menu."
 "sp.hidden.desc" = "Not shown in search and radio"
+"dock.play_pause" = "Play / Pause"
+"dock.next" = "Next"
+"dock.previous" = "Previous"
