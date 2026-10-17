@@ -108,30 +108,37 @@ impl Worker {
         let ih = ((j.h / GLOW_PITCH).ceil() as usize).max(2);
         let m = &j.motion;
         let (cool, warm) = j.ramps;
-        // The field drifts with the page (parallax): sample it shifted.
+        // Only the ASCII layer follows the page (parallax); the glow stays put
+        // so the titlebar and window edges never shift.
         let shift = j.scroll * PARALLAX;
         let y_shift = shift / j.h;
+        let noise = &self.noise;
+        // Field value + colour at normalised (x, y).
+        let field_at = |x: f32, y: f32| -> (f32, Rgb) {
+            let sh = field::shimmer(noise, x, y, m);
+            let eval = |p: Preset, cool: &Ramp, warm: &Ramp| {
+                let (b, s) = field::sample(p, x, y, aspect, m);
+                let b = ((b + sh * b.min(1.0) * 1.4) * m.gain).max(0.0);
+                (b, cool.at(b).lerp(warm.at(b), s))
+            };
+            let (mut b, mut c) = eval(j.preset, &cool, &warm);
+            if let Some((pp, (pc, pw), pt)) = &j.prev {
+                let (b2, c2) = eval(*pp, pc, pw);
+                b = b2 + (b - b2) * pt;
+                c = c2.lerp(c, *pt);
+            }
+            (b, c)
+        };
 
         // --- glow (low-res)
         let mut glow = vec![0u8; iw * ih * 4];
         self.samples.clear();
         self.lum.clear();
         for py in 0..ih {
-            let y = (py as f32 + 0.5) / ih as f32 + y_shift;
+            let y = (py as f32 + 0.5) / ih as f32;
             for px_ in 0..iw {
                 let x = (px_ as f32 + 0.5) / iw as f32 * aspect;
-                let sh = field::shimmer(&self.noise, x, y, m);
-                let eval = |p: Preset, cool: &Ramp, warm: &Ramp| {
-                    let (b, s) = field::sample(p, x, y, aspect, m);
-                    let b = ((b + sh * b.min(1.0) * 1.4) * m.gain).max(0.0);
-                    (b, cool.at(b).lerp(warm.at(b), s))
-                };
-                let (mut b, mut c) = eval(j.preset, &cool, &warm);
-                if let Some((pp, (pc, pw), pt)) = &j.prev {
-                    let (b2, c2) = eval(*pp, pc, pw);
-                    b = b2 + (b - b2) * pt;
-                    c = c2.lerp(c, *pt);
-                }
+                let (b, c) = field_at(x, y);
                 // Softer and darker than the raw field: it is a background.
                 let shade = c.scale(smoothstep(0.02, 1.1, b) * j.level * 0.5);
                 let o = (py * iw + px_) * 4;
@@ -197,7 +204,12 @@ impl Worker {
                 }
                 for col in 0..cols {
                     let lx = col as f32 * CELL_W;
-                    let (b, c) = sample(lx + CELL_W * 0.5, ly + CELL_H * 0.5);
+                    // Evaluated at the scrolled position, so the art moves with the page.
+                    let (b, c) = if shift.abs() < 0.01 {
+                        sample(lx + CELL_W * 0.5, ly + CELL_H * 0.5)
+                    } else {
+                        field_at((lx + CELL_W * 0.5) / j.w * aspect, (ly + CELL_H * 0.5) / j.h + y_shift)
+                    };
                     let dv = b * j.density;
                     if dv < j.threshold {
                         continue;
@@ -312,8 +324,7 @@ pub struct GlowView {
     lum_grid: Option<Arc<theme::LumGrid>>,
     scroll: f32,
     ascii_scroll: f32,
-    /// Scroll the displayed glow / ASCII images were drawn for.
-    glow_drawn_at: f32,
+    /// Scroll the displayed ASCII image was drawn for.
     ascii_drawn_at: f32,
     stats: (f32, f32, u32, Instant),
     _task: Task<()>,
@@ -402,7 +413,6 @@ impl GlowView {
             lum_grid: None,
             scroll: 0.0,
             ascii_scroll: 0.0,
-            glow_drawn_at: 0.0,
             ascii_drawn_at: 0.0,
             stats: (0.0, 0.0, 0, now),
             _task: task,
@@ -479,7 +489,6 @@ impl GlowView {
             if let Some(old) = self.glow_img.replace(glow) {
                 self.stale.push(old);
             }
-            self.glow_drawn_at = out.scroll;
             if let Some(a) = out.ascii {
                 self.ascii_drawn_at = out.scroll;
                 let a = Arc::new(RenderImage::new(vec![image::Frame::new(a)]));
@@ -577,12 +586,7 @@ impl GlowView {
             Bounds { origin: gpui::point(b.origin.x, b.origin.y + px(dy)), size: b.size }
         };
         if let Some(img) = self.glow_img.clone() {
-            // Slightly taller so a shift never uncovers an edge.
-            let pad = px(((self.scroll - self.glow_drawn_at).abs() * PARALLAX).min(400.0));
-            let mut b = shifted(bounds, self.glow_drawn_at, self.scroll);
-            b.origin.y -= pad;
-            b.size.height += pad + pad;
-            let _ = window.paint_image(bounds, b, Default::default(), img, 0, false);
+            let _ = window.paint_image(bounds, bounds, Default::default(), img, 0, false);
         }
         if let Some(img) = self.ascii_img.clone() {
             // The titlebar dot grid stays put; the field below moves.

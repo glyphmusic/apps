@@ -191,6 +191,8 @@ pub struct Glyph {
     pub settings_scroll: gpui::ScrollHandle,
     pub queue_scroll: gpui::ScrollHandle,
     pub name_dialog: Option<NameDialog>,
+    /// Sidebar icon under the mouse and since when (hover animation).
+    pub nav_hover: Option<(View, Instant)>,
     pub playlist_name: Entity<TextInput>,
     pub glow: Entity<GlowView>,
     pub search_input: Entity<TextInput>,
@@ -405,6 +407,7 @@ impl Glyph {
             settings_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
+            nav_hover: None,
             playlist_name,
             glow,
             search_input,
@@ -739,7 +742,9 @@ impl Glyph {
             let e = at.elapsed();
             e < Duration::from_millis(250) || e > TOAST_FOR - Duration::from_millis(400)
         });
+        let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700));
         toast_fading
+            || nav_anim
             || self.bar_slide.running()
             || self.search.loading
             || self.resolving

@@ -312,6 +312,29 @@ pub fn window_pill() -> impl IntoElement {
 pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let item = |id: &'static str, name: &'static str, view: View, cx: &mut Context<Glyph>| {
         let active = if view == View::Settings { app.settings_open } else { app.view == view && !app.settings_open };
+        // Hover animation per icon: the disc spins, the gear turns, the house
+        // hops, the magnifier wiggles, the library pops.
+        let t = app.nav_hover.filter(|(v, _)| *v == view).map(|(_, at)| at.elapsed().as_secs_f32());
+        let tf = match t {
+            None => gpui::Transformation::rotate(gpui::radians(0.0)),
+            Some(t) => match view {
+                View::NowPlaying => gpui::Transformation::rotate(gpui::radians(t * std::f32::consts::TAU / 1.4)),
+                View::Settings => {
+                    let k = (t / 0.5).min(1.0);
+                    gpui::Transformation::rotate(gpui::radians((1.0 - (1.0 - k).powi(3)) * std::f32::consts::FRAC_PI_2))
+                }
+                View::Home => {
+                    let k = (t / 0.35).min(1.0);
+                    gpui::Transformation::translate(gpui::point(px(0.0), px(-3.0 * (k * std::f32::consts::PI).sin())))
+                }
+                View::Search => gpui::Transformation::rotate(gpui::radians(0.25 * (t * 18.0).sin() * (-t * 5.0).exp())),
+                _ => {
+                    let k = (t / 0.3).min(1.0);
+                    let s = 1.0 + 0.16 * (k * std::f32::consts::PI).sin();
+                    gpui::Transformation::scale(gpui::size(s, s))
+                }
+            },
+        };
         div()
             .id(id)
             .w(px(44.0))
@@ -323,8 +346,16 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
             .cursor_pointer()
             .when(active, |d| d.bg(theme::active()))
             .hover(|s| s.bg(theme::hover()))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.nav_hover = Some((view, std::time::Instant::now()));
+                } else if this.nav_hover.is_some_and(|(v, _)| v == view) {
+                    this.nav_hover = None;
+                }
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(view, w, cx)))
-            .child(icon(name, 20.0, if active { theme::text() } else { theme::text_dim() }))
+            .child(icon(name, 20.0, if active { theme::text() } else { theme::text_dim() }).with_transformation(tf))
     };
     let home = item("nav-home", "house", View::Home, cx);
     let search = item("nav-search", "search", View::Search, cx);
