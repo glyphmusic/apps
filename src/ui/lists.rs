@@ -12,7 +12,7 @@ use crate::theme;
 use crate::ui::widgets::*;
 use glyph_protocol::Track;
 use gpui::{
-    anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId,
+    anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId, ExternalPaths,
     FontWeight, Hsla, MouseButton, MouseDownEvent, ObjectFit, SharedString, Stateful, Window,
 };
 use std::rc::Rc;
@@ -636,6 +636,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
             ListRef::Liked | ListRef::ArtistLiked(_) => (t("library.liked.empty"), t("library.liked.empty.sub")),
             ListRef::Recent => (t("home.empty.title"), t("library.recent.empty.sub")),
             ListRef::Downloads => (t("library.downloads.empty"), t("library.downloads.empty.sub")),
+            ListRef::User(_) => (t("library.playlist.empty"), t("list.empty.sub.user")),
             _ => (t("library.playlist.empty"), t("list.empty.sub")),
         };
         ascii_state(ART_EMPTY, a, b).into_any_element()
@@ -646,6 +647,12 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         div().flex().flex_col().children(rows).into_any_element()
     };
 
+    // Own playlists take music files / folders dropped from the file manager.
+    let drop_id = match &l {
+        ListRef::User(id) => Some(id.clone()),
+        _ => None,
+    };
+
     // The cover column stays put; only the songs scroll.
     div()
         .size_full()
@@ -654,6 +661,12 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         .gap(px(16.0))
         .px(px(32.0))
         .pt(px(20.0))
+        .when_some(drop_id, |d, id| {
+            d.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(theme::hover()))
+                .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                    this.import_files_to_playlist(id.clone(), paths.paths().to_vec(), cx)
+                }))
+        })
         .children(back_button(app, cx).map(|b| div().flex_none().flex().child(b)))
         .child(
             div()

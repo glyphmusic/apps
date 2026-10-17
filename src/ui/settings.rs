@@ -17,10 +17,10 @@ use gpui::{anchored,
 };
 use std::rc::Rc;
 
-pub const REPO_URL: &str = "https://github.com/glyphmusic/glyph";
-const DOCS_URL: &str = "https://github.com/glyphmusic/glyph#readme";
-const ISSUES_URL: &str = "https://github.com/glyphmusic/glyph/issues/new";
-const RELEASES_URL: &str = "https://github.com/glyphmusic/glyph/releases";
+pub const REPO_URL: &str = "https://github.com/glyphmusic/desktop";
+const DOCS_URL: &str = "https://github.com/glyphmusic/desktop#readme";
+const ISSUES_URL: &str = "https://github.com/glyphmusic/desktop/issues/new";
+const RELEASES_URL: &str = "https://github.com/glyphmusic/desktop/releases";
 
 const PANEL_W: f32 = 920.0;
 const PANEL_H: f32 = 600.0;

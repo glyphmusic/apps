@@ -3,7 +3,7 @@
 //! like GPUI does. Any re-entrant window-procedure call during that borrow is
 //! the bug this design avoids; the example counts them and fails on any.
 //!
-//! `cargo run -p glyph-audio --example embed_host_win -- [youtube-id]`
+//! `cargo run -p glyph-audio --features embed-host-example --example embed_host_win -- [youtube-id]`
 use glyph_audio::*;
 use glyph_protocol::{PlaybackSource, ProviderId, Track};
 use raw_window_handle::HasWindowHandle;

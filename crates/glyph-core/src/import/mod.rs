@@ -4,6 +4,7 @@
 //! results are bucketed into sure / unsure / not found.
 
 pub mod files;
+pub mod local;
 
 use crate::providers::Providers;
 use crate::resolver::{MIN_CONFIDENCE, SURE_CONFIDENCE};

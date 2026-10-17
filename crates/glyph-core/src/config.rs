@@ -200,10 +200,13 @@ impl Default for VisualsConfig {
     }
 }
 
+/// Where the release workflow publishes (the app's own repository).
+pub const RELEASES_REPO: &str = "glyphmusic/desktop";
+
 impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
-            repo: "glyphmusic/glyph".into(),
+            repo: RELEASES_REPO.into(),
             check_on_start: true,
             auto_install: false,
             channel: "stable".into(),
@@ -283,6 +286,10 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(e.into()),
         };
+        // Early configs named a repository that has no releases.
+        if cfg.updates.repo.trim() == "glyphmusic/glyph" {
+            cfg.updates.repo = RELEASES_REPO.into();
+        }
         cfg.keys.blank_to_none();
         cfg.file_keys = Some(cfg.keys.clone());
         cfg.apply_env();

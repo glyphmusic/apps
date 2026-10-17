@@ -313,9 +313,13 @@ pub fn pump(queue: &HostQueue) {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // Before the first attach gtk is not initialised yet (and must not be
+        // touched then).
         #[cfg(target_os = "linux")]
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
+        if gtk::is_initialized() {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
         }
         HOST.with(|h| {
             let mut h = h.borrow_mut();

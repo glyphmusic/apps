@@ -50,7 +50,7 @@ ascii_covers = false
 
 [updates]
 # GitHub repository (owner/repo) that publishes releases.
-repo = "glyphmusic/glyph"
+repo = "glyphmusic/desktop"
 check_on_start = true
 # Download + install automatically (always SHA-256 verified). Restart is asked first.
 auto_install = false
