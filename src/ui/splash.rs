@@ -190,9 +190,11 @@ fn paint(bounds: Bounds<Pixels>, t: f32, particles: &[Particle], fade_out: f32, 
     let cols = ART[0].len() as f32;
     let rows = ART.len() as f32;
     // The note is about a third of the smaller window side tall.
-    let cell_w = ((h.min(w) * 0.36) / (rows * CELL_ASPECT)).clamp(5.0, 12.0);
-    let cell_h = cell_w * CELL_ASPECT;
-    let font_size = px(cell_w * 1.25);
+    let row_h = ((h.min(w) * 0.36) / rows).clamp(6.0, 15.0);
+    // Columns a bit tighter than the icon's own raster: a slimmer note.
+    let cell_w = row_h / CELL_ASPECT * 0.82;
+    let cell_h = row_h;
+    let font_size = px(row_h * 0.95);
     let (left, top) = (cx_ - cols * cell_w / 2.0, cy_ - rows * cell_h / 2.0);
     let reach = w.max(h) * 0.78;
     let font = gpui::Font { weight: gpui::FontWeight::BOLD, ..gpui::font(crate::theme::MONO) };

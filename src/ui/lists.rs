@@ -314,6 +314,35 @@ pub fn song_row(
     with_menu(row, tr, from_ctx, cx)
 }
 
+/// "Follow" / "Following" outline button for an artist.
+pub fn follow_button(id: impl Into<ElementId>, name: &str, track: Option<Track>, app: &Glyph, h: f32, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    let following = app.is_following(name);
+    let n = name.to_string();
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(h))
+        .px(px(14.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(if following { white(0.14) } else { white(0.4) })
+        .bg(if following { white(0.08) } else { black(0.25) })
+        .cursor_pointer()
+        .text_size(theme::text_sm())
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(white(0.95))
+        .hover(|s| s.border_color(white(0.7)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_follow(&n, track.clone(), cx)
+        }))
+        .when(following, |d| d.child(icon("check", 14.0, white(0.95))))
+        .child(if following { t("artist.following") } else { t("artist.follow") })
+}
+
 fn round_icon_button(id: impl Into<ElementId>, name: &str, size: f32) -> Stateful<gpui::Div> {
     div()
         .id(id)
@@ -665,9 +694,11 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             .gap(px(8.0))
                             .child(play_pill("artist-play", t("common.play")).on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))))
                             .child(round_icon_button("artist-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
-                            .child(round_icon_button("artist-queue", "list-plus", 36.0).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx)))),
+                            .child(round_icon_button("artist-queue", "list-plus", 36.0).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
+                            .child(follow_button("artist-follow", &name, tracks.first().cloned(), app, 36.0, cx)),
                     )
-                }),
+                })
+                .when(!has, |d| d.child(div().pt(px(4.0)).flex().child(follow_button("artist-follow", &name, None, app, 36.0, cx)))),
         )
         .children(about_card.map(|c| div().absolute().right(px(32.0)).bottom(px(40.0)).child(c)));
 
@@ -894,6 +925,52 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
                 .into_any_element()
         })
         .collect();
+    // Followed artists: round pictures, open the artist page.
+    let followed = app.library.followed.clone();
+    let artist_tiles: Vec<AnyElement> = followed
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let art: AnyElement = match &f.track {
+                Some(tr) => cover(app, tr, 168.0, 84.0, cx).into_any_element(),
+                None => div()
+                    .size(px(168.0))
+                    .rounded_full()
+                    .bg(theme::card())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("user-round", 48.0, white(0.5)))
+                    .into_any_element(),
+            };
+            let name = f.name.clone();
+            div()
+                .id(("lib-artist", i))
+                .flex_none()
+                .w(px(184.0))
+                .p(px(8.0))
+                .rounded(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(white(0.05)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&name, cx)))
+                .child(art)
+                .child(div().pt(px(6.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(f.name.clone()))
+                .child(div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("search.kind.artist")))
+                .into_any_element()
+        })
+        .collect();
+    let artists_section = (!artist_tiles.is_empty()).then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .pt(px(10.0))
+            .child(section_title("user-round", t("library.artists")))
+            .child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(artist_tiles))
+    });
     div()
         .id("lib-scroll")
         .track_scroll(&app.main_scroll)
@@ -901,7 +978,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
         .overflow_y_scroll()
         .px(px(32.0))
         .py(px(20.0))
-        .child(div().flex().flex_col().gap(px(18.0)).child(head).child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(tiles)))
+        .child(div().flex().flex_col().gap(px(18.0)).child(head).child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(tiles)).children(artists_section))
         .into_any_element()
 }
 

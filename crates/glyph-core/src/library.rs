@@ -46,6 +46,15 @@ impl ListKey {
     }
 }
 
+/// An artist the user follows (shown in the library and on Home).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FollowedArtist {
+    pub name: String,
+    /// A song of theirs, for the picture until the artist page has a photo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
+}
+
 /// Max entries in "recently opened lists".
 pub const RECENT_LISTS_LIMIT: usize = 8;
 
@@ -66,6 +75,9 @@ pub struct Library {
     /// Lists opened recently, newest first (sidebar).
     #[serde(default)]
     pub recent_lists: Vec<ListKey>,
+    /// Followed artists, newest first.
+    #[serde(default)]
+    pub followed: Vec<FollowedArtist>,
 }
 
 /// Max entries in the search history.
@@ -132,6 +144,21 @@ impl Library {
     pub fn remove_search(&mut self, index: usize) {
         if index < self.search_history.len() {
             self.search_history.remove(index);
+        }
+    }
+
+    pub fn is_following(&self, name: &str) -> bool {
+        self.followed.iter().any(|a| a.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Follows or unfollows an artist. Returns true when now following.
+    pub fn toggle_follow(&mut self, name: &str, track: Option<Track>) -> bool {
+        if let Some(i) = self.followed.iter().position(|a| a.name.eq_ignore_ascii_case(name)) {
+            self.followed.remove(i);
+            false
+        } else {
+            self.followed.insert(0, FollowedArtist { name: name.trim().to_string(), track });
+            true
         }
     }
 
@@ -287,6 +314,15 @@ mod tests {
 
     fn tr(id: &str, title: &str) -> Track {
         test_track(ProviderId::Audius, id, title, "Band", Some(180_000))
+    }
+
+    #[test]
+    fn follow_toggle_is_case_insensitive() {
+        let mut lib = Library::default();
+        assert!(lib.toggle_follow("Daft Punk", None));
+        assert!(lib.is_following("daft punk"));
+        assert!(!lib.toggle_follow("DAFT PUNK", None));
+        assert!(lib.followed.is_empty());
     }
 
     #[test]

@@ -313,41 +313,94 @@ pub fn fmt_ms(ms: Option<u64>) -> String {
 }
 
 /// Thin flat bar (white fill on grey track, 4 px), clickable in segments.
-pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick) -> Div {
-    const N: usize = 80;
-    let filled = (frac.clamp(0.0, 1.0) * N as f32).round() as usize;
-    let seg = width / N as f32;
-    div()
-        .flex()
-        .flex_none()
-        .w(px(width))
-        .h(px(14.0))
-        .items_center()
-        .children((0..N).map(move |i| {
-            let pick = on_pick.clone();
-            let first = i == 0;
-            let last = i + 1 == N;
-            div()
-                .id((id, i))
-                .w(px(seg))
-                .h(px(14.0))
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .on_click(move |_, w, cx| pick((i as f32 + 0.5) / N as f32, w, cx))
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(4.0))
-                        .when(first, |d| d.rounded_l(px(2.0)))
-                        .when(last, |d| d.rounded_r(px(2.0)))
-                        .bg(if i < filled {
-                            theme::text()
-                        } else {
-                            gpui::hsla(0.0, 0.0, 1.0, 0.18)
-                        }),
-                )
-        }))
+thread_local! {
+    /// Bar being dragged: (bar id, current fraction).
+    static BAR_DRAG: std::cell::Cell<Option<(&'static str, f32)>> = const { std::cell::Cell::new(None) };
+    /// Bar under the mouse (shows the knob).
+    static BAR_HOVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Thin progress / volume bar: click or drag anywhere on it. Volume-like bars
+/// apply while dragging; seek bars (`id` contains "seek") show the dragged
+/// position and seek once on release.
+pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, cx: &mut Context<crate::app::Glyph>) -> Div {
+    let view = cx.entity().downgrade();
+    let live = !id.contains("seek");
+    div().flex_none().w(px(width)).h(px(14.0)).child(
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let drag = BAR_DRAG.with(|d| d.get()).filter(|(d, _)| *d == id);
+                let shown = drag.map(|(_, f)| f).unwrap_or(frac).clamp(0.0, 1.0);
+                let hot = drag.is_some() || BAR_HOVER.with(|h| h.get()) == Some(id);
+                let x0 = f32::from(bounds.origin.x);
+                let w = f32::from(bounds.size.width);
+                let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+                let th = if hot { 5.0 } else { 4.0 };
+                let track = gpui::Bounds { origin: gpui::point(px(x0), px(cy - th / 2.0)), size: gpui::size(px(w), px(th)) };
+                let quad = |b: gpui::Bounds<gpui::Pixels>, r: f32, c: Hsla| {
+                    gpui::quad(b, gpui::Corners::all(px(r)), c, gpui::Edges::default(), gpui::transparent_black(), gpui::BorderStyle::default())
+                };
+                window.paint_quad(quad(track, th / 2.0, gpui::hsla(0.0, 0.0, 1.0, 0.18)));
+                let fill_w = w * shown;
+                if fill_w > 0.5 {
+                    let filled = gpui::Bounds { origin: track.origin, size: gpui::size(px(fill_w), px(th)) };
+                    window.paint_quad(quad(filled, th / 2.0, if hot { theme::pink() } else { theme::text() }));
+                }
+                if hot {
+                    let k = 11.0;
+                    let knob = gpui::Bounds { origin: gpui::point(px(x0 + fill_w - k / 2.0), px(cy - k / 2.0)), size: gpui::size(px(k), px(k)) };
+                    window.paint_quad(quad(knob, k / 2.0, gpui::white()));
+                }
+                let frac_at = move |x: f32| ((x - x0) / w.max(1.0)).clamp(0.0, 1.0);
+                let (p1, p2, p3) = (on_pick.clone(), on_pick.clone(), on_pick.clone());
+                let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
+                // A little taller hit area than the drawn bar.
+                let hit = bounds.dilate(px(4.0));
+                window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hit.contains(&e.position) {
+                        return;
+                    }
+                    let f = frac_at(f32::from(e.position.x));
+                    BAR_DRAG.with(|d| d.set(Some((id, f))));
+                    if live {
+                        p1(f, window, cx);
+                    }
+                    cx.stop_propagation();
+                    v1.update(cx, |_, cx| cx.notify()).ok();
+                });
+                window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, window, cx| {
+                    let over = hit.contains(&e.position);
+                    let was = BAR_HOVER.with(|h| h.get()) == Some(id);
+                    if over != was {
+                        BAR_HOVER.with(|h| h.set(if over { Some(id) } else { None }));
+                        v2.update(cx, |_, cx| cx.notify()).ok();
+                    }
+                    if BAR_DRAG.with(|d| d.get()).is_some_and(|(d, _)| d == id) {
+                        if e.pressed_button != Some(gpui::MouseButton::Left) {
+                            BAR_DRAG.with(|d| d.set(None));
+                            return;
+                        }
+                        let f = frac_at(f32::from(e.position.x));
+                        BAR_DRAG.with(|d| d.set(Some((id, f))));
+                        if live {
+                            p2(f, window, cx);
+                        }
+                        v2.update(cx, |_, cx| cx.notify()).ok();
+                    }
+                });
+                window.on_mouse_event(move |e: &gpui::MouseUpEvent, _, window, cx| {
+                    if let Some((d, _)) = BAR_DRAG.with(|d| d.get()).filter(|(d, _)| *d == id) {
+                        let _ = d;
+                        BAR_DRAG.with(|d| d.set(None));
+                        p3(frac_at(f32::from(e.position.x)), window, cx);
+                        v3.update(cx, |_, cx| cx.notify()).ok();
+                    }
+                });
+            },
+        )
+        .size_full(),
+    )
 }
 
 /// Empty / error state, Liner style: a small icon in a soft circle, title and

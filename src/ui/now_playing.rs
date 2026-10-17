@@ -133,7 +133,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(10.0))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(fmt_time(pos)))
-                .child(thin_bar("np-seek", 250.0, frac, seek))
+                .child(thin_bar("np-seek", 250.0, frac, seek, cx))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()))),
         )
         .child(
@@ -162,7 +162,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(10.0))
                 .child(icon("volume-2", 16.0, theme::text_dim()))
-                .child(thin_bar("np-vol", 150.0, app.volume(), vol))
+                .child(thin_bar("np-vol", 150.0, app.volume(), vol, cx))
                 .child(
                     toggle_button("np-like", "heart", 16.0, liked, Some(theme::pink()))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -321,15 +321,25 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
             .into_any_element()
     };
 
+    // The pills stay fixed above the lines; only the lines scroll, and their
+    // edges fade only where there is more text.
     let scroll = div()
         .id("lyrics-scroll")
+        .track_scroll(&app.lyrics_scroll)
         .size_full()
         .overflow_y_scroll()
+        .pt(px(12.0))
+        .pb(px(24.0))
+        .child(body);
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
         .flex()
         .flex_col()
-        .gap(px(28.0))
-        .py(px(20.0))
+        .gap(px(16.0))
+        .pt(px(20.0))
         .child(info)
-        .child(body);
-    fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.5), 48.0, None).flex_1().min_w_0().h_full().into_any_element()
+        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full())
+        .into_any_element()
 }

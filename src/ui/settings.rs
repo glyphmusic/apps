@@ -562,7 +562,7 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(thin_bar("intensity", 160.0, intensity, set_int))
+                .child(thin_bar("intensity", 160.0, intensity, set_int, cx))
                 .child(mono().w(px(36.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(format!("{:.0}%", intensity * 100.0))),
         ),
         row(

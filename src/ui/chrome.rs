@@ -333,6 +333,39 @@ fn nav_motion(view: View, t: f32) -> (f32, f32, f32) {
     }
 }
 
+/// Label that floats to the right of a sidebar item after a short hover.
+fn side_tooltip(label: SharedString, since: Option<std::time::Instant>) -> Option<gpui::AnyElement> {
+    let t = since?.elapsed().as_secs_f32();
+    let a = ((t - 0.35) / 0.15).clamp(0.0, 1.0);
+    if a <= 0.0 {
+        return None;
+    }
+    Some(
+        gpui::deferred(
+            div()
+                .absolute()
+                .left(px(52.0 - 4.0 * (1.0 - a)))
+                .top(px(9.0))
+                .opacity(a)
+                .flex()
+                .items_center()
+                .h(px(26.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
+                .bg(gpui::hsla(0.0, 0.0, 0.12, 0.98))
+                .border_1()
+                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                .whitespace_nowrap()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
+                .child(label),
+        )
+        .with_priority(2)
+        .into_any_element(),
+    )
+}
+
 /// Recently opened lists as small covers under the navigation (newest first).
 fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyElement> {
     let lists = app.recent_lists(5);
@@ -346,8 +379,19 @@ fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyEle
         .map(|(i, l)| {
             let active = open.as_ref().is_some_and(|o| o.same(&l));
             let art = crate::ui::lists::list_cover(app, &l, 36.0, cx);
+            let tip = side_tooltip(app.list_title(&l).into(), app.side_hover.filter(|(h, _)| *h == i).map(|(_, at)| at));
             let lm = l.clone();
             crate::ui::lists::with_list_menu(div().id(("side-list", i)), lm, cx)
+                .relative()
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.side_hover = Some((i, std::time::Instant::now()));
+                    } else if this.side_hover.is_some_and(|(h, _)| h == i) {
+                        this.side_hover = None;
+                    }
+                    cx.notify();
+                }))
+                .children(tip)
                 .size(px(44.0))
                 .flex()
                 .items_center()
@@ -391,11 +435,21 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
             }
             _ => (0.0, 0.0, 1.0),
         };
+        let label = match view {
+            View::Home => t("nav.home"),
+            View::Search => t("nav.search"),
+            View::Library => t("nav.library"),
+            View::NowPlaying => t("nav.now_playing"),
+            _ => t("nav.settings"),
+        };
+        let tip = side_tooltip(label, app.nav_hover.filter(|(v, _)| *v == view).map(|(_, at)| at));
         let tf = gpui::Transformation::rotate(gpui::radians(angle))
             .with_translation(gpui::point(px(0.0), px(dy)))
             .with_scaling(gpui::size(scale, scale));
         div()
             .id(id)
+            .relative()
+            .children(tip)
             .w(px(44.0))
             .h(px(44.0))
             .flex()

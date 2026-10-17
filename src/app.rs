@@ -222,6 +222,7 @@ pub struct Glyph {
     pub main_scroll: gpui::ScrollHandle,
     pub settings_scroll: gpui::ScrollHandle,
     pub queue_scroll: gpui::ScrollHandle,
+    pub lyrics_scroll: gpui::ScrollHandle,
     pub name_dialog: Option<NameDialog>,
     /// Sidebar icon under the mouse and since when (hover animation).
     pub nav_hover: Option<(View, Instant)>,
@@ -229,6 +230,8 @@ pub struct Glyph {
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
     pub nav_leave: Option<(View, Instant, f32)>,
+    /// Sidebar list tile under the mouse (tooltip).
+    pub side_hover: Option<(usize, Instant)>,
     pub playlist_name: Entity<TextInput>,
     pub glow: Entity<GlowView>,
     pub search_input: Entity<TextInput>,
@@ -444,6 +447,7 @@ impl Glyph {
             main_scroll: gpui::ScrollHandle::new(),
             settings_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::ScrollHandle::new(),
+            lyrics_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
             nav_hover: None,
             // Read straight from disk: the async config load comes too late for the first frame.
@@ -452,6 +456,7 @@ impl Glyph {
                 .unwrap_or(true)
                 .then(crate::ui::splash::Splash::new),
             nav_leave: None,
+            side_hover: None,
             playlist_name,
             glow,
             search_input,
@@ -789,7 +794,9 @@ impl Glyph {
         let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700))
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
         let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200)) || self.ctx_closing.is_some();
+        let tip_anim = self.side_hover.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(600));
         toast_fading
+            || tip_anim
             || menu_anim
             || self.splash.is_some()
             || nav_anim
@@ -1529,6 +1536,22 @@ impl Glyph {
             ListRef::Album { tracks, .. } => tracks.clone(),
             ListRef::ArtistLiked(name) => self.liked_by(name),
         }
+    }
+
+    pub fn is_following(&self, name: &str) -> bool {
+        self.library_ok && self.library.is_following(name)
+    }
+
+    pub fn toggle_follow(&mut self, name: &str, track: Option<Track>, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            self.toast(t("status.library_offline"));
+            return;
+        }
+        if let Some(now) = guard(|| self.library.toggle_follow(name, track)) {
+            self.save_library(cx);
+            self.toast(tf(if now { "toast.following" } else { "toast.unfollowed" }, &[("name", &name)]));
+        }
+        cx.notify();
     }
 
     pub fn is_saved(&self, l: &ListRef) -> bool {
