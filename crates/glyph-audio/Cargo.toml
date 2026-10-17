@@ -29,3 +29,12 @@ tao = "0.37"
 # wry's webkit2gtk needs gtk initialised/pumped by us for the child-webview host.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+[features]
+# The Windows embed-host check needs tao, which is not a dependency on macOS;
+# build it with `--features embed-host-example`.
+embed-host-example = []
+
+[[example]]
+name = "embed_host_win"
+required-features = ["embed-host-example"]
