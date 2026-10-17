@@ -190,9 +190,9 @@ fn paint(bounds: Bounds<Pixels>, t: f32, particles: &[Particle], fade_out: f32, 
     let cols = ART[0].len() as f32;
     let rows = ART.len() as f32;
     // The note is about a third of the smaller window side tall.
-    let row_h = ((h.min(w) * 0.36) / rows).clamp(6.0, 15.0);
-    // Columns slightly tighter than the icon raster: a touch slimmer, not stretched.
-    let cell_w = row_h / CELL_ASPECT * 0.93;
+    let row_h = ((h.min(w) * 0.26) / rows).clamp(5.0, 11.0);
+    // Same proportions as the icon raster; the logo is kept small.
+    let cell_w = row_h / CELL_ASPECT;
     let cell_h = row_h;
     let font_size = px(row_h * 0.95);
     let (left, top) = (cx_ - cols * cell_w / 2.0, cy_ - rows * cell_h / 2.0);
