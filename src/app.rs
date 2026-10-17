@@ -1896,14 +1896,14 @@ Language: {}",
     pub fn test_connection(&mut self, cx: &mut Context<Self>) {
         let mut cfg = self.config.clone();
         cfg.server_url = self.server_input.read(cx).value.trim().to_string();
-        if cfg.server_url.is_empty() {
+        if cfg.effective_server_url().is_empty() {
             self.conn_test = Some(ConnTest::Ok(t("settings.server.direct").to_string()));
             cx.notify();
             return;
         }
         self.conn_test = Some(ConnTest::Running);
         cx.spawn(async move |this, cx| {
-            let url = cfg.server_url.clone();
+            let url = cfg.effective_server_url().to_string();
             let r = cx
                 .background_executor()
                 .spawn(async move {

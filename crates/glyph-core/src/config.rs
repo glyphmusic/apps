@@ -5,10 +5,14 @@ use glyph_protocol::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Public Glyph server used when `server_url` is empty, so nobody has to set
+/// anything up. `server_url = "off"` switches to direct mode.
+pub const DEFAULT_SERVER_URL: &str = "https://glyph-server.astrls-mail-cli.workers.dev";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Empty string = direct mode.
+    /// Empty = the public Glyph server ([`DEFAULT_SERVER_URL`]); "off" = direct mode.
     pub server_url: String,
     /// "" = system language; otherwise "en" | "de" | "ru".
     pub language: String,
@@ -237,6 +241,16 @@ impl Config {
         }
     }
 
+    /// The server actually used: the public one when none is set, nothing
+    /// (direct mode) for "off".
+    pub fn effective_server_url(&self) -> &str {
+        match self.server_url.trim() {
+            "" => DEFAULT_SERVER_URL,
+            u if u.eq_ignore_ascii_case("off") || u.eq_ignore_ascii_case("direct") => "",
+            u => u,
+        }
+    }
+
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&Self::path())
     }
@@ -272,6 +286,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_server_means_public_and_off_means_direct() {
+        let mut c = Config::default();
+        assert_eq!(c.effective_server_url(), DEFAULT_SERVER_URL);
+        c.server_url = "OFF".into();
+        assert_eq!(c.effective_server_url(), "");
+        c.server_url = " https://mine.example ".into();
+        assert_eq!(c.effective_server_url(), "https://mine.example");
+    }
 
     #[test]
     fn defaults_roundtrip_through_toml() {

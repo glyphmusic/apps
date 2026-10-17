@@ -91,7 +91,7 @@
 "settings.priority.hint" = "Drag to reorder"
 "settings.server" = "Server"
 "settings.server.url" = "Server URL"
-"settings.server.placeholder" = "empty = direct mode"
+"settings.server.placeholder" = "empty = public Glyph server · off = no server"
 "settings.server.test" = "Test connection"
 "settings.server.apply" = "Apply"
 "settings.server.testing" = "testing…"

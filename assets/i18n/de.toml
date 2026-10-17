@@ -91,7 +91,7 @@
 "settings.priority.hint" = "Zum Sortieren ziehen"
 "settings.server" = "Server"
 "settings.server.url" = "Server-URL"
-"settings.server.placeholder" = "leer = Direkt-Modus"
+"settings.server.placeholder" = "leer = öffentlicher Glyph-Server · off = ohne Server"
 "settings.server.test" = "Verbindung testen"
 "settings.server.apply" = "Übernehmen"
 "settings.server.testing" = "teste…"

@@ -91,7 +91,7 @@
 "settings.priority.hint" = "Перетащите, чтобы изменить порядок"
 "settings.server" = "Сервер"
 "settings.server.url" = "Адрес сервера"
-"settings.server.placeholder" = "пусто = прямой режим"
+"settings.server.placeholder" = "пусто = публичный сервер Glyph · off = без сервера"
 "settings.server.test" = "Проверить соединение"
 "settings.server.apply" = "Применить"
 "settings.server.testing" = "проверка…"

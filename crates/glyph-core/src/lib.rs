@@ -187,7 +187,7 @@ impl Inner {
 
         let mut mode = BackendMode::Direct;
         let mut server = None;
-        let url = server_client::normalize_base_url(&config.server_url);
+        let url = server_client::normalize_base_url(config.effective_server_url());
         if !url.is_empty() {
             let client = ServerClient::new(&url, http.clone(), server_client::install_id());
             match client.check_compat().await {
@@ -487,12 +487,14 @@ mod tests {
         std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
         std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
 
-        let b = Backend::new(Config::default()).await.unwrap();
+        let mut direct = Config::default();
+        direct.server_url = "off".into();
+        let b = Backend::new(direct.clone()).await.unwrap();
         assert_eq!(b.mode(), BackendMode::Direct);
         assert!(!b.active_providers().contains(&ProviderId::YouTube));
         assert!(!b.active_providers().contains(&ProviderId::Jamendo));
 
-        let mut cfg = Config::default();
+        let mut cfg = direct;
         cfg.keys.youtube = Some("k".into());
         cfg.keys.jamendo_client_id = Some("j".into());
         cfg.providers.enabled.push(ProviderId::YouTube);
