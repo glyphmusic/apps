@@ -2030,6 +2030,49 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Music files / folders dropped onto playlist `id`: imported as local
+    /// songs (tags, embedded cover) and added at the end.
+    pub fn import_files_to_playlist(&mut self, id: String, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.toast_info(t("toast.dl_unready"));
+            cx.notify();
+            return;
+        };
+        // Folders are walked off the UI thread; plain files are checked here.
+        if !paths.iter().any(|p| p.is_dir() || glyph_core::import::local::is_audio(p)) {
+            self.toast_info(t("toast.import_none"));
+            cx.notify();
+            return;
+        }
+        self.toast(t("toast.import_started"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = b.import_local(paths).await;
+            this.update(cx, |s, cx| {
+                match res {
+                    Ok(r) => {
+                        if r.failed > 0 {
+                            s.toast_info(tf("toast.import_failed", &[("n", &r.failed)]));
+                        }
+                        let before = s.library.playlist(&id).map(|p| p.tracks.len()).unwrap_or(0);
+                        let n = r.tracks.len();
+                        s.add_many_to_playlist(&id, r.tracks, cx);
+                        let after = s.library.playlist(&id).map(|p| p.tracks.len()).unwrap_or(0);
+                        if n == 0 && r.failed == 0 {
+                            s.toast_info(t("toast.import_none"));
+                        } else if n > 0 && after == before {
+                            s.toast_info(t("toast.import_already"));
+                        }
+                    }
+                    Err(e) => s.toast_info(tf("toast.import_error", &[("e", &format!("{e:#}"))])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
@@ -3235,10 +3278,7 @@ impl Glyph {
     pub fn set_cache_limit(&mut self, mb: u64, cx: &mut Context<Self>) {
         self.config.storage.cache_limit_mb = mb;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3446,10 +3486,7 @@ impl Glyph {
         self.config.audio.quality = q;
         self.open_select = None;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3458,10 +3495,7 @@ impl Glyph {
         self.config.audio.download_quality = q;
         self.open_select = None;
         self.save_config(cx);
-        if let Some(b) = self.backend.clone() {
-            let cfg = self.config.clone();
-            guard(|| b.set_config(cfg));
-        }
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 
@@ -3663,9 +3697,25 @@ Language: {}",
         cx.notify();
     }
 
+    /// Rebuilds the backend with the current config (sources, qualities,
+    /// cache limit, update channel). The future must be awaited: dropping it
+    /// unpolled changed nothing.
+    fn push_config_to_backend(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        let cfg = self.config.clone();
+        cx.spawn(async move |_, _| {
+            if let Err(e) = guard_async(b.set_config(cfg)).await {
+                tracing::warn!("applying settings to the backend: {e}");
+            }
+        })
+        .detach();
+    }
+
     pub fn set_update_channel(&mut self, prerelease: bool, cx: &mut Context<Self>) {
         self.config.updates.channel = if prerelease { "prerelease" } else { "stable" }.into();
         self.save_config(cx);
+        // The update check reads the backend's config.
+        self.push_config_to_backend(cx);
         cx.notify();
     }
 

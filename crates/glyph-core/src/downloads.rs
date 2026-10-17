@@ -155,6 +155,10 @@ impl Downloads {
         }
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Cheap check for the UI (index only, no disk access).
     pub fn contains(&self, t: &Track) -> bool {
         self.map.lock().unwrap().contains_key(&track_key(t))
@@ -190,12 +194,16 @@ impl Downloads {
     /// Copies an already downloaded file (YouTube audio cache) into the
     /// folder and records it for `t`.
     pub fn store_copy(&self, t: &Track, provider: ProviderId, src: &Path) -> Result<PathBuf> {
+        self.store_file(t, provider, src, extension("", &src.to_string_lossy()))
+    }
+
+    /// Copies `src` into the folder as `<name>.<ext>` and records it for `t`.
+    pub fn store_file(&self, t: &Track, provider: ProviderId, src: &Path, ext: &str) -> Result<PathBuf> {
         let len = std::fs::metadata(src)?.len();
         if len == 0 || len > MAX_BYTES {
             bail!("unusable source file");
         }
         std::fs::create_dir_all(&self.dir)?;
-        let ext = extension("", &src.to_string_lossy());
         let name = self.free_name(t, ext);
         let path = self.dir.join(&name);
         std::fs::copy(src, &path)?;
@@ -297,7 +305,10 @@ pub fn mime_of(path: &Path) -> &'static str {
         "ogg" => "audio/ogg",
         "flac" => "audio/flac",
         "wav" => "audio/wav",
-        "m4a" => "audio/mp4",
+        "oga" => "audio/ogg",
+        "m4a" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        "mka" => "audio/x-matroska",
         _ => "audio/mpeg",
     }
 }

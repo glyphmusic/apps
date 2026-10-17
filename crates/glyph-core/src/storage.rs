@@ -53,6 +53,12 @@ pub fn downloads_dir() -> PathBuf {
     paths::data_dir().join("downloads")
 }
 
+/// Audio files the user imported (dropped onto a playlist). Not part of
+/// the downloads, so clearing those keeps them.
+pub fn imports_dir() -> PathBuf {
+    paths::data_dir().join("imports")
+}
+
 pub fn lyrics_dir() -> PathBuf {
     paths::data_dir().join("lyrics")
 }

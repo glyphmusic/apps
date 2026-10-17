@@ -167,6 +167,8 @@ pub struct Backend {
     /// Current setup; replaced as a whole by `set_config`.
     inner: std::sync::RwLock<Arc<Inner>>,
     downloads: Arc<downloads::Downloads>,
+    /// Audio files dropped onto playlists (same index format as downloads).
+    imports: Arc<downloads::Downloads>,
     /// Recent search results (query -> when, songs): repeated searches do
     /// not hit the sources again for 10 minutes.
     search_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<Track>)>>>,
@@ -485,9 +487,11 @@ impl Backend {
             .build()?;
         let inner = rt.spawn(Inner::build(config, None)).await.map_err(|e| anyhow!("backend start failed: {e}"))??;
         let downloads = Arc::new(downloads::Downloads::load(storage::downloads_dir()));
+        let imports = Arc::new(downloads::Downloads::load(storage::imports_dir()));
         Ok(Self {
             inner: std::sync::RwLock::new(Arc::new(inner)),
             downloads,
+            imports,
             search_cache: Default::default(),
             dl_progress: Default::default(),
             rt: Some(rt),
@@ -619,10 +623,10 @@ impl Backend {
         futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) }).boxed()
     }
 
-    /// Best legal full source (or a preview) for a track. Downloaded songs
-    /// play from their local file.
+    /// Best legal full source (or a preview) for a track. Downloaded and
+    /// imported songs play from their local file.
     pub async fn resolve(&self, track: &Track) -> anyhow::Result<Option<Resolved>> {
-        if let Some((path, provider)) = self.downloads.local(track) {
+        if let Some((path, provider)) = self.local_file(track) {
             let mime = Some(downloads::mime_of(&path).to_string());
             let source = PlaybackSource::Stream { provider, url: path.to_string_lossy().into_owned(), mime };
             return Ok(Some(Resolved { track: track.clone(), source, confidence: 1.0 }));
@@ -659,7 +663,7 @@ impl Backend {
             return;
         }
         let tracks: Vec<Track> =
-            tracks.into_iter().filter(|t| self.downloads.local(t).is_none()).take(ytdlp::MAX_BATCH).collect();
+            tracks.into_iter().filter(|t| self.local_file(t).is_none()).take(ytdlp::MAX_BATCH).collect();
         if tracks.is_empty() {
             return;
         }
@@ -713,7 +717,7 @@ impl Backend {
     ///
     /// Uses `audio.download_quality`; [`Backend::download_progress`] follows it.
     pub async fn download(&self, track: &Track) -> anyhow::Result<Option<PathBuf>> {
-        if let Some((p, _)) = self.downloads.local(track) {
+        if let Some((p, _)) = self.local_file(track) {
             return Ok(Some(p));
         }
         let (inner, dl, track) = (self.cur(), self.downloads.clone(), track.clone());
@@ -759,9 +763,26 @@ impl Backend {
         map.get(&dedupe::track_key(track)).map(|p| p.fraction())
     }
 
-    /// Index lookup only (cheap enough for every rendered row).
+    /// Index lookup only (cheap enough for every rendered row). Imported
+    /// files count as downloaded.
     pub fn is_downloaded(&self, track: &Track) -> bool {
-        self.downloads.contains(track)
+        self.downloads.contains(track) || self.imports.contains(track)
+    }
+
+    /// The downloaded or imported file of `track`.
+    fn local_file(&self, track: &Track) -> Option<(PathBuf, ProviderId)> {
+        self.downloads.local(track).or_else(|| self.imports.local(track))
+    }
+
+    /// Imports dropped audio files / folders (tags, embedded cover, copy
+    /// into the imports folder). The songs come back in drop order.
+    pub async fn import_local(&self, paths: Vec<PathBuf>) -> anyhow::Result<import::local::LocalImport> {
+        let imports = self.imports.clone();
+        self.spawn(async move {
+            tokio::task::spawn_blocking(move || import::local::import_files(&imports, &paths)).await
+        })
+        .await?
+        .map_err(|e| anyhow!("import failed: {e}"))
     }
 
     /// Downloaded songs, newest first.
@@ -822,6 +843,12 @@ impl Backend {
     /// fallback chain provider → Spotify/Deezer → Cover Art Archive.
     /// `None` = UI draws a generated ASCII pattern.
     pub async fn cover(&self, track: &Track) -> anyhow::Result<Option<PathBuf>> {
+        if self.imports.contains(track) {
+            let p = import::local::cover_path(&self.imports, track);
+            if p.is_file() {
+                return Ok(Some(p));
+            }
+        }
         let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.covers.get(&track).await }).await?
     }
