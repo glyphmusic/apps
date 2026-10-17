@@ -192,7 +192,14 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
     } else if query.trim().is_empty() {
         ascii_state(ART_SEARCH, t("search.empty.title"), t("search.empty.sub")).into_any_element()
     } else if app.search.results.is_empty() && app.search.loading {
-        skeleton_rows("search", 8).pt(px(8.0)).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .pt(px(8.0))
+            .when(filter == SearchFilter::All, |d| d.child(skeleton_artist_rows("search", 2)))
+            .child(skeleton_rows("search", 7))
+            .into_any_element()
     } else if app.search.results.is_empty() {
         ascii_state(ART_EMPTY, t("search.none.title"), format!("\u{201c}{query}\u{201d}")).into_any_element()
     } else {
@@ -205,7 +212,9 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                     .into_iter()
                     .enumerate()
                     .map(|(i, (name, tr))| {
-                        let art = cover(app, &tr, 48.0, 24.0, cx);
+                        let k = reveal_k(&format!("search:artist:{name}"), 0.5);
+                        let art = ascii_veil(cover(app, &tr, 48.0, 24.0, cx), format!("rva-{i}"), 48.0, 48.0, 24.0, k);
+                        let shown = decode(&name, k);
                         let follow = crate::ui::lists::follow_button(("search-follow", i), &name, Some(tr.clone()), app, 30.0, cx);
                         let n2 = name.clone();
                         crate::ui::lists::with_artist_menu(div().id(("search-artist", i)), name.clone(), cx)
@@ -222,7 +231,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                                 cx.listener(move |this, _, w, cx| this.pick_search_artist(&n2, Some(tr2.clone()), w, cx))
                             })
                             .child(art)
-                            .child(div().flex_1().min_w_0().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(name))
+                            .child(div().flex_1().min_w_0().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(shown))
                             .child(kind_chip(t("search.kind.artist")))
                             .child(follow)
                     })

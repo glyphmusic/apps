@@ -8,6 +8,8 @@ mod config_ext;
 mod embed;
 mod i18n;
 mod instance;
+#[cfg(windows)]
+mod jumplist;
 mod guard;
 mod theme;
 mod ui;

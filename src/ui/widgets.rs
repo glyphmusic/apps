@@ -718,6 +718,86 @@ pub fn skeleton_rows(prefix: &str, n: usize) -> Div {
     }))
 }
 
+/// Skeleton rows for artists in search results: round picture, name, chip.
+pub fn skeleton_artist_rows(prefix: &str, n: usize) -> Div {
+    div().flex().flex_col().gap(px(2.0)).children((0..n).map(|i| {
+        let name_w = [0.3, 0.22, 0.26][i % 3];
+        div()
+            .flex()
+            .items_center()
+            .gap(px(14.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .child(skeleton(format!("{prefix}-ska-c{i}"), 48.0, 48.0, 24.0))
+            .child(div().flex_1().child(div().h(px(13.0)).w(gpui::relative(name_w)).child(skeleton_fill(format!("{prefix}-ska-n{i}"), 4.0, 13.0))))
+            .child(skeleton(format!("{prefix}-ska-k{i}"), 46.0, 18.0, 4.0))
+    }))
+}
+
+// ---- ASCII reveal --------------------------------------------------------
+//
+// New content "decodes" in: text starts as random ramp characters that settle
+// into the real letters from left to right, and pictures start under an ASCII
+// shimmer that fades out. Keys remember when something was first shown.
+
+thread_local! {
+    static REVEALS: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>> = std::cell::RefCell::new(Default::default());
+}
+
+const DECODE_RAMP: &[char] = &['#', '%', '&', '*', '+', '=', '-', ':', '.', '@', '$', '0', 'X'];
+
+/// Progress 0..1 of the reveal for `key`, `dur` seconds long (starts the
+/// first time it is asked for).
+pub fn reveal_k(key: &str, dur: f32) -> f32 {
+    REVEALS.with(|r| {
+        let mut m = r.borrow_mut();
+        let at = *m.entry(key.to_string()).or_insert_with(std::time::Instant::now);
+        (at.elapsed().as_secs_f32() / dur.max(0.01)).min(1.0)
+    })
+}
+
+/// Something is still revealing (the app keeps re-rendering).
+pub fn reveal_active() -> bool {
+    REVEALS.with(|r| r.borrow().values().any(|at| at.elapsed().as_secs_f32() < 1.0))
+}
+
+/// Forget reveals under `prefix` (e.g. a new search starts over).
+pub fn reset_reveals(prefix: &str) {
+    REVEALS.with(|r| r.borrow_mut().retain(|k, _| !k.starts_with(prefix)));
+}
+
+/// `text` part-way decoded: the first `k` share is real, the rest flickers
+/// through ASCII characters (spaces stay spaces).
+pub fn decode(text: &str, k: f32) -> String {
+    if k >= 1.0 {
+        return text.to_string();
+    }
+    let n = text.chars().count();
+    let done = (k.max(0.0) * n as f32) as usize;
+    let tick = SKELETON_T0.with(|t0| (t0.elapsed().as_secs_f32() * 24.0) as u32);
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i < done || c.is_whitespace() {
+                c
+            } else {
+                let h = (i as u32).wrapping_mul(2654435761) ^ tick.wrapping_mul(40503);
+                DECODE_RAMP[(h >> 7) as usize % DECODE_RAMP.len()]
+            }
+        })
+        .collect()
+}
+
+/// `el` (a picture) under an ASCII shimmer that fades out as `k` goes to 1.
+pub fn ascii_veil(el: impl IntoElement, id: impl Into<SharedString>, w: f32, h: f32, r: f32, k: f32) -> Div {
+    let e = 1.0 - (1.0 - k).powi(2);
+    div()
+        .relative()
+        .flex_none()
+        .child(div().opacity(0.15 + 0.85 * e).child(el))
+        .when(k < 1.0, |d| d.child(div().absolute().inset_0().opacity(1.0 - e).child(skeleton(id, w, h, r))))
+}
+
 /// Skeleton lyric lines.
 pub fn skeleton_lyrics(n: usize) -> Div {
     div().flex().flex_col().gap(px(26.0)).children((0..n).map(|i| {
@@ -756,6 +836,9 @@ pub fn track_row(
     let l2 = list.clone();
     let (t_next, t_q, t_like, t_share) = (t.clone(), t.clone(), t.clone(), t.clone());
     let art = cover(app, &t, 44.0, 6.0, cx);
+    // Search results decode in (ASCII), everywhere else they just appear.
+    let reveal = if id_prefix == "search-row" { reveal_k(&format!("search:{}", track_key(&t)), 0.5) } else { 1.0 };
+    let art = if reveal < 1.0 { ascii_veil(art, format!("rv-{}", track_key(&t)), 44.0, 44.0, 6.0, reveal) } else { art };
 
     let t_menu = t.clone();
     div()
@@ -791,7 +874,7 @@ pub fn track_row(
                         .text_size(theme::text_md())
                         .font_weight(if playing { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                         .text_color(theme::text())
-                        .child(t.title.clone()),
+                        .child(decode(&t.title, reveal)),
                 )
                 .child(
                     div()
@@ -799,7 +882,11 @@ pub fn track_row(
                         .min_w_0()
                         .text_size(theme::text_sm())
                         .text_color(theme::text_dim())
-                        .child(crate::ui::lists::artist_link((id_prefix, i * 10 + 5), &t.artist, cx))
+                        .child(if reveal < 1.0 {
+                            div().truncate().child(decode(&t.artist, reveal)).into_any_element()
+                        } else {
+                            crate::ui::lists::artist_link((id_prefix, i * 10 + 5), &t.artist, cx).into_any_element()
+                        })
                         .when_some(crate::ui::lists::album_link((id_prefix, i * 10 + 6), &t, cx), |d, link| d.child(div().flex_none().child(" · ")).child(link)),
                 ),
         )
@@ -870,15 +957,24 @@ pub fn tr(key: &str) -> SharedString {
 /// an edge only shows while there is more content beyond it (none at the very
 /// top / bottom). The caller sizes the returned wrapper; `el` should fill it.
 pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpui::ScrollHandle>) -> Div {
-    let (show_top, show_bottom) = match scroll {
+    // Edges fade in with the distance scrolled (no pop), and a page that only
+    // overflows by a few pixels counts as not scrollable at all.
+    let (top_k, bottom_k) = match scroll {
         Some(s) => {
             let y = -f32::from(s.offset().y);
             let max = f32::from(s.max_offset().y);
-            (y > 1.0, max > 1.0 && y < max - 1.0)
+            if max < 32.0 {
+                (0.0, 0.0)
+            } else {
+                (((y - 2.0) / 40.0).clamp(0.0, 1.0), ((max - y - 2.0) / 40.0).clamp(0.0, 1.0))
+            }
         }
-        None => (true, true),
+        None => (1.0, 1.0),
     };
+    let (show_top, show_bottom) = (top_k > 0.0, bottom_k > 0.0);
     let edge = |top: bool| {
+        let k = if top { top_k } else { bottom_k };
+        let color = Hsla { a: color.a * k, ..color };
         div()
             .absolute()
             .left_0()
@@ -958,7 +1054,17 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                             v.update(cx, |_, cx| cx.notify()).ok();
                         });
                     }
-                    if max <= 1.0 {
+                    if max < 32.0 {
+                        // Overflows by a few pixels only: keep the page still
+                        // instead of letting it wobble up and down.
+                        if max > 0.0 {
+                            let hs = handle.clone();
+                            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                                if phase == gpui::DispatchPhase::Capture && hs.bounds().contains(&e.position) && e.delta.pixel_delta(px(20.0)).y != px(0.0) {
+                                    cx.stop_propagation();
+                                }
+                            });
+                        }
                         return;
                     }
                     // Mouse wheel: take the step over (before the scroll view

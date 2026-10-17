@@ -293,6 +293,8 @@ pub struct Glyph {
     pub settings_advanced: bool,
     /// Storage breakdown for "Cache & Storage" (None = not measured yet).
     pub storage: Option<glyph_core::storage::StorageStats>,
+    /// Which storage kinds "Clear cache" removes (order of StorageKind::ALL).
+    pub storage_selected: [bool; 4],
     pub toast: Option<(String, Instant)>,
     pub lang: crate::i18n::Lang,
     /// Eased text ink per background zone (0 light .. 1 dark).
@@ -510,6 +512,8 @@ impl Glyph {
             open_select: None,
             settings_advanced: false,
             storage: None,
+            // Downloads are offline songs: opt-in, never cleared by default.
+            storage_selected: [true, false, true, true],
             toast: None,
             lang: crate::i18n::lang(),
             ink: [0.0; 3],
@@ -778,7 +782,7 @@ impl Glyph {
         // Requests from another launch (jump list click, second start).
         while let Some(req) = crate::instance::try_recv() {
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
-                cx.perform_dock_menu_action(n);
+                self.dock_action(n, cx);
             }
             cx.activate(true);
         }
@@ -823,6 +827,7 @@ impl Glyph {
         let tip_anim = self.side_hover.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(600));
         let info_anim = self.lyrics_info.is_some_and(|at| at.elapsed() < Duration::from_millis(300));
         toast_fading
+            || crate::ui::widgets::reveal_active()
             || info_anim
             || tip_anim
             || menu_anim
@@ -1008,6 +1013,7 @@ impl Glyph {
                         return Err(None);
                     }
                     s.search.results.clear();
+                    crate::ui::widgets::reset_reveals("search:");
                     s.search.seen.clear();
                     s.search.errors.clear();
                     s.search.error = None;
@@ -1804,6 +1810,18 @@ impl Glyph {
         }
     }
 
+    /// Jump list / dock entry `n`: 0..=4 recently played, 5 play/pause,
+    /// 6 next, 7 previous.
+    fn dock_action(&mut self, n: usize, cx: &mut Context<Self>) {
+        match n {
+            0..=4 => self.play_recent(n, cx),
+            5 => self.toggle_play(cx),
+            6 => self.next(false, cx),
+            7 => self.previous(cx),
+            _ => {}
+        }
+    }
+
     /// Recently played songs + transport in the taskbar jump list (Windows)
     /// and the dock menu (macOS). Linux has no such menu; nothing happens there.
     fn update_dock_menu(&mut self, cx: &mut Context<Self>) {
@@ -1815,6 +1833,33 @@ impl Glyph {
             return;
         }
         self.dock_keys = keys;
+        // Windows: own jump list with a "Recently played" category.
+        #[cfg(windows)]
+        {
+            use crate::jumplist::{update, Entry};
+            let recent = self
+                .library
+                .recent
+                .iter()
+                .take(5)
+                .enumerate()
+                .map(|(i, tr)| Entry { label: format!("{} · {}", tr.title, tr.artist), action: i })
+                .collect();
+            let tasks = vec![
+                Entry { label: t("dock.play_pause").to_string(), action: 5 },
+                Entry { label: t("dock.next").to_string(), action: 6 },
+                Entry { label: t("dock.previous").to_string(), action: 7 },
+            ];
+            update(t("library.recent").to_string(), recent, tasks);
+            let _ = cx;
+        }
+        // macOS: dock menu with in-process actions.
+        #[cfg(not(windows))]
+        self.set_platform_dock_menu(cx);
+    }
+
+    #[cfg(not(windows))]
+    fn set_platform_dock_menu(&mut self, cx: &mut Context<Self>) {
         use crate::ui::{NextTrack, PlayRecent0, PlayRecent1, PlayRecent2, PlayRecent3, PlayRecent4, PrevTrack, TogglePlay};
         let mut items: Vec<gpui::MenuItem> = Vec::new();
         for (i, tr) in self.library.recent.iter().take(5).enumerate() {

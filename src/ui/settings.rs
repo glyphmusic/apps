@@ -271,48 +271,51 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         SettingsPage::Support => (t("sp.support"), t("sp.support.sub"), support(app, cx)),
     };
 
-    let panel = div()
-        .id("settings-panel")
-        .occlude()
+    // Outer shell holds the navigation; the page sits in its own inset,
+    // bordered card next to it.
+    let page_bg = hsla(0.0, 0.0, 0.045, 1.0);
+    let content = div()
         .relative()
-        .w(px(PANEL_W))
-        .max_w(gpui::relative(0.94))
-        .h(px(PANEL_H))
-        .max_h(gpui::relative(0.9))
-        .flex()
-        .rounded(px(14.0))
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .rounded(px(12.0))
         .overflow_hidden()
-        .bg(hsla(0.0, 0.0, 0.055, 0.985))
+        .bg(page_bg)
         .border_1()
-        .border_color(white(0.07))
-        .font_family(theme::FONT)
-        // Clicks inside never reach the backdrop (which closes the modal).
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| cx.stop_propagation())
-        .child(nav(app, cx))
-        .child(fade_edges(div()
-                .id("settings-page")
-                .track_scroll(&app.settings_scroll)
-                .size_full()
-                .overflow_y_scroll()
-                .px(px(32.0))
-                .py(px(26.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .pr(px(36.0))
-                        .child(div().text_size(px(19.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
-                        .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
-                )
-                .child(div().pt(px(10.0)).child(body)), hsla(0.0, 0.0, 0.055, 1.0), 26.0, Some(&app.settings_scroll)).flex_1().min_w_0().h_full().child(scrollbar(&app.settings_scroll, true, cx)))
+        .border_color(white(0.08))
+        .child(
+            fade_edges(
+                div()
+                    .id("settings-page")
+                    .track_scroll(&app.settings_scroll)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .px(px(28.0))
+                    .py(px(22.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .pr(px(36.0))
+                            .child(div().text_size(px(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
+                            .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
+                    )
+                    .child(div().pt(px(10.0)).child(body)),
+                page_bg,
+                22.0,
+                Some(&app.settings_scroll),
+            )
+            .size_full()
+            .child(scrollbar(&app.settings_scroll, true, cx)),
+        )
         .child(
             div()
                 .id("settings-close")
                 .absolute()
-                .top(px(18.0))
-                .right(px(18.0))
+                .top(px(14.0))
+                .right(px(14.0))
                 .size(px(30.0))
                 .rounded(px(8.0))
                 .flex()
@@ -323,6 +326,29 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                 .on_click(cx.listener(|this, _, w, cx| this.close_settings(w, cx)))
                 .child(icon("x", 16.0, white(0.7))),
         );
+
+    let panel = div()
+        .id("settings-panel")
+        .occlude()
+        .relative()
+        .w(px(PANEL_W))
+        .max_w(gpui::relative(0.94))
+        .h(px(PANEL_H))
+        .max_h(gpui::relative(0.9))
+        .flex()
+        .p(px(8.0))
+        .gap(px(4.0))
+        .rounded(px(16.0))
+        .overflow_hidden()
+        .bg(hsla(0.0, 0.0, 0.08, 0.985))
+        .border_1()
+        .border_color(white(0.07))
+        .font_family(theme::FONT)
+        // Clicks inside never reach the backdrop (which closes the modal).
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(nav(app, cx))
+        .child(content);
 
     div()
         .id("settings-backdrop")
@@ -385,10 +411,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .p(px(12.0))
-        .bg(white(0.02))
-        .border_r_1()
-        .border_color(white(0.05))
+        .p(px(6.0))
         .child(
             div()
                 .flex()
@@ -750,51 +773,69 @@ fn donut(parts: Vec<(f32, Hsla)>, size: f32, thickness: f32) -> impl IntoElement
     .size(px(size))
 }
 
+/// Filled checkbox: white square with a black check when on.
+fn checkbox(on: bool) -> Div {
+    div()
+        .flex_none()
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(on, |d| d.bg(gpui::white()).child(icon("check", 12.0, gpui::black())))
+        .when(!on, |d| d.border_1().border_color(white(0.35)))
+}
+
 fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let Some(stats) = app.storage else {
         return div().child(skeleton("storage-sk", 520.0, 160.0, 10.0));
     };
     let total = stats.total();
+    let selected = app.storage_selected;
     let legend = StorageKind::ALL.into_iter().enumerate().map(|(i, k)| {
         let v = stats.get(k);
         let pct = if total > 0 { v as f32 / total as f32 * 100.0 } else { 0.0 };
-        let dim = v == 0;
+        let pct = if v > 0 && pct < 1.0 { "<1%".to_string() } else { format!("{pct:.0}%") };
+        let on = selected[i];
         div()
+            .id(("storage-kind", i))
             .flex()
             .items_center()
             .gap(px(10.0))
-            .h(px(32.0))
+            .h(px(36.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
             .text_size(px(13.5))
-            .when(dim, |d| d.opacity(0.45))
-            .child(div().size(px(8.0)).rounded_full().bg(gpui::rgb(STORAGE_COLORS[i])))
-            .child(div().w(px(140.0)).text_color(gpui::white()).child(storage_label(k)))
+            .hover(|s| s.bg(white(0.05)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.storage_selected[i] = !this.storage_selected[i];
+                cx.notify();
+            }))
+            .child(checkbox(on))
+            .child(div().ml(px(4.0)).size(px(8.0)).rounded_full().bg(gpui::rgb(STORAGE_COLORS[i])))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if on { gpui::white() } else { white(0.55) })
+                    .child(storage_label(k)),
+            )
             .child(
                 mono()
                     .px(px(6.0))
                     .rounded(px(4.0))
                     .bg(white(0.08))
                     .text_size(px(11.0))
-                    .text_color(white(0.7))
-                    .child(format!("{pct:.0}%")),
+                    .text_color(white(0.6))
+                    .child(pct),
             )
             .child(div().flex_1())
-            .child(mono().w(px(72.0)).flex().justify_end().text_size(px(12.5)).text_color(white(0.8)).child(format_bytes(v)))
             .child(
-                div()
-                    .id(("clear", i))
-                    .ml(px(8.0))
-                    .px(px(8.0))
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(white(0.6))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(white(0.08)).text_color(gpui::white()))
-                    .when(dim, |d| d.invisible())
-                    .on_click(cx.listener(move |this, _, _, cx| this.clear_storage(k, cx)))
-                    .child(t("sp.storage.clear")),
+                mono()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if on { white(0.85) } else { white(0.45) })
+                    .child(format_bytes(v)),
             )
     });
     let parts: Vec<(f32, Hsla)> = StorageKind::ALL
@@ -808,12 +849,15 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         (it.next().unwrap_or("0").to_string(), it.next().unwrap_or("B").to_string())
     };
     let breakdown = surface()
+        .p(px(14.0))
         .flex()
         .items_center()
         .gap(px(28.0))
-        .child(div().flex_1().min_w_0().flex().flex_col().children(legend))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.0)).children(legend))
         .child(
             div()
+                .flex_none()
+                .pr(px(16.0))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -821,8 +865,8 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(
                     div()
                         .relative()
-                        .size(px(128.0))
-                        .child(donut(parts, 128.0, 16.0))
+                        .size(px(116.0))
+                        .child(donut(parts, 116.0, 14.0))
                         .child(
                             div()
                                 .absolute()
@@ -832,38 +876,54 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                                 .items_center()
                                 .justify_center()
                                 .child(div().text_size(px(22.0)).font_weight(FontWeight::BOLD).text_color(gpui::white()).child(num))
-                                .child(div().text_size(px(11.0)).text_color(white(0.6)).child(unit)),
+                                .child(div().text_size(px(10.5)).text_color(white(0.6)).child(unit.to_uppercase())),
                         ),
                 )
                 .child(div().text_size(px(12.0)).text_color(white(0.6)).child(t("sp.storage.usage"))),
         );
 
-    // Cache limit: stops on a line, the current one highlighted.
+    // Cache limit: a slider track with tick stops, filled up to the current one.
     let cur = app.config.storage.cache_limit_mb;
+    let cur_i = LIMITS_MB.iter().position(|m| *m == cur);
+    let n = LIMITS_MB.len();
     let stops = LIMITS_MB.into_iter().enumerate().map(|(i, mb)| {
-        let on = mb == cur;
-        let passed = LIMITS_MB.iter().position(|m| *m == cur).map(|c| i <= c).unwrap_or(false);
+        let on = Some(i) == cur_i;
+        let passed = cur_i.map(|c| i <= c).unwrap_or(false);
+        let out_filled = cur_i.map(|c| i < c).unwrap_or(false);
+        // Each stop draws the half of the track into it and the half out of it.
+        let seg = |filled: bool, visible: bool| {
+            div().flex_1().h(px(2.0)).when(visible, |d| d.bg(if filled { gpui::white() } else { white(0.18) }))
+        };
+        let mark = if on {
+            div().size(px(14.0)).rounded_full().bg(gpui::white())
+        } else {
+            div().w(px(1.5)).h(px(8.0)).bg(if passed { gpui::white() } else { white(0.3) })
+        };
         div()
             .id(("limit", i))
             .flex_1()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(10.0))
+            .gap(px(12.0))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| this.set_cache_limit(mb, cx)))
             .child(
                 div()
-                    .h(px(14.0))
+                    .relative()
+                    .w_full()
+                    .h(px(16.0))
                     .flex()
                     .items_center()
-                    .child(div().size(px(if on { 14.0 } else { 6.0 })).rounded_full().bg(if passed { gpui::white() } else { white(0.3) })),
+                    .child(seg(passed, i > 0))
+                    .child(seg(out_filled, i + 1 < n))
+                    .child(div().absolute().inset_0().flex().items_center().justify_center().child(mark)),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(11.5))
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()))
-                    .when(!on, |d| d.text_color(white(0.55)))
+                    .when(!on, |d| d.text_color(white(0.5)).hover(|s| s.text_color(white(0.8))))
                     .child(limit_label(mb)),
             )
     });
@@ -873,17 +933,59 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .gap(px(4.0))
         .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(t("sp.storage.limit")))
         .child(div().text_size(px(12.5)).text_color(white(0.55)).child(t("sp.storage.limit.desc")))
-        .child(
-            div()
-                .relative()
-                .pt(px(18.0))
-                // The track line behind the stops.
-                .child(div().absolute().top(px(24.0)).left(px(40.0)).right(px(40.0)).h(px(2.0)).bg(white(0.18)))
-                .child(div().flex().children(stops)),
-        );
+        .child(div().pt(px(20.0)).flex().children(stops));
 
+    // Bottom actions: clear the checked kinds, open the cache folder.
+    let sel_bytes: u64 = StorageKind::ALL
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| selected[*i])
+        .map(|(_, k)| stats.get(k))
+        .sum();
+    let can_clear = sel_bytes > 0;
+    let clear = div()
+        .id("storage-clear")
+        .flex_1()
+        .h(px(40.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(10.0))
+        .bg(gpui::white())
+        .text_size(px(13.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(gpui::black())
+        .when(can_clear, |d| {
+            d.cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(move |this, _, _, cx| {
+                for (i, k) in StorageKind::ALL.into_iter().enumerate() {
+                    if this.storage_selected[i] {
+                        this.clear_storage(k, cx);
+                    }
+                }
+            }))
+        })
+        .when(!can_clear, |d| d.opacity(0.4))
+        .child(tf("sp.storage.clearsel", &[("size", &format_bytes(sel_bytes))]));
     let data_dir = glyph_core::paths::data_dir();
-    let downloads_dir = glyph_core::storage::downloads_dir();
+    let open = div()
+        .id("storage-open")
+        .flex_none()
+        .h(px(40.0))
+        .px(px(18.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(px(10.0))
+        .bg(white(0.07))
+        .cursor_pointer()
+        .hover(|s| s.bg(white(0.11)))
+        .text_size(px(13.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(gpui::white())
+        .on_click(move |_, _, cx| cx.reveal_path(&data_dir))
+        .child(icon("folder-open", 15.0, white(0.85)))
+        .child(t("sp.storage.openfolder"));
+
     div()
         .flex()
         .flex_col()
@@ -891,21 +993,7 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .pt(px(6.0))
         .child(breakdown)
         .child(limit)
-        .child(rows(vec![
-            row(
-                t("sp.storage.downloads"),
-                Some(t("sp.storage.downloads.desc")),
-                button("open-downloads", t("sp.storage.open")).on_click(move |_, _, cx| {
-                    let _ = std::fs::create_dir_all(&downloads_dir);
-                    cx.reveal_path(&downloads_dir)
-                }),
-            ),
-            row(
-                t("sp.support.data"),
-                Some(t("sp.support.data.desc")),
-                button("open-data", t("sp.storage.open")).on_click(move |_, _, cx| cx.reveal_path(&data_dir)),
-            ),
-        ]))
+        .child(div().pt(px(6.0)).flex().gap(px(10.0)).child(clear).child(open))
 }
 
 fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {

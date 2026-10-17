@@ -2398,6 +2398,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "windows 0.61.3",
 ]
 
 [[package]]

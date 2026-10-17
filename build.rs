@@ -7,7 +7,38 @@ fn main() {
         let ico = dir.join("assets").join("icons").join("glyph.ico");
         let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("glyph.rc");
         let ico = ico.display().to_string().replace('\\', "/");
-        std::fs::write(&out, format!("1 ICON \"{ico}\"\n")).unwrap();
+        // Version info: Windows shows FileDescription as the app's name (taskbar
+        // jump list, Task Manager) instead of the file name.
+        let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+        let nums: Vec<u32> = version.split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect();
+        let n = |i: usize| nums.get(i).copied().unwrap_or(0);
+        let (a, b, c) = (n(0), n(1), n(2));
+        let rc = format!(
+            r#"1 ICON "{ico}"
+1 VERSIONINFO
+FILEVERSION {a},{b},{c},0
+PRODUCTVERSION {a},{b},{c},0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "Glyph"
+      VALUE "ProductName", "Glyph"
+      VALUE "CompanyName", "glyphmusic"
+      VALUE "FileVersion", "{version}"
+      VALUE "ProductVersion", "{version}"
+      VALUE "OriginalFilename", "glyph.exe"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#
+        );
+        std::fs::write(&out, rc).unwrap();
         let _ = embed_resource::compile(&out, embed_resource::NONE);
     }
 }

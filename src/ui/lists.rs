@@ -634,7 +634,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                         .overflow_hidden()
                         .when(!about_open, |d| d.max_h(px(18.0 * 4.0)))
                         .when(about_open, |d| d.max_h(px(18.0 * 11.0)).overflow_y_scroll())
-                        .child(i.about.clone()),
+                        .child(decode(&i.about, reveal_k(&format!("artist:about:{}", i.url), 0.9))),
                 )
                 .child(
                     div()
@@ -708,7 +708,11 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .rounded_t(px(14.0))
         .overflow_hidden()
         .when_some(hero_img, |d, im| {
-            d.child(div().absolute().inset_0().child(img(im).size_full().rounded_t(px(14.0)).object_fit(ObjectFit::Cover)))
+            // The picture rises out of an ASCII shimmer.
+            let k = reveal_k(&format!("artist:hero:{name}"), 0.8);
+            let e = 1.0 - (1.0 - k).powi(2);
+            d.child(div().absolute().inset_0().opacity(0.1 + 0.9 * e).child(img(im).size_full().rounded_t(px(14.0)).object_fit(ObjectFit::Cover)))
+                .when(k < 1.0, |d| d.child(div().absolute().inset_0().opacity(1.0 - e).child(skeleton("hero-rv", 1680.0, 420.0, 14.0))))
         })
         .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 420.0, 14.0))))
         .children(back_button(app, cx).map(|b| div().absolute().top(px(20.0)).left(px(32.0)).child(b)))
@@ -721,8 +725,16 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(mono().text_size(px(11.0)).text_color(white(0.55)).child(format!("[{}]", t("artist.badge"))))
-                .child(div().text_size(px(46.0)).line_height(px(50.0)).font_weight(FontWeight::BOLD).text_color(gpui::white()).truncate().child(name.clone()))
+                .child(mono().text_size(px(11.0)).text_color(white(0.55)).child(decode(&format!("[{}]", t("artist.badge")), reveal_k(&format!("artist:badge:{name}"), 0.4))))
+                .child(
+                    div()
+                        .text_size(px(46.0))
+                        .line_height(px(50.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .truncate()
+                        .child(decode(&name, reveal_k(&format!("artist:name:{name}"), 0.7))),
+                )
                 .when(has, |d| d.child(mono().text_size(px(11.5)).text_color(white(0.6)).child(format!("[ {:02} {} ]", n_songs, t("list.songs_caps")))))
                 .when(has, |d| {
                     d.child(
