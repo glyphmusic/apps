@@ -289,6 +289,8 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                         origin: v["origin"].as_str().map(str::to_string),
                         // A picture not fetched yet keeps the old one.
                         cover: if v.get("cover").is_some() { cover.or(old_cover) } else { None },
+                        // Device setting, never part of the synced value.
+                        auto_download: pos.is_some_and(|p| lib.playlists[p].auto_download),
                     };
                     match pos {
                         Some(p) => lib.playlists[p] = pl,

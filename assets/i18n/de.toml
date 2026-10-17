@@ -379,6 +379,10 @@
 "toast.dl_unready" = "Noch nicht bereit, gleich nochmal versuchen"
 "tip.info" = "Lyrics-Optionen"
 "tip.download" = "Herunterladen"
+"tip.arrow-down-to-line" = "Neue Songs automatisch herunterladen"
+"ctx.auto_download" = "Neue Songs automatisch herunterladen"
+"toast.auto_dl_on" = "Neue Songs in dieser Playlist werden automatisch heruntergeladen"
+"toast.auto_dl_off" = "Automatische Downloads aus"
 
 # Settings > Account (accounts & sync)
 "sp.account" = "Account"

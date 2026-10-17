@@ -379,6 +379,10 @@
 "toast.dl_unready" = "Ещё не готово, попробуйте через секунду"
 "tip.info" = "Настройки текста"
 "tip.download" = "Скачать"
+"tip.arrow-down-to-line" = "Скачивать новые песни автоматически"
+"ctx.auto_download" = "Скачивать новые песни автоматически"
+"toast.auto_dl_on" = "Новые песни в этом плейлисте будут скачиваться автоматически"
+"toast.auto_dl_off" = "Автоскачивание выключено"
 
 # Settings > Account (accounts & sync)
 "sp.account" = "Аккаунт"

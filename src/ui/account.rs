@@ -502,6 +502,15 @@ impl Glyph {
                 s.account.syncing = false;
                 match r {
                     Ok(round) => {
+                        // Songs of auto-download playlists before the round,
+                        // to find the ones another device added.
+                        let auto_before: Vec<(String, std::collections::HashSet<String>)> = s
+                            .library
+                            .playlists
+                            .iter()
+                            .filter(|p| p.auto_download)
+                            .map(|p| (p.id.clone(), p.tracks.iter().map(glyph_core::dedupe::track_key).collect()))
+                            .collect();
                         let applied = b.sync_apply(&mut s.library, &round);
                         let mut cfg = s.config.clone();
                         let st = b.sync_apply_settings(&mut cfg, &round);
@@ -524,6 +533,14 @@ impl Glyph {
                         }
                         if !applied.remove_downloads.is_empty() {
                             s.remove_downloads(applied.remove_downloads, cx);
+                        }
+                        for (id, before) in auto_before {
+                            let added: Vec<_> = s
+                                .library
+                                .playlist(&id)
+                                .map(|p| p.tracks.iter().filter(|t| !before.contains(&glyph_core::dedupe::track_key(t))).cloned().collect())
+                                .unwrap_or_default();
+                            s.auto_download_added(&id, added, cx);
                         }
                         s.account.last_sync = Some(Instant::now());
                         s.account.sync_error = None;

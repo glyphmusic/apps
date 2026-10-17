@@ -1911,20 +1911,21 @@ impl Glyph {
 
     /// Adds several songs at once (one toast).
     pub fn add_many_to_playlist(&mut self, id: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
-        let mut added = 0;
+        let mut added = Vec::new();
         let mut name = String::new();
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             name = p.name.clone();
             for t in tracks {
                 if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
-                    p.tracks.push(t);
-                    added += 1;
+                    p.tracks.push(t.clone());
+                    added.push(t);
                 }
             }
         }
-        if added > 0 {
+        if !added.is_empty() {
             self.save_library(cx);
-            self.toast(tf("toast.added_n_to_playlist", &[("n", &added), ("name", &name)]));
+            self.toast(tf("toast.added_n_to_playlist", &[("n", &added.len()), ("name", &name)]));
+            self.auto_download_added(id, added, cx);
         }
         cx.notify();
     }
@@ -1932,13 +1933,42 @@ impl Glyph {
     pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
-                p.tracks.push(t);
+                p.tracks.push(t.clone());
                 let name = p.name.clone();
                 self.save_library(cx);
                 self.toast(tf("toast.added_to_playlist", &[("name", &name)]));
+                self.auto_download_added(id, vec![t], cx);
             }
         }
         cx.notify();
+    }
+
+    pub fn is_auto_download(&self, id: &str) -> bool {
+        self.library_ok && self.library.playlist(id).is_some_and(|p| p.auto_download)
+    }
+
+    /// Turns "download new songs automatically" on or off for a playlist.
+    /// Songs already in it stay as they are ("Download all" covers those).
+    pub fn toggle_auto_download(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            self.toast_info(t("status.library_offline"));
+            return;
+        }
+        let Some(p) = self.library.playlist_mut(id) else { return };
+        p.auto_download = !p.auto_download;
+        let on = p.auto_download;
+        self.save_library(cx);
+        self.toast_info(t(if on { "toast.auto_dl_on" } else { "toast.auto_dl_off" }));
+        cx.notify();
+    }
+
+    /// Songs just added to playlist `id` (here or from another device):
+    /// downloads them if the playlist downloads new songs automatically.
+    pub(crate) fn auto_download_added(&mut self, id: &str, added: Vec<Track>, cx: &mut Context<Self>) {
+        if added.is_empty() || !self.is_auto_download(id) {
+            return;
+        }
+        self.download_tracks_with(added, true, cx);
     }
 
     pub fn share(&mut self, t: &Track, cx: &mut Context<Self>) {
@@ -2247,14 +2277,24 @@ impl Glyph {
     /// Downloads the songs one after another; songs no source offers for
     /// download are skipped and counted in the closing toast.
     pub fn download_tracks(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.download_tracks_with(tracks, false, cx);
+    }
+
+    /// `auto`: started by a playlist that downloads new songs by itself, so
+    /// it starts silently and only reports what was saved or failed.
+    fn download_tracks_with(&mut self, tracks: Vec<Track>, auto: bool, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else {
-            self.toast_info(t("toast.dl_unready"));
+            if !auto {
+                self.toast_info(t("toast.dl_unready"));
+            }
             cx.notify();
             return;
         };
         let todo: Vec<Track> = tracks.into_iter().filter(|tr| !self.is_downloaded(tr) && !self.is_downloading(tr)).collect();
         if todo.is_empty() {
-            self.toast_info(t("toast.dl_already"));
+            if !auto {
+                self.toast_info(t("toast.dl_already"));
+            }
             cx.notify();
             return;
         }
@@ -2263,11 +2303,13 @@ impl Glyph {
         }
         let total = todo.len();
         let first_title = todo[0].title.clone();
-        self.toast(if total == 1 {
-            tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
-        } else {
-            tf("toast.dl_started", &[("n", &total)]).to_string()
-        });
+        if !auto {
+            self.toast(if total == 1 {
+                tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
+            } else {
+                tf("toast.dl_started", &[("n", &total)]).to_string()
+            });
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
@@ -2297,6 +2339,11 @@ impl Glyph {
                     cx.notify();
                 })
                 .ok();
+            }
+            // Songs no source offers for download are expected in an
+            // automatic run; it says nothing unless something happened.
+            if auto && ok + failed == 0 {
+                return;
             }
             let msg = if ok + failed == 0 {
                 t("toast.dl_none").to_string()
