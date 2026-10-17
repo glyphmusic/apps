@@ -158,7 +158,14 @@ pub fn raster(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaIm
             let mx = col.0.max(col.1).max(col.2).max(0.001);
             let shown = col.scale((0.45 + 0.55 * mx).min(1.0) / mx);
             let (rr, gg, bb) = ((shown.0 * 255.0) as u8, (shown.1 * 255.0) as u8, (shown.2 * 255.0) as u8);
-            let a = (90.0 + 165.0 * l) as u8;
+            // Fade out over the lower 55 % so the hero melts into the page.
+            let fy = (r as f32 + 0.5) / rows as f32;
+            let fade = 1.0 - ((fy - 0.45) / 0.55).clamp(0.0, 1.0);
+            let fade = fade * fade * (3.0 - 2.0 * fade);
+            let a = ((90.0 + 165.0 * l) * fade) as u8;
+            if a < 4 {
+                continue;
+            }
             let ox = c * CW + 1;
             let oy = r * CH + 1;
             for (ry, bits) in FONT[idx].iter().enumerate() {

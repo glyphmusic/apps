@@ -6,7 +6,6 @@ use crate::ui::lists::{artist_link, list_cover, with_menu};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::widgets::*;
-use glyph_core::BackendMode;
 use glyph_protocol::Track;
 use gpui::{div, prelude::*, px, Context, FontWeight, Window};
 use std::rc::Rc;
@@ -322,10 +321,9 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         )
         .children(now)
         .child(div().px(px(14.0)).pb(px(6.0)).text_size(theme::text_sm()).text_color(theme::text_dim()).child(tf("queue.next_n", &[("n", &n)])))
-        .child(
-            div()
+        .child(fade_edges(div()
                 .id("q-scroll")
-                .flex_1()
+                .size_full()
                 .overflow_y_scroll()
                 .px(px(6.0))
                 .when(!app.queue_ok, |d| d.child(ascii_state(ART_OFFLINE, t("status.queue_offline"), "")))
@@ -363,8 +361,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             }
                         })))
                         .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_remove(i, cx))))
-                })),
-        )
+                })), theme::panel_strong(), 18.0).flex_1().min_h_0())
         .child(
             div()
                 .px(px(14.0))

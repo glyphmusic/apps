@@ -54,7 +54,7 @@ fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
             .gap(px(6.0))
             .h(px(30.0))
             .px(px(12.0))
-            .rounded_full()
+            .rounded(px(8.0))
             .bg(black(0.55))
             .border_1()
             .border_color(white(0.1))
@@ -116,7 +116,7 @@ pub fn list_cover(app: &mut Glyph, l: &ListRef, size: f32, cx: &mut Context<Glyp
     };
     let tracks = app.list_tracks(l);
     match l {
-        ListRef::Liked => tile(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0), "heart-fill", theme::pink()),
+        ListRef::Liked | ListRef::ArtistLiked(_) => tile(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0), "heart-fill", theme::pink()),
         ListRef::Recent => tile(theme::card(), "history", white(0.75)),
         ListRef::User(_) => {
             // Distinct covers (by path) for the mosaic.
@@ -307,7 +307,7 @@ fn round_icon_button(id: impl Into<ElementId>, name: &str, size: f32) -> Statefu
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(px(8.0))
         .bg(black(0.35))
         .border_1()
         .border_color(white(0.14))
@@ -326,7 +326,7 @@ fn play_pill(id: impl Into<ElementId>, label: SharedString) -> Stateful<gpui::Di
         .gap(px(8.0))
         .h(px(36.0))
         .px(px(18.0))
-        .rounded_full()
+        .rounded(px(8.0))
         .bg(gpui::white())
         .cursor_pointer()
         .text_size(theme::text_sm())
@@ -345,19 +345,20 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     let title = app.list_title(&l);
     let art = list_cover(app, &l, 248.0, cx);
     let kind = match &l {
-        ListRef::Liked => t("list.kind.liked"),
-        ListRef::Recent => t("list.kind.recent"),
-        ListRef::User(_) => t("list.kind.playlist"),
         ListRef::Album { .. } => t("list.kind.album"),
+        _ => t("list.kind.playlist"),
     };
-    let sub: AnyElement = match &l {
-        ListRef::Album { artist, .. } => div()
-            .flex()
-            .text_size(theme::text_sm())
-            .text_color(theme::text_dim())
-            .child(artist_link("list-artist", artist, cx))
-            .into_any_element(),
-        _ => div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(kind.clone()).into_any_element(),
+    // Only albums and "liked by artist" have a subtitle (the artist).
+    let sub: Option<AnyElement> = match &l {
+        ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => Some(
+            div()
+                .flex()
+                .text_size(theme::text_sm())
+                .text_color(theme::text_dim())
+                .child(artist_link("list-artist", artist, cx))
+                .into_any_element(),
+        ),
+        _ => None,
     };
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
     let has = !tracks.is_empty();
@@ -381,7 +382,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .gap(px(4.0))
                 .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(format!("[{}]", kind.to_uppercase())))
                 .child(div().text_size(px(22.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title.clone()))
-                .child(sub)
+                .children(sub)
                 .child(meta_line(&tracks, theme::text_faint())),
         )
         .when(has, |d| {
@@ -405,18 +406,27 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
             )
         })
         .when_some(user_id, |d, id| {
+            let id2 = id.clone();
             d.child(
-                div().flex().child(
-                    text_button("list-delete", t("list.delete"))
-                        .text_size(theme::text_sm())
-                        .on_click(cx.listener(move |this, _, _, cx| this.delete_playlist(&id, cx))),
-                ),
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        text_button("list-rename", t("list.rename"))
+                            .text_size(theme::text_sm())
+                            .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(None, Some(id2.clone()), w, cx))),
+                    )
+                    .child(
+                        text_button("list-delete", t("list.delete"))
+                            .text_size(theme::text_sm())
+                            .on_click(cx.listener(move |this, _, _, cx| this.delete_playlist(&id, cx))),
+                    ),
             )
         });
 
     let right: AnyElement = if tracks.is_empty() {
         let (a, b) = match &l {
-            ListRef::Liked => (t("library.liked.empty"), t("library.liked.empty.sub")),
+            ListRef::Liked | ListRef::ArtistLiked(_) => (t("library.liked.empty"), t("library.liked.empty.sub")),
             ListRef::Recent => (t("home.empty.title"), t("library.recent.empty.sub")),
             _ => (t("library.playlist.empty"), t("list.empty.sub")),
         };
@@ -471,9 +481,6 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         Some(
             div()
                 .id("artist-about")
-                .absolute()
-                .right(px(20.0))
-                .bottom(px(20.0))
                 .w(px(340.0))
                 .p(px(14.0))
                 .rounded(px(12.0))
@@ -535,9 +542,6 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
     } else if info_loading {
         Some(
             div()
-                .absolute()
-                .right(px(20.0))
-                .bottom(px(20.0))
                 .w(px(340.0))
                 .p(px(14.0))
                 .rounded(px(12.0))
@@ -555,35 +559,30 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         None
     };
 
+    // Full-bleed hero: the ASCII photo is the page background here and fades
+    // out at the bottom (baked into the raster), so it melts into the glow.
     let hero = div()
         .relative()
-        .w_full()
-        .h(px(340.0))
-        .rounded(px(14.0))
-        .bg(black(0.7))
+        .mx(px(-32.0))
+        .mt(px(-20.0))
+        .h(px(380.0))
         .overflow_hidden()
         .when_some(hero_img, |d, im| d.child(div().absolute().inset_0().child(img(im).size_full().object_fit(ObjectFit::Cover))))
-        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 340.0, 14.0))))
-        // Readability: darken towards the bottom-left where the text sits.
+        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", 1680.0, 380.0, 0.0))))
+        // Readability behind the name: soft dark wash from the left.
         .child(
             div()
                 .absolute()
                 .inset_0()
-                .bg(linear_gradient(0.0, linear_color_stop(black(0.88), 0.0), linear_color_stop(black(0.0), 0.75))),
+                .bg(linear_gradient(90.0, linear_color_stop(black(0.55), 0.0), linear_color_stop(black(0.0), 0.55))),
         )
+        .children(back_button(app, cx).map(|b| div().absolute().top(px(20.0)).left(px(32.0)).child(b)))
         .child(
             div()
                 .absolute()
-                .inset_0()
-                .bg(linear_gradient(90.0, linear_color_stop(black(0.6), 0.0), linear_color_stop(black(0.0), 0.6))),
-        )
-        .children(back_button(app, cx).map(|b| div().absolute().top(px(16.0)).left(px(16.0)).child(b)))
-        .child(
-            div()
-                .absolute()
-                .left(px(28.0))
-                .bottom(px(26.0))
-                .right(px(if about_card.is_some() { 390.0 } else { 28.0 }))
+                .left(px(32.0))
+                .bottom(px(40.0))
+                .right(px(if about_card.is_some() { 400.0 } else { 32.0 }))
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
@@ -603,9 +602,9 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                     )
                 }),
         )
-        .children(about_card);
+        .children(about_card.map(|c| div().absolute().right(px(32.0)).bottom(px(40.0)).child(c)));
 
-    // Popular songs.
+    // Popular songs: 5, then "Show more".
     let n_show = if show_all { tracks.len() } else { tracks.len().min(5) };
     let songs: AnyElement = if tracks.is_empty() && loading {
         skeleton_rows("artist", 5).into_any_element()
@@ -617,23 +616,67 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         div().flex().flex_col().children(rows).into_any_element()
     };
     let nm = name.clone();
-    let songs_head = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(section_title("music-2", t("artist.popular")))
-        .when(tracks.len() > 5, |d| {
-            d.child(
-                text_button("artist-all", if show_all { t("artist.show_less") } else { t("artist.show_all") })
-                    .text_size(theme::text_sm())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(p) = this.artists.get_mut(&nm) {
-                            p.show_all = !p.show_all;
-                        }
-                        cx.notify();
-                    })),
+    let more = (tracks.len() > 5).then(|| {
+        div().flex().pt(px(4.0)).child(
+            button("artist-all", if show_all { t("artist.show_less") } else { t("artist.show_more_n") }).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(p) = this.artists.get_mut(&nm) {
+                    p.show_all = !p.show_all;
+                }
+                cx.notify();
+            })),
+        )
+    });
+
+    // Your liked songs by this artist.
+    let liked = app.liked_by(&name);
+    let liked_card = (!liked.is_empty()).then(|| {
+        let l = ListRef::ArtistLiked(name.clone());
+        let n = liked.len();
+        div()
+            .flex_none()
+            .w(px(300.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(section_title("heart", t("artist.liked")))
+            .child(
+                card()
+                    .id("artist-liked")
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
+                    .p(px(10.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::card_hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(56.0))
+                            .rounded(px(8.0))
+                            .bg(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("heart-fill", 20.0, theme::pink())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(theme::text_md())
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(white(0.95))
+                                    .child(tf("artist.liked_n", &[("n", &n)])),
+                            )
+                            .child(div().truncate().text_size(theme::text_sm()).text_color(white(0.55)).child(tf("artist.by", &[("name", &name)]))),
+                    ),
             )
-        });
+    });
 
     // Albums, grouped from the songs found.
     let mut albums: Vec<(String, Vec<Track>)> = Vec::new();
@@ -668,31 +711,40 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         })
         .collect();
 
-    div()
-        .id("artist-scroll")
-        .size_full()
-        .overflow_y_scroll()
-        .px(px(32.0))
-        .py(px(20.0))
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap(px(22.0))
+        .child(hero)
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap(px(22.0))
-                .child(hero)
-                .child(div().flex().flex_col().gap(px(8.0)).child(songs_head).child(songs))
-                .when(!album_cards.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .child(section_title("disc-3", t("artist.albums")))
-                            .child(div().id("artist-albums").flex().gap(px(20.0)).overflow_x_scroll().children(album_cards)),
-                    )
-                }),
+                .items_start()
+                .gap(px(32.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(section_title("music-2", t("artist.popular")))
+                        .child(songs)
+                        .children(more),
+                )
+                .children(liked_card),
         )
-        .into_any_element()
+        .when(!album_cards.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(section_title("disc-3", t("artist.albums")))
+                    .child(div().id("artist-albums").flex().gap(px(20.0)).overflow_x_scroll().children(album_cards)),
+            )
+        });
+    div().id("artist-scroll").size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
 }
 
 // ------------------------------------------------------------------ library
@@ -711,7 +763,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
                 .gap(px(6.0))
                 .h(px(32.0))
                 .px(px(14.0))
-                .rounded_full()
+                .rounded(px(8.0))
                 .bg(theme::card())
                 .border_1()
                 .border_color(theme::border())
@@ -719,7 +771,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
                 .text_size(theme::text_sm())
                 .text_color(white(0.9))
                 .hover(|s| s.bg(theme::card_hover()))
-                .on_click(cx.listener(|this, _, _, cx| this.new_playlist_with(None, cx)))
+                .on_click(cx.listener(|this, _, w, cx| this.open_name_dialog(None, None, w, cx)))
                 .child(icon("plus", 14.0, white(0.9)))
                 .child(t("library.playlist.new")),
         );
@@ -732,9 +784,9 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
             .child(div().flex().flex_col().gap(px(18.0)).child(head).child(ascii_state(ART_OFFLINE, t("status.library_offline"), t("library.offline.sub"))))
             .into_any_element();
     }
-    let mut lists: Vec<(ListRef, String)> = vec![(ListRef::Liked, t("list.kind.liked").to_string())];
+    let mut lists: Vec<(ListRef, String)> = vec![(ListRef::Liked, t("list.kind.playlist").to_string())];
     if !app.library.recent.is_empty() {
-        lists.push((ListRef::Recent, t("list.kind.recent").to_string()));
+        lists.push((ListRef::Recent, t("list.kind.playlist").to_string()));
     }
     for p in &app.library.playlists {
         lists.push((ListRef::User(p.id.clone()), t("list.kind.playlist").to_string()));
@@ -776,52 +828,54 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
 
 // ------------------------------------------------------------------ song menu
 
-pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+/// One menu row. `closes_sub`: hovering it closes the playlist flyout.
+fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_sub: bool, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .h(px(32.0))
+        .px(px(10.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .text_size(px(13.0))
+        .text_color(white(0.88))
+        .hover(|s| s.bg(white(0.07)))
+        .when(closes_sub, |d| {
+            d.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && m.playlists) {
+                    m.playlists = false;
+                    cx.notify();
+                }
+            }))
+        })
+        .child(icon(name, 15.0, color))
+        .child(div().flex_1().truncate().child(label))
+}
+
+pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> Option<AnyElement> {
     let m = app.ctx_menu.clone()?;
     let tr = m.track.clone();
-    let item = |id: ElementId, name: &str, label: SharedString, color: Hsla| {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .h(px(32.0))
-            .px(px(10.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .text_size(px(13.0))
-            .text_color(white(0.88))
-            .hover(|s| s.bg(white(0.07)))
-            .child(icon(name, 15.0, color))
-            .child(div().flex_1().truncate().child(label))
-    };
     let sep = || div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(white(0.07));
     let mut body: Vec<AnyElement> = Vec::new();
+    // "Add to playlist" flyout (opens on hover, to the right or left).
+    let mut sub: Vec<AnyElement> = Vec::new();
     if m.playlists {
-        body.push(
-            item("ctx-back".into(), "chevron-left", t("ctx.add_playlist"), white(0.6))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(m) = this.ctx_menu.as_mut() {
-                        m.playlists = false;
-                    }
-                    cx.notify();
-                }))
-                .into_any_element(),
-        );
-        body.push(sep().into_any_element());
         let t_new = tr.clone();
-        body.push(
-            item("ctx-new-pl".into(), "plus", t("library.playlist.new"), white(0.7))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ctx_menu = None;
-                    this.new_playlist_with(Some(t_new.clone()), cx)
-                }))
+        sub.push(
+            ctx_item("ctx-new-pl".into(), "plus", t("library.playlist.new"), white(0.7), false, cx)
+                .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Some(t_new.clone()), None, w, cx)))
                 .into_any_element(),
         );
-        for (i, p) in app.library.playlists.iter().enumerate() {
-            let (id, t_add) = (p.id.clone(), tr.clone());
-            body.push(
-                item(("ctx-pl", i).into(), "list-music", p.name.clone().into(), white(0.7))
+        if !app.library.playlists.is_empty() {
+            sub.push(sep().into_any_element());
+        }
+        let pls: Vec<(String, String)> = app.library.playlists.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+        for (i, (id, name)) in pls.into_iter().enumerate() {
+            let t_add = tr.clone();
+            sub.push(
+                ctx_item(("ctx-pl", i).into(), "list-music", name.into(), white(0.7), false, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ctx_menu = None;
                         this.add_to_playlist(&id, t_add.clone(), cx)
@@ -829,7 +883,9 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
                     .into_any_element(),
             );
         }
-    } else {
+    }
+    let flip = f32::from(m.pos.x) + 244.0 + 236.0 > f32::from(window.viewport_size().width);
+    {
         let art = cover(app, &tr, 36.0, 5.0, cx);
         body.push(
             div()
@@ -852,7 +908,7 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         body.push(sep().into_any_element());
         let t1 = tr.clone();
         body.push(
-            item("ctx-play".into(), "play", t("ctx.play"), white(0.7))
+            ctx_item("ctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ctx_menu = None;
                     this.play_list(vec![t1.clone()], 0, cx)
@@ -861,7 +917,7 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         );
         let t2 = tr.clone();
         body.push(
-            item("ctx-next".into(), "list-start", t("ctx.play_next"), white(0.7))
+            ctx_item("ctx-next".into(), "list-start", t("ctx.play_next"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ctx_menu = None;
                     this.queue_add(t2.clone(), true, cx)
@@ -870,7 +926,7 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         );
         let t3 = tr.clone();
         body.push(
-            item("ctx-queue".into(), "list-plus", t("ctx.queue"), white(0.7))
+            ctx_item("ctx-queue".into(), "list-plus", t("ctx.queue"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ctx_menu = None;
                     this.queue_add(t3.clone(), false, cx)
@@ -881,10 +937,13 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         let liked = app.is_liked(&tr);
         let t4 = tr.clone();
         body.push(
-            item("ctx-like".into(),
+            ctx_item(
+                "ctx-like".into(),
                 if liked { "heart-fill" } else { "heart" },
                 if liked { t("ctx.unlike") } else { t("ctx.like") },
                 if liked { theme::pink() } else { white(0.7) },
+                true,
+                cx,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.ctx_menu = None;
@@ -893,20 +952,44 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
             .into_any_element(),
         );
         body.push(
-            item("ctx-add-pl".into(), "list-music", t("ctx.add_playlist"), white(0.7))
+            ctx_item("ctx-add-pl".into(), "list-music", t("ctx.add_playlist"), white(0.7), false, cx)
+                .relative()
+                .when(m.playlists, |d| d.bg(white(0.07)))
                 .child(icon("chevron-right", 14.0, white(0.4)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(m) = this.ctx_menu.as_mut() {
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && !m.playlists) {
                         m.playlists = true;
+                        cx.notify();
                     }
-                    cx.notify();
                 }))
+                .when(m.playlists, |d| {
+                    d.child(
+                        div()
+                            .id("ctx-sub")
+                            .absolute()
+                            .top(px(-6.0))
+                            .when(!flip, |d| d.left(px(236.0)))
+                            .when(flip, |d| d.right(px(236.0)))
+                            .w(px(228.0))
+                            .max_h(px(320.0))
+                            .overflow_y_scroll()
+                            .p(px(6.0))
+                            .rounded(px(10.0))
+                            .bg(gpui::hsla(0.0, 0.0, 0.075, 0.98))
+                            .border_1()
+                            .border_color(white(0.1))
+                            .flex()
+                            .flex_col()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .children(sub),
+                    )
+                })
                 .into_any_element(),
         );
         if let Some((l, i)) = m.from.clone().filter(|(l, _)| matches!(l, ListRef::User(_) | ListRef::Recent)) {
             let label = if l == ListRef::Recent { t("ctx.remove_recent") } else { t("ctx.remove") };
             body.push(
-                item("ctx-remove".into(), "circle-minus", label, white(0.7))
+                ctx_item("ctx-remove".into(), "circle-minus", label, white(0.7), true, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ctx_menu = None;
                         this.remove_from_list(&l, i, cx)
@@ -917,7 +1000,7 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         body.push(sep().into_any_element());
         let artist = tr.artist.clone();
         body.push(
-            item("ctx-artist".into(), "user-round", t("ctx.artist"), white(0.7))
+            ctx_item("ctx-artist".into(), "user-round", t("ctx.artist"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ctx_menu = None;
                     this.open_artist(&artist, cx)
@@ -926,7 +1009,7 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         );
         let t5 = tr.clone();
         body.push(
-            item("ctx-link".into(), "link-2", t("ctx.copy_link"), white(0.7))
+            ctx_item("ctx-link".into(), "link-2", t("ctx.copy_link"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.ctx_menu = None;
                     this.share(&t5, cx);
@@ -964,4 +1047,71 @@ pub fn ctx_menu(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> 
         .with_priority(3)
         .into_any_element(),
     )
+}
+
+// ------------------------------------------------------------------ name dialog
+
+/// "New playlist" / "Rename playlist": a small centred dialog with one field.
+pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
+    let renaming = app.name_dialog.as_ref().is_some_and(|d| d.rename.is_some());
+    let input = app.playlist_name.clone();
+    let panel = div()
+        .id("name-dialog")
+        .occlude()
+        .w(px(380.0))
+        .p(px(20.0))
+        .rounded(px(12.0))
+        .bg(gpui::hsla(0.0, 0.0, 0.07, 0.99))
+        .border_1()
+        .border_color(white(0.08))
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .font_family(theme::FONT)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(white(0.95))
+                .child(if renaming { t("dialog.playlist.rename") } else { t("dialog.playlist.title") }),
+        )
+        .child(
+            div()
+                .h(px(38.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded(px(8.0))
+                .bg(black(0.45))
+                .border_1()
+                .border_color(white(0.12))
+                .text_size(px(13.5))
+                .child(input),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap(px(8.0))
+                .child(button("dialog-cancel", t("dialog.cancel")).on_click(cx.listener(|this, _, _, cx| this.close_name_dialog(cx))))
+                .child(
+                    primary_button("dialog-ok", if renaming { t("dialog.save") } else { t("dialog.create") })
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_name_dialog(cx))),
+                ),
+        );
+    deferred(
+        div()
+            .id("dialog-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(black(0.45))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_name_dialog(cx)))
+            .child(panel),
+    )
+    .with_priority(4)
+    .into_any_element()
 }

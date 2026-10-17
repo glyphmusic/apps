@@ -139,7 +139,7 @@ pub fn pill() -> Div {
         .bg(theme::panel_strong())
         .border_1()
         .border_color(theme::border())
-        .rounded_full()
+        .rounded(px(8.0))
 }
 
 pub fn mono() -> Div {
@@ -192,7 +192,7 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> State
         .gap(px(6.0))
         .px(px(14.0))
         .h(px(32.0))
-        .rounded_full()
+        .rounded(px(8.0))
         .bg(theme::card())
         .border_1()
         .border_color(theme::border())
@@ -214,7 +214,7 @@ pub fn primary_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
         .gap(px(6.0))
         .px(px(16.0))
         .h(px(32.0))
-        .rounded_full()
+        .rounded(px(8.0))
         .bg(theme::text())
         .cursor_pointer()
         .text_size(theme::text_sm())
@@ -292,7 +292,7 @@ pub fn chip(label: impl Into<SharedString>, on: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
+        .rounded(px(8.0))
         .text_size(px(12.0))
         // Fixed line height so the label sits in the vertical centre.
         .line_height(px(14.0))
@@ -732,4 +732,25 @@ pub fn status_line(text: impl Into<SharedString>) -> Div {
 /// Translate helper kept here so view code reads short.
 pub fn tr(key: &str) -> SharedString {
     t(key)
+}
+
+/// Soft fade at the top and bottom edge of a scroll frame: `el` plus two
+/// gradient overlays in `color` (the surface behind it). The caller sizes the
+/// returned wrapper; `el` should fill it.
+pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32) -> Div {
+    let edge = |top: bool| {
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(px(h))
+            .when(top, |d| d.top_0())
+            .when(!top, |d| d.bottom_0())
+            .bg(gpui::linear_gradient(
+                if top { 180.0 } else { 0.0 },
+                gpui::linear_color_stop(color, 0.0),
+                gpui::linear_color_stop(color.opacity(0.0), 1.0),
+            ))
+    };
+    div().relative().child(el).child(edge(true)).child(edge(false))
 }

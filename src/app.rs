@@ -44,6 +44,17 @@ pub enum ListRef {
     Recent,
     User(String),
     Album { title: String, artist: String, tracks: Vec<Track> },
+    /// Liked songs by one artist.
+    ArtistLiked(String),
+}
+
+/// "New playlist" / "Rename" dialog.
+#[derive(Debug, Clone)]
+pub struct NameDialog {
+    /// Song to add to the new playlist.
+    pub track: Option<Track>,
+    /// Playlist id when renaming.
+    pub rename: Option<String>,
 }
 
 /// One step of the back history.
@@ -171,6 +182,8 @@ pub struct Glyph {
     pub ctx_menu: Option<CtxMenu>,
     /// Artist hero images rendered as ASCII, per source image (None = computing).
     pub heroes: std::collections::HashMap<PathBuf, Option<Arc<gpui::RenderImage>>>,
+    pub name_dialog: Option<NameDialog>,
+    pub playlist_name: Entity<TextInput>,
     pub glow: Entity<GlowView>,
     pub search_input: Entity<TextInput>,
     pub server_input: Entity<TextInput>,
@@ -302,6 +315,7 @@ impl Glyph {
             cx.new(|cx| TextInput::new("search.placeholder", cx));
         let server_input = cx.new(|cx| TextInput::new("settings.server.placeholder", cx));
         let settings_search = cx.new(|cx| TextInput::new("settings.search", cx));
+        let playlist_name = cx.new(|cx| TextInput::new("dialog.playlist.placeholder", cx));
         let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
             "youtube",
             "jamendo_client_id",
@@ -321,6 +335,11 @@ impl Glyph {
                 InputEvent::Cancel => {}
             }
         })];
+        subs.push(cx.subscribe(&playlist_name, |this, _, ev: &InputEvent, cx| match ev {
+            InputEvent::Submit(_) => this.submit_name_dialog(cx),
+            InputEvent::Cancel => this.close_name_dialog(cx),
+            InputEvent::Changed(_) => {}
+        }));
         subs.push(cx.subscribe(&server_input, |this, _, ev: &InputEvent, cx| {
             if let InputEvent::Changed(v) | InputEvent::Submit(v) = ev {
                 this.config.server_url = v.trim().to_string();
@@ -371,6 +390,8 @@ impl Glyph {
             history: Vec::new(),
             ctx_menu: None,
             heroes: Default::default(),
+            name_dialog: None,
+            playlist_name,
             glow,
             search_input,
             server_input,
@@ -1239,21 +1260,6 @@ impl Glyph {
         cx.notify();
     }
 
-    pub fn create_playlist(&mut self, cx: &mut Context<Self>) {
-        let n = self.library.playlists.len() + 1;
-        let name = tf("library.new_playlist_name", &[("n", &n)]).to_string();
-        if guard(|| {
-            self.library.create_playlist(&name);
-        })
-        .is_some()
-        {
-            self.save_library(cx);
-        } else {
-            self.toast(t("status.library_offline"));
-        }
-        cx.notify();
-    }
-
     pub fn delete_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
         if guard(|| self.library.delete_playlist(id)).is_some() {
             self.save_library(cx);
@@ -1350,7 +1356,13 @@ impl Glyph {
             ListRef::Recent => self.library.recent.clone(),
             ListRef::User(id) => self.library.playlist(id).map(|p| p.tracks.clone()).unwrap_or_default(),
             ListRef::Album { tracks, .. } => tracks.clone(),
+            ListRef::ArtistLiked(name) => self.liked_by(name),
         }
+    }
+
+    /// Liked songs (co-)credited to `name`.
+    pub fn liked_by(&self, name: &str) -> Vec<Track> {
+        self.library.liked.iter().filter(|t| by_artist(name, &t.artist)).cloned().collect()
     }
 
     pub fn list_title(&self, l: &ListRef) -> String {
@@ -1359,6 +1371,7 @@ impl Glyph {
             ListRef::Recent => t("library.recent").to_string(),
             ListRef::User(id) => self.library.playlist(id).map(|p| p.name.clone()).unwrap_or_default(),
             ListRef::Album { title, .. } => title.clone(),
+            ListRef::ArtistLiked(_) => t("library.liked").to_string(),
         }
     }
 
@@ -1514,17 +1527,59 @@ impl Glyph {
                     self.save_library(cx);
                 }
             }
+            ListRef::ArtistLiked(name) => {
+                if let Some(tr) = self.liked_by(name).get(i).cloned() {
+                    self.toggle_like(&tr, cx);
+                }
+            }
             ListRef::Album { .. } => {}
         }
         cx.notify();
     }
 
-    /// Creates a new playlist and adds `tr` to it.
-    pub fn new_playlist_with(&mut self, tr: Option<Track>, cx: &mut Context<Self>) {
-        self.create_playlist(cx);
-        if let (Some(tr), Some(id)) = (tr, self.library.playlists.last().map(|p| p.id.clone())) {
-            self.add_to_playlist(&id, tr, cx);
+    /// Opens the name dialog for a new playlist (with `track` added) or for
+    /// renaming playlist `rename`.
+    pub fn open_name_dialog(&mut self, track: Option<Track>, rename: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let current = rename.as_ref().and_then(|id| self.library.playlist(id)).map(|p| p.name.clone()).unwrap_or_default();
+        self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
+        self.ctx_menu = None;
+        self.name_dialog = Some(NameDialog { track, rename });
+        let f = self.playlist_name.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    pub fn close_name_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.name_dialog.take().is_some() {
+            cx.notify();
         }
+    }
+
+    pub fn submit_name_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.name_dialog.take() else { return };
+        let typed = self.playlist_name.read(cx).value.trim().to_string();
+        if let Some(id) = d.rename {
+            if !typed.is_empty() && guard(|| self.library.rename_playlist(&id, &typed)).is_some() {
+                self.save_library(cx);
+            }
+        } else {
+            let name = if typed.is_empty() {
+                tf("library.new_playlist_name", &[("n", &(self.library.playlists.len() + 1))]).to_string()
+            } else {
+                typed
+            };
+            match guard(|| self.library.create_playlist(&name).id.clone()) {
+                Some(id) => {
+                    self.save_library(cx);
+                    match d.track {
+                        Some(tr) => self.add_to_playlist(&id, tr, cx),
+                        None => self.open_list(ListRef::User(id), cx),
+                    }
+                }
+                None => self.toast(t("status.library_offline")),
+            }
+        }
+        cx.notify();
     }
 
     // ------------------------------------------------------------ settings

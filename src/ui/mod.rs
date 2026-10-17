@@ -135,6 +135,12 @@ impl Render for Glyph {
         };
         theme::set_zone(None);
         // Content floats directly on the background (Liner): no big panel.
+        // Scroll frames fade in/out at their edges instead of a hard cut.
+        let main = if self.view == View::NowPlaying {
+            main
+        } else {
+            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.55), 22.0).size_full().into_any_element()
+        };
         let main_panel = div().flex_1().min_w_0().h_full().overflow_hidden().child(main);
         let queue = self
             .show_queue
@@ -166,7 +172,8 @@ impl Render for Glyph {
         });
         let toast = self.toast.as_ref().map(|(m, _)| m.clone());
         let modal = self.settings_open.then(|| settings::modal(self, window, cx));
-        let menu = lists::ctx_menu(self, cx);
+        let menu = lists::ctx_menu(self, window, cx);
+        let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
         let dim = self.settings_open;
 
         div()
@@ -195,7 +202,9 @@ impl Render for Glyph {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
-                if this.ctx_menu.is_some() {
+                if this.name_dialog.is_some() {
+                    this.close_name_dialog(cx);
+                } else if this.ctx_menu.is_some() {
                     this.close_ctx(cx);
                 } else if this.open_select.is_some() {
                     this.open_select = None;
@@ -245,6 +254,7 @@ impl Render for Glyph {
             .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(0.08)).child(b)))
             .children(modal)
             .children(menu)
+            .children(dialog)
             .when_some(toast, |d, m| {
                 d.child(
                     div()

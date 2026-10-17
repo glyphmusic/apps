@@ -321,17 +321,15 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
             .into_any_element()
     };
 
-    div()
+    let scroll = div()
         .id("lyrics-scroll")
-        .flex_1()
-        .min_w_0()
-        .h_full()
+        .size_full()
         .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap(px(28.0))
         .py(px(20.0))
         .child(info)
-        .child(body)
-        .into_any_element()
+        .child(body);
+    fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.5), 48.0).flex_1().min_w_0().h_full().into_any_element()
 }
