@@ -214,8 +214,9 @@ pub enum SettingsPage {
     Server,
     Account,
     Storage,
+    /// Export, share and import settings.
+    Transfer,
     About,
-    Support,
 }
 
 pub struct Glyph {
@@ -278,6 +279,8 @@ pub struct Glyph {
     pub backend: Option<Arc<Backend>>,
     /// Settings -> Account state and the sync loop.
     pub account: crate::ui::account::AccountUi,
+    /// Settings export / import (Settings -> Backup & share).
+    pub transfer: crate::ui::transfer::TransferUi,
     pub backend_state: BackendState,
     pub player: Option<Arc<PlayerController>>,
     pub player_ok: bool,
@@ -331,8 +334,8 @@ pub struct Glyph {
     pub settings_search: Entity<TextInput>,
     /// Which dropdown in the settings modal is open.
     pub open_select: Option<&'static str>,
-    /// "Advanced" sections in settings are expanded.
-    pub settings_advanced: bool,
+    /// Selected sub-tab of the settings page (see `ui::settings::subtabs`).
+    pub settings_sub: u8,
     /// Storage breakdown for "Cache & Storage" (None = not measured yet).
     pub storage: Option<glyph_core::storage::StorageStats>,
     /// Which storage kinds "Clear cache" removes (order of StorageKind::ALL).
@@ -630,9 +633,10 @@ impl Glyph {
             settings_closing: None,
             settings_page: SettingsPage::Playback,
             account: Default::default(),
+            transfer: Default::default(),
             settings_search,
             open_select: None,
-            settings_advanced: false,
+            settings_sub: 0,
             storage: None,
             // Downloads are offline songs: opt-in, never cleared by default.
             storage_selected: [true, false, true, true],
@@ -1072,6 +1076,7 @@ impl Glyph {
             || self.download_done.values().any(|at| at.elapsed().as_secs_f32() < crate::ui::widgets::DL_DONE_ANIM_S)
             || settings_anim
             || crate::ui::settings::select_animating()
+            || crate::ui::settings::flash_animating()
             || tip_anim
             || menu_anim
             || self.splash.is_some()
@@ -1330,6 +1335,13 @@ impl Glyph {
     // ------------------------------------------------------------ search
 
     fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
+        // A pasted settings code opens the import in settings.
+        if glyph_core::settings_share::is_code(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_settings_text(&code, cx);
+            return;
+        }
         // A pasted playlist code imports instead of searching.
         if glyph_core::share::is_code(&q) {
             let code = q.clone();
@@ -2946,6 +2958,9 @@ impl Glyph {
         self.settings_closing = None;
         self.settings_open = true;
         if let Some(p) = page {
+            if p != self.settings_page {
+                self.settings_sub = 0;
+            }
             self.settings_page = p;
         }
         self.open_select = None;
@@ -2968,7 +2983,16 @@ impl Glyph {
     }
 
     pub fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        self.set_settings_tab(page, 0, cx);
+    }
+
+    /// Opens a settings page at one of its sub-tabs.
+    pub fn set_settings_tab(&mut self, page: SettingsPage, sub: u8, cx: &mut Context<Self>) {
+        if (page, sub) != (self.settings_page, self.settings_sub) {
+            self.settings_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        }
         self.settings_page = page;
+        self.settings_sub = sub;
         self.open_select = None;
         if page == SettingsPage::Storage {
             self.refresh_storage(cx);

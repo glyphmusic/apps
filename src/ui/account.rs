@@ -47,6 +47,8 @@ pub struct AccountUi {
     /// Feedback line under the actions (approve, rename, ...).
     pub notice: Option<(String, bool)>,
     pub recovery_code: Option<String>,
+    /// The recovery code is shown in clear (hidden as dots until clicked).
+    pub recovery_visible: bool,
     pub handle_input: Option<Entity<TextInput>>,
     pub code_input: Option<Entity<TextInput>>,
     pub delete_input: Option<Entity<TextInput>>,
@@ -164,6 +166,7 @@ impl Glyph {
                         Self::clear(&s.account.pw_input, cx);
                         Self::clear(&s.account.pw2_input, cx);
                         s.account.recovery_code = recovery;
+                        s.account.recovery_visible = false;
                         let handle = s.signed_in().map(|a| a.account.handle).unwrap_or_default();
                         s.toast(tf("account.toast.signed_in", &[("handle", &handle)]).to_string());
                         s.account_page_opened(cx);
@@ -231,7 +234,7 @@ impl Glyph {
         );
     }
 
-    fn signed_in(&self) -> Option<Stored> {
+    pub(crate) fn signed_in(&self) -> Option<Stored> {
         self.backend.as_ref().and_then(|b| b.account())
     }
 
@@ -415,7 +418,44 @@ impl Glyph {
     }
 
     pub fn account_recovery(&mut self, cx: &mut Context<Self>) {
-        self.account_call(cx, |b| Box::pin(async move { b.account_new_recovery_code().await }), |s, code, _| s.account.recovery_code = Some(code));
+        self.account_call(cx, |b| Box::pin(async move { b.account_new_recovery_code().await }), |s, code, _| {
+            s.account.recovery_code = Some(code);
+            s.account.recovery_visible = false;
+        });
+    }
+
+    pub fn account_copy_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(code) = self.account.recovery_code.clone() else { return };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+        self.toast(t("account.recovery.copied").to_string());
+        cx.notify();
+    }
+
+    /// Saves the recovery code as a small text file where the user picks.
+    pub fn account_download_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(code) = self.account.recovery_code.clone() else { return };
+        let handle = self.signed_in().map(|a| a.account.handle).unwrap_or_default();
+        let text = tf("account.recovery.file", &[("handle", &handle), ("code", &code)]).to_string();
+        let dir = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(std::path::PathBuf::from)
+            .map(|h| if h.join("Downloads").is_dir() { h.join("Downloads") } else { h })
+            .unwrap_or_else(glyph_core::paths::data_dir);
+        let name = format!("glyph-recovery-code-{handle}.txt");
+        let rx = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let r = cx.background_executor().spawn(async move { std::fs::write(&path, text) }).await;
+            this.update(cx, |s, cx| {
+                match r {
+                    Ok(()) => s.toast(t("account.recovery.saved").to_string()),
+                    Err(e) => s.toast_info(tf("sp.transfer.error", &[("e", &e)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn account_sign_out(&mut self, cx: &mut Context<Self>) {
@@ -606,33 +646,43 @@ fn field(input: Entity<TextInput>) -> Div {
 }
 
 fn signed_out(app: &mut Glyph, col: Div, cx: &mut Context<Glyph>) -> Div {
-    let intro = div().max_w(px(420.0)).pb(px(18.0)).text_center().text_size(px(13.0)).text_color(white(0.6)).child(t("account.intro"));
     // Centred in the page width, a little below the title.
     let centre = div().w_full().pt(px(24.0)).flex().flex_col().items_center();
     if let Login::Starting | Login::Waiting(_) | Login::Full(_) = &app.account.login {
-        return col.child(centre.child(intro).child(passkey_waiting(app, cx)));
+        return col.child(centre.child(passkey_waiting(app, cx)));
     }
     let public = app.config.effective_server_url().trim_end_matches('/') == glyph_core::config::DEFAULT_SERVER_URL;
 
     if public && !app.account.in_app {
+        // Just the two ways in, centred in the page.
         let failed = match &app.account.login {
-            Login::Failed(m) => Some(div().pb(px(8.0)).text_size(px(12.5)).text_color(theme::warn()).child(m.clone())),
+            Login::Failed(m) => Some(div().text_center().text_size(px(12.5)).text_color(theme::warn()).child(m.clone())),
             _ => None,
         };
-        let browser = div()
-            .w(px(360.0))
+        let buttons = div()
+            .w(px(320.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .children(failed)
             .child(
                 primary_button("acct-browser", t("account.browser.button"))
                     .justify_center()
-                    .h(px(38.0))
+                    .h(px(40.0))
+                    .child(icon("external-link", 14.0, gpui::black().opacity(0.6)))
                     .on_click(cx.listener(|this, _, _, cx| this.account_sign_in(cx))),
             )
-            .child(div().text_center().text_size(px(12.0)).text_color(white(0.5)).child(t("account.browser.desc")));
-        return col.child(centre.child(intro).child(browser).child(sign_in_switch("acct-inapp", t("account.browser.in_app"), true, cx)));
+            .child(
+                button("acct-inapp", t("account.browser.in_app"))
+                    .justify_center()
+                    .h(px(40.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.account.in_app = true;
+                        this.account.login = Login::Idle;
+                        cx.notify();
+                    })),
+            );
+        return col.child(div().w_full().h(px(400.0)).flex().flex_col().items_center().justify_center().child(buttons));
     }
     let a = &app.account;
     let register = a.register;
@@ -688,7 +738,7 @@ fn signed_out(app: &mut Glyph, col: Div, cx: &mut Context<Glyph>) -> Div {
         )
         .child(div().text_center().text_size(px(12.0)).text_color(white(0.5)).child(t("account.passkey.desc")));
     let back = public.then(|| sign_in_switch("acct-usebrowser", t("account.browser.back"), false, cx));
-    col.child(centre.child(intro).child(form).child(or).child(passkey).children(back))
+    col.child(centre.child(form).child(or).child(passkey).children(back))
 }
 
 /// Plain text link (no button look) between browser and in-app sign-in.
@@ -860,7 +910,7 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
             button("acct-rc", t("account.recovery.new")).on_click(cx.listener(|this, _, _, cx| this.account_recovery(cx))),
         ),
     ]);
-    let rc_shown = a.recovery_code.clone().map(|c| div().child(code_box(&c)).child(div().text_size(px(12.5)).text_color(theme::warn()).child(t("account.recovery.once"))));
+    let rc_shown = a.recovery_code.clone().map(|c| recovery_box(&c, a.recovery_visible, cx));
 
     let delete = rows(vec![row(
         t("account.delete"),
@@ -872,15 +922,77 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
             .child(danger_button("acct-delete", t("account.delete.button")).on_click(cx.listener(|this, _, _, cx| this.account_delete(cx)))),
     )]);
 
-    col.child(head)
-        .child(section_label(tf("account.devices", &[("n", &count), ("max", &limit)])))
-        .child(rows(devices))
-        .child(section_label(t("account.pair.section")))
-        .child(pair)
-        .child(section_label(t("account.security")))
-        .child(recovery)
-        .children(rc_shown)
-        .child(section_label(t("account.danger")))
-        .child(delete)
-        .child(div().pt(px(14.0)).text_size(px(12.0)).text_color(white(0.4)).font_weight(FontWeight::NORMAL).child(t("account.privacy")))
+    // Sub-tabs (see `settings::subtabs`): overview, devices, security.
+    match app.settings_sub {
+        1 => col
+            .child(section_label(tf("account.devices", &[("n", &count), ("max", &limit)])))
+            .child(rows(devices))
+            .child(section_label(t("account.pair.section")))
+            .child(pair),
+        2 => col
+            .child(recovery)
+            .children(rc_shown)
+            .child(section_label(t("account.danger")))
+            .child(delete),
+        // A code from signing up shows right here too.
+        _ => col
+            .child(head)
+            .children(rc_shown)
+            .child(div().pt(px(14.0)).text_size(px(12.0)).text_color(white(0.4)).font_weight(FontWeight::NORMAL).child(t("account.privacy"))),
+    }
+}
+
+/// A fresh recovery code: dots until clicked, then the code; copy and save.
+fn recovery_box(code: &str, visible: bool, cx: &mut Context<Glyph>) -> Div {
+    let shown: String = if visible {
+        code.to_string()
+    } else {
+        code.chars().map(|c| if c == '-' { '-' } else { '•' }).collect()
+    };
+    let code_line = div()
+        .id("acct-rc-code")
+        .my(px(8.0))
+        .py(px(14.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_dashed()
+        .border_color(white(0.25))
+        .when(!visible, |d| d.cursor_pointer().hover(|s| s.bg(white(0.03))))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.account.recovery_visible = true;
+            cx.notify();
+        }))
+        .child(div().font_family(theme::MONO).text_size(px(22.0)).text_color(if visible { gpui::white() } else { white(0.55) }).child(shown))
+        .when(!visible, |d| d.child(div().text_size(px(12.0)).text_color(white(0.5)).child(t("account.recovery.reveal"))));
+    div()
+        .child(code_line)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_1().text_size(px(12.5)).text_color(theme::warn()).child(t("account.recovery.once")))
+                .child(
+                    button("acct-rc-toggle", if visible { t("account.recovery.hide") } else { t("account.recovery.show") })
+                        .child(icon(if visible { "eye-off" } else { "eye" }, 14.0, white(0.6)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.account.recovery_visible = !visible;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("acct-rc-copy", t("account.recovery.copy"))
+                        .child(icon("copy", 14.0, white(0.6)))
+                        .on_click(cx.listener(|this, _, _, cx| this.account_copy_recovery(cx))),
+                )
+                .child(
+                    button("acct-rc-save", t("account.recovery.download"))
+                        .child(icon("download", 14.0, white(0.6)))
+                        .on_click(cx.listener(|this, _, _, cx| this.account_download_recovery(cx))),
+                ),
+        )
 }

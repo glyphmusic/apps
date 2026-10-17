@@ -1,7 +1,8 @@
 //! Settings as a modal (Liner layout): left navigation with search and
-//! grouped pages, right the page with rows (label + description left,
-//! control right). Pages: Playback, Audio, Appearance, Server, Cache &
-//! Storage, About.
+//! grouped pages (some with sub-tabs), right the page with rows (label +
+//! description left, control right). Pages: Playback, Audio, Appearance,
+//! Account, Server, Cache & Storage, Backup & share, About. The search finds
+//! pages, sub-tabs and single options (see [`OPTIONS`]).
 
 use crate::app::{BackendState, ConnTest, Glyph, SettingsPage};
 use crate::i18n::{t, tf, Lang};
@@ -47,9 +48,69 @@ fn switch(id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<Div> {
         .child(div().size(px(16.0)).rounded_full().bg(if on { gpui::black() } else { white(0.75) }))
 }
 
+thread_local! {
+    /// Option picked in the settings search: (label, since when, scrolled to).
+    /// Its row lights up briefly and scrolls into view.
+    static FLASH: std::cell::RefCell<Option<(String, std::time::Instant, bool)>> = const { std::cell::RefCell::new(None) };
+    /// Scroll state of the settings page (for scrolling to a found option).
+    static PAGE_SCROLL: std::cell::RefCell<Option<gpui::ScrollHandle>> = const { std::cell::RefCell::new(None) };
+}
+
+const FLASH_S: f32 = 1.8;
+
+/// Highlights the row labelled `label` on the next settings page shown.
+pub fn flash_option(label: impl Into<String>) {
+    FLASH.with(|f| *f.borrow_mut() = Some((label.into(), std::time::Instant::now(), false)));
+}
+
+/// A found option is still lit (the app keeps rendering).
+pub fn flash_animating() -> bool {
+    FLASH.with(|f| f.borrow().as_ref().is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < FLASH_S))
+}
+
+/// Highlight strength (1 -> 0) for the row labelled `label`, if it is the found one.
+fn flash_k(label: &str) -> Option<f32> {
+    FLASH.with(|f| {
+        let f = f.borrow();
+        let (l, at, _) = f.as_ref()?;
+        let e = at.elapsed().as_secs_f32();
+        (l == label && e < FLASH_S).then(|| if e < 0.7 { 1.0 } else { 1.0 - (e - 0.7) / (FLASH_S - 0.7) })
+    })
+}
+
+/// Scrolls the settings page so the found row (window bounds `b`) is in view; once.
+fn scroll_to_found(b: gpui::Bounds<Pixels>) {
+    let first = FLASH.with(|f| f.borrow_mut().as_mut().is_some_and(|fl| !std::mem::replace(&mut fl.2, true)));
+    if !first {
+        return;
+    }
+    PAGE_SCROLL.with(|h| {
+        let Some(h) = h.borrow().clone() else { return };
+        let vp = h.bounds();
+        let vh = f32::from(vp.size.height);
+        let top = f32::from(b.origin.y) - f32::from(vp.origin.y);
+        if top >= 0.0 && top + f32::from(b.size.height) <= vh {
+            return;
+        }
+        let max = f32::from(h.max_offset().y).max(0.0);
+        let y = (f32::from(h.offset().y) - (top - vh * 0.3)).clamp(-max, 0.0);
+        h.set_offset(point(px(0.0), px(y)));
+    });
+}
+
 /// Settings row: label + description left, control right.
 pub(crate) fn row(label: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> AnyElement {
+    let label: SharedString = label.into();
+    let lit = flash_k(&label);
     div()
+        .when_some(lit, |d, k| {
+            d.relative()
+                .mx(px(-10.0))
+                .px(px(10.0))
+                .rounded(px(8.0))
+                .bg(theme::pink().opacity(0.14 * k))
+                .child(canvas(|b, _, _| scroll_to_found(b), |_, _, _, _| {}).absolute().inset_0())
+        })
         .flex()
         .items_center()
         .justify_between()
@@ -61,7 +122,7 @@ pub(crate) fn row(label: impl Into<SharedString>, desc: Option<SharedString>, co
                 .flex_col()
                 .min_w_0()
                 .gap(px(3.0))
-                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label.into()))
+                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label))
                 .when_some(desc, |d, s| d.child(div().text_size(px(12.5)).text_color(white(0.55)).child(s))),
         )
         .child(div().flex_none().flex().items_center().gap(px(8.0)).child(control))
@@ -583,30 +644,6 @@ fn select(
         .children(list)
 }
 
-/// "Advanced" disclosure row; the section below only shows when expanded.
-fn advanced_toggle(app: &Glyph, cx: &mut Context<Glyph>) -> AnyElement {
-    let open = app.settings_advanced;
-    div()
-        .id("sp-advanced")
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .pt(px(18.0))
-        .pb(px(4.0))
-        .cursor_pointer()
-        .text_size(px(12.5))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(white(0.55))
-        .hover(|s| s.text_color(gpui::white()))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.settings_advanced = !this.settings_advanced;
-            cx.notify();
-        }))
-        .child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.55)))
-        .child(t("sp.advanced"))
-        .into_any_element()
-}
-
 pub(crate) fn input_box(input: impl IntoElement) -> Div {
     div()
         .w(px(300.0))
@@ -629,18 +666,95 @@ pub fn modal(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> A
     theme::on_panel(|| modal_inner(app, window, cx))
 }
 
+/// Title, subtitle and nav icon of a settings page.
+fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static str) {
+    match page {
+        SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), "play"),
+        SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), "volume-2"),
+        SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), "palette"),
+        SettingsPage::Account => (t("sp.account"), t("sp.account.sub"), "user-round"),
+        SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), "server"),
+        SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), "database"),
+        SettingsPage::Transfer => (t("sp.transfer"), t("sp.transfer.sub"), "copy"),
+        SettingsPage::About => (t("sp.about"), t("sp.about.sub"), "info"),
+    }
+}
+
+/// Sub-tabs of a settings page (label keys); empty: the page has none.
+/// `app.settings_sub` indexes this list.
+pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
+    match page {
+        SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources"],
+        SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
+        SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
+        SettingsPage::About => &["sp.sub.version", "sp.support"],
+        _ => &[],
+    }
+}
+
+/// Every option the settings search finds on its own: page, sub-tab, label
+/// key (the row's label, so the row can light up), extra search words.
+const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
+    (SettingsPage::Playback, 0, "sp.audio.quality", "streaming quality qualität bitrate"),
+    (SettingsPage::Playback, 0, "sp.audio.dl_quality", "download quality qualität flac"),
+    (SettingsPage::Playback, 0, "sp.crossfade", "crossfade überblenden fade"),
+    (SettingsPage::Playback, 0, "sp.output", "output ausgabe device gerät speaker lautsprecher headphones kopfhörer"),
+    (SettingsPage::Playback, 0, "sp.level", "volume lautstärke level"),
+    (SettingsPage::Playback, 0, "sp.normalize", "normalize normalisieren loudness lautheit"),
+    (SettingsPage::Playback, 1, "sp.explicit", "explicit explizit"),
+    (SettingsPage::Playback, 1, "sp.radio", "radio autoplay"),
+    (SettingsPage::Playback, 1, "sp.hidden", "hidden ausgeblendet blocked artists künstler"),
+    (SettingsPage::Playback, 2, "settings.sources.fallback", "youtube soundcloud embed fallback"),
+    (SettingsPage::Playback, 2, "ytdlp.title", "yt-dlp ytdlp youtube"),
+    (SettingsPage::Playback, 2, "settings.priority", "priority priorität order reihenfolge audius jamendo archive"),
+    (SettingsPage::Audio, 0, "sp.eq.enable", "equalizer eq"),
+    (SettingsPage::Audio, 0, "sp.eq.preset", "preset bass treble höhen tiefen"),
+    (SettingsPage::Audio, 0, "sp.eq.share", "share teilen export import code datei file"),
+    (SettingsPage::Appearance, 0, "settings.language", "language sprache"),
+    (SettingsPage::Appearance, 0, "settings.visuals.intensity", "background hintergrund glow intensity intensität"),
+    (SettingsPage::Appearance, 0, "settings.visuals.ascii_covers", "ascii cover"),
+    (SettingsPage::Appearance, 0, "sp.appearance.startup", "startup start animation splash"),
+    (SettingsPage::Account, 0, "account.handle", "handle name rename umbenennen"),
+    (SettingsPage::Account, 0, "account.keys", "sync api keys schlüssel"),
+    (SettingsPage::Account, 0, "account.limit", "device limit gerätelimit"),
+    (SettingsPage::Account, 1, "account.pair", "pair koppeln code device gerät add hinzufügen"),
+    (SettingsPage::Account, 2, "account.password.change", "password passwort"),
+    (SettingsPage::Account, 2, "account.passkey.add", "passkey"),
+    (SettingsPage::Account, 2, "account.recovery", "recovery wiederherstellung code"),
+    (SettingsPage::Account, 2, "account.delete", "delete löschen account"),
+    (SettingsPage::Server, 0, "settings.server.url", "server url adresse"),
+    (SettingsPage::Server, 1, "settings.keys.lastfm", "api key lastfm last.fm"),
+    (SettingsPage::Server, 1, "settings.keys.youtube", "api key youtube"),
+    (SettingsPage::Server, 1, "settings.keys.spotify_client_id", "api key spotify"),
+    (SettingsPage::Server, 1, "settings.keys.jamendo_client_id", "api key jamendo"),
+    (SettingsPage::Storage, 0, "sp.storage.limit", "cache limit size größe"),
+    (SettingsPage::Storage, 0, "sp.storage.usage", "clear leeren cache downloads covers lyrics speicher"),
+    (SettingsPage::Transfer, 0, "sp.transfer.code", "share teilen export code copy kopieren"),
+    (SettingsPage::Transfer, 0, "sp.transfer.file", "export file datei save speichern backup"),
+    (SettingsPage::Transfer, 0, "sp.transfer.import", "import apply übernehmen paste einfügen"),
+    (SettingsPage::About, 0, "update.auto", "auto update automatisch"),
+    (SettingsPage::About, 0, "update.channel", "prerelease beta channel kanal"),
+    (SettingsPage::About, 1, "sp.support.issue", "bug issue report melden"),
+    (SettingsPage::About, 1, "sp.support.diag", "diagnostics diagnose"),
+    (SettingsPage::About, 1, "sp.support.data", "data daten folder ordner"),
+];
+
 fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     select_anim_tick(app.open_select);
+    PAGE_SCROLL.with(|h| *h.borrow_mut() = Some(app.settings_scroll.clone()));
     let page = app.settings_page;
-    let (title, sub, body) = match page {
-        SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), playback(app, cx)),
-        SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), equalizer(app, cx)),
-        SettingsPage::Appearance => (t("sp.appearance"), t("sp.appearance.sub"), appearance(app, cx)),
-        SettingsPage::Server => (t("sp.server"), t("sp.server.sub"), server(app, cx)),
-        SettingsPage::Account => (t("sp.account"), t("sp.account.sub"), crate::ui::account::page(app, cx)),
-        SettingsPage::Storage => (t("sp.storage"), t("sp.storage.sub"), storage(app, cx)),
-        SettingsPage::About => (t("sp.about"), t("sp.about.sub"), about(app, cx)),
-        SettingsPage::Support => (t("sp.support"), t("sp.support.sub"), support(app, cx)),
+    let (title, sub, _) = page_info(page);
+    let tab = subtabs(app, page).get(app.settings_sub as usize).map(|k| t(k));
+    let body = match page {
+        SettingsPage::Playback => playback(app, cx),
+        SettingsPage::Audio => equalizer(app, cx),
+        SettingsPage::Appearance => appearance(app, cx),
+        SettingsPage::Server => server(app, cx),
+        SettingsPage::Account => crate::ui::account::page(app, cx),
+        SettingsPage::Storage => storage(app, cx),
+        SettingsPage::Transfer => crate::ui::transfer::page(app, cx),
+        SettingsPage::About if app.settings_sub == 1 => support(app, cx),
+        SettingsPage::About => about(app, cx),
     };
 
     // Outer shell holds the navigation; the page sits in its own inset,
@@ -671,7 +785,16 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                             .flex_col()
                             .gap(px(4.0))
                             .pr(px(36.0))
-                            .child(div().text_size(px(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white()).child(title))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .text_size(px(17.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(div().text_color(if tab.is_some() { white(0.5) } else { gpui::white() }).child(title))
+                                    .when_some(tab, |d, tab| d.child(icon("chevron-right", 16.0, white(0.4))).child(div().text_color(gpui::white()).child(tab))),
+                            )
                             .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
                     )
                     .child(div().pt(px(10.0)).child(body)),
@@ -737,53 +860,52 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .into_any_element()
 }
 
-fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
     let q = app.settings_search.read(cx).value.trim().to_lowercase();
-    let current = app.settings_page;
-    // (page, icon, label, extra search words)
-    let groups: [(SharedString, Vec<(SettingsPage, &'static str, SharedString, &'static str)>); 2] = [
+    let (current, current_sub) = (app.settings_page, app.settings_sub);
+    let signed_in = app.signed_in().is_some();
+    // (page, extra search words)
+    let groups: [(SharedString, Vec<(SettingsPage, &'static str)>); 2] = [
         (
             t("sp.group.prefs"),
             vec![
-                (SettingsPage::Playback, "play", t("sp.playback"), "sources source quelle youtube soundcloud priority radio quality qualität audio"),
-                (SettingsPage::Audio, "volume-2", t("sp.eq"), "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file"),
-                (SettingsPage::Appearance, "palette", t("sp.appearance"), "language sprache theme ascii cover glow"),
+                (SettingsPage::Playback, "sources source quelle youtube soundcloud priority radio quality qualität audio"),
+                (SettingsPage::Audio, "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file"),
+                (SettingsPage::Appearance, "language sprache theme ascii cover glow"),
             ],
         ),
         (
             t("sp.group.app"),
             vec![
-                (SettingsPage::Account, "user-round", t("sp.account"), "account konto login sign in anmelden sync devices geräte handle passkey"),
-                (SettingsPage::Server, "server", t("sp.server"), "url api key keys schlüssel"),
-                (SettingsPage::Storage, "database", t("sp.storage"), "cache download downloads speicher"),
-                (SettingsPage::About, "info", t("sp.about"), "update version"),
+                (SettingsPage::Account, "account konto login sign in anmelden sync devices geräte handle passkey"),
+                (SettingsPage::Server, "url api key keys schlüssel"),
+                (SettingsPage::Storage, "cache download downloads speicher"),
+                (SettingsPage::Transfer, "backup export import share teilen code datei file"),
+                (SettingsPage::About, "update version support hilfe help"),
             ],
         ),
     ];
-    let matches = |label: &SharedString, words: &str| q.is_empty() || label.to_lowercase().contains(&q) || words.contains(&q);
-    let item = |page: SettingsPage, icon_name: &'static str, label: SharedString, cx: &mut Context<Glyph>| {
-        let on = page == current;
-        div()
-            .id(("sp-nav", page as usize))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .h(px(36.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .text_size(px(14.0))
-            .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
-            .when(!on, |d| d.text_color(white(0.75)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
-            .on_click(cx.listener(move |this, _, _, cx| this.set_settings_page(page, cx)))
-            .child(icon(icon_name, 16.0, if on { gpui::white() } else { white(0.7) }))
-            .child(label)
+    let hit = |text: &str| q.is_empty() || text.to_lowercase().contains(&q);
+
+    // Single options matching the search (with their page / sub-tab).
+    let found: Vec<(SettingsPage, u8, SharedString)> = if q.is_empty() {
+        Vec::new()
+    } else {
+        OPTIONS
+            .iter()
+            .filter(|(p, _, _, _)| *p != SettingsPage::Account || signed_in)
+            .filter(|(_, _, key, words)| hit(&t(key)) || words.contains(&q))
+            .map(|(p, s, key, _)| (*p, *s, t(key)))
+            .take(14)
+            .collect()
     };
 
     let mut col = div()
+        .id("sp-nav")
         .flex_none()
         .w(px(NAV_W))
         .h_full()
+        .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -791,6 +913,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .child(
             div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap(px(8.0))
                 .h(px(34.0))
@@ -803,13 +926,109 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(div().flex_1().min_w_0().child(app.settings_search.clone())),
         );
     for (group, items) in groups {
-        let visible: Vec<_> = items.into_iter().filter(|(_, _, l, w)| matches(l, w)).collect();
+        let mut visible = Vec::new();
+        for (page, words) in items {
+            let (label, _, icon_name) = page_info(page);
+            let subs = subtabs(app, page);
+            let sub_hit: Vec<bool> = subs.iter().map(|k| !q.is_empty() && hit(&t(k))).collect();
+            let page_hit = hit(&label) || words.contains(&q) || found.iter().any(|f| f.0 == page);
+            if page_hit || sub_hit.contains(&true) {
+                visible.push((page, label, icon_name, subs, sub_hit));
+            }
+        }
         if visible.is_empty() {
             continue;
         }
-        col = col.child(div().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
-        for (page, ic, label, _) in visible {
-            col = col.child(item(page, ic, label, cx));
+        col = col.child(div().flex_none().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
+        for (page, label, icon_name, subs, sub_hit) in visible {
+            let on = page == current;
+            let open = !subs.is_empty() && (on || sub_hit.contains(&true));
+            col = col.child(
+                div()
+                    .id(("sp-nav", page as usize))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(36.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(14.0))
+                    .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
+                    .when(!on, |d| d.text_color(white(0.75)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.settings_page != page {
+                            this.set_settings_page(page, cx);
+                        }
+                    }))
+                    .child(icon(icon_name, 16.0, if on { gpui::white() } else { white(0.7) }))
+                    .child(div().flex_1().child(label))
+                    .when(!subs.is_empty(), |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.45)))),
+            );
+            if open {
+                // Sub-tabs hang off a thin line under the page's icon.
+                col = col.child(
+                    div()
+                        .flex_none()
+                        .ml(px(18.0))
+                        .my(px(2.0))
+                        .pl(px(8.0))
+                        .border_l_1()
+                        .border_color(white(0.10))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .children(subs.iter().enumerate().map(|(i, key)| {
+                            let sel = on && current_sub as usize == i;
+                            let sub = i as u8;
+                            div()
+                                .id(("sp-sub", page as usize * 8 + i))
+                                .flex()
+                                .items_center()
+                                .h(px(32.0))
+                                .px(px(10.0))
+                                .rounded(px(7.0))
+                                .cursor_pointer()
+                                .text_size(px(13.5))
+                                .when(sel, |d| d.bg(white(0.08)).text_color(gpui::white()).font_weight(FontWeight::MEDIUM))
+                                .when(!sel, |d| d.text_color(white(0.6)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_settings_tab(page, sub, cx)))
+                                .child(t(key))
+                        })),
+                );
+            }
+        }
+    }
+    if !found.is_empty() {
+        col = col.child(div().flex_none().px(px(10.0)).pt(px(14.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(t("sp.group.options")));
+        for (i, (page, sub, label)) in found.into_iter().enumerate() {
+            let (page_label, _, _) = page_info(page);
+            let crumb: SharedString = match subtabs(app, page).get(sub as usize) {
+                Some(k) => format!("{page_label} › {}", t(k)).into(),
+                None => page_label,
+            };
+            let l = label.clone();
+            col = col.child(
+                div()
+                    .id(("sp-found", i))
+                    .flex()
+                    .flex_none()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(1.0))
+                    .py(px(6.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(white(0.05)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        flash_option(l.to_string());
+                        this.set_settings_tab(page, sub, cx);
+                    }))
+                    .child(div().text_size(px(13.5)).text_color(white(0.9)).truncate().child(label))
+                    .child(div().text_size(px(11.5)).text_color(white(0.45)).truncate().child(crumb)),
+            );
         }
     }
     col
@@ -818,7 +1037,12 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 // ------------------------------------------------------------------ pages
 
 fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
-    // Everyday options first; sources and their order live under "Advanced".
+    // Sub-tabs: general (sound and output), content (what plays), sources.
+    match app.settings_sub {
+        1 => return content(app, cx),
+        2 => return sources(app, cx),
+        _ => {}
+    }
     let cur = app.config.audio.quality;
     let options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
         .into_iter()
@@ -837,7 +1061,7 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         })
         .collect();
     let dl_quality = select(app, "sel-dl-quality", quality_label(cur_dl), dl_options, cx);
-    let basic = rows(vec![
+    rows(vec![
         row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality),
         row(t("sp.audio.dl_quality"), Some(t("sp.audio.dl_quality.desc")), dl_quality),
         row(t("sp.crossfade"), Some(t("sp.crossfade.desc")), {
@@ -896,6 +1120,12 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             Some(t("sp.normalize.desc")),
             switch("normalize", app.config.audio.normalize).on_click(cx.listener(|this, _, _, cx| this.toggle_normalize(cx))),
         ),
+    ])
+}
+
+/// Playback > Content: what shows up and what plays next.
+fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    let content = rows(vec![
         row(
             t("sp.explicit"),
             Some(t("sp.explicit.desc")),
@@ -905,13 +1135,6 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 cx.notify();
             })),
         ),
-        row(
-            t("settings.sources.fallback"),
-            Some(t("settings.sources.fallback.hint")),
-            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
-        ),
-        // Local yt-dlp plays YouTube directly (only matters with YouTube on).
-        row(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)),
         row(
             t("sp.radio"),
             Some(t("sp.radio.desc")),
@@ -960,31 +1183,46 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 )
         })),
     );
-    let mut col = div().flex().flex_col().child(basic).child(rows(vec![hidden_row])).child(advanced_toggle(app, cx));
-    if app.settings_advanced {
-        let enabled = app.config.providers.enabled.clone();
-        let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
-            .into_iter()
-            .map(|p| {
-                let cooling = app
-                    .backend
-                    .as_ref()
-                    .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
-                    .unwrap_or(false);
-                row(
-                    p.display_name(),
-                    Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
-                    switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
-                )
-            })
-            .collect();
-        col = col
-            .child(rows(sources))
-            .child(section_label(t("settings.priority")))
-            .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
-            .child(priority_list(app, cx));
-    }
-    col
+    div().flex().flex_col().child(content).child(div().border_t_1().border_color(white(0.06)).child(hidden_row))
+}
+
+/// Playback > Sources: YouTube / SoundCloud fallback, yt-dlp, the free
+/// sources and their order.
+fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    let top = rows(vec![
+        row(
+            t("settings.sources.fallback"),
+            Some(t("settings.sources.fallback.hint")),
+            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
+        ),
+        // Local yt-dlp plays YouTube directly (only matters with YouTube on).
+        row(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)),
+    ]);
+    let enabled = app.config.providers.enabled.clone();
+    let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
+        .into_iter()
+        .map(|p| {
+            let cooling = app
+                .backend
+                .as_ref()
+                .and_then(|b| crate::guard::guard(|| b.provider_cooling_down(p)))
+                .unwrap_or(false);
+            row(
+                p.display_name(),
+                Some(if cooling { t("settings.sources.paused") } else { t(&format!("sp.src.{}", p.badge().to_lowercase())) }),
+                switch(("prov", p as usize), enabled.contains(&p)).on_click(cx.listener(move |this, _, _, cx| this.toggle_provider(p, cx))),
+            )
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .child(top)
+        .child(section_label(t("settings.sources")))
+        .child(rows(sources))
+        .child(section_label(t("settings.priority")))
+        .child(div().pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.priority.hint")))
+        .child(priority_list(app, cx))
 }
 
 /// The dragged priority entry: the whole row follows the cursor.
@@ -1063,7 +1301,7 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let language = select(app, "sel-lang", cur.native_name().into(), options, cx);
 
     let weak = cx.entity().downgrade();
-    let set_int: Pick = Rc::new(move |f, _, cx| {
+    let set_int: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
         weak.update(cx, |this, cx| this.set_intensity(f, cx)).ok();
     });
     let intensity = app.config.visuals.intensity;
@@ -1122,7 +1360,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         Some(ConnTest::Ok(s)) => Some((s.clone(), theme::ok())),
         Some(ConnTest::Failed(s)) => Some((s.clone(), theme::warn())),
     };
-    let mut items = vec![
+    let items = vec![
         row(t("settings.server.url"), Some(t("sp.server.url.desc")), input_box(app.server_input.clone())),
         row(
             mode,
@@ -1139,14 +1377,14 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .iter()
         .map(|(name, input)| row(t(&format!("settings.keys.{name}")), None, input_box(input.clone())))
         .collect();
-    let mut col = div().flex().flex_col().child(rows(items)).child(advanced_toggle(app, cx));
-    if app.settings_advanced {
-        col = col
-            .child(section_label(t("settings.keys")))
-            .child(div().pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
+    if app.settings_sub == 1 {
+        return div()
+            .flex()
+            .flex_col()
+            .child(div().pt(px(6.0)).pb(px(4.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("settings.keys.hint")))
             .child(rows(keys));
     }
-    col
+    rows(items)
 }
 
 const STORAGE_COLORS: [u32; 4] = [0x22c3e6, 0xa970ff, 0xff5fa2, 0xf2b84b];

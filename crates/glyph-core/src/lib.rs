@@ -28,6 +28,7 @@ pub mod providers;
 pub mod queue;
 pub mod resolver;
 pub mod server_client;
+pub mod settings_share;
 pub mod settings_sync;
 pub mod share;
 pub mod sync;
