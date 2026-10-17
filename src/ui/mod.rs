@@ -13,6 +13,7 @@ pub mod player_bar;
 pub mod settings;
 pub mod splash;
 pub mod toasts;
+pub mod transfer;
 pub mod views;
 pub mod widgets;
 pub mod ytdlp;
