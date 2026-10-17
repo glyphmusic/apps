@@ -170,7 +170,7 @@ pub(crate) fn eq_match(current: &str, gains: &[f32; 10], user: &[glyph_core::eq:
     all.into_iter().find(|(_, g)| same_gains(g, gains)).map(|(k, _)| k).unwrap_or_else(|| "custom".into())
 }
 
-type Pick = Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>;
+type EqPick = Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>;
 
 /// Equalizer page: on/off, presets (built-in and own), the curve, saving
 /// and sharing.
@@ -178,11 +178,11 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let on = app.config.audio.eq_enabled;
     let gains = crate::app::eq_gains(&app.config.audio.eq_gains);
     let preset = app.config.audio.eq_preset.clone();
-    let mut options: Vec<(SharedString, bool, Pick)> = EQ_PRESETS
+    let mut options: Vec<(SharedString, bool, EqPick)> = EQ_PRESETS
         .iter()
         .map(|(k, g)| {
             let (k, g) = (*k, *g);
-            let f: Pick = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
+            let f: EqPick = Rc::new(move |this, cx| this.set_eq(true, k, g, true, cx));
             (eq_preset_label(k), preset == k, f)
         })
         .collect();
@@ -190,14 +190,14 @@ fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         let key = format!("user:{}", p.name);
         let g = p.gains();
         let selected = preset == key;
-        let f: Pick = Rc::new(move |this, cx| this.set_eq(true, &key, g, true, cx));
+        let f: EqPick = Rc::new(move |this, cx| this.set_eq(true, &key, g, true, cx));
         options.push((SharedString::from(p.name.clone()), selected, f));
     }
     if preset == "custom" {
         options.push((eq_preset_label("custom"), true, Rc::new(|_: &mut Glyph, _: &mut Context<Glyph>| {})));
     }
     let own = preset.strip_prefix("user:").map(str::to_string);
-    let action = |key: &str, f: fn(&mut Glyph, &mut Context<Glyph>)| -> (SharedString, bool, Pick) { (t(key), false, Rc::new(f)) };
+    let action = |key: &str, f: fn(&mut Glyph, &mut Context<Glyph>)| -> (SharedString, bool, EqPick) { (t(key), false, Rc::new(f)) };
     let share = vec![
         action("sp.eq.copy_code", |this, cx| this.copy_eq_code(cx)),
         action("sp.eq.paste_code", |this, cx| this.paste_eq_code(cx)),
