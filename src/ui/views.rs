@@ -144,11 +144,14 @@ fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut
             let el = div()
                 .id((prefix, i))
                 .flex_none()
-                .w(px(176.0))
+                .w(px(192.0))
+                .p(px(8.0))
+                .rounded(px(10.0))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
                 .cursor_pointer()
+                .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 1.0, 0.05)))
                 .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)))
                 .child(art)
                 .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tr.title.clone()))
@@ -156,7 +159,7 @@ fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut
             with_menu(el, tr, None, cx)
         })
         .collect();
-    div().id(prefix).flex().gap(px(20.0)).overflow_x_scroll().children(items)
+    div().id(prefix).flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().children(items)
 }
 
 // ------------------------------------------------------------------ search

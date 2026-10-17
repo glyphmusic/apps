@@ -705,7 +705,10 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             let lm = l.clone();
             with_list_menu(div().id(("album", i)), lm, cx)
                 .flex_none()
-                .w(px(160.0))
+                .w(px(176.0))
+                .p(px(8.0))
+                .rounded(px(10.0))
+                .hover(|s| s.bg(white(0.05)))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
@@ -748,7 +751,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                     .flex_col()
                     .gap(px(12.0))
                     .child(section_title("disc-3", t("artist.albums")))
-                    .child(div().id("artist-albums").flex().gap(px(20.0)).overflow_x_scroll().children(album_cards)),
+                    .child(div().id("artist-albums").flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().children(album_cards)),
             )
         });
     div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
