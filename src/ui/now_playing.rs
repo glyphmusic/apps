@@ -218,7 +218,7 @@ fn mode_switch(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         )
 }
 
-fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
+fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
     let ls = &app.lyrics;
     if ls.loading {
         return div()
@@ -340,6 +340,6 @@ fn lyrics(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .gap(px(16.0))
         .pt(px(20.0))
         .child(info)
-        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full())
+        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full().child(scrollbar(&app.lyrics_scroll, cx)))
         .into_any_element()
 }

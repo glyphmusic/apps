@@ -72,8 +72,7 @@ fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
 /// Clickable artist name: opens the artist profile.
 pub fn artist_link(id: impl Into<ElementId>, name: &str, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
     let n = name.to_string();
-    div()
-        .id(id)
+    with_artist_menu(div().id(id), name.to_string(), cx)
         .min_w_0()
         .truncate()
         .cursor_pointer()
@@ -102,6 +101,17 @@ pub fn album_link(id: impl Into<ElementId>, tr: &Track, cx: &mut Context<Glyph>)
                 this.open_album(&t2, &seed.artist, seed.clone(), cx)
             }))
             .child(title),
+    )
+}
+
+/// Right-click on an artist (name, tile, row) opens the artist menu.
+pub fn with_artist_menu(el: Stateful<gpui::Div>, name: String, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    el.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+            cx.stop_propagation();
+            this.open_artist_ctx(&crate::app::primary_artist(&name), e.position, cx)
+        }),
     )
 }
 
@@ -365,8 +375,8 @@ pub fn follow_button(id: impl Into<ElementId>, name: &str, track: Option<Track>,
 }
 
 fn round_icon_button(id: impl Into<ElementId>, name: &str, size: f32) -> Stateful<gpui::Div> {
-    div()
-        .id(id)
+    let tip = tip_for(name);
+    with_tip(div().id(id), tip)
         .flex_none()
         .size(px(size))
         .flex()
@@ -720,7 +730,16 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             .gap(px(8.0))
                             .child(play_pill("artist-play", t("common.play")).on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))))
                             .child(round_icon_button("artist-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
-                            .child(round_icon_button("artist-queue", "list-plus", 36.0).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
+                            .child({
+                                let nm = name.clone();
+                                round_icon_button("artist-more", "ellipsis-vertical", 36.0).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.open_artist_ctx(&nm, e.position, cx)
+                                    }),
+                                )
+                            })
                             .child(follow_button("artist-follow", &name, tracks.first().cloned(), app, 36.0, cx)),
                     )
                 })
@@ -970,8 +989,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
                     .into_any_element(),
             };
             let name = f.name.clone();
-            div()
-                .id(("lib-artist", i))
+            with_artist_menu(div().id(("lib-artist", i)), f.name.clone(), cx)
                 .flex_none()
                 .w(px(184.0))
                 .p(px(8.0))
@@ -1126,7 +1144,86 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         }
     }
     let flip = f32::from(m.pos.x) + 244.0 + 236.0 > f32::from(window.viewport_size().width);
-    if let Some(l) = m.list.clone() {
+    if let Some(name) = m.artist.clone() {
+        body.push(
+            div()
+                .px(px(8.0))
+                .py(px(6.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(white(0.95))
+                .truncate()
+                .child(name.clone())
+                .into_any_element(),
+        );
+        body.push(sep().into_any_element());
+        let songs = app.artists.get(&name).map(|p| p.tracks.clone()).unwrap_or_default();
+        if !songs.is_empty() {
+            let (s1, s2) = (songs.clone(), songs.clone());
+            body.push(
+                ctx_item("actx-queue".into(), "list-plus", t("ctx.queue"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.queue_all(s1.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+            body.push(
+                ctx_item("actx-next".into(), "list-start", t("ctx.play_next"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        for tr in s2.iter().rev() {
+                            this.queue_add(tr.clone(), true, cx);
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let following = app.is_following(&name);
+        let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
+        let first = songs.first().cloned();
+        body.push(
+            ctx_item(
+                "actx-follow".into(),
+                if following { "check" } else { "user-round" },
+                if following { t("artist.unfollow") } else { t("artist.follow") },
+                white(0.7),
+                true,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.begin_ctx_close();
+                this.toggle_follow(&n1, first.clone(), cx)
+            }))
+            .into_any_element(),
+        );
+        body.push(
+            ctx_item("actx-link".into(), "link-2", t("ctx.copy_link"), white(0.7), true, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_ctx_close();
+                    this.copy_artist_link(&n2, cx);
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        body.push(sep().into_any_element());
+        let hidden = app.library.is_hidden(&name);
+        body.push(
+            ctx_item(
+                "actx-hide".into(),
+                if hidden { "eye" } else { "eye-off" },
+                if hidden { t("ctx.show_artist") } else { t("ctx.hide_artist") },
+                white(0.7),
+                true,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.begin_ctx_close();
+                this.toggle_hidden_artist(&n3, cx)
+            }))
+            .into_any_element(),
+        );
+    } else if let Some(l) = m.list.clone() {
         let art = list_cover(app, &l, 36.0, cx);
         let title = app.list_title(&l);
         let kind = match &l {

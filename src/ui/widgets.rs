@@ -25,9 +25,43 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
 }
 
 /// Round/square icon button with a subtle hover.
+/// Hover tooltip (GPUI shows it after a short delay next to the cursor).
+pub struct Tip(pub SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(9.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .bg(gpui::hsla(0.0, 0.0, 0.12, 0.98))
+            .border_1()
+            .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+            .font_family(theme::FONT)
+            .text_size(px(12.5))
+            .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
+            .child(self.0.clone())
+    }
+}
+
+/// Tooltip text for an icon button (`tip.<icon>` in the language files).
+pub fn tip_for(icon_name: &str) -> Option<SharedString> {
+    let key = format!("tip.{icon_name}");
+    let v = t(&key);
+    (v.as_ref() != key).then_some(v)
+}
+
+/// Adds a tooltip with `label` to an element.
+pub fn with_tip(el: Stateful<Div>, label: Option<SharedString>) -> Stateful<Div> {
+    match label {
+        Some(l) => el.tooltip(move |_, cx| cx.new(|_| Tip(l.clone())).into()),
+        None => el,
+    }
+}
+
 pub fn icon_button(id: impl Into<ElementId>, name: &str, size: f32, color: Hsla) -> Stateful<Div> {
-    div()
-        .id(id)
+    let tip = tip_for(name);
+    with_tip(div().id(id), tip)
         .flex_none()
         .flex()
         .items_center()
@@ -91,8 +125,8 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
     } else {
         glyph.into_any_element()
     };
-    div()
-        .id(ElementId::Name(id))
+    with_tip(div()
+        .id(ElementId::Name(id)), tip_for(name))
         .flex_none()
         .relative()
         .flex()
@@ -846,6 +880,10 @@ thread_local! {
 pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph>) -> AnyElement {
     let handle = handle.clone();
     let view = cx.entity().downgrade();
+    // What the edge fades / this bar were rendered with. The handle only learns
+    // the new page's size during layout, so after a page change the first frame
+    // can show stale fades; repaint once when they disagree.
+    let rendered = (f32::from(handle.offset().y), f32::from(handle.max_offset().y));
     div()
         .absolute()
         .top(px(4.0))
@@ -855,8 +893,15 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, cx: &mut Context<crate::app::Glyph
         .child(
             gpui::canvas(
                 |_, _, _| (),
-                move |bounds, _, window, _| {
+                move |bounds, _, window, cx| {
                     let max = f32::from(handle.max_offset().y);
+                    let now = (f32::from(handle.offset().y), max);
+                    if (now.0 - rendered.0).abs() > 0.5 || (now.1 - rendered.1).abs() > 0.5 {
+                        let v = view.clone();
+                        cx.defer(move |cx| {
+                            v.update(cx, |_, cx| cx.notify()).ok();
+                        });
+                    }
                     if max <= 1.0 {
                         return;
                     }

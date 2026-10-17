@@ -446,7 +446,45 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         ),
     ]);
 
-    let mut col = div().flex().flex_col().child(basic).child(advanced_toggle(app, cx));
+    // Artists hidden with "Don't show this artist", each with "Show again".
+    let hidden = app.library.hidden_artists.clone();
+    let hidden_row = row(
+        t("sp.hidden"),
+        Some(if hidden.is_empty() { t("sp.hidden.none") } else { t("sp.hidden.desc") }),
+        div().flex().flex_wrap().justify_end().gap(px(6.0)).max_w(px(320.0)).children(hidden.into_iter().enumerate().map(|(i, name)| {
+            let n = name.clone();
+            div()
+                .id(("hidden-artist", i))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(28.0))
+                .pl(px(10.0))
+                .pr(px(6.0))
+                .rounded(px(8.0))
+                .bg(white(0.06))
+                .border_1()
+                .border_color(white(0.08))
+                .text_size(px(12.5))
+                .text_color(white(0.85))
+                .child(name)
+                .child(
+                    div()
+                        .id(("hidden-show", i))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(18.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(white(0.12)))
+                        .tooltip(|_, cx| cx.new(|_| Tip(t("ctx.show_artist"))).into())
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden_artist(&n, cx)))
+                        .child(icon("eye", 12.0, white(0.7))),
+                )
+        })),
+    );
+    let mut col = div().flex().flex_col().child(basic).child(rows(vec![hidden_row])).child(advanced_toggle(app, cx));
     if app.settings_advanced {
         let enabled = app.config.providers.enabled.clone();
         let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]

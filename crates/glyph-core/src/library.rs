@@ -46,6 +46,24 @@ impl ListKey {
     }
 }
 
+/// One entry of "recent searches": a song or an artist picked from search.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SearchItem {
+    Song { track: Track },
+    Artist { name: String, #[serde(default, skip_serializing_if = "Option::is_none")] track: Option<Track> },
+}
+
+impl SearchItem {
+    fn same(&self, other: &SearchItem) -> bool {
+        match (self, other) {
+            (SearchItem::Song { track: a }, SearchItem::Song { track: b }) => same_entry(a, b),
+            (SearchItem::Artist { name: a, .. }, SearchItem::Artist { name: b, .. }) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        }
+    }
+}
+
 /// An artist the user follows (shown in the library and on Home).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FollowedArtist {
@@ -78,6 +96,13 @@ pub struct Library {
     /// Followed artists, newest first.
     #[serde(default)]
     pub followed: Vec<FollowedArtist>,
+    /// Recent searches (songs and artists), newest first. Replaces
+    /// `search_history`, which is migrated on load.
+    #[serde(default)]
+    pub search_items: Vec<SearchItem>,
+    /// Artists the user chose not to see (search, radio).
+    #[serde(default)]
+    pub hidden_artists: Vec<String>,
 }
 
 /// Max entries in the search history.
@@ -95,8 +120,14 @@ impl Library {
 
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read(path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(lib) => Ok(lib),
+            Ok(bytes) => match serde_json::from_slice::<Library>(&bytes) {
+                Ok(mut lib) => {
+                    // Older files only had songs in the search history.
+                    if lib.search_items.is_empty() && !lib.search_history.is_empty() {
+                        lib.search_items = lib.search_history.drain(..).map(|track| SearchItem::Song { track }).collect();
+                    }
+                    Ok(lib)
+                }
                 Err(e) => {
                     let _ = std::fs::copy(path, path.with_extension("json.bak"));
                     Err(anyhow::anyhow!("library file is corrupt (backup kept): {e}"))
@@ -136,14 +167,38 @@ impl Library {
 
     /// Remember a song picked from search: front, deduped, capped.
     pub fn push_search(&mut self, track: Track) {
-        self.search_history.retain(|t| !same_entry(t, &track));
-        self.search_history.insert(0, track);
-        self.search_history.truncate(SEARCH_HISTORY_LIMIT);
+        self.push_search_item(SearchItem::Song { track });
+    }
+
+    /// Remember an artist opened from search.
+    pub fn push_search_artist(&mut self, name: &str, track: Option<Track>) {
+        self.push_search_item(SearchItem::Artist { name: name.trim().to_string(), track });
+    }
+
+    fn push_search_item(&mut self, item: SearchItem) {
+        self.search_items.retain(|i| !i.same(&item));
+        self.search_items.insert(0, item);
+        self.search_items.truncate(SEARCH_HISTORY_LIMIT);
     }
 
     pub fn remove_search(&mut self, index: usize) {
-        if index < self.search_history.len() {
-            self.search_history.remove(index);
+        if index < self.search_items.len() {
+            self.search_items.remove(index);
+        }
+    }
+
+    pub fn is_hidden(&self, artist: &str) -> bool {
+        self.hidden_artists.iter().any(|a| a.eq_ignore_ascii_case(artist.trim()))
+    }
+
+    /// Hides or shows an artist again. Returns true when now hidden.
+    pub fn toggle_hidden(&mut self, artist: &str) -> bool {
+        if let Some(i) = self.hidden_artists.iter().position(|a| a.eq_ignore_ascii_case(artist.trim())) {
+            self.hidden_artists.remove(i);
+            false
+        } else {
+            self.hidden_artists.push(artist.trim().to_string());
+            true
         }
     }
 
@@ -345,20 +400,48 @@ mod tests {
         assert!(!lib.recent_lists.contains(&ListKey::Playlist { id: "5".into() }));
     }
 
+    fn song_title(i: &SearchItem) -> &str {
+        match i {
+            SearchItem::Song { track } => &track.title,
+            SearchItem::Artist { name, .. } => name,
+        }
+    }
+
     #[test]
     fn search_history_front_dedupe_cap_remove() {
         let mut lib = Library::default();
         for i in 0..25 {
             lib.push_search(tr(&i.to_string(), &format!("Song {i}")));
         }
-        assert_eq!(lib.search_history.len(), SEARCH_HISTORY_LIMIT);
-        assert_eq!(lib.search_history[0].title, "Song 24");
+        assert_eq!(lib.search_items.len(), SEARCH_HISTORY_LIMIT);
+        assert_eq!(song_title(&lib.search_items[0]), "Song 24");
         lib.push_search(tr("20", "Song 20"));
-        assert_eq!(lib.search_history[0].title, "Song 20");
-        assert_eq!(lib.search_history.iter().filter(|t| t.title == "Song 20").count(), 1);
+        assert_eq!(song_title(&lib.search_items[0]), "Song 20");
+        assert_eq!(lib.search_items.iter().filter(|t| song_title(t) == "Song 20").count(), 1);
         lib.remove_search(0);
-        assert_eq!(lib.search_history[0].title, "Song 24");
+        assert_eq!(song_title(&lib.search_items[0]), "Song 24");
         lib.remove_search(999);
+        lib.push_search_artist("Daft Punk", None);
+        lib.push_search_artist("daft punk", None);
+        assert_eq!(lib.search_items.iter().filter(|i| matches!(i, SearchItem::Artist { .. })).count(), 1);
+    }
+
+    #[test]
+    fn hidden_artists_and_history_migration() {
+        let mut lib = Library::default();
+        assert!(lib.toggle_hidden("Spam Band"));
+        assert!(lib.is_hidden("spam band "));
+        assert!(!lib.toggle_hidden("SPAM BAND"));
+        assert!(lib.hidden_artists.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let mut old = Library::default();
+        old.search_history = vec![tr("1", "Old")];
+        old.save_to(&path).unwrap();
+        let back = Library::load_from(&path).unwrap();
+        assert!(back.search_history.is_empty());
+        assert_eq!(song_title(&back.search_items[0]), "Old");
     }
 
     #[test]

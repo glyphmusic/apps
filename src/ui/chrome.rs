@@ -143,10 +143,33 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
     let rows: Vec<_> = items
         .into_iter()
         .enumerate()
-        .map(|(i, tr)| {
+        .map(|(i, item)| {
             let group = SharedString::from(format!("sugg-{i}"));
-            let art = cover(app, &tr, 44.0, 4.0, cx);
-            let play = tr.clone();
+            let (art, title, sub): (gpui::AnyElement, String, String) = match &item {
+                glyph_core::SearchItem::Song { track } => (
+                    cover(app, track, 44.0, 4.0, cx).into_any_element(),
+                    track.title.clone(),
+                    format!("{} • {}", t("search.kind.song"), track.artist),
+                ),
+                glyph_core::SearchItem::Artist { name, track } => (
+                    match track {
+                        Some(tr) => cover(app, tr, 44.0, 22.0, cx).into_any_element(),
+                        None => div()
+                            .size(px(44.0))
+                            .rounded_full()
+                            .bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("user-round", 18.0, gpui::hsla(0.0, 0.0, 1.0, 0.6)))
+                            .into_any_element(),
+                    },
+                    name.clone(),
+                    t("search.kind.artist").to_string(),
+                ),
+            };
+            let is_song = matches!(item, glyph_core::SearchItem::Song { .. });
+            let pick = item.clone();
             div()
                 .id(("sugg", i))
                 .group(group.clone())
@@ -161,26 +184,31 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                 // Stop here: the search bar's own click would refocus the input.
                 .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
-                    this.play_suggestion(play.clone(), w, cx)
+                    match &pick {
+                        glyph_core::SearchItem::Song { track } => this.play_suggestion(track.clone(), w, cx),
+                        glyph_core::SearchItem::Artist { name, track } => this.pick_search_artist(name, track.clone(), w, cx),
+                    }
                 }))
                 .child(
                     div()
                         .relative()
                         .flex_none()
                         .child(art)
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(px(4.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
-                                .invisible()
-                                .group_hover(group.clone(), |s| s.visible())
-                                .child(icon("play", 16.0, gpui::white())),
-                        ),
+                        .when(is_song, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                                    .invisible()
+                                    .group_hover(group.clone(), |s| s.visible())
+                                    .child(icon("play", 16.0, gpui::white())),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -189,14 +217,8 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                         .flex_1()
                         .min_w_0()
                         .gap(px(2.0))
-                        .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(tr.title.clone()))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(theme::text_sm())
-                                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.6))
-                                .child(format!("{} • {}", t("search.kind.song"), tr.artist)),
-                        ),
+                        .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(title))
+                        .child(div().truncate().text_size(theme::text_sm()).text_color(gpui::hsla(0.0, 0.0, 1.0, 0.6)).child(sub)),
                 )
                 .when(is_history, |d| {
                     d.child(

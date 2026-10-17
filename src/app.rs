@@ -115,6 +115,8 @@ pub struct CtxMenu {
     pub from: Option<(ListRef, usize)>,
     /// Showing the "add to playlist" flyout.
     pub playlists: bool,
+    /// Menu for an artist (artist page "more" button) instead of a song.
+    pub artist: Option<String>,
     /// Menu for a whole list (album, playlist) instead of one song;
     /// `track` is then its first song.
     pub list: Option<ListRef>,
@@ -1021,6 +1023,9 @@ impl Glyph {
                         match ev {
                             SearchEvent::Results { tracks, .. } => {
                                 for t in tracks {
+                                    if s.is_hidden_artist(&t.artist) {
+                                        continue;
+                                    }
                                     if s.search.seen.insert((t.source, t.id.clone())) {
                                         s.search.results.push(t);
                                     } else if let Some(x) = s.search.results.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
@@ -1075,7 +1080,7 @@ impl Glyph {
             m + count as i32
         };
         // Only artists that match the query, or that clearly dominate the results.
-        found.retain(|(n, _, c)| score(n, 0) > 0 || *c >= 3);
+        found.retain(|(n, _, c)| (score(n, 0) > 0 || *c >= 3) && !self.library.is_hidden(n));
         found.sort_by_key(|(n, _, c)| -score(n, *c));
         found.into_iter().take(max).map(|(n, t, _)| (n, t)).collect()
     }
@@ -1114,12 +1119,22 @@ impl Glyph {
     }
 
     /// Songs for the search dropdown: search history, else recently played.
-    pub fn search_suggestions(&self) -> (bool, Vec<Track>) {
-        if !self.library.search_history.is_empty() {
-            (true, self.library.search_history.iter().take(8).cloned().collect())
+    pub fn search_suggestions(&self) -> (bool, Vec<glyph_core::SearchItem>) {
+        if !self.library.search_items.is_empty() {
+            (true, self.library.search_items.iter().take(8).cloned().collect())
         } else {
-            (false, self.library.recent.iter().take(8).cloned().collect())
+            (false, self.library.recent.iter().take(8).map(|t| glyph_core::SearchItem::Song { track: t.clone() }).collect())
         }
+    }
+
+    /// Open an artist picked from search (remembered in recent searches).
+    pub fn pick_search_artist(&mut self, name: &str, track: Option<Track>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library_ok && guard(|| self.library.push_search_artist(name, track)).is_some() {
+            self.save_library(cx);
+        }
+        let f = self.focus.clone();
+        window.focus(&f, cx);
+        self.open_artist(name, cx);
     }
 
     /// Play a song picked from the search dropdown and close it.
@@ -1347,7 +1362,14 @@ impl Glyph {
         cx.spawn(async move |this, cx| {
             let r = guard_async(b.similar(&seed)).await;
             this.update(cx, |s, cx| match r {
-                Ok(tracks) if !tracks.is_empty() => s.play_list(tracks, 0, cx),
+                Ok(tracks) if !tracks.is_empty() => {
+                    let tracks: Vec<Track> = tracks.into_iter().filter(|t| !s.is_hidden_artist(&t.artist)).collect();
+                    if tracks.is_empty() {
+                        s.toast(t("toast.radio_empty"));
+                    } else {
+                        s.play_list(tracks, 0, cx)
+                    }
+                }
                 Ok(_) => s.toast(t("toast.radio_empty")),
                 Err(e) => s.toast(tf("toast.radio_error", &[("e", &e)])),
             })
@@ -1775,9 +1797,68 @@ impl Glyph {
     }
 
     pub fn open_ctx(&mut self, track: Track, pos: gpui::Point<gpui::Pixels>, from: Option<(ListRef, usize)>, cx: &mut Context<Self>) {
-        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, list: None });
+        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, list: None, artist: None });
         self.ctx_opened = Instant::now();
         self.ctx_closing = None;
+        cx.notify();
+    }
+
+    /// "More" menu of an artist page.
+    pub fn open_artist_ctx(&mut self, name: &str, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let songs = self.artists.get(name).map(|p| p.tracks.clone()).unwrap_or_default();
+        let track = songs.first().cloned().unwrap_or(Track {
+            id: String::new(),
+            source: ProviderId::Audius,
+            title: String::new(),
+            artist: name.to_string(),
+            album: None,
+            duration_ms: None,
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+        });
+        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: None, artist: Some(name.to_string()) });
+        self.ctx_opened = Instant::now();
+        self.ctx_closing = None;
+        cx.notify();
+    }
+
+    /// Copies a link for the artist: the Wikipedia article if known, else
+    /// their top song on its platform.
+    pub fn copy_artist_link(&mut self, name: &str, cx: &mut Context<Self>) {
+        let page = self.artists.get(name);
+        let url = page
+            .and_then(|p| p.info.as_ref().map(|i| i.url.clone()).filter(|u| !u.is_empty()))
+            .or_else(|| page.and_then(|p| p.tracks.iter().find_map(|t| t.permalink.clone())));
+        match url {
+            Some(u) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(u));
+                self.toast(t("toast.link_copied_plain"));
+            }
+            None => self.toast(t("toast.no_link")),
+        }
+    }
+
+    pub fn is_hidden_artist(&self, credit: &str) -> bool {
+        self.library_ok && !self.library.hidden_artists.is_empty() && self.library.hidden_artists.iter().any(|h| by_artist(h, credit))
+    }
+
+    /// "Don't show this artist" / "Show again".
+    pub fn toggle_hidden_artist(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.library_ok {
+            return;
+        }
+        if let Some(hidden) = guard(|| self.library.toggle_hidden(name)) {
+            self.save_library(cx);
+            if hidden {
+                let n = name.to_string();
+                self.search.results.retain(|t| !by_artist(&n, &t.artist));
+                self.toast(tf("toast.artist_hidden", &[("name", &name)]));
+            } else {
+                self.toast(tf("toast.artist_shown", &[("name", &name)]));
+            }
+        }
         cx.notify();
     }
 
@@ -1802,7 +1883,7 @@ impl Glyph {
             },
             None => return,
         };
-        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: Some(l) });
+        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: Some(l), artist: None });
         self.ctx_opened = Instant::now();
         self.ctx_closing = None;
         cx.notify();

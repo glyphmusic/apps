@@ -207,8 +207,7 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                         let art = cover(app, &tr, 48.0, 24.0, cx);
                         let follow = crate::ui::lists::follow_button(("search-follow", i), &name, Some(tr.clone()), app, 30.0, cx);
                         let n2 = name.clone();
-                        div()
-                            .id(("search-artist", i))
+                        crate::ui::lists::with_artist_menu(div().id(("search-artist", i)), name.clone(), cx)
                             .flex()
                             .items_center()
                             .gap(px(14.0))
@@ -217,7 +216,10 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                             .rounded(px(8.0))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::card()))
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n2, cx)))
+                            .on_click({
+                                let tr2 = tr.clone();
+                                cx.listener(move |this, _, w, cx| this.pick_search_artist(&n2, Some(tr2.clone()), w, cx))
+                            })
                             .child(art)
                             .child(div().flex_1().min_w_0().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(name))
                             .child(kind_chip(t("search.kind.artist")))
