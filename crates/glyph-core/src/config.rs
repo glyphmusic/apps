@@ -107,11 +107,15 @@ pub struct AudioConfig {
     pub normalize: bool,
     /// Leave out songs marked explicit.
     pub hide_explicit: bool,
-    /// Equalizer on, chosen preset ("custom" after manual changes) and the
+    /// Equalizer on, chosen preset (built-in key, `user:<name>`, or "custom"
+    /// after manual changes) and the
     /// ten band gains in dB (32 Hz .. 16 kHz).
     pub eq_enabled: bool,
     pub eq_preset: String,
     pub eq_gains: Vec<f32>,
+    /// Equalizer presets the user saved (selected as `user:<name>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eq_user_presets: Vec<crate::eq::EqPreset>,
     /// Output device name; None = system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
@@ -129,6 +133,7 @@ impl Default for AudioConfig {
             eq_enabled: false,
             eq_preset: "flat".into(),
             eq_gains: vec![0.0; 10],
+            eq_user_presets: Vec::new(),
             output_device: None,
         }
     }

@@ -60,6 +60,8 @@ pub struct NameDialog {
     pub tracks: Vec<Track>,
     /// Playlist id when renaming.
     pub rename: Option<String>,
+    /// Naming an equalizer preset instead of a playlist.
+    pub eq_preset: bool,
 }
 
 impl ListRef {
@@ -1333,6 +1335,12 @@ impl Glyph {
             let code = q.clone();
             self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             self.import_share_code(&code, cx);
+            return;
+        }
+        if glyph_core::eq::is_code(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_eq_code(&code, cx);
             return;
         }
         self.search.query = q.clone();
@@ -2807,7 +2815,7 @@ impl Glyph {
         let current = rename.as_ref().and_then(|id| self.library.playlist(id)).map(|p| p.name.clone()).unwrap_or_default();
         self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
         self.ctx_menu = None;
-        self.name_dialog = Some(NameDialog { tracks, rename });
+        self.name_dialog = Some(NameDialog { tracks, rename, eq_preset: false });
         let f = self.playlist_name.read(cx).focus.clone();
         window.focus(&f, cx);
         cx.notify();
@@ -2882,7 +2890,14 @@ impl Glyph {
     pub fn submit_name_dialog(&mut self, cx: &mut Context<Self>) {
         let Some(d) = self.name_dialog.take() else { return };
         let typed = self.playlist_name.read(cx).value.trim().to_string();
-        if let Some(id) = d.rename {
+        if d.eq_preset {
+            let name = glyph_core::eq::clean_name(&typed);
+            if !name.is_empty() {
+                let gains = eq_gains(&self.config.audio.eq_gains);
+                self.add_eq_preset(glyph_core::eq::EqPreset::new(&name, gains), cx);
+                self.toast_sub(t("toast.eq_saved"), name);
+            }
+        } else if let Some(id) = d.rename {
             if !typed.is_empty() && guard(|| self.library.rename_playlist(&id, &typed)).is_some() {
                 self.save_library(cx);
             }
@@ -3052,6 +3067,135 @@ impl Glyph {
         if save {
             self.save_config(cx);
         }
+        cx.notify();
+    }
+
+    /// The curve as it is now, named after its preset (for sharing).
+    fn current_eq_preset(&self) -> glyph_core::eq::EqPreset {
+        let name = crate::ui::settings::eq_preset_label(&self.config.audio.eq_preset);
+        glyph_core::eq::EqPreset::new(&name, eq_gains(&self.config.audio.eq_gains))
+    }
+
+    /// Asks for a name and saves the current curve as an own preset.
+    pub fn open_eq_save_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.config.audio.eq_preset.strip_prefix("user:").unwrap_or_default().to_string();
+        self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
+        self.ctx_menu = None;
+        self.open_select = None;
+        self.name_dialog = Some(NameDialog { tracks: Vec::new(), rename: None, eq_preset: true });
+        let f = self.playlist_name.read(cx).focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    /// Adds an own preset (one with the same name is replaced) and selects it.
+    pub fn add_eq_preset(&mut self, p: glyph_core::eq::EqPreset, cx: &mut Context<Self>) {
+        let gains = p.gains();
+        let list = &mut self.config.audio.eq_user_presets;
+        match list.iter_mut().find(|e| e.name.eq_ignore_ascii_case(&p.name)) {
+            Some(e) => *e = p.clone(),
+            None => list.push(p.clone()),
+        }
+        self.set_eq(true, &format!("user:{}", p.name), gains, true, cx);
+    }
+
+    /// Removes an own preset; the curve stays as it is.
+    pub fn delete_eq_preset(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.config.audio.eq_user_presets.retain(|p| p.name != name);
+        if self.config.audio.eq_preset.strip_prefix("user:") == Some(name) {
+            self.config.audio.eq_preset = "custom".into();
+        }
+        self.open_select = None;
+        self.save_config(cx);
+        self.toast_sub(t("toast.eq_deleted"), name.to_string());
+        cx.notify();
+    }
+
+    /// Copies a share code for the current curve.
+    pub fn copy_eq_code(&mut self, cx: &mut Context<Self>) {
+        let p = self.current_eq_preset();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(glyph_core::eq::encode(&p)));
+        self.open_select = None;
+        self.toast_sub(t("toast.eq_copied"), p.name);
+        cx.notify();
+    }
+
+    /// Imports an equalizer share code as an own preset; false when the
+    /// text is no such code.
+    pub fn import_eq_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if !glyph_core::eq::is_code(code) && !code.trim().starts_with('{') {
+            return false;
+        }
+        match glyph_core::eq::decode(code) {
+            Ok(p) => {
+                let name = p.name.clone();
+                self.add_eq_preset(p, cx);
+                self.toast_sub(t("toast.eq_imported"), name);
+            }
+            Err(e) => self.toast_info(format!("{e:#}")),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Imports the equalizer code on the clipboard.
+    pub fn paste_eq_code(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        if !self.import_eq_code(&text, cx) {
+            self.toast_info(t("toast.eq_no_code"));
+            cx.notify();
+        }
+    }
+
+    /// Saves the current curve as a `.glyph-eq` file.
+    pub fn export_eq_file(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let p = self.current_eq_preset();
+        let file_name = format!("{}.{}", p.name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-"), glyph_core::eq::FILE_EXT);
+        let dir = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_else(glyph_core::paths::data_dir);
+        let rx = cx.prompt_for_new_path(&dir, Some(&file_name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let body = glyph_core::eq::to_file(&p);
+            let saved = cx.background_executor().spawn(async move { std::fs::write(&path, body).map_err(|e| e.to_string()) }).await;
+            this.update(cx, |s, cx| {
+                match saved {
+                    Ok(()) => s.toast_sub(t("toast.eq_exported"), p.name.clone()),
+                    Err(e) => s.toast_info(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Imports a `.glyph-eq` file as an own preset.
+    pub fn import_eq_file(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(t("sp.eq.import_file").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let text = cx.background_executor().spawn(async move { std::fs::read_to_string(path) }).await;
+            this.update(cx, |s, cx| {
+                match text {
+                    Ok(text) if s.import_eq_code(&text, cx) => {}
+                    Ok(_) => s.toast_info(t("toast.eq_no_code")),
+                    Err(e) => s.toast_info(e.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
