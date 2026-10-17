@@ -235,3 +235,6 @@
 "artist.liked" = "Gelikte Songs"
 "artist.liked_n" = "Du hast {n} Songs geliked"
 "artist.by" = "von {name}"
+"ctx.shuffle" = "Zufällig abspielen"
+"ctx.open" = "Öffnen"
+"toast.added_n_to_playlist" = "{n} Songs zu {name} hinzugefügt"

@@ -51,8 +51,8 @@ pub enum ListRef {
 /// "New playlist" / "Rename" dialog.
 #[derive(Debug, Clone)]
 pub struct NameDialog {
-    /// Song to add to the new playlist.
-    pub track: Option<Track>,
+    /// Songs to add to the new playlist.
+    pub tracks: Vec<Track>,
     /// Playlist id when renaming.
     pub rename: Option<String>,
 }
@@ -84,8 +84,11 @@ pub struct CtxMenu {
     pub pos: gpui::Point<gpui::Pixels>,
     /// The list and index the song was opened from (for "remove from …").
     pub from: Option<(ListRef, usize)>,
-    /// Showing the "add to playlist" list instead of the main items.
+    /// Showing the "add to playlist" flyout.
     pub playlists: bool,
+    /// Menu for a whole list (album, playlist) instead of one song;
+    /// `track` is then its first song.
+    pub list: Option<ListRef>,
 }
 
 /// First artist of "A, B", "A & B", "A feat. B", "A x B".
@@ -703,7 +706,11 @@ impl Glyph {
             dirty = true;
         }
         let scroll = -f32::from(self.main_scroll.offset().y);
-        self.glow.update(cx, |g, _| g.set_scroll(scroll));
+        self.glow.update(cx, |g, cx| {
+            if g.set_scroll(scroll) {
+                cx.notify();
+            }
+        });
         let zones = self.glow.read(cx).zones();
         for (ink, lum) in self.ink.iter_mut().zip(zones) {
             let target = crate::theme::ink_for(lum);
@@ -1291,6 +1298,26 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Adds several songs at once (one toast).
+    pub fn add_many_to_playlist(&mut self, id: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let mut added = 0;
+        let mut name = String::new();
+        if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
+            name = p.name.clone();
+            for t in tracks {
+                if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
+                    p.tracks.push(t);
+                    added += 1;
+                }
+            }
+        }
+        if added > 0 {
+            self.save_library(cx);
+            self.toast(tf("toast.added_n_to_playlist", &[("n", &added), ("name", &name)]));
+        }
+        cx.notify();
+    }
+
     pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
@@ -1520,7 +1547,32 @@ impl Glyph {
     }
 
     pub fn open_ctx(&mut self, track: Track, pos: gpui::Point<gpui::Pixels>, from: Option<(ListRef, usize)>, cx: &mut Context<Self>) {
-        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false });
+        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, list: None });
+        cx.notify();
+    }
+
+    /// Right-click on an album / playlist tile.
+    pub fn open_list_ctx(&mut self, l: ListRef, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let first = self.list_tracks(&l).into_iter().next();
+        let is_user = matches!(l, ListRef::User(_));
+        // Empty lists only have something to offer when they are the user's own.
+        let track = match first {
+            Some(t) => t,
+            None if is_user => Track {
+                id: String::new(),
+                source: ProviderId::Audius,
+                title: String::new(),
+                artist: String::new(),
+                album: None,
+                duration_ms: None,
+                cover_url: None,
+                isrc: None,
+                permalink: None,
+                external_ids: Default::default(),
+            },
+            None => return,
+        };
+        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: Some(l) });
         cx.notify();
     }
 
@@ -1561,11 +1613,11 @@ impl Glyph {
 
     /// Opens the name dialog for a new playlist (with `track` added) or for
     /// renaming playlist `rename`.
-    pub fn open_name_dialog(&mut self, track: Option<Track>, rename: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_name_dialog(&mut self, tracks: Vec<Track>, rename: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let current = rename.as_ref().and_then(|id| self.library.playlist(id)).map(|p| p.name.clone()).unwrap_or_default();
         self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
         self.ctx_menu = None;
-        self.name_dialog = Some(NameDialog { track, rename });
+        self.name_dialog = Some(NameDialog { tracks, rename });
         let f = self.playlist_name.read(cx).focus.clone();
         window.focus(&f, cx);
         cx.notify();
@@ -1593,9 +1645,10 @@ impl Glyph {
             match guard(|| self.library.create_playlist(&name).id.clone()) {
                 Some(id) => {
                     self.save_library(cx);
-                    match d.track {
-                        Some(tr) => self.add_to_playlist(&id, tr, cx),
-                        None => self.open_list(ListRef::User(id), cx),
+                    match d.tracks.len() {
+                        0 => self.open_list(ListRef::User(id), cx),
+                        1 => self.add_to_playlist(&id, d.tracks[0].clone(), cx),
+                        _ => self.add_many_to_playlist(&id, d.tracks, cx),
                     }
                 }
                 None => self.toast(t("status.library_offline")),

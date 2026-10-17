@@ -235,3 +235,6 @@
 "artist.liked" = "Liked songs"
 "artist.liked_n" = "You liked {n} songs"
 "artist.by" = "by {name}"
+"ctx.shuffle" = "Shuffle play"
+"ctx.open" = "Open"
+"toast.added_n_to_playlist" = "Added {n} songs to {name}"

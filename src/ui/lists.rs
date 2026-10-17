@@ -85,6 +85,17 @@ pub fn artist_link(id: impl Into<ElementId>, name: &str, cx: &mut Context<Glyph>
         .child(name.to_string())
 }
 
+/// Right-click on an album / playlist tile opens the list menu.
+pub fn with_list_menu(el: Stateful<gpui::Div>, l: ListRef, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    el.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+            cx.stop_propagation();
+            this.open_list_ctx(l.clone(), e.position, cx)
+        }),
+    )
+}
+
 /// Right-click on a song opens the song menu.
 pub fn with_menu(el: Stateful<gpui::Div>, tr: Track, from: Option<(ListRef, usize)>, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
     el.on_mouse_down(
@@ -414,7 +425,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     .child(
                         text_button("list-rename", t("list.rename"))
                             .text_size(theme::text_sm())
-                            .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(None, Some(id2.clone()), w, cx))),
+                            .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id2.clone()), w, cx))),
                     )
                     .child(
                         text_button("list-delete", t("list.delete"))
@@ -637,8 +648,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             .gap(px(12.0))
             .child(section_title("heart", t("artist.liked")))
             .child(
-                card()
-                    .id("artist-liked")
+                with_list_menu(card().id("artist-liked"), ListRef::ArtistLiked(name.clone()), cx)
                     .flex()
                     .items_center()
                     .gap(px(14.0))
@@ -692,8 +702,8 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             let art = cover(app, &list[0], 160.0, 8.0, cx);
             let n = list.len();
             let l = ListRef::Album { title: title.clone(), artist: name.clone(), tracks: list };
-            div()
-                .id(("album", i))
+            let lm = l.clone();
+            with_list_menu(div().id(("album", i)), lm, cx)
                 .flex_none()
                 .w(px(160.0))
                 .flex()
@@ -768,7 +778,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
                 .text_size(theme::text_sm())
                 .text_color(white(0.9))
                 .hover(|s| s.bg(theme::card_hover()))
-                .on_click(cx.listener(|this, _, w, cx| this.open_name_dialog(None, None, w, cx)))
+                .on_click(cx.listener(|this, _, w, cx| this.open_name_dialog(Vec::new(), None, w, cx)))
                 .child(icon("plus", 14.0, white(0.9)))
                 .child(t("library.playlist.new")),
         );
@@ -796,8 +806,8 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
             let art = list_cover(app, &l, 168.0, cx);
             let title = app.list_title(&l);
             let n = app.list_tracks(&l).len();
-            div()
-                .id(("lib-tile", i))
+            let lm = l.clone();
+            with_list_menu(div().id(("lib-tile", i)), lm, cx)
                 .flex_none()
                 .w(px(184.0))
                 .p(px(8.0))
@@ -826,6 +836,43 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
 }
 
 // ------------------------------------------------------------------ song menu
+
+/// "Add to playlist" row with its hover flyout (`sub`).
+fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Glyph>) -> AnyElement {
+    ctx_item("ctx-add-pl".into(), "list-music", t("ctx.add_playlist"), white(0.7), false, cx)
+                .relative()
+                .when(open, |d| d.bg(white(0.07)))
+                .child(icon("chevron-right", 14.0, white(0.4)))
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && !m.playlists) {
+                        m.playlists = true;
+                        cx.notify();
+                    }
+                }))
+                .when(open, |d| {
+                    d.child(
+                        div()
+                            .id("ctx-sub")
+                            .absolute()
+                            .top(px(-6.0))
+                            .when(!flip, |d| d.left(px(236.0)))
+                            .when(flip, |d| d.right(px(236.0)))
+                            .w(px(228.0))
+                            .max_h(px(320.0))
+                            .overflow_y_scroll()
+                            .p(px(6.0))
+                            .rounded(px(10.0))
+                            .bg(gpui::hsla(0.0, 0.0, 0.075, 0.98))
+                            .border_1()
+                            .border_color(white(0.1))
+                            .flex()
+                            .flex_col()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .children(sub),
+                    )
+                })
+                .into_any_element()
+}
 
 /// One menu row. `closes_sub`: hovering it closes the playlist flyout.
 fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_sub: bool, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
@@ -858,33 +905,140 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     let tr = m.track.clone();
     let sep = || div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(white(0.07));
     let mut body: Vec<AnyElement> = Vec::new();
+    // Songs the menu acts on: one song, or a whole list.
+    let songs: Vec<Track> = match &m.list {
+        Some(l) => app.list_tracks(l),
+        None => vec![tr.clone()],
+    };
     // "Add to playlist" flyout (opens on hover, to the right or left).
     let mut sub: Vec<AnyElement> = Vec::new();
     if m.playlists {
-        let t_new = tr.clone();
+        let t_new = songs.clone();
         sub.push(
             ctx_item("ctx-new-pl".into(), "plus", t("library.playlist.new"), white(0.7), false, cx)
-                .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Some(t_new.clone()), None, w, cx)))
+                .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(t_new.clone(), None, w, cx)))
                 .into_any_element(),
         );
         if !app.library.playlists.is_empty() {
             sub.push(sep().into_any_element());
         }
         let pls: Vec<(String, String)> = app.library.playlists.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
-        for (i, (id, name)) in pls.into_iter().enumerate() {
-            let t_add = tr.clone();
+        let own = match &m.list {
+            Some(ListRef::User(id)) => Some(id.clone()),
+            _ => None,
+        };
+        for (i, (id, name)) in pls.into_iter().enumerate().filter(|(_, (id, _))| Some(id) != own.as_ref()) {
+            let t_add = songs.clone();
             sub.push(
                 ctx_item(("ctx-pl", i).into(), "list-music", name.into(), white(0.7), false, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.ctx_menu = None;
-                        this.add_to_playlist(&id, t_add.clone(), cx)
+                        this.add_many_to_playlist(&id, t_add.clone(), cx)
                     }))
                     .into_any_element(),
             );
         }
     }
     let flip = f32::from(m.pos.x) + 244.0 + 236.0 > f32::from(window.viewport_size().width);
-    {
+    if let Some(l) = m.list.clone() {
+        let art = list_cover(app, &l, 36.0, cx);
+        let title = app.list_title(&l);
+        let kind = match &l {
+            ListRef::Album { artist, .. } => artist.clone(),
+            _ => t("list.kind.playlist").to_string(),
+        };
+        body.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .child(art)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(div().truncate().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(white(0.95)).child(title))
+                        .child(div().truncate().text_size(px(12.0)).text_color(white(0.55)).child(kind)),
+                )
+                .into_any_element(),
+        );
+        body.push(sep().into_any_element());
+        let has = !songs.is_empty();
+        if has {
+            let (s1, s2, s3) = (songs.clone(), songs.clone(), songs.clone());
+            body.push(
+                ctx_item("lctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ctx_menu = None;
+                        this.play_list(s1.clone(), 0, cx)
+                    }))
+                    .into_any_element(),
+            );
+            body.push(
+                ctx_item("lctx-shuffle".into(), "shuffle", t("ctx.shuffle"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ctx_menu = None;
+                        this.play_shuffled(s2.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+            body.push(
+                ctx_item("lctx-queue".into(), "list-plus", t("ctx.queue"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ctx_menu = None;
+                        this.queue_all(s3.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+            body.push(sep().into_any_element());
+        }
+        let l_open = l.clone();
+        body.push(
+            ctx_item("lctx-open".into(), "list-music", t("ctx.open"), white(0.7), true, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.ctx_menu = None;
+                    this.open_list(l_open.clone(), cx)
+                }))
+                .into_any_element(),
+        );
+        if has {
+            body.push(add_pl_row(m.playlists, flip, sub, cx));
+        }
+        match &l {
+            ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => {
+                let a = artist.clone();
+                body.push(
+                    ctx_item("lctx-artist".into(), "user-round", t("ctx.artist"), white(0.7), true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.ctx_menu = None;
+                            this.open_artist(&a, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+            ListRef::User(id) => {
+                body.push(sep().into_any_element());
+                let (id1, id2) = (id.clone(), id.clone());
+                body.push(
+                    ctx_item("lctx-rename".into(), "text-center", t("list.rename"), white(0.7), true, cx)
+                        .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id1.clone()), w, cx)))
+                        .into_any_element(),
+                );
+                body.push(
+                    ctx_item("lctx-delete".into(), "trash-2", t("list.delete"), white(0.7), true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.ctx_menu = None;
+                            this.delete_playlist(&id2, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+            _ => {}
+        }
+    } else {
         let art = cover(app, &tr, 36.0, 5.0, cx);
         body.push(
             div()
@@ -951,39 +1105,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             .into_any_element(),
         );
         body.push(
-            ctx_item("ctx-add-pl".into(), "list-music", t("ctx.add_playlist"), white(0.7), false, cx)
-                .relative()
-                .when(m.playlists, |d| d.bg(white(0.07)))
-                .child(icon("chevron-right", 14.0, white(0.4)))
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && !m.playlists) {
-                        m.playlists = true;
-                        cx.notify();
-                    }
-                }))
-                .when(m.playlists, |d| {
-                    d.child(
-                        div()
-                            .id("ctx-sub")
-                            .absolute()
-                            .top(px(-6.0))
-                            .when(!flip, |d| d.left(px(236.0)))
-                            .when(flip, |d| d.right(px(236.0)))
-                            .w(px(228.0))
-                            .max_h(px(320.0))
-                            .overflow_y_scroll()
-                            .p(px(6.0))
-                            .rounded(px(10.0))
-                            .bg(gpui::hsla(0.0, 0.0, 0.075, 0.98))
-                            .border_1()
-                            .border_color(white(0.1))
-                            .flex()
-                            .flex_col()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .children(sub),
-                    )
-                })
-                .into_any_element(),
+            add_pl_row(m.playlists, flip, sub, cx),
         );
         if let Some((l, i)) = m.from.clone().filter(|(l, _)| matches!(l, ListRef::User(_) | ListRef::Recent)) {
             let label = if l == ListRef::Recent { t("ctx.remove_recent") } else { t("ctx.remove") };

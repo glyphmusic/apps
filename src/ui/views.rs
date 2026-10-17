@@ -2,7 +2,7 @@
 //! directly on the background; only individual cards are flat surfaces.
 
 use crate::app::{Glyph, ListRef, SearchFilter};
-use crate::ui::lists::{artist_link, list_cover, with_menu};
+use crate::ui::lists::{artist_link, list_cover, with_list_menu, with_menu};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::widgets::*;
@@ -63,7 +63,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
             .cursor_pointer()
             .hover(|s| s.bg(theme::card_hover()))
     };
-    let mut cards = vec![base("card-liked".into())
+    let mut cards = vec![with_list_menu(base("card-liked".into()), ListRef::Liked, cx)
         .on_click(cx.listener(|this, _, _, cx| this.open_list(ListRef::Liked, cx)))
         .child(
             div()
@@ -92,7 +92,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         let l = ListRef::User(id);
         let art = list_cover(app, &l, 56.0, cx);
         cards.push(
-            base(("card-pl", i).into())
+            with_list_menu(base(("card-pl", i).into()), l.clone(), cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
                 .child(art)
                 .child(
@@ -221,8 +221,17 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                         let is_album = filter == SearchFilter::Albums;
                         let (title, sub2) = (name.clone(), sub.clone());
                         let art = cover(app, &tracks[0], 44.0, if filter == SearchFilter::Artists { 22.0 } else { 6.0 }, cx);
-                        div()
-                            .id(("group", i))
+                        let gm = if is_album {
+                            Some(ListRef::Album { title: name.clone(), artist: sub.clone(), tracks: tracks.clone() })
+                        } else {
+                            None
+                        };
+                        let row = div().id(("group", i));
+                        let row = match gm {
+                            Some(l) => with_list_menu(row, l, cx),
+                            None => row,
+                        };
+                        row
                             .flex()
                             .items_center()
                             .gap(px(14.0))

@@ -89,6 +89,8 @@ struct FrameOut {
     zones: [f32; ZONES],
     lum: Arc<theme::LumGrid>,
     ms: f32,
+    /// Scroll the frame was drawn for (paint shifts by the difference).
+    scroll: f32,
 }
 
 struct Worker {
@@ -274,7 +276,7 @@ impl Worker {
             pitch: GLOW_PITCH,
             data: self.lum.iter().map(|l| l * 1.12).collect(),
         });
-        FrameOut { glow, ascii, zones, lum, ms: t0.elapsed().as_secs_f32() * 1000.0 }
+        FrameOut { glow, ascii, zones, lum, ms: t0.elapsed().as_secs_f32() * 1000.0, scroll: j.scroll }
     }
 }
 
@@ -310,6 +312,9 @@ pub struct GlowView {
     lum_grid: Option<Arc<theme::LumGrid>>,
     scroll: f32,
     ascii_scroll: f32,
+    /// Scroll the displayed glow / ASCII images were drawn for.
+    glow_drawn_at: f32,
+    ascii_drawn_at: f32,
     stats: (f32, f32, u32, Instant),
     _task: Task<()>,
 }
@@ -397,6 +402,8 @@ impl GlowView {
             lum_grid: None,
             scroll: 0.0,
             ascii_scroll: 0.0,
+            glow_drawn_at: 0.0,
+            ascii_drawn_at: 0.0,
             stats: (0.0, 0.0, 0, now),
             _task: task,
         }
@@ -425,9 +432,13 @@ impl GlowView {
     pub fn preset(&self) -> Preset {
         self.preset
     }
-    /// Scroll position of the main view (px scrolled down).
-    pub fn set_scroll(&mut self, y: f32) {
-        self.scroll = y.max(0.0);
+    /// Scroll position of the main view (px scrolled down). Returns true when
+    /// it changed (the view then repaints right away, shifting the last frame).
+    pub fn set_scroll(&mut self, y: f32) -> bool {
+        let y = y.max(0.0);
+        let changed = (y - self.scroll).abs() > 0.01;
+        self.scroll = y;
+        changed
     }
     /// Short glow pulse, e.g. on every new lyric line.
     pub fn pulse(&mut self) {
@@ -468,7 +479,9 @@ impl GlowView {
             if let Some(old) = self.glow_img.replace(glow) {
                 self.stale.push(old);
             }
+            self.glow_drawn_at = out.scroll;
             if let Some(a) = out.ascii {
+                self.ascii_drawn_at = out.scroll;
                 let a = Arc::new(RenderImage::new(vec![image::Frame::new(a)]));
                 if let Some(old) = self.ascii_img.replace(a) {
                     self.stale.push(old);
@@ -557,11 +570,30 @@ impl GlowView {
             let _ = window.drop_image(old);
         }
         window.paint_quad(fill(bounds, theme::bg()));
+        // Frames arrive a few ms after a scroll; shift the last ones by the
+        // difference so the background follows the page without lag.
+        let shifted = |b: Bounds<Pixels>, drawn_at: f32, scroll: f32| {
+            let dy = -(scroll - drawn_at) * PARALLAX;
+            Bounds { origin: gpui::point(b.origin.x, b.origin.y + px(dy)), size: b.size }
+        };
         if let Some(img) = self.glow_img.clone() {
-            let _ = window.paint_image(bounds, bounds, Default::default(), img, 0, false);
+            // Slightly taller so a shift never uncovers an edge.
+            let pad = px(((self.scroll - self.glow_drawn_at).abs() * PARALLAX).min(400.0));
+            let mut b = shifted(bounds, self.glow_drawn_at, self.scroll);
+            b.origin.y -= pad;
+            b.size.height += pad + pad;
+            let _ = window.paint_image(bounds, b, Default::default(), img, 0, false);
         }
         if let Some(img) = self.ascii_img.clone() {
-            let _ = window.paint_image(bounds, bounds, Default::default(), img, 0, false);
+            // The titlebar dot grid stays put; the field below moves.
+            let bar = px(theme::TITLEBAR_H);
+            let top = Bounds { origin: bounds.origin, size: size(bounds.size.width, bar) };
+            let rest = Bounds {
+                origin: gpui::point(bounds.origin.x, bounds.origin.y + bar),
+                size: size(bounds.size.width, bounds.size.height - bar),
+            };
+            let _ = window.paint_image(top, bounds, Default::default(), img.clone(), 0, false);
+            let _ = window.paint_image(rest, shifted(bounds, self.ascii_drawn_at, self.scroll), Default::default(), img, 0, false);
         }
     }
 }

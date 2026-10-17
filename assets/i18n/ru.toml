@@ -235,3 +235,6 @@
 "artist.liked" = "Любимые треки"
 "artist.liked_n" = "Вам нравится треков: {n}"
 "artist.by" = "{name}"
+"ctx.shuffle" = "Перемешать"
+"ctx.open" = "Открыть"
+"toast.added_n_to_playlist" = "Добавлено в «{name}»: {n}"
