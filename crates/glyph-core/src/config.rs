@@ -56,6 +56,8 @@ pub struct VisualsConfig {
     /// 0.0..=1.0
     pub intensity: f32,
     pub ascii_covers: bool,
+    /// Particle animation that forms the logo at startup.
+    pub startup_animation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,7 +120,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, ascii_covers: false }
+        Self { intensity: 0.8, ascii_covers: false, startup_animation: true }
     }
 }
 

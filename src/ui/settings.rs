@@ -574,6 +574,15 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 cx.notify();
             })),
         ),
+        row(
+            t("sp.appearance.startup"),
+            Some(t("sp.appearance.startup.desc")),
+            switch("startup-anim", app.config.visuals.startup_animation).on_click(cx.listener(|this, _, _, cx| {
+                this.config.visuals.startup_animation = !this.config.visuals.startup_animation;
+                this.save_config(cx);
+                cx.notify();
+            })),
+        ),
     ])
 }
 

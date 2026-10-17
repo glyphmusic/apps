@@ -412,7 +412,11 @@ impl Glyph {
             queue_scroll: gpui::ScrollHandle::new(),
             name_dialog: None,
             nav_hover: None,
-            splash: Some(crate::ui::splash::Splash::new()),
+            // Read straight from disk: the async config load comes too late for the first frame.
+            splash: Config::load()
+                .map(|c| c.visuals.startup_animation)
+                .unwrap_or(true)
+                .then(crate::ui::splash::Splash::new),
             nav_leave: None,
             playlist_name,
             glow,
