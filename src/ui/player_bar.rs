@@ -13,6 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 const SIDE_W: f32 = 300.0;
+/// Cover size of the current song (its ASCII reveal replays on every song change).
+pub(crate) const COVER: f32 = 48.0;
 
 pub fn player_bar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     theme::on_panel(|| bar(app, window, cx))
@@ -62,7 +64,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
     let now = match app.current.clone() {
         Some(tr) => {
             let liked = app.is_liked(&tr);
-            let art = cover(app, &tr, 48.0, 6.0, cx);
+            let art = cover(app, &tr, COVER, 6.0, cx);
             let t_like = tr.clone();
             let sub = div()
                 .flex()
