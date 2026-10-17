@@ -1,12 +1,16 @@
-//! YouTube: Data API v3 search (`videoCategoryId=10`, embeddable only) +
-//! playback through the official IFrame player (`PlaybackSource::Embed`,
-//! `embed_id` = video id). No Innertube, no scraping, no audio extraction.
+//! YouTube. With a local yt-dlp (see [`crate::ytdlp`]) search and playback
+//! run on this machine: `ytsearch` results and a direct audio URL played by
+//! glyph-audio (`PlaybackSource::Stream`), no API quota. Without it: Data API
+//! v3 search (`videoCategoryId=10`, embeddable only) and the official IFrame
+//! player (`PlaybackSource::Embed`, `embed_id` = video id). The embed is also
+//! the fallback when yt-dlp fails for a video.
 //!
 //! Quota: `search.list` costs 100 units of 10 000 per day, so searches are
 //! cached in memory (10 min) and counted against a persisted daily budget.
 
 use crate::provider::*;
 use crate::paths;
+use crate::ytdlp::YtDlp;
 use anyhow::Result;
 use async_trait::async_trait;
 use glyph_protocol::{Capabilities, PlaybackSource, ProviderId, Track};
@@ -17,11 +21,16 @@ use std::time::{Duration, Instant};
 
 const BASE: &str = "https://www.googleapis.com/youtube/v3";
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+/// yt-dlp starts a Python bundle and solves player challenges: give it time.
+const LOCAL_SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
+const LOCAL_SOURCE_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub struct YouTube {
     http: reqwest::Client,
-    key: String,
+    /// Data API key (search without yt-dlp, playlist import).
+    key: Option<String>,
     daily_budget: u32,
+    local: Option<YtDlp>,
     cache: Mutex<HashMap<String, (Instant, Vec<Candidate>)>>,
 }
 
@@ -225,6 +234,11 @@ fn thumb_url(t: &Option<Thumbs>, id: &str) -> String {
 }
 
 fn make_track(id: &str, raw_title: &str, channel: &str, thumbs: &Option<Thumbs>, dur: Option<u64>) -> (Track, f32) {
+    video_track(id, raw_title, channel, Some(thumb_url(thumbs, id)), dur)
+}
+
+/// Track + resolver bonus for a video (cover defaults to the `hqdefault` still).
+pub(crate) fn video_track(id: &str, raw_title: &str, channel: &str, cover: Option<String>, dur: Option<u64>) -> (Track, f32) {
     let (artist, title, is_topic) = split_video(raw_title, channel);
     let bonus = bonus_for(&unescape_html(raw_title), is_topic);
     (
@@ -235,10 +249,11 @@ fn make_track(id: &str, raw_title: &str, channel: &str, thumbs: &Option<Thumbs>,
             artist,
             album: None,
             duration_ms: dur,
-            cover_url: Some(thumb_url(thumbs, id)),
+            cover_url: Some(cover.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))),
             isrc: None,
             permalink: Some(format!("https://www.youtube.com/watch?v={id}")),
             external_ids: Default::default(),
+            explicit: false,
         },
         bonus,
     )
@@ -256,8 +271,26 @@ fn quota_day() -> u64 {
 }
 
 impl YouTube {
-    pub fn new(http: reqwest::Client, key: String, daily_budget: u32) -> Self {
-        Self { http, key, daily_budget, cache: Mutex::new(HashMap::new()) }
+    pub fn new(http: reqwest::Client, key: Option<String>, daily_budget: u32, local: Option<YtDlp>) -> Self {
+        Self { http, key, daily_budget, local, cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// yt-dlp runs on this machine (search + direct audio).
+    pub fn local(&self) -> Option<&YtDlp> {
+        self.local.as_ref()
+    }
+
+    fn key(&self) -> Result<&str> {
+        self.key.as_deref().ok_or_else(|| ProviderError::Other("YouTube API key missing".into()).into())
+    }
+
+    /// The song through the local yt-dlp, as a fully downloaded file in the
+    /// audio cache (googlevideo refuses streams read at playback pace).
+    pub async fn local_source(&self, video_id: &str) -> Result<PlaybackSource> {
+        let yt = self.local.as_ref().ok_or(ProviderError::Unsupported)?;
+        let path = yt.audio_file(&self.http, video_id).await?;
+        let mime = Some(crate::ytdlp::mime_for_path(&path).to_string());
+        Ok(PlaybackSource::Stream { provider: ProviderId::YouTube, url: path.to_string_lossy().into_owned(), mime })
     }
 
     fn budget_path() -> std::path::PathBuf {
@@ -288,7 +321,7 @@ impl YouTube {
         let req = self
             .http
             .get(format!("{BASE}/videos"))
-            .query(&[("part", "contentDetails"), ("id", joined.as_str()), ("key", self.key.as_str())]);
+            .query(&[("part", "contentDetails"), ("id", joined.as_str()), ("key", self.key.as_deref().unwrap_or(""))]);
         match send_json::<VideosResp>(req).await {
             Ok(r) => r
                 .items
@@ -307,6 +340,7 @@ impl YouTube {
 
     /// Items of a (public) playlist, for import. Needs only the API key.
     pub async fn playlist_items(&self, playlist_id: &str) -> Result<Vec<Track>> {
+        let key = self.key()?.to_string();
         let mut out = Vec::new();
         let mut token: Option<String> = None;
         for _ in 0..40 {
@@ -314,7 +348,7 @@ impl YouTube {
                 ("part", "snippet".to_string()),
                 ("playlistId", playlist_id.to_string()),
                 ("maxResults", "50".to_string()),
-                ("key", self.key.clone()),
+                ("key", key.clone()),
             ];
             if let Some(t) = &token {
                 q.push(("pageToken", t.clone()));
@@ -341,7 +375,7 @@ impl YouTube {
         let req = self
             .http
             .get(format!("{BASE}/playlists"))
-            .query(&[("part", "snippet"), ("id", playlist_id), ("key", self.key.as_str())]);
+            .query(&[("part", "snippet"), ("id", playlist_id), ("key", self.key()?)]);
         let v: serde_json::Value = send_json(req).await?;
         Ok(v["items"][0]["snippet"]["title"].as_str().unwrap_or("YouTube playlist").to_string())
     }
@@ -361,6 +395,14 @@ impl MusicProvider for YouTube {
         Ok(self.search_candidates(query).await?.into_iter().map(|c| c.track).collect())
     }
 
+    fn search_timeout(&self) -> Option<Duration> {
+        self.local.is_some().then_some(LOCAL_SEARCH_TIMEOUT)
+    }
+
+    fn source_timeout(&self) -> Option<Duration> {
+        self.local.is_some().then_some(LOCAL_SOURCE_TIMEOUT)
+    }
+
     async fn search_candidates(&self, query: &str) -> Result<Vec<Candidate>> {
         let key = query.trim().to_lowercase();
         if let Some((at, hit)) = self.cache.lock().unwrap().get(&key) {
@@ -368,6 +410,14 @@ impl MusicProvider for YouTube {
                 return Ok(hit.clone());
             }
         }
+        if let Some(yt) = &self.local {
+            let out = yt.search(query, crate::ytdlp::SEARCH_RESULTS).await?;
+            let mut cache = self.cache.lock().unwrap();
+            cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+            cache.insert(key, (Instant::now(), out.clone()));
+            return Ok(out);
+        }
+        let api_key = self.key()?;
         self.spend_search()?;
         let req = self.http.get(format!("{BASE}/search")).query(&[
             ("part", "snippet"),
@@ -376,7 +426,7 @@ impl MusicProvider for YouTube {
             ("videoEmbeddable", "true"),
             ("maxResults", "10"),
             ("q", query),
-            ("key", self.key.as_str()),
+            ("key", api_key),
         ]);
         let r: SearchResp = send_json(req).await?;
         let ids: Vec<String> = r.items.iter().filter_map(|i| i.id.video_id.clone()).collect();
@@ -403,10 +453,14 @@ impl MusicProvider for YouTube {
     }
 
     async fn track(&self, id: &str) -> Result<Track> {
+        if let (Some(yt), None) = (&self.local, &self.key) {
+            let a = yt.resolve(id).await?;
+            return Ok(video_track(&a.video_id, &a.title, &a.channel, None, a.duration_ms).0);
+        }
         let req = self
             .http
             .get(format!("{BASE}/videos"))
-            .query(&[("part", "snippet,contentDetails"), ("id", id), ("key", self.key.as_str())]);
+            .query(&[("part", "snippet,contentDetails"), ("id", id), ("key", self.key()?)]);
         let r: VideosResp = send_json(req).await?;
         let v = r.items.into_iter().next().ok_or(ProviderError::NotFound)?;
         let sn = v.snippet.unwrap_or_default();
@@ -416,7 +470,26 @@ impl MusicProvider for YouTube {
 
     async fn playback_source(&self, track: &Track) -> Result<PlaybackSource> {
         let id = id_at(ProviderId::YouTube, track).ok_or(ProviderError::Unsupported)?;
+        if self.local.is_some() {
+            match self.local_source(id).await {
+                Ok(s) => return Ok(s),
+                // Removed / private: the embed would fail the same way.
+                Err(e) if matches!(e.downcast_ref::<ProviderError>(), Some(ProviderError::NotFound)) => return Err(e),
+                Err(e) => tracing::info!("local YouTube failed, using the embed: {e:#}"),
+            }
+        }
         Ok(PlaybackSource::Embed { provider: ProviderId::YouTube, embed_id: id.to_string() })
+    }
+
+    async fn download_url(&self, track: &Track) -> Result<Option<String>> {
+        let Some(id) = id_at(ProviderId::YouTube, track) else { return Ok(None) };
+        if self.local.is_none() {
+            return Ok(None);
+        }
+        match self.local_source(id).await? {
+            PlaybackSource::Stream { url, .. } => Ok(Some(url)),
+            _ => Ok(None),
+        }
     }
 }
 

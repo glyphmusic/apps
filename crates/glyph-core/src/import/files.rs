@@ -32,6 +32,7 @@ fn mk(source: ProviderId, idx: usize, title: &str, artist: &str, album: Option<&
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
+        explicit: false,
     })
 }
 

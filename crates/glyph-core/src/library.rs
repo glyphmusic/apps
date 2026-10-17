@@ -32,6 +32,8 @@ pub enum ListKey {
     Playlist { id: String },
     Album { title: String, artist: String, tracks: Vec<Track> },
     ArtistLiked { artist: String },
+    /// Songs saved for offline use.
+    Downloads,
 }
 
 impl ListKey {
@@ -103,6 +105,12 @@ pub struct Library {
     /// Artists the user chose not to see (search, radio).
     #[serde(default)]
     pub hidden_artists: Vec<String>,
+    /// Songs started per artist (normalised name), for the taste profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artist_plays: BTreeMap<String, u32>,
+    /// Songs skipped within 30 s per artist (normalised name).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artist_skips: BTreeMap<String, u32>,
 }
 
 /// Max entries in the search history.
@@ -155,6 +163,33 @@ impl Library {
             self.liked.remove(i);
         } else {
             self.liked.insert(0, track.clone());
+        }
+    }
+
+    /// Counts a started song for its artists (taste profile).
+    pub fn record_play(&mut self, track: &Track) {
+        for a in crate::taste::credited(&track.artist) {
+            *self.artist_plays.entry(a).or_default() += 1;
+        }
+        // Keep the map small: drop the rarest when it grows.
+        if self.artist_plays.len() > 2000 {
+            let mut v: Vec<(String, u32)> = std::mem::take(&mut self.artist_plays).into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.truncate(1500);
+            self.artist_plays = v.into_iter().collect();
+        }
+    }
+
+    /// Counts an early skip for the song's artists.
+    pub fn record_skip(&mut self, track: &Track) {
+        for a in crate::taste::credited(&track.artist) {
+            *self.artist_skips.entry(a).or_default() += 1;
+        }
+        if self.artist_skips.len() > 2000 {
+            let mut v: Vec<(String, u32)> = std::mem::take(&mut self.artist_skips).into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.truncate(1500);
+            self.artist_skips = v.into_iter().collect();
         }
     }
 

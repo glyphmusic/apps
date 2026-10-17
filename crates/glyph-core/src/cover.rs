@@ -19,6 +19,8 @@ pub const COVER_PX: u32 = 512;
 const MAX_DOWNLOAD: usize = 12 * 1024 * 1024;
 
 pub struct CoverCache {
+    server: Option<crate::server_client::ServerClient>,
+    server_musicbrainz: Option<Arc<crate::providers::musicbrainz::MusicBrainz>>,
     dir: PathBuf,
     max_bytes: u64,
     http: reqwest::Client,
@@ -29,7 +31,14 @@ pub struct CoverCache {
 
 impl CoverCache {
     pub fn new(dir: PathBuf, http: reqwest::Client, providers: Arc<Providers>) -> Self {
-        Self { dir, max_bytes: MAX_CACHE_BYTES, http, providers, misses: Mutex::new(HashSet::new()) }
+        Self { server: None, server_musicbrainz: None, dir, max_bytes: MAX_CACHE_BYTES, http, providers, misses: Mutex::new(HashSet::new()) }
+    }
+
+    pub fn with_server(mut self, server: Option<crate::server_client::ServerClient>) -> Self {
+        self.server_musicbrainz = server.as_ref().filter(|_| self.providers.musicbrainz.is_some())
+            .map(|s| Arc::new(crate::providers::musicbrainz::MusicBrainz::new(self.http.clone()).with_server(s.clone())));
+        self.server = server;
+        self
     }
 
     pub fn with_max_bytes(mut self, max: u64) -> Self {
@@ -57,6 +66,32 @@ impl CoverCache {
             return Ok(None);
         }
         tokio::fs::create_dir_all(&self.dir).await?;
+        if let Some(server) = &self.server {
+            let mut candidate = track.clone();
+            for _ in 0..2 {
+                // An older server has no /v1/cover: fall through to the direct chain.
+                let url = match server.cover_url(&candidate).await {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::debug!("server cover failed, going direct: {e}");
+                        break;
+                    }
+                };
+                if let Some(url) = url {
+                    if self.download_and_store(&url, &path).await.is_ok() {
+                        return Ok(Some(self.finish(path)));
+                    }
+                }
+                if candidate.cover_url.take().is_none() { break; }
+            }
+            if let Some(mb) = &self.server_musicbrainz {
+                for url in mb.cover_urls(&track.artist, &track.title).await.unwrap_or_default() {
+                    if self.download_and_store(&server.upstream_url(&url), &path).await.is_ok() {
+                        return Ok(Some(self.finish(path)));
+                    }
+                }
+            }
+        }
 
         let mut tried: Vec<String> = Vec::new();
         // 1. provider cover

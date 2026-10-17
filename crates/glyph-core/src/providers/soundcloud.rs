@@ -81,6 +81,7 @@ fn convert(t: SCTrack) -> Option<Track> {
         isrc,
         permalink: t.permalink_url,
         external_ids: Default::default(),
+        explicit: false,
     })
 }
 

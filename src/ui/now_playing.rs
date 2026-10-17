@@ -8,7 +8,7 @@ use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::widgets::*;
 use glyph_core::RepeatMode;
-use gpui::{canvas, div, prelude::*, px, Context, FontWeight, Window};
+use gpui::{canvas, div, prelude::*, px, Context, FontWeight, SharedString, Window};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -100,7 +100,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .cursor_pointer()
         .hover(|s| s.opacity(0.88))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx)))
-        .child(icon(if app.is_playing() { "pause" } else { "play" }, 18.0, gpui::black()));
+        .child(crate::ui::widgets::play_glyph(app.is_loading(), app.is_playing(), 18.0, 44.0));
 
     let left = div()
         .flex()
@@ -116,7 +116,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .flex_col()
                 .items_center()
                 .gap(px(4.0))
-                .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).child(track.title.clone()))
+                .child(song_title(track.title.clone(), track.explicit).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
                 .child(
                     div()
                         .flex()
@@ -218,6 +218,74 @@ fn mode_switch(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         )
 }
 
+thread_local! {
+    /// Eased opacity per lyric line, for the song it belongs to.
+    static LINE_ALPHA: std::cell::RefCell<(String, Vec<f32>, Option<std::time::Instant>)> = std::cell::RefCell::new((String::new(), Vec::new(), None));
+    static FOLLOW_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Line opacities easing towards: active 1, the next few a soft step down,
+/// sung lines quieter.
+fn line_alphas(key: String, n: usize, active: Option<usize>) -> Vec<f32> {
+    let target = |i: usize| -> f32 {
+        match active {
+            Some(a) if i == a => 1.0,
+            Some(a) if i > a => (0.48 - 0.05 * (i - a - 1) as f32).max(0.26),
+            Some(_) => 0.26,
+            None => 0.4,
+        }
+    };
+    LINE_ALPHA.with(|c| {
+        let mut c = c.borrow_mut();
+        let now = std::time::Instant::now();
+        if c.0 != key || c.1.len() != n {
+            *c = (key, (0..n).map(target).collect(), Some(now));
+            return c.1.clone();
+        }
+        let dt = c.2.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.016).clamp(0.0, 0.1);
+        c.2 = Some(now);
+        let k = 1.0 - (-dt / 0.16).exp();
+        for i in 0..n {
+            let t = target(i);
+            c.1[i] += (t - c.1[i]) * k;
+        }
+        c.1.clone()
+    })
+}
+
+/// 0..1 visibility of line `ix` near the top / bottom edge of the frame
+/// (from last frame's layout, which is where it is drawn now give or take
+/// the follow step).
+fn edge_fade(handle: &gpui::ScrollHandle, ix: usize) -> f32 {
+    const BAND: f32 = 64.0;
+    let (Some(item), view) = (handle.bounds_for_item(ix), handle.bounds()) else { return 1.0 };
+    let vh = f32::from(view.size.height);
+    if vh <= 0.0 {
+        return 1.0;
+    }
+    let mid = f32::from(item.origin.y - view.origin.y + handle.offset().y) + f32::from(item.size.height) / 2.0;
+    let k = (mid / BAND).min((vh - mid) / BAND).clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
+}
+
+/// One easing step of the lyrics frame towards line `ix` (time-based).
+fn follow_line(handle: &gpui::ScrollHandle, ix: usize) {
+    let (Some(item), view) = (handle.bounds_for_item(ix), handle.bounds()) else { return };
+    let vh = f32::from(view.size.height);
+    if vh <= 0.0 {
+        return;
+    }
+    let max = f32::from(handle.max_offset().y);
+    let center = f32::from(item.origin.y - view.origin.y) + f32::from(item.size.height) / 2.0;
+    let target = -(center - vh * 0.38).clamp(0.0, max.max(0.0));
+    let cur = f32::from(handle.offset().y);
+    let now = std::time::Instant::now();
+    let dt = FOLLOW_AT.with(|f| f.replace(Some(now))).map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.016).clamp(0.0, 0.1);
+    let k = 1.0 - (-dt / 0.22).exp();
+    let next = if (target - cur).abs() < 0.5 { target } else { cur + (target - cur) * k };
+    handle.set_offset(gpui::point(px(0.0), px(next)));
+}
+
 fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
     let ls = &app.lyrics;
     if ls.loading {
@@ -235,7 +303,7 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
             .into_any_element();
     };
     let offset = app.lyrics_offset();
-    let pos_ms = app.position().as_millis() as u64;
+    let pos_ms = app.display_position().as_millis() as u64;
     let active = guard(|| l.active_line(pos_ms, offset)).flatten();
     let progress = guard(|| l.line_progress(pos_ms, offset)).unwrap_or(0.0);
     let synced = !l.synced.is_empty();
@@ -285,57 +353,69 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .when(open_for.is_some(), |d| d.child(div().opacity(grow).ml(px(24.0 * (1.0 - grow))).child(details)))
         .child(pill().px(px(3.0)).h(px(32.0)).child(info_btn));
 
-    let body: gpui::AnyElement = if synced {
-        let center = active.unwrap_or(0);
-        let start = center.saturating_sub(2);
-        let end = (start + 9).min(l.synced.len());
-        div()
-            .flex()
-            .flex_col()
-            .when(app.lyrics_only, |d| d.items_center().text_center())
-            .gap(px(22.0))
-            .children((start..end).map(|i| {
+    let body: Vec<gpui::AnyElement> = if synced {
+        // Every line is a direct child of the scroll frame, so the frame can
+        // glide to the active one; colours ease instead of jumping.
+        let alphas = line_alphas(app.lyrics.key.clone().unwrap_or_default(), l.synced.len(), active);
+        (0..l.synced.len())
+            .map(|i| {
                 let line = &l.synced[i];
                 let tms = line.time_ms;
                 let seek = cx.listener(move |this: &mut Glyph, _, _, cx| {
                     let off = this.lyrics_offset();
+                    this.lyrics_user_scroll = None;
                     this.seek_to(Duration::from_millis((tms as i64 - off).max(0) as u64));
                     cx.notify();
                 });
-                let text = if line.text.trim().is_empty() { "♪".to_string() } else { line.text.clone() };
+                let text: SharedString = if line.text.trim().is_empty() { "♪".into() } else { line.text.clone().into() };
+                // Lines fade themselves out towards the frame's edges (no dark
+                // band over the background, which looked wrong on light covers).
+                let a = alphas.get(i).copied().unwrap_or(0.3) * edge_fade(&app.lyrics_scroll, i);
                 let base = div()
                     .id(("lyric", i))
+                    .w_full()
+                    .py(px(11.0))
                     .cursor_pointer()
                     .on_click(seek)
+                    .when(centered, |d| d.text_center())
                     .text_size(px(28.0))
                     .line_height(px(38.0))
                     .font_weight(FontWeight::BOLD);
                 if Some(i) == active {
-                    // Interpolated fill: the part already sung is full white.
+                    // Sung part fills in white inside one paragraph (wraps like the line).
                     let n = text.chars().count();
                     let k = (progress.clamp(0.0, 1.0) * n as f32).round() as usize;
-                    let done: String = text.chars().take(k).collect();
-                    let rest: String = text.chars().skip(k).collect();
-                    base.flex()
-                        .flex_wrap()
-                        .when(centered, |d| d.justify_center())
-                        .child(div().text_color(theme::text()).child(done))
-                        .child(div().text_color(theme::text().opacity(0.78)).child(rest))
+                    let split = text.char_indices().nth(k).map(|(b, _)| b).unwrap_or(text.len());
+                    let rest_c = theme::text().opacity(0.5);
+                    let hl = vec![
+                        (0..split, gpui::HighlightStyle { color: Some(theme::text().opacity(a)), ..Default::default() }),
+                        (split..text.len(), gpui::HighlightStyle { color: Some(rest_c), ..Default::default() }),
+                    ];
+                    base.child(gpui::StyledText::new(text).with_highlights(hl)).into_any_element()
                 } else {
-                    base.text_color(theme::text().opacity(0.35)).hover(|s| s.text_color(theme::text().opacity(0.6))).child(text)
+                    base.text_color(theme::text().opacity(a)).hover(|s| s.text_color(theme::text().opacity(0.75))).child(text).into_any_element()
                 }
-            }))
-            .into_any_element()
+            })
+            .collect()
     } else {
-        div()
+        vec![div()
             .flex()
             .flex_col()
             .gap(px(8.0))
             .text_size(px(18.0))
             .text_color(theme::text_dim())
             .children(l.plain.unwrap_or_default().lines().map(|s| div().child(s.to_string())))
-            .into_any_element()
+            .into_any_element()]
     };
+    // Auto-follow: glide so the active line sits a bit above the middle.
+    // A hand scroll pauses this for a few seconds.
+    let follow = app.lyrics_user_scroll.is_none_or(|at| at.elapsed() > Duration::from_secs(4))
+        && !crate::ui::widgets::wheeled_recently(&app.lyrics_scroll, Duration::from_secs(4));
+    if synced && follow {
+        if let Some(i) = active {
+            follow_line(&app.lyrics_scroll, i);
+        }
+    }
 
     // The pills stay fixed above the lines; only the lines scroll, and their
     // edges fade only where there is more text.
@@ -344,9 +424,13 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .track_scroll(&app.lyrics_scroll)
         .size_full()
         .overflow_y_scroll()
-        .pt(px(12.0))
-        .pb(px(24.0))
-        .child(body);
+        .flex()
+        .flex_col()
+        .when(centered, |d| d.items_center())
+        .pt(px(if synced { 140.0 } else { 12.0 }))
+        .pb(px(if synced { 320.0 } else { 24.0 }))
+        .on_scroll_wheel(cx.listener(|this, _, _, _| this.lyrics_user_scroll = Some(std::time::Instant::now())))
+        .children(body);
     div()
         .flex_1()
         .min_w_0()
@@ -356,6 +440,6 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .gap(px(16.0))
         .pt(px(20.0))
         .child(info)
-        .child(fade_edges(scroll, gpui::hsla(0.0, 0.0, 0.0, 0.35), 40.0, Some(&app.lyrics_scroll)).flex_1().min_h_0().w_full().child(scrollbar(&app.lyrics_scroll, true, cx)))
+        .child(div().relative().flex_1().min_h_0().w_full().child(scroll).child(scrollbar(&app.lyrics_scroll, true, cx)))
         .into_any_element()
 }

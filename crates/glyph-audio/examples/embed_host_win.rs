@@ -30,7 +30,7 @@ fn main() {
     player.set_embed_visible(true);
     let t = Track {
         id: id.clone(), source: ProviderId::YouTube, title: "t".into(), artist: "-".into(), album: None,
-        duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(),
+        duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
     };
     player.load(t, PlaybackSource::Embed { provider: ProviderId::YouTube, embed_id: id });
     let start = Instant::now();

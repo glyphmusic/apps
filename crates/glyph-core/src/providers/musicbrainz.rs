@@ -13,6 +13,7 @@ const API: &str = "https://musicbrainz.org/ws/2";
 const MIN_INTERVAL: Duration = Duration::from_millis(1100);
 
 pub struct MusicBrainz {
+    server: Option<crate::server_client::ServerClient>,
     http: reqwest::Client,
     last: Mutex<Option<Instant>>,
 }
@@ -83,6 +84,7 @@ fn convert(r: &Recording) -> Track {
         isrc: r.isrcs.first().cloned(),
         permalink: Some(format!("https://musicbrainz.org/recording/{}", r.id)),
         external_ids: Default::default(),
+        explicit: false,
     }
 }
 
@@ -97,7 +99,12 @@ fn lucene_quote(s: &str) -> String {
 
 impl MusicBrainz {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http, last: Mutex::new(None) }
+        Self { server: None, http, last: Mutex::new(None) }
+    }
+
+    pub fn with_server(mut self, server: crate::server_client::ServerClient) -> Self {
+        self.server = Some(server);
+        self
     }
 
     /// Serialises requests to at most one per [`MIN_INTERVAL`].
@@ -114,10 +121,9 @@ impl MusicBrainz {
 
     async fn recordings(&self, query: &str, limit: &str) -> Result<Vec<Recording>> {
         self.throttle().await;
-        let req = self
-            .http
-            .get(format!("{API}/recording"))
-            .query(&[("query", query), ("fmt", "json"), ("limit", limit)]);
+        let url = reqwest::Url::parse_with_params(&format!("{API}/recording"), &[("query", query), ("fmt", "json"), ("limit", limit)])?;
+        let url = self.server.as_ref().map(|s| s.upstream_url(url.as_str())).unwrap_or_else(|| url.into());
+        let req = self.http.get(url);
         let l: RecordingList = send_json(req).await?;
         Ok(l.recordings)
     }

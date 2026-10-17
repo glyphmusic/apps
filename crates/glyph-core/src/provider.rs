@@ -1,7 +1,10 @@
 //! The [`MusicProvider`] trait every source implements, plus shared helpers
 //! (error type, JSON helpers, cooldown tracking).
 //!
-//! Hard rules: official APIs only. No scraping, no Innertube, no yt-dlp.
+//! Hard rules: official APIs only, no scraping, no Innertube. The one
+//! exception (user decision, 2026-10-17): YouTube may run through the user's
+//! own yt-dlp on their machine (`crate::ytdlp`) — validated video ids and
+//! search queries only, no cookies, no login, never on a server.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,9 +37,26 @@ pub trait MusicProvider: Send + Sync {
     async fn track(&self, id: &str) -> Result<Track>;
     async fn playback_source(&self, track: &Track) -> Result<PlaybackSource>;
 
+    /// Longer search timeout than [`SEARCH_TIMEOUT`] (local tools).
+    fn search_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Longer timeout for `playback_source` than the resolver default.
+    fn source_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Search used by the resolver; providers may attach score bonuses.
     async fn search_candidates(&self, query: &str) -> Result<Vec<Candidate>> {
         Ok(self.search(query).await?.into_iter().map(|track| Candidate { track, bonus: 0.0 }).collect())
+    }
+
+    /// A file URL the source allows saving for offline use, `None` when the
+    /// song may only be streamed (the default for every provider).
+    async fn download_url(&self, track: &Track) -> Result<Option<String>> {
+        let _ = track;
+        Ok(None)
     }
 
     /// Exact lookup by ISRC (Spotify, Deezer, MusicBrainz).
@@ -81,9 +101,57 @@ pub fn id_at(provider: ProviderId, track: &Track) -> Option<&str> {
     }
 }
 
+/// Requests per second (and burst) allowed per API host, so a few quick
+/// searches never hit a source's rate limit.
+fn host_rate(host: &str) -> (f32, f32) {
+    if host.contains("musicbrainz.org") {
+        (1.0, 1.0)
+    } else if host.contains("audius") {
+        (2.0, 4.0)
+    } else if host.contains("archive.org") {
+        (2.0, 4.0)
+    } else if host.contains("deezer.com") {
+        (8.0, 10.0)
+    } else if host.contains("googleapis.com") {
+        (3.0, 5.0)
+    } else {
+        (5.0, 8.0)
+    }
+}
+
+/// Token bucket per host: waits (briefly) instead of sending too fast.
+pub async fn throttle(host: &str) {
+    static BUCKETS: std::sync::OnceLock<Mutex<HashMap<String, (f32, Instant)>>> = std::sync::OnceLock::new();
+    let (rate, burst) = host_rate(host);
+    loop {
+        let wait = {
+            let mut m = BUCKETS.get_or_init(Default::default).lock().unwrap();
+            let now = Instant::now();
+            let (tokens, at) = m.entry(host.to_string()).or_insert((burst, now));
+            *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * rate).min(burst);
+            *at = now;
+            if *tokens >= 1.0 {
+                *tokens -= 1.0;
+                None
+            } else {
+                Some(Duration::from_secs_f32((1.0 - *tokens) / rate))
+            }
+        };
+        match wait {
+            None => return,
+            Some(d) => tokio::time::sleep(d).await,
+        }
+    }
+}
+
 /// Sends a request and parses the JSON body, mapping HTTP statuses to [`ProviderError`].
 pub async fn send_json<T: DeserializeOwned>(req: reqwest::RequestBuilder) -> Result<T> {
-    let resp = req.send().await?;
+    let (client, req) = req.build_split();
+    let req = req?;
+    if let Some(host) = req.url().host_str() {
+        throttle(host).await;
+    }
+    let resp = client.execute(req).await?;
     let status = resp.status();
     if !status.is_success() {
         return Err(match status.as_u16() {

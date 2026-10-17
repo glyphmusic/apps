@@ -37,6 +37,8 @@ pub(crate) struct STrack {
     pub kind: Option<String>,
     #[serde(default)]
     pub is_local: Option<bool>,
+    #[serde(default)]
+    pub explicit: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +90,7 @@ pub(crate) fn convert(t: STrack) -> Option<Track> {
             .external_urls
             .and_then(|u| u.spotify)
             .or_else(|| Some(format!("https://open.spotify.com/track/{id}"))),
+        explicit: t.explicit == Some(true),
         id,
         source: ProviderId::Spotify,
         title: t.name,

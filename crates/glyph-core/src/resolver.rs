@@ -276,7 +276,7 @@ impl Resolver {
                     continue;
                 }
                 let q = q.clone();
-                let to = this.search_timeout;
+                let to = p.search_timeout().unwrap_or(this.search_timeout);
                 pending.push(async move { (id, timeout(to, p.search(&q)).await) });
             }
             let mut merger = Merger::new();
@@ -329,7 +329,7 @@ impl Resolver {
 
     async fn source_of(&self, provider: ProviderId, view: &Track) -> Option<PlaybackSource> {
         let p = self.providers.get(provider)?;
-        match timeout(SOURCE_TIMEOUT, p.playback_source(view)).await {
+        match timeout(p.source_timeout().unwrap_or(SOURCE_TIMEOUT), p.playback_source(view)).await {
             Ok(Ok(s)) => Some(s),
             Ok(Err(e)) => {
                 tracing::debug!(?provider, "playback_source failed: {e}");
@@ -376,6 +376,12 @@ impl Resolver {
         }
     }
 
+    /// The cached match of `track` at `provider`, if the mapping points there.
+    pub fn cached_at(&self, track: &Track, provider: ProviderId) -> Option<(Track, f32)> {
+        let (_, m) = self.cache.get(&mapping_keys(track))?;
+        (m.provider == provider).then_some((m.track, m.confidence))
+    }
+
     /// Records a mapping obtained elsewhere (e.g. from the server).
     pub fn remember(&self, wanted: &Track, matched: &Track, confidence: f32) {
         self.cache.insert(
@@ -392,7 +398,7 @@ impl Resolver {
             }
             let Some(p) = self.providers.get(id) else { continue };
             let q = query.to_string();
-            let to = self.search_timeout;
+            let to = p.search_timeout().unwrap_or(self.search_timeout);
             pending.push(async move { (id, timeout(to, p.search_candidates(&q)).await) });
         }
         let mut out = Vec::new();
@@ -472,6 +478,18 @@ impl Resolver {
         }
         None
     }
+}
+
+/// Best candidate of one provider for `want` (at least [`MIN_CONFIDENCE`]).
+pub fn best_candidate(want: &Track, cands: Vec<Candidate>) -> Option<(Candidate, f32)> {
+    cands
+        .into_iter()
+        .map(|c| {
+            let s = score_candidate(want, &c);
+            (c, s)
+        })
+        .filter(|(_, s)| *s >= MIN_CONFIDENCE)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 /// De-duplicates ids while keeping order.

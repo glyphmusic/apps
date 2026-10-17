@@ -171,6 +171,7 @@ pub fn same_song(a: &Track, b: &Track) -> bool {
 /// Merges `incoming` into `into` (same song): records the other source id and
 /// fills missing metadata.
 pub fn merge_track(into: &mut Track, incoming: &Track) {
+    into.explicit |= incoming.explicit;
     if incoming.source != into.source {
         into.external_ids.entry(incoming.source).or_insert_with(|| incoming.id.clone());
     }
@@ -270,6 +271,7 @@ pub(crate) fn test_track(
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
+        explicit: false,
     }
 }
 

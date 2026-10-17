@@ -63,10 +63,20 @@ impl Providers {
         if let (true, Some(id)) = (on(ProviderId::SoundCloud), &keys.soundcloud_client_id) {
             add(&mut p.all, Arc::new(soundcloud::SoundCloud::new(http.clone(), id.clone())));
         }
-        if let (true, Some(k)) = (on(ProviderId::YouTube), &keys.youtube) {
-            let yt = Arc::new(youtube::YouTube::new(http.clone(), k.clone(), config.providers.youtube_daily_searches));
-            p.youtube = Some(yt.clone());
-            add(&mut p.all, yt);
+        if on(ProviderId::YouTube) {
+            // A local yt-dlp is enough on its own; the API key alone gives
+            // search + the embed player.
+            let local = crate::ytdlp::YtDlp::locate(config.providers.ytdlp_path.as_deref());
+            if local.is_some() || keys.youtube.is_some() {
+                let yt = Arc::new(youtube::YouTube::new(
+                    http.clone(),
+                    keys.youtube.clone(),
+                    config.providers.youtube_daily_searches,
+                    local,
+                ));
+                p.youtube = Some(yt.clone());
+                add(&mut p.all, yt);
+            }
         }
         if let (true, Some(id), Some(secret)) =
             (on(ProviderId::Spotify), &keys.spotify_client_id, &keys.spotify_client_secret)
@@ -128,6 +138,8 @@ mod tests {
 
     #[test]
     fn providers_without_keys_are_skipped() {
+        // yt-dlp lookup reads GLYPH_DATA_DIR, which other tests change.
+        let _g = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let http = reqwest::Client::new();
         let cfg = Config::default();
         let p = Providers::build(&cfg, &http);
@@ -136,7 +148,8 @@ mod tests {
         assert!(ids.contains(&ProviderId::Archive));
         assert!(ids.contains(&ProviderId::Deezer));
         assert!(!ids.contains(&ProviderId::Jamendo));
-        assert!(!ids.contains(&ProviderId::YouTube));
+        // YouTube is on by default but needs yt-dlp (or a key) on this machine.
+        assert_eq!(ids.contains(&ProviderId::YouTube), crate::ytdlp::locate(None).is_some());
         assert!(!ids.contains(&ProviderId::SoundCloud));
         assert!(!ids.contains(&ProviderId::Spotify));
         assert!(!ids.contains(&ProviderId::LastFm));

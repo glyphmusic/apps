@@ -40,6 +40,8 @@
 pub mod embed;
 mod engine;
 mod http;
+pub mod eq;
+pub mod loudness;
 mod media_keys;
 mod native;
 pub mod spectrum;
@@ -111,6 +113,8 @@ pub(crate) enum Cmd {
     Seek(Duration),
     Volume(f32),
     Crossfade(Duration),
+    /// Output device by name; None = follow the system default.
+    OutputDevice(Option<String>),
     MiniOptions(MiniPlayerOptions),
     Opened { id: u64, opened: native::Opened },
     DecodeError { id: u64, message: String },
@@ -194,6 +198,30 @@ impl PlayerController {
         self.send(Cmd::Volume(volume));
     }
     /// Overlap between native tracks (0 = gapless, no fade).
+    /// 10-band equalizer (native playback), gains in dB for `eq::BANDS`.
+    pub fn set_equalizer(&self, enabled: bool, gains: [f32; 10]) {
+        eq::set(enabled, gains);
+    }
+
+    /// Loudness target and per-song levelling (native playback).
+    pub fn set_loudness(&self, level: loudness::Level, normalize: bool) {
+        loudness::set(level, normalize);
+    }
+
+    /// Names of the audio outputs (for the settings list).
+    pub fn output_devices() -> Vec<String> {
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        rodio::cpal::default_host()
+            .output_devices()
+            .map(|it| it.filter_map(|d| d.description().ok().map(|x| x.name().to_string())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Plays on the named output (None = system default, followed when it changes).
+    pub fn set_output_device(&self, name: Option<String>) {
+        self.send(Cmd::OutputDevice(name));
+    }
+
     pub fn set_crossfade(&self, d: Duration) {
         self.send(Cmd::Crossfade(d.min(Duration::from_secs(20))));
     }
@@ -283,6 +311,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
+            explicit: false,
         }
     }
 

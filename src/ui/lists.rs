@@ -35,6 +35,28 @@ fn total_time(tracks: &[Track]) -> String {
     }
 }
 
+/// Blue check badge for verified artists (drawn, no icon file needed).
+pub fn verified_badge(size: f32) -> gpui::Div {
+    div()
+        .flex_none()
+        .size(px(size))
+        .rounded_full()
+        .bg(gpui::hsla(212.0 / 360.0, 0.9, 0.56, 1.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon("check", size * 0.62, gpui::white()))
+}
+
+/// 1234 -> "1.2K", 3_400_000 -> "3.4M".
+pub fn compact_count(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}K", n as f64 / 1e3).replace(".0K", "K"),
+        _ => format!("{:.1}M", n as f64 / 1e6).replace(".0M", "M"),
+    }
+}
+
 /// `[ 07 SONGS · 11:50 ]`-style meta line (mono, the ASCII accent).
 fn meta_line(tracks: &[Track], color: Hsla) -> gpui::Div {
     mono()
@@ -159,6 +181,7 @@ pub fn list_cover(app: &mut Glyph, l: &ListRef, size: f32, cx: &mut Context<Glyp
     match l {
         ListRef::Liked | ListRef::ArtistLiked(_) => tile(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0), "heart-fill", theme::pink()),
         ListRef::Recent => tile(theme::card(), "history", white(0.75)),
+        ListRef::Downloads => tile(gpui::hsla(330.0 / 360.0, 0.3, 0.16, 1.0), "download", theme::pink()),
         ListRef::User(id) if app.library.playlist(id).is_some_and(|p| p.cover.is_some()) => {
             let p = app.library.playlist(id).and_then(|p| p.cover.clone()).unwrap_or_default();
             img(std::path::PathBuf::from(p)).flex_none().size(px(size)).rounded(px(r)).object_fit(ObjectFit::Cover).into_any_element()
@@ -190,6 +213,36 @@ pub fn list_cover(app: &mut Glyph, l: &ListRef, size: f32, cx: &mut Context<Glyp
                     .child(div().flex().child(q(a).rounded_tl(rr)).child(q(b).rounded_tr(rr)))
                     .child(div().flex().child(q(c).rounded_bl(rr)).child(q(d).rounded_br(rr)))
                     .into_any_element()
+            } else if paths.len() >= 2 {
+                // Automatic thumbnail from the songs' covers: halves, or one
+                // big + two small.
+                let rr = px(r);
+                let img_ = |p: std::path::PathBuf, w: f32, h: f32| img(p).w(px(w)).h(px(h)).object_fit(ObjectFit::Cover);
+                let mut it = paths.into_iter();
+                let a = it.next().unwrap();
+                let b = it.next().unwrap();
+                match it.next() {
+                    None => div()
+                        .flex_none()
+                        .size(px(size))
+                        .flex()
+                        .child(img_(a, size / 2.0, size).rounded_l(rr))
+                        .child(img_(b, size / 2.0, size).rounded_r(rr))
+                        .into_any_element(),
+                    Some(c) => div()
+                        .flex_none()
+                        .size(px(size))
+                        .flex()
+                        .child(img_(a, size / 2.0, size).rounded_l(rr))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(img_(b, size / 2.0, size / 2.0).rounded_tr(rr))
+                                .child(img_(c, size / 2.0, size / 2.0).rounded_br(rr)),
+                        )
+                        .into_any_element(),
+                }
             } else if let Some(first) = tracks.first() {
                 cover(app, first, size, r, cx).into_any_element()
             } else {
@@ -220,6 +273,7 @@ pub fn song_row(
     let tr = list[i].clone();
     let playing = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
     let liked = app.is_liked(&tr);
+    let dl_badge = crate::ui::widgets::download_badge(app.download_view(&tr), 14.0, "arrow-down");
     let group: SharedString = format!("{prefix}-g-{i}").into();
     let art = cover(app, &tr, 40.0, 6.0, cx);
     let l2 = list.clone();
@@ -276,18 +330,29 @@ pub fn song_row(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .truncate()
-                        .text_size(theme::text_md())
-                        .font_weight(if playing { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                        .text_color(if playing { theme::pink() } else { theme::text() })
-                        .child(tr.title.clone()),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w_0()
+                        .when(tr.explicit, |d| d.child(explicit_badge()))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(theme::text_md())
+                                .font_weight(if playing { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                                .text_color(if playing { theme::pink() } else { theme::text() })
+                                .child(tr.title.clone()),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
+                        .items_center()
+                        .gap(px(6.0))
                         .min_w_0()
                         .text_size(theme::text_sm())
                         .text_color(theme::text_dim())
+                        .children(dl_badge)
                         .child(artist_link((prefix, i * 8 + 1), &tr.artist, cx)),
                 ),
         )
@@ -477,6 +542,9 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     };
 
     let l_more = l.clone();
+    let all_dl = has && tracks.iter().all(|tr| app.is_downloaded(tr));
+    let dl_view = if has { app.downloads_view(&tracks) } else { crate::ui::widgets::DlView::None };
+    let t_dl = tracks.clone();
     let left = div()
         .flex_none()
         .w(px(248.0))
@@ -517,9 +585,28 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .items_center()
                 .gap(px(6.0))
                 .when(has, |d| {
-                    d.child(icon_button("list-download", "download", 16.0, theme::text_dim()).on_click(cx.listener(|this, _, _, cx| {
-                        this.toast(t("toast.downloads_soon"));
-                        cx.notify();
+                    // Pink check when everything is saved (click removes), a
+                    // filling ring around the arrow while downloads run.
+                    let btn = match crate::ui::widgets::download_badge(dl_view, 20.0, "download") {
+                        Some(badge) => crate::ui::widgets::with_tip(div().id("list-download"), crate::ui::widgets::tip_for("download"))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(30.0))
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::hover()))
+                            .active(|s| s.bg(theme::active()))
+                            .child(badge),
+                        None => icon_button("list-download", "download", 16.0, theme::text_dim()),
+                    };
+                    d.child(btn.on_click(cx.listener(move |this, _, _, cx| {
+                        if all_dl {
+                            this.remove_downloads(t_dl.clone(), cx)
+                        } else {
+                            this.download_tracks(t_dl.clone(), cx)
+                        }
                     })))
                     .child(icon_button("list-queue", "list-plus", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
                 })
@@ -548,6 +635,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         let (a, b) = match &l {
             ListRef::Liked | ListRef::ArtistLiked(_) => (t("library.liked.empty"), t("library.liked.empty.sub")),
             ListRef::Recent => (t("home.empty.title"), t("library.recent.empty.sub")),
+            ListRef::Downloads => (t("library.downloads.empty"), t("library.downloads.empty.sub")),
             _ => (t("library.playlist.empty"), t("list.empty.sub")),
         };
         ascii_state(ART_EMPTY, a, b).into_any_element()
@@ -608,6 +696,9 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
     let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
     let has = !tracks.is_empty();
     let n_songs = tracks.len();
+    let stats = app.artists.get(&name).and_then(|p| p.stats.clone());
+    let verified = stats.as_ref().is_some_and(|s| s.verified);
+    let fans = stats.map(|s| s.fans).filter(|f| *f > 0);
 
     let about_card = if let Some(i) = info.clone() {
         let url = i.url.clone();
@@ -633,7 +724,10 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                         .text_color(white(0.72))
                         .overflow_hidden()
                         .when(!about_open, |d| d.max_h(px(18.0 * 4.0)))
-                        .when(about_open, |d| d.max_h(px(18.0 * 11.0)).overflow_y_scroll())
+                        .when(about_open, |d| {
+                            let h = crate::ui::widgets::handle_for("artist-about");
+                            d.max_h(px(18.0 * 11.0)).overflow_y_scroll().track_scroll(&h).child(crate::ui::widgets::smooth_wheel(&h, false, cx))
+                        })
                         .child(decode(&i.about, reveal_k(&format!("artist:about:{}", i.url), 0.9))),
                 )
                 .child(
@@ -728,14 +822,31 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .child(mono().text_size(px(11.0)).text_color(white(0.55)).child(decode(&format!("[{}]", t("artist.badge")), reveal_k(&format!("artist:badge:{name}"), 0.4))))
                 .child(
                     div()
-                        .text_size(px(46.0))
-                        .line_height(px(50.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(gpui::white())
-                        .truncate()
-                        .child(decode(&name, reveal_k(&format!("artist:name:{name}"), 0.7))),
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(46.0))
+                                .line_height(px(50.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(gpui::white())
+                                .truncate()
+                                .child(decode(&name, reveal_k(&format!("artist:name:{name}"), 0.7))),
+                        )
+                        .when(verified, |d| d.child(verified_badge(26.0))),
                 )
-                .when(has, |d| d.child(mono().text_size(px(11.5)).text_color(white(0.6)).child(format!("[ {:02} {} ]", n_songs, t("list.songs_caps")))))
+                .when(has || fans.is_some(), |d| {
+                    let mut parts = Vec::new();
+                    if has {
+                        parts.push(format!("{:02} {}", n_songs, t("list.songs_caps")));
+                    }
+                    if let Some(f) = fans {
+                        parts.push(tf("artist.fans", &[("n", &compact_count(f))]).to_string());
+                    }
+                    d.child(mono().text_size(px(11.5)).text_color(white(0.6)).child(format!("[ {} ]", parts.join(" · "))))
+                })
                 .when(has, |d| {
                     d.child(
                         div()
@@ -745,6 +856,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             .gap(px(8.0))
                             .child(play_pill("artist-play", t("common.play")).on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))))
                             .child(round_icon_button("artist-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+                            .child(follow_button("artist-follow", &name, tracks.first().cloned(), app, 36.0, cx))
                             .child({
                                 let nm = name.clone();
                                 round_icon_button("artist-more", "ellipsis-vertical", 36.0).on_mouse_down(
@@ -754,8 +866,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                                         this.open_artist_ctx(&nm, e.position, cx)
                                     }),
                                 )
-                            })
-                            .child(follow_button("artist-follow", &name, tracks.first().cloned(), app, 36.0, cx)),
+                            }),
                     )
                 })
                 .when(!has, |d| d.child(div().pt(px(4.0)).flex().child(follow_button("artist-follow", &name, None, app, 36.0, cx)))),
@@ -850,7 +961,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         .enumerate()
         .map(|(i, (title, list))| {
             let art = cover(app, &list[0], 160.0, 8.0, cx);
-            let n = list.len();
+            let label = app.album_label(&title, &name, list.len(), cx);
             let l = ListRef::Album { title: title.clone(), artist: name.clone(), tracks: list };
             let lm = l.clone();
             with_list_menu(div().id(("album", i)), lm, cx)
@@ -866,7 +977,7 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
                 .child(art)
                 .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
-                .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(format!("{:02} {}", n, t("list.songs_caps"))))
+                .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(label.to_uppercase()))
                 .into_any_element()
         })
         .collect();
@@ -901,7 +1012,18 @@ pub fn artist_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                     .flex_col()
                     .gap(px(12.0))
                     .child(section_title("disc-3", t("artist.albums")))
-                    .child(div().id("artist-albums").flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().children(album_cards)),
+                    .child({
+                        let h = crate::ui::widgets::handle_for("artist-albums");
+                        div()
+                            .id("artist-albums")
+                            .track_scroll(&h)
+                            .flex()
+                            .gap(px(4.0))
+                            .ml(px(-8.0))
+                            .overflow_x_scroll()
+                            .child(crate::ui::widgets::smooth_wheel(&h, true, cx))
+                            .children(album_cards)
+                    }),
             )
         });
     div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
@@ -948,6 +1070,9 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
     let mut lists: Vec<(ListRef, String)> = vec![(ListRef::Liked, t("list.kind.playlist").to_string())];
     if !app.library.recent.is_empty() {
         lists.push((ListRef::Recent, t("list.kind.playlist").to_string()));
+    }
+    if app.backend.as_ref().is_some_and(|b| !b.downloaded_tracks().is_empty()) {
+        lists.push((ListRef::Downloads, t("list.kind.playlist").to_string()));
     }
     for p in &app.library.playlists {
         lists.push((ListRef::User(p.id.clone()), t("list.kind.playlist").to_string()));
@@ -1059,6 +1184,8 @@ fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Gly
                     d.child(
                         div()
                             .id("ctx-sub")
+                            .track_scroll(&crate::ui::widgets::handle_for("ctx-sub"))
+                            .child(crate::ui::widgets::smooth_wheel(&crate::ui::widgets::handle_for("ctx-sub"), false, cx))
                             .absolute()
                             .top(px(-6.0))
                             .when(!flip, |d| d.left(px(236.0)))
@@ -1082,14 +1209,19 @@ fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Gly
 
 /// Destructive row (remove, hide, delete): turns red on hover.
 fn danger_item(id: ElementId, name: &str, label: SharedString, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
-    ctx_item(id, name, label, gpui::hsla(0.0, 0.75, 0.68, 0.9), true, cx)
-        .hover(|s| s.bg(gpui::hsla(0.0, 0.7, 0.5, 0.18)).text_color(gpui::hsla(0.0, 0.85, 0.75, 1.0)))
+    menu_row(id, name, label, gpui::hsla(0.0, 0.75, 0.68, 0.9), true, true, cx)
 }
 
 /// One menu row. `closes_sub`: hovering it closes the playlist flyout.
 fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_sub: bool, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    menu_row(id, name, label, color, closes_sub, false, cx)
+}
+
+/// A div takes only one hover style, so normal and red rows share this.
+fn menu_row(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_sub: bool, danger: bool, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
     div()
         .id(id)
+        .flex_none()
         .flex()
         .items_center()
         .gap(px(10.0))
@@ -1099,7 +1231,13 @@ fn ctx_item(id: ElementId, name: &str, label: SharedString, color: Hsla, closes_
         .cursor_pointer()
         .text_size(px(13.0))
         .text_color(white(0.88))
-        .hover(|s| s.bg(white(0.07)))
+        .hover(move |s| {
+            if danger {
+                s.bg(gpui::hsla(0.0, 0.7, 0.5, 0.18)).text_color(gpui::hsla(0.0, 0.85, 0.75, 1.0))
+            } else {
+                s.bg(white(0.07))
+            }
+        })
         .when(closes_sub, |d| {
             d.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && m.playlists) {
@@ -1294,6 +1432,26 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     }))
                     .into_any_element(),
             );
+            let s4 = songs.clone();
+            if songs.iter().all(|tr| app.is_downloaded(tr)) {
+                body.push(
+                    danger_item("lctx-undl".into(), "trash-2", t("ctx.remove_downloads"), cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_ctx_close();
+                            this.remove_downloads(s4.clone(), cx)
+                        }))
+                        .into_any_element(),
+                );
+            } else {
+                body.push(
+                    ctx_item("lctx-dl".into(), "download", t("ctx.download_all"), white(0.7), true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_ctx_close();
+                            this.download_tracks(s4.clone(), cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
             body.push(sep().into_any_element());
         }
         let l_open = l.clone();
@@ -1305,6 +1463,17 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 }))
                 .into_any_element(),
         );
+        if has {
+            let l_share = l.clone();
+            body.push(
+                ctx_item("lctx-share".into(), "link-2", t("ctx.share_list"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.share_list(&l_share, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         if has {
             body.push(add_pl_row(m.playlists, flip, sub, cx));
         }
@@ -1406,6 +1575,26 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 }))
                 .into_any_element(),
         );
+        let t_dl = tr.clone();
+        if app.is_downloaded(&tr) {
+            body.push(
+                danger_item("ctx-undl".into(), "trash-2", t("ctx.remove_download"), cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.remove_downloads(vec![t_dl.clone()], cx)
+                    }))
+                    .into_any_element(),
+            );
+        } else if !app.is_downloading(&tr) {
+            body.push(
+                ctx_item("ctx-dl".into(), "download", t("ctx.download"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.download_tracks(vec![t_dl.clone()], cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         body.push(sep().into_any_element());
         let liked = app.is_liked(&tr);
         let t4 = tr.clone();

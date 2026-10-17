@@ -36,9 +36,9 @@ impl RemoteSource {
         }
     }
 
-    /// Handled by the server's `/v1/import/spotify` (Last.fm is direct only).
+    /// All remote imports are handled by the server's `/v1/import/spotify`.
     pub fn server_capable(&self) -> bool {
-        !matches!(self, Self::LastFmLoved(_))
+        true
     }
 }
 
@@ -115,16 +115,10 @@ pub async fn fetch_list(
         crate::ImportInput::Url(url) => {
             let url = url.trim().to_string();
             let src = parse_url(&url).ok_or_else(|| anyhow!("not a supported playlist link: {url}"))?;
-            if src.server_capable() {
-                if let Some(server) = server {
-                    match server.import(&url).await {
-                        Ok(r) => {
-                            let label = format!("{}/playlist", format!("{:?}", r.source).to_lowercase());
-                            return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url)));
-                        }
-                        Err(e) => tracing::warn!("server import failed, going direct: {e}"),
-                    }
-                }
+            if let Some(server) = server {
+                let r = server.import(&url).await?;
+                let label = src.label().to_string();
+                return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url)));
             }
             let list = fetch_direct(&src, providers).await?;
             Ok((list, Some(url)))

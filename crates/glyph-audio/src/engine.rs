@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_millis(16);
+/// Pause / resume fade of native playback (no hard cut).
+const PAUSE_FADE: Duration = Duration::from_millis(220);
 const NEAR_END: Duration = Duration::from_secs(10);
 /// A `load()` of the track that just started gaplessly is the UI reacting to
 /// our `Ended`; ignore it for this long.
@@ -34,6 +36,26 @@ pub fn fade_gains(k: f32) -> (f32, f32) {
     let k = k.clamp(0.0, 1.0);
     let a = k * std::f32::consts::FRAC_PI_2;
     (a.cos(), a.sin())
+}
+
+fn loud_key(t: &Track) -> String {
+    format!("{:?}:{}", t.source, t.id)
+}
+
+/// Volume factor for embedded players around song changes: they cannot
+/// overlap (one official player, audio never pulled), so they fade out over
+/// the last `cf` and fade in over the first half of it.
+pub fn embed_fade(pos: Duration, duration: Option<Duration>, cf: Duration) -> f32 {
+    if cf.is_zero() {
+        return 1.0;
+    }
+    let cf_s = cf.as_secs_f32();
+    let fade_in = (pos.as_secs_f32() / (cf_s * 0.5).max(0.5)).clamp(0.0, 1.0);
+    let fade_out = duration
+        .map(|d| (d.saturating_sub(pos).as_secs_f32() / cf_s).clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let k = fade_in.min(fade_out);
+    (k * std::f32::consts::FRAC_PI_2).sin()
 }
 
 fn same_track(a: &Track, b: &Track) -> bool {
@@ -102,6 +124,10 @@ pub(crate) struct Engine {
     rx: Receiver<Cmd>,
     tx: Sender<Cmd>,
     device: Option<rodio::MixerDeviceSink>,
+    /// Chosen output (None = system default) and the name actually opened.
+    out_device: Option<String>,
+    opened_device: Option<String>,
+    device_checked: Instant,
     player: Option<rodio::Player>,
     cur: Option<Slot>,
     next: Option<Slot>,
@@ -124,6 +150,15 @@ pub(crate) struct Engine {
     next_player: Option<rodio::Player>,
     /// The previous track while it fades out: (player, slot, fade start).
     fading: Option<(rodio::Player, Slot, Instant)>,
+    /// Measured loudness per song this session (LUFS), so replays start
+    /// at the right gain.
+    loud_cache: std::collections::HashMap<String, f32>,
+    /// Embed volume factor of the current fade (1 = none).
+    embed_gain: f32,
+    /// Native volume factor of the pause / resume fade (1 = none).
+    pause_gain: f32,
+    /// Running pause fade: (start, gain at start, fading in).
+    pause_fade: Option<(Instant, f32, bool)>,
 }
 
 impl Engine {
@@ -134,6 +169,9 @@ impl Engine {
             rx,
             tx,
             device: None,
+            out_device: None,
+            opened_device: None,
+            device_checked: Instant::now(),
             player: None,
             cur: None,
             next: None,
@@ -153,6 +191,10 @@ impl Engine {
             crossfade: Duration::ZERO,
             next_player: None,
             fading: None,
+            loud_cache: std::collections::HashMap::new(),
+            embed_gain: 1.0,
+            pause_gain: 1.0,
+            pause_fade: None,
         }
     }
 
@@ -231,6 +273,12 @@ impl Engine {
             Cmd::Seek(p) => self.seek(p),
             Cmd::Volume(v) => self.set_volume(v),
             Cmd::Crossfade(d) => self.crossfade = d,
+            Cmd::OutputDevice(name) => {
+                if self.out_device != name {
+                    self.out_device = name;
+                    self.reopen_device();
+                }
+            }
             Cmd::MiniOptions(o) => {
                 self.mini_opts = o;
                 if let Some(e) = self.embed.as_mut() {
@@ -268,6 +316,9 @@ impl Engine {
                 if let Some(cur) = self.cur.take() {
                     cur.ctl.stop.store(true, Ordering::SeqCst);
                 }
+                self.pause_fade = None;
+                self.pause_gain = 1.0;
+                self.apply_native_volume();
                 if let Some(p) = &self.player {
                     p.skip_one();
                     p.play();
@@ -279,6 +330,8 @@ impl Engine {
             }
         }
         self.stop_all();
+        self.pause_fade = None;
+        self.pause_gain = 1.0;
         self.want_play = true;
         self.pending_seek = None;
         self.last_load = Some((track.clone(), source.clone()));
@@ -300,11 +353,67 @@ impl Engine {
         native::spawn_decoder(id, url, mime, self.tx.clone());
     }
 
+    fn find_device(name: &str) -> Option<rodio::cpal::Device> {
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        rodio::cpal::default_host()
+            .output_devices()
+            .ok()?
+            .find(|d| d.description().ok().is_some_and(|x| x.name() == name))
+    }
+
+    fn default_device_name() -> Option<String> {
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        rodio::cpal::default_host().default_output_device()?.description().ok().map(|x| x.name().to_string())
+    }
+
+    /// Moves playback to the chosen output: the current song restarts there
+    /// at the same position.
+    fn reopen_device(&mut self) {
+        if self.device.is_none() {
+            return;
+        }
+        let resume = self.last_load.clone().filter(|_| self.backend() == Some(BackendKind::Native));
+        let pos = self.shared.state.lock().unwrap().position;
+        let was_playing = self.want_play;
+        self.stop_native();
+        self.device = None;
+        self.opened_device = None;
+        if let Some((t, s)) = resume {
+            self.load(t, s);
+            self.pending_seek = Some(pos);
+            if !was_playing {
+                self.want_play = false;
+            }
+        }
+    }
+
+    /// Following the system default: switch when the default output changes
+    /// (headphones plugged in, another device chosen in Windows).
+    fn check_default_device(&mut self) {
+        if self.out_device.is_some() || self.device.is_none() || self.device_checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.device_checked = Instant::now();
+        let now = Self::default_device_name();
+        if now.is_some() && now != self.opened_device {
+            self.reopen_device();
+        }
+    }
+
     fn ensure_device(&mut self) -> bool {
         if self.device.is_some() {
             return true;
         }
-        match rodio::DeviceSinkBuilder::open_default_sink() {
+        let chosen = self.out_device.as_deref().and_then(Self::find_device);
+        let opened = match chosen {
+            Some(dev) => rodio::DeviceSinkBuilder::from_device(dev).and_then(|b| b.open_sink_or_fallback()),
+            None => rodio::DeviceSinkBuilder::open_default_sink(),
+        };
+        self.opened_device = match &self.out_device {
+            Some(n) if Self::find_device(n).is_some() => Some(n.clone()),
+            _ => Self::default_device_name(),
+        };
+        match opened {
             Ok(mut d) => {
                 d.log_on_drop(false);
                 self.device = Some(d);
@@ -320,7 +429,7 @@ impl Engine {
     fn new_player(&mut self) -> Option<()> {
         let dev = self.device.as_ref()?;
         let p = rodio::Player::connect_new(dev.mixer());
-        p.set_volume(self.volume);
+        p.set_volume(self.out_volume());
         self.player = Some(p);
         Some(())
     }
@@ -431,11 +540,15 @@ impl Engine {
         let duration = o
             .duration
             .or_else(|| track.duration_ms.map(Duration::from_millis));
+        let shared = Arc::new(TrackShared::default());
+        if let Some(l) = self.loud_cache.get(&loud_key(&track)) {
+            shared.loudness.set_known(*l);
+        }
         Slot {
             id,
             track,
             is_preview,
-            shared: Arc::new(TrackShared::default()),
+            shared,
             ctl: o.ctl.clone(),
             rate: o.rate.get(),
             duration,
@@ -515,6 +628,10 @@ impl Engine {
                     return;
                 }
                 self.want_play = true;
+                if self.pause_gain < 1.0 || self.pause_fade.is_some() {
+                    self.pause_fade = Some((Instant::now(), self.pause_gain, true));
+                    self.apply_native_volume();
+                }
                 if let Some(p) = &self.player {
                     p.play();
                 }
@@ -531,7 +648,20 @@ impl Engine {
     }
 
     fn pause(&mut self) {
+        let was_playing = self.want_play;
         self.want_play = false;
+        let audible = was_playing
+            && self.backend() == Some(BackendKind::Native)
+            && self.cur.as_ref().is_some_and(|c| c.shared.started.load(Ordering::Relaxed));
+        if audible {
+            // Fade out first; `step_pause_fade` pauses the output when silent.
+            self.pause_fade = Some((Instant::now(), self.pause_gain, false));
+            self.set_status(Status::Paused);
+            return;
+        }
+        self.pause_fade = None;
+        self.pause_gain = 0.0;
+        self.apply_native_volume();
         if let Some((p, _, _)) = &self.fading {
             p.pause();
         }
@@ -595,17 +725,53 @@ impl Engine {
         }
     }
 
+    /// Volume for the native players: user volume times the pause fade.
+    fn out_volume(&self) -> f32 {
+        self.volume * self.pause_gain
+    }
+
+    fn apply_native_volume(&self) {
+        if self.fading.is_none() {
+            if let Some(p) = &self.player {
+                p.set_volume(self.out_volume());
+            }
+        }
+    }
+
+    /// Advances the pause / resume fade; pauses the output at the end of a
+    /// fade-out.
+    fn step_pause_fade(&mut self) {
+        let Some((at, from, fade_in)) = self.pause_fade else { return };
+        let k = (at.elapsed().as_secs_f32() / PAUSE_FADE.as_secs_f32()).min(1.0);
+        let to = if fade_in { 1.0 } else { 0.0 };
+        // Smoothstep: no click at either end.
+        let e = k * k * (3.0 - 2.0 * k);
+        self.pause_gain = from + (to - from) * e;
+        self.apply_native_volume();
+        if k >= 1.0 {
+            self.pause_fade = None;
+            if !fade_in && !self.want_play {
+                if let Some(p) = &self.player {
+                    p.pause();
+                }
+                if let Some((p, _, _)) = &self.fading {
+                    p.pause();
+                }
+            }
+        }
+    }
+
     fn set_volume(&mut self, v: f32) {
         let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 };
         self.volume = v;
         self.shared.state.lock().unwrap().volume = v;
         if let Some(p) = &self.player {
             if self.fading.is_none() {
-                p.set_volume(v);
+                p.set_volume(self.out_volume());
             }
         }
         if let Some(e) = self.embed.as_mut() {
-            e.set_volume(v);
+            e.set_volume(v * self.embed_gain);
         }
     }
 
@@ -641,7 +807,9 @@ impl Engine {
         let session = self.embed_session;
         self.set_track_state(&track, BackendKind::Embed, false, None);
         self.set_status(Status::Loading);
-        if let Err(msg) = self.embed.as_mut().unwrap().load(provider, &embed_id, self.volume, session) {
+        // With crossfade on, the song fades in (see `embed_fade`).
+        self.embed_gain = if self.crossfade.is_zero() { 1.0 } else { 0.0 };
+        if let Err(msg) = self.embed.as_mut().unwrap().load(provider, &embed_id, self.volume * self.embed_gain, session) {
             self.fail(msg);
         }
     }
@@ -696,6 +864,7 @@ impl Engine {
     // ---- periodic
 
     fn tick(&mut self) {
+        self.check_default_device();
         let mut analysed = false;
         if let Some(cur) = self.cur.as_mut() {
             let finished = cur.shared.finished.load(Ordering::SeqCst);
@@ -751,6 +920,30 @@ impl Engine {
             }
         }
         self.step_fade();
+        self.step_pause_fade();
+        // Remember what was measured (replays start at the right gain).
+        if let Some(cur) = &self.cur {
+            if let Some(l) = cur.shared.loudness.measured() {
+                self.loud_cache.insert(loud_key(&cur.track), l);
+            }
+        }
+        // Embedded players: volume fades at song changes.
+        if self.backend() == Some(BackendKind::Embed) {
+            let (pos, dur) = {
+                let st = self.shared.state.lock().unwrap();
+                (st.position, st.duration)
+            };
+            let g = embed_fade(pos, dur, self.crossfade);
+            if (g - self.embed_gain).abs() > 0.02 || (g >= 1.0 && self.embed_gain < 1.0) {
+                self.embed_gain = g;
+                let v = self.volume * g;
+                if let Some(e) = self.embed.as_mut() {
+                    e.set_volume(v);
+                }
+            }
+        } else {
+            self.embed_gain = 1.0;
+        }
         if !analysed {
             let bands = self.analyzer.decay();
             *self.shared.spectrum.lock().unwrap() = bands;
@@ -779,9 +972,9 @@ impl Engine {
         let Some((old_player, _, at)) = &self.fading else { return };
         let k = at.elapsed().as_secs_f32() / self.crossfade.as_secs_f32().max(0.001);
         let (g_old, g_new) = fade_gains(k);
-        old_player.set_volume(self.volume * g_old);
+        old_player.set_volume(self.out_volume() * g_old);
         if let Some(p) = &self.player {
-            p.set_volume(self.volume * g_new);
+            p.set_volume(self.out_volume() * g_new);
         }
         if k >= 1.0 {
             self.finish_fade();
@@ -794,7 +987,7 @@ impl Engine {
             old.ctl.stop.store(true, Ordering::SeqCst);
             old_player.stop();
             if let Some(p) = &self.player {
-                p.set_volume(self.volume);
+                p.set_volume(self.out_volume());
             }
         }
     }

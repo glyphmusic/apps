@@ -32,12 +32,16 @@ struct DTrack {
     artist: Option<DArtist>,
     #[serde(default)]
     album: Option<DAlbum>,
+    #[serde(default)]
+    explicit_lyrics: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DArtist {
     #[serde(default)]
     name: String,
+    #[serde(default, deserialize_with = "de_opt_flex_string")]
+    id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +80,7 @@ fn convert(t: DTrack) -> Option<Track> {
         duration_ms: t.duration.and_then(secs_to_ms),
         isrc: t.isrc.filter(|s| !s.is_empty()),
         external_ids: Default::default(),
+        explicit: t.explicit_lyrics == Some(true),
     })
 }
 
@@ -107,6 +112,63 @@ impl Deezer {
         let v: serde_json::Value = send_json(self.http.get(url).query(query)).await?;
         check_error(&v)?;
         Ok(v)
+    }
+
+    /// Songs like `track` without any key: top songs of the artists Deezer
+    /// lists as related, interleaved (one per artist per round).
+    pub async fn related_tracks(&self, track: &Track) -> Result<Vec<Track>> {
+        // The artist's Deezer id: from the song itself or a search.
+        let artist_id = match id_at(ProviderId::Deezer, track) {
+            Some(id) => self.fetch_track(id).await.ok().and_then(|t| t.artist.and_then(|a| a.id)),
+            None => None,
+        };
+        let artist_id = match artist_id {
+            Some(a) => a,
+            None => {
+                let q = format!("{} {}", track.artist, track.title);
+                let v = self.get(&format!("{API}/search"), &[("q", q.trim()), ("limit", "5")]).await?;
+                let l: DList = serde_json::from_value(v)?;
+                let want = crate::dedupe::normalize_artist(&track.artist);
+                l.data
+                    .into_iter()
+                    .filter_map(|t| t.artist)
+                    .find(|a| crate::dedupe::normalize_artist(&a.name) == want)
+                    .and_then(|a| a.id)
+                    .ok_or(ProviderError::NotFound)?
+            }
+        };
+        #[derive(Deserialize)]
+        struct Related {
+            #[serde(default)]
+            data: Vec<DArtist>,
+        }
+        let v = self.get(&format!("{API}/artist/{artist_id}/related"), &[("limit", "8")]).await?;
+        let rel: Related = serde_json::from_value(v)?;
+        let mut per_artist: Vec<Vec<Track>> = Vec::new();
+        for a in rel.data.into_iter().filter_map(|a| a.id).take(6) {
+            if let Ok(v) = self.get(&format!("{API}/artist/{a}/top"), &[("limit", "3")]).await {
+                if let Ok(l) = serde_json::from_value::<DList>(v) {
+                    per_artist.push(l.data.into_iter().filter_map(convert).collect());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for round in 0..3 {
+            for list in &per_artist {
+                if let Some(t) = list.get(round) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Popular right now (Deezer's public chart).
+    pub async fn chart(&self, limit: usize) -> Result<Vec<Track>> {
+        let n = limit.clamp(1, 100).to_string();
+        let v = self.get(&format!("{API}/chart/0/tracks"), &[("limit", n.as_str())]).await?;
+        let l: DList = serde_json::from_value(v)?;
+        Ok(l.data.into_iter().filter_map(convert).collect())
     }
 
     async fn fetch_track(&self, id: &str) -> Result<DTrack> {

@@ -12,6 +12,7 @@ use crate::http::AudioSource;
 use crate::Cmd;
 use flume::{Receiver, Sender, TrySendError};
 use rodio::{ChannelCount, SampleRate, Source};
+use std::io::{Read, Seek, SeekFrom};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,8 +20,8 @@ use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymError;
-use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
@@ -63,6 +64,7 @@ pub struct TrackShared {
     pub pos_frames: AtomicU64,
     pub started: AtomicBool,
     pub finished: AtomicBool,
+    pub loudness: crate::loudness::TrackLoudness,
 }
 
 /// Rolling mono tap for the FFT.
@@ -77,6 +79,46 @@ pub struct Opened {
     pub channels: ChannelCount,
     pub duration: Option<Duration>,
     pub ctl: Arc<DecodeCtl>,
+}
+
+/// Byte length of a leading ID3v2 header (magic + version + flags + size).
+const ID3V2_HEADER: u64 = 10;
+
+/// Offset of a *degenerate* ID3v2 header, or `None`.
+///
+/// Deezer's official 30 s previews (and a few other encoders) open with an
+/// ID3v2.4 header whose declared tag size is 0. symphonia's ID3v2 reader
+/// treats that empty tag as broken and aborts the whole probe with
+/// "out of bounds" before it ever reaches the MPEG frames, so nothing plays.
+/// The announced tag carries no frames, so it is safe to step over it.
+///
+/// A real ID3v2 tag (size > 0) is returned as `None` and read normally.
+///
+/// Leaves the stream where the probe has to start: after the empty tag, or
+/// back at 0. MPEG survives a wrong start (frame sync), MP4 does not: its
+/// `ftyp` box sits at byte 4 and the probe ends with "end of stream".
+fn degenerate_id3v2_offset(src: &mut AudioSource) -> Option<u64> {
+    if !src.is_seekable() {
+        return None;
+    }
+    let off = read_degenerate_id3v2(src);
+    src.seek(SeekFrom::Start(off.unwrap_or(0))).ok()?;
+    off
+}
+
+fn read_degenerate_id3v2(src: &mut AudioSource) -> Option<u64> {
+    src.seek(SeekFrom::Start(0)).ok()?;
+    let mut h = [0u8; ID3V2_HEADER as usize];
+    src.read_exact(&mut h).ok()?;
+    if &h[0..3] != b"ID3" {
+        return None;
+    }
+    // Size is synchsafe: 7 bits per byte, high bit always zero.
+    let size = u32::from(h[6] & 0x7f) << 21
+        | u32::from(h[7] & 0x7f) << 14
+        | u32::from(h[8] & 0x7f) << 7
+        | u32::from(h[9] & 0x7f);
+    (size == 0).then_some(ID3V2_HEADER)
 }
 
 /// Decide a symphonia probe hint from mime/url.
@@ -112,14 +154,13 @@ pub fn spawn_decoder(id: u64, url: String, mime: Option<String>, engine: Sender<
     }
 }
 
-fn decode_thread(
-    id: u64,
-    url: &str,
-    mime: Option<&str>,
-    engine: &Sender<Cmd>,
-    ctl: Arc<DecodeCtl>,
-) -> Result<(), String> {
-    let src = AudioSource::open(url).map_err(|e| format!("cannot open stream: {e}"))?;
+/// Opens `url` and probes its container.
+fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
+    let mut src = AudioSource::open(url).map_err(|e| format!("cannot open stream: {e} [url={url}]"))?;
+    // Step over an empty ID3v2 tag (Deezer previews) that symphonia cannot parse.
+    if let Some(off) = degenerate_id3v2_offset(&mut src) {
+        tracing::debug!("skipping degenerate ID3v2 header ({off} bytes) in {url}");
+    }
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
     let probed = symphonia::default::get_probe()
         .format(
@@ -129,7 +170,17 @@ fn decode_thread(
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("unsupported audio format: {e}"))?;
-    let mut format = probed.format;
+    Ok(probed.format)
+}
+
+fn decode_thread(
+    id: u64,
+    url: &str,
+    mime: Option<&str>,
+    engine: &Sender<Cmd>,
+    ctl: Arc<DecodeCtl>,
+) -> Result<(), String> {
+    let mut format = open_format(url, mime)?;
     let track = format
         .tracks()
         .iter()
@@ -273,10 +324,14 @@ pub struct TrackSource {
     tap_acc: f32,
     tap_n: usize,
     counter: u32,
+    level: crate::loudness::Leveller,
+    eq: crate::eq::Equalizer,
 }
 
 impl TrackSource {
     pub fn new(opened: Opened, shared: Arc<TrackShared>, tap: Arc<Tap>) -> Self {
+        let level = crate::loudness::Leveller::new(opened.rate.get(), opened.channels.get());
+        let eq = crate::eq::Equalizer::new(opened.rate.get(), opened.channels.get());
         Self {
             rx: opened.rx,
             cur: Vec::new(),
@@ -292,6 +347,8 @@ impl TrackSource {
             tap_acc: 0.0,
             tap_n: 0,
             counter: 0,
+            level,
+            eq,
         }
     }
 
@@ -358,7 +415,8 @@ impl Iterator for TrackSource {
         if self.counter % 1024 == 0 {
             self.publish_pos();
         }
-        Some(s)
+        let s = self.eq.process(s);
+        Some(self.level.process(s, &self.shared.loudness))
     }
 }
 
@@ -381,11 +439,82 @@ impl Source for TrackSource {
 mod tests {
     use super::*;
 
+    /// Decodes a whole local file the way `decode_thread` opens it:
+    /// `GLYPH_TEST_AUDIO=<file> cargo test -p glyph-audio decodes_file -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decodes_file_to_the_end() {
+        let path = std::env::var("GLYPH_TEST_AUDIO").expect("GLYPH_TEST_AUDIO");
+        let mut format = open_format(&path, Some("audio/mp4")).unwrap();
+        let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).unwrap().clone();
+        let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).unwrap();
+        let rate = track.codec_params.sample_rate.unwrap() as f64;
+        let mut frames = 0u64;
+        while let Ok(packet) = format.next_packet() {
+            if packet.track_id() == track.id {
+                frames += decoder.decode(&packet).unwrap().frames() as u64;
+            }
+        }
+        println!("decoded {:.1} s at {rate} Hz", frames as f64 / rate);
+        assert!(frames as f64 / rate > 60.0);
+    }
+
+    #[test]
+    fn id3_check_leaves_stream_at_probe_start() {
+        let dir = std::env::temp_dir().join(format!("glyph-id3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            AudioSource::open(p.to_str().unwrap()).unwrap()
+        };
+        // MP4 (YouTube m4a): no tag, must be back at 0 for the `ftyp` box.
+        let mut mp4 = open("a.m4a", b"\0\0\0\x18ftypdash\0\0\0\0iso6mp41");
+        assert_eq!(degenerate_id3v2_offset(&mut mp4), None);
+        assert_eq!(mp4.stream_position().unwrap(), 0);
+        // Deezer preview: empty ID3v2 tag is skipped.
+        let mut mp3 = open("b.mp3", b"ID3\x04\0\0\0\0\0\0\xff\xfb\x90\x64");
+        assert_eq!(degenerate_id3v2_offset(&mut mp3), Some(10));
+        assert_eq!(mp3.stream_position().unwrap(), 10);
+        // Real tag: read by symphonia from the start.
+        let mut tagged = open("c.mp3", b"ID3\x04\0\0\0\0\0\x05TIT2\0\xff\xfb");
+        assert_eq!(degenerate_id3v2_offset(&mut tagged), None);
+        assert_eq!(tagged.stream_position().unwrap(), 0);
+        drop((mp4, mp3, tagged));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hint_uses_extension_ignoring_query() {
         let h = hint_for("https://x.test/a/b/song.MP3?sig=abc.def", None);
         let _ = h; // Hint has no getters; just make sure it does not panic.
         let _ = hint_for("https://x.test/stream", Some("audio/mpeg"));
+    }
+
+    fn file_source(bytes: Vec<u8>) -> AudioSource {
+        let p = std::env::temp_dir().join(format!("glyph-id3-{}.bin", std::process::id()));
+        std::fs::write(&p, &bytes).unwrap();
+        AudioSource::File(std::fs::File::open(&p).unwrap())
+    }
+
+    /// Deezer's 30 s previews open with an ID3v2.4 header declaring tag size 0.
+    /// symphonia aborts the probe on it, so we must step over it.
+    #[test]
+    fn degenerate_id3v2_header_is_skipped() {
+        // ID3, v2.4, no flags, synchsafe size 0, then an MPEG frame sync.
+        let mut deezer = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        deezer.extend_from_slice(&[0xFF, 0xFB, 0x92, 0x64]);
+        assert_eq!(degenerate_id3v2_offset(&mut file_source(deezer.clone())), Some(ID3V2_HEADER));
+
+        // A real tag with frames must be left alone.
+        let mut real = b"ID3\x04\x00\x00\x00\x00\x00\x20".to_vec();
+        real.extend_from_slice(&[0u8; 32]);
+        real.extend_from_slice(&[0xFF, 0xFB, 0x92, 0x64]);
+        assert_eq!(degenerate_id3v2_offset(&mut file_source(real)), None);
+
+        // Raw MPEG frames, no tag at all.
+        let raw = vec![0xFF, 0xFB, 0x92, 0x64, 0x00, 0x00];
+        assert_eq!(degenerate_id3v2_offset(&mut file_source(raw)), None);
     }
 
     #[test]
@@ -405,6 +534,8 @@ mod tests {
         };
         let shared = Arc::new(TrackShared::default());
         let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
+        src.level = crate::loudness::Leveller::bypass();
+        src.eq = crate::eq::Equalizer::bypass();
         let got: Vec<f32> = src.by_ref().collect();
         assert_eq!(got, vec![0.5, 0.25, 0.125, 0.0625]);
         assert!(shared.finished.load(Ordering::SeqCst));

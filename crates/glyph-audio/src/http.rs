@@ -289,6 +289,22 @@ mod tests {
         assert_eq!(range_header(950, 100, Some(1000)), "bytes=950-999");
     }
 
+    /// Live check against the real Deezer preview CDN (network test).
+    #[test]
+    #[ignore = "needs network"]
+    fn live_deezer_preview() {
+        use symphonia::core::io::MediaSource;
+        let api = reqwest::blocking::get("https://api.deezer.com/search?q=daft+punk&limit=1").unwrap();
+        let v: serde_json::Value = api.json().unwrap();
+        let url = v["data"][0]["preview"].as_str().unwrap().to_string();
+        println!("url = {url}");
+        let mut src = AudioSource::open(&url).expect("open failed");
+        println!("seekable={} byte_len={:?}", src.is_seekable(), src.byte_len());
+        let mut b = [0u8; 16];
+        src.read_exact(&mut b).unwrap();
+        println!("first 16 bytes = {:02X?}", b);
+    }
+
     /// Tiny Range-capable server; verifies seeking + chunk refetch.
     #[test]
     fn ranged_read_and_seek() {

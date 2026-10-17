@@ -10,6 +10,8 @@ mod i18n;
 mod instance;
 #[cfg(windows)]
 mod jumplist;
+#[cfg(windows)]
+mod thumbbar;
 mod guard;
 mod theme;
 mod ui;

@@ -156,6 +156,7 @@ impl MusicProvider for LrcLib {
                 isrc: None,
                 permalink: None,
                 external_ids: Default::default(),
+                explicit: false,
             })
             .collect())
     }
@@ -173,6 +174,7 @@ impl MusicProvider for LrcLib {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
+            explicit: false,
         })
     }
 

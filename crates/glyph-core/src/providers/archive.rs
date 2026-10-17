@@ -1,6 +1,7 @@
 //! Internet Archive: Advanced Search API, native playback, restricted to
 //! audio items in freely licensed collections (Creative Commons / public domain).
 
+use crate::config::AudioQuality;
 use crate::provider::*;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -70,6 +71,7 @@ fn doc_to_track(d: Doc) -> Track {
         duration_ms: None,
         isrc: None,
         external_ids: Default::default(),
+        explicit: false,
     }
 }
 
@@ -117,6 +119,26 @@ fn pick_file(files: &[MetaFile]) -> Option<&MetaFile> {
         }
     };
     files.iter().filter_map(|f| rank(f).map(|r| (r, f))).min_by_key(|(r, _)| *r).map(|(_, f)| f)
+}
+
+/// The download file for `q`: the played file's FLAC original (High) or its
+/// 64 kbps MP3 derivative (Low), else the played file itself. Siblings share
+/// the name stem ("01 Song.flac", "01 Song.mp3", "01 Song_64kb.mp3").
+fn pick_download_file(files: &[MetaFile], q: AudioQuality) -> Option<&MetaFile> {
+    let played = pick_file(files)?;
+    let stem = |n: &str| -> String {
+        let base = n.rsplit_once('.').map_or(n, |(b, _)| b);
+        base.trim_end_matches("_64kb").trim_end_matches("_vbr").to_lowercase()
+    };
+    let want = stem(&played.name);
+    let fmt_has = |f: &MetaFile, s: &str| f.format.as_deref().is_some_and(|x| x.to_lowercase().contains(s));
+    let sibling = |s: &str| files.iter().find(|f| fmt_has(f, s) && stem(&f.name) == want);
+    let better = match q {
+        AudioQuality::High => sibling("flac"),
+        AudioQuality::Low => sibling("64kbps"),
+        AudioQuality::Standard => None,
+    };
+    Some(better.unwrap_or(played))
 }
 
 fn encode_path(name: &str) -> String {
@@ -200,6 +222,16 @@ impl MusicProvider for Archive {
             mime: Some(mime.into()),
         })
     }
+
+    /// Search is limited to Creative-Commons / public-domain items, which may
+    /// be saved: the streamed file, or its FLAC / 64 kbps sibling depending
+    /// on the download quality.
+    async fn download_url(&self, track: &Track) -> Result<Option<String>> {
+        let Some(id) = id_at(ProviderId::Archive, track) else { return Ok(None) };
+        let m = self.metadata(id).await?;
+        let file = pick_download_file(&m.files, crate::downloads::job_quality()).ok_or(ProviderError::NotFound)?;
+        Ok(Some(format!("https://archive.org/download/{id}/{}", encode_path(&file.name))))
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +261,21 @@ mod tests {
     }
 
     #[test]
+    fn download_quality_picks_siblings() {
+        let f = |name: &str, format: &str| MetaFile { name: name.into(), format: Some(format.into()), length: Some(10.0) };
+        let files = vec![
+            f("02 Other.flac", "Flac"),
+            f("01 Song.flac", "Flac"),
+            f("01 Song.mp3", "VBR MP3"),
+            f("01 Song_64kb.mp3", "64Kbps MP3"),
+            f("02 Other.mp3", "VBR MP3"),
+        ];
+        assert_eq!(pick_download_file(&files, AudioQuality::Standard).unwrap().name, "01 Song.mp3");
+        assert_eq!(pick_download_file(&files, AudioQuality::High).unwrap().name, "01 Song.flac");
+        assert_eq!(pick_download_file(&files, AudioQuality::Low).unwrap().name, "01 Song_64kb.mp3");
+    }
+
+    #[test]
     fn picks_mp3_and_encodes_path() {
         let files = vec![
             MetaFile { name: "a.flac".into(), format: Some("Flac".into()), length: None },
@@ -236,6 +283,8 @@ mod tests {
             MetaFile { name: "d.mp3".into(), format: Some("VBR MP3".into()), length: Some(10.0) },
         ];
         assert_eq!(pick_file(&files).unwrap().name, "d.mp3");
+        // No FLAC sibling of the played file: stays on it.
+        assert_eq!(pick_download_file(&files, AudioQuality::High).unwrap().name, "d.mp3");
         assert_eq!(encode_path("sub dir/b c.mp3"), "sub%20dir/b%20c.mp3");
         assert!(is_free_license("https://creativecommons.org/licenses/by/4.0/"));
         assert!(!is_free_license("http://example.com/all-rights"));

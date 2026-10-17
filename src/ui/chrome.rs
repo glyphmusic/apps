@@ -247,6 +247,8 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
         gpui::deferred(
             div()
                 .id("search-dropdown")
+                .track_scroll(&crate::ui::widgets::handle_for("search-dropdown"))
+                .child(crate::ui::widgets::smooth_wheel(&crate::ui::widgets::handle_for("search-dropdown"), false, cx))
                 .occlude()
                 .absolute()
                 .top(px(38.0))

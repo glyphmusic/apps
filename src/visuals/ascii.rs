@@ -193,6 +193,65 @@ pub fn raster(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaIm
     image::RgbaImage::from_raw(w, h, buf)
 }
 
+/// A cover as coloured ASCII in a square image of `size` px (black ground),
+/// drawn with the background's 5×7 font: rendered once, then shown as a
+/// picture. (As text, tiny glyphs re-rasterised at every scroll position
+/// and shimmered, and every cover cost dozens of text runs per frame.)
+/// Returns BGRA for `RenderImage`.
+pub fn cover_raster(path: &Path, size: u32) -> Option<image::RgbaImage> {
+    use super::glow::FONT;
+    const CW: u32 = 6;
+    const CH: u32 = 8;
+    let size = size.max(16);
+    // About one character per 4 px, like the text version; the grid is drawn
+    // at its natural pixel size and then scaled to fit.
+    let cols = (size / 4).clamp(10, 48);
+    let rows = (cols * CW / CH).max(6);
+    let img = image::open(path).ok()?.to_rgb8();
+    let (iw, ih) = (img.width(), img.height());
+    let side = iw.min(ih);
+    let cropped = image::imageops::crop_imm(&img, (iw - side) / 2, (ih - side) / 2, side, side).to_image();
+    let small = image::imageops::resize(&cropped, cols, rows, image::imageops::FilterType::Triangle);
+    let lumas: Vec<f32> = small
+        .pixels()
+        .map(|p| Rgb(p.0[0] as f32 / 255.0, p.0[1] as f32 / 255.0, p.0[2] as f32 / 255.0).luma())
+        .collect();
+    let lo = lumas.iter().cloned().fold(1.0f32, f32::min);
+    let hi = lumas.iter().cloned().fold(0.0f32, f32::max);
+    let span = (hi - lo).max(0.08);
+    let (gw, gh) = (cols * CW, rows * CH);
+    // RGB on black, then scaled to the requested size.
+    let mut grid = image::RgbImage::new(gw, gh);
+    let n = RAMP.len();
+    for r in 0..rows {
+        for c in 0..cols {
+            let p = small.get_pixel(c, r).0;
+            let col = Rgb(p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0);
+            let l = ((lumas[(r * cols + c) as usize] - lo) / span).clamp(0.0, 1.0);
+            let idx = (l.powf(0.9) * (n - 1) as f32).round() as usize;
+            if idx == 0 {
+                continue;
+            }
+            let mx = col.0.max(col.1).max(col.2).max(0.001);
+            let shown = col.scale((0.35 + 0.65 * mx).min(1.0) / mx);
+            let px = image::Rgb([(shown.0 * 255.0) as u8, (shown.1 * 255.0) as u8, (shown.2 * 255.0) as u8]);
+            for (ry, bits) in FONT[idx].iter().enumerate() {
+                for rx in 0..5u32 {
+                    if bits & (0b10000 >> rx) != 0 {
+                        grid.put_pixel(c * CW + rx, r * CH + ry as u32, px);
+                    }
+                }
+            }
+        }
+    }
+    let out = image::imageops::resize(&grid, size, size, image::imageops::FilterType::Triangle);
+    let mut buf = Vec::with_capacity((size * size * 4) as usize);
+    for p in out.pixels() {
+        buf.extend_from_slice(&[p.0[2], p.0[1], p.0[0], 255]);
+    }
+    image::RgbaImage::from_raw(size, size, buf)
+}
+
 /// The photo itself (no ASCII), cropped like `object-fit: cover`, slightly
 /// dimmed and faded out over the lower part. Straight-alpha BGRA.
 pub fn photo_fade(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::RgbaImage> {

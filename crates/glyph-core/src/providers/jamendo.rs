@@ -39,6 +39,10 @@ struct JTrack {
     audio: Option<String>,
     #[serde(default)]
     shareurl: Option<String>,
+    #[serde(default)]
+    audiodownload: Option<String>,
+    #[serde(default)]
+    audiodownload_allowed: Option<bool>,
 }
 
 fn convert(t: &JTrack) -> Track {
@@ -53,7 +57,12 @@ fn convert(t: &JTrack) -> Track {
         isrc: None,
         permalink: t.shareurl.clone(),
         external_ids: Default::default(),
+        explicit: false,
     }
+}
+
+fn download_of(t: &JTrack) -> Option<String> {
+    (t.audiodownload_allowed == Some(true)).then(|| t.audiodownload.clone()).flatten().filter(|u| !u.is_empty())
 }
 
 pub fn parse_search(json: &str) -> Result<Vec<Track>> {
@@ -74,6 +83,7 @@ impl Jamendo {
                 ("client_id", self.client_id.as_str()),
                 ("format", "json"),
                 ("audioformat", "mp32"),
+                ("audiodlformat", "mp32"),
                 ("imagesize", "300"),
             ])
             .query(extra);
@@ -112,6 +122,15 @@ impl MusicProvider for Jamendo {
             .ok_or(ProviderError::NotFound)?;
         Ok(PlaybackSource::Stream { provider: ProviderId::Jamendo, url, mime: Some("audio/mpeg".into()) })
     }
+
+    /// Only when the artist allowed downloads (`audiodownload_allowed`).
+    /// Always the MP3 link; `Backend::download` switches it to the wanted
+    /// quality (`downloads::jamendo_format_url`), also for server answers.
+    async fn download_url(&self, track: &Track) -> Result<Option<String>> {
+        let Some(id) = id_at(ProviderId::Jamendo, track) else { return Ok(None) };
+        let r = self.fetch(&[("id", id), ("limit", "1")]).await?;
+        Ok(r.first().and_then(download_of))
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +147,16 @@ mod tests {
         assert_eq!(t[0].id, "1234");
         assert_eq!(t[0].duration_ms, Some(185_000));
         assert_eq!(t[0].album.as_deref(), Some("LP"));
+    }
+
+    #[test]
+    fn download_needs_permission() {
+        let r: Resp = serde_json::from_str(r#"{"results":[
+          {"id":"1","name":"A","audiodownload":"https://dl/1","audiodownload_allowed":true},
+          {"id":"2","name":"B","audiodownload":"https://dl/2","audiodownload_allowed":false},
+          {"id":"3","name":"C","audiodownload":"https://dl/3"}]}"#).unwrap();
+        assert_eq!(download_of(&r.results[0]).as_deref(), Some("https://dl/1"));
+        assert_eq!(download_of(&r.results[1]), None);
+        assert_eq!(download_of(&r.results[2]), None);
     }
 }

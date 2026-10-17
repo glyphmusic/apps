@@ -33,6 +33,10 @@ pub fn install_panic_hook() {
                 tracing::warn!("backend not ready: {msg} at {loc}");
             }
         } else {
+            // Leave a trace for crashes of the windowed app (no console there).
+            let bt = std::backtrace::Backtrace::force_capture();
+            let log = glyph_core::paths::data_dir().join("crash.log");
+            let _ = std::fs::write(&log, format!("{msg}\nat {loc}\n\n{bt}\n"));
             default(info);
         }
     }));

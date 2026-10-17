@@ -6,7 +6,7 @@ use crate::i18n::t;
 use crate::theme;
 use crate::visuals::{ascii, Palette};
 use glyph_protocol::{ProviderId, Track};
-use gpui::{
+use gpui::{canvas, 
     div, img, prelude::*, px, svg, AnimationExt, AnyElement, Context, Div, ElementId, FontWeight, Hsla, ObjectFit,
     SharedString, Stateful, Svg, Window,
 };
@@ -548,6 +548,19 @@ pub const ART_SEARCH: &str = r"    .--.
 /// Cover image (real provider cover via `Backend::cover`), with a flat
 /// placeholder or – if `visuals.ascii_covers` – an ASCII pattern.
 pub fn cover(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Context<Glyph>) -> Div {
+    let el = cover_inner(app, t, size, radius, cx);
+    // Once the picture is there it "ASCIIs in" (everywhere: rows, home,
+    // search), timed from the moment it first shows.
+    if app.cover_path(t, cx).is_some() && (!app.config.visuals.ascii_covers || app.ascii_ready(t, size)) {
+        let k = reveal_k(&format!("cover:{}:{size}", track_key(t)), 0.9);
+        if k < 1.0 {
+            return ascii_veil(el, format!("cv-{}-{size}", track_key(t)), size, size, radius, k);
+        }
+    }
+    el
+}
+
+fn cover_inner(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Context<Glyph>) -> Div {
     let path = app.cover_path(t, cx);
     let base = div()
         .flex_none()
@@ -579,19 +592,9 @@ pub fn cover(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Contex
         if app.config.visuals.ascii_covers {
             // The real cover rendered through the ASCII ramp (computed off the
             // UI thread, cached per track and size).
-            match app.ascii_cover(t, &p, cols, rows, cx) {
-                Some(rows_) if !rows_.is_empty() => {
-                    return grid(gpui::black(), theme::text_dim()).children(rows_.into_iter().map(|(line, runs)| {
-                        let hl: Vec<_> = runs
-                            .into_iter()
-                            .map(|(start, len, c)| {
-                                (start..start + len, gpui::HighlightStyle { color: Some(c.hsla(1.0)), ..Default::default() })
-                            })
-                            .collect();
-                        div().whitespace_nowrap().child(gpui::StyledText::new(line).with_highlights(hl))
-                    }));
-                }
-                Some(_) => {}
+            // Rendered at 2x so it stays sharp on high-DPI screens.
+            match app.ascii_cover(t, &p, (size * 2.0) as u32, cx) {
+                Some(im) => return base.child(img(im).size(px(size)).rounded(px(radius))),
                 None => return skeleton(format!("cover-sk-{}-{size}", track_key(t)), size, size, radius),
             }
         }
@@ -632,44 +635,91 @@ pub fn take_skeleton_seen() -> bool {
 
 const SHIMMER_RAMP: &[u8] = b" .:-=+*#";
 
-fn shimmer_text(cols: usize, rows: usize, seed: u32) -> Vec<String> {
-    SKELETON_SEEN.with(|c| c.set(true));
-    let t = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
-    // Band position in columns; it crosses ~60 columns per second, with a
-    // pause off-screen so the sweep reads as a glint, not a scroll.
-    let period = (cols as f32 + 40.0) / 60.0;
-    let x0 = ((t % period) / period) * (cols as f32 + 40.0) - 20.0;
-    (0..rows)
-        .map(|y| {
-            (0..cols)
-                .map(|x| {
-                    let d = (x as f32 + y as f32 * 1.6) - x0;
-                    let band = (-(d * d) / 18.0).exp();
-                    // A little per-cell grain so the field is not flat.
-                    let h = (x as u32).wrapping_mul(2654435761) ^ (y as u32 + seed).wrapping_mul(40503);
-                    let grain = (h % 7) as f32 / 7.0 * 0.22;
-                    let v = (0.18 + grain + band * 0.8).min(1.0);
-                    SHIMMER_RAMP[((v * (SHIMMER_RAMP.len() - 1) as f32).round() as usize).min(SHIMMER_RAMP.len() - 1)] as char
-                })
-                .collect()
-        })
-        .collect()
+
+thread_local! {
+    /// Shaped shimmer glyphs per (character, font size): shaped once, then
+    /// only painted. Rebuilding the shimmer as text every frame re-shaped
+    /// thousands of characters per frame (typing and scrolling lagged).
+    static SHIMMER_GLYPHS: std::cell::RefCell<std::collections::HashMap<(u8, u32), gpui::ShapedLine>> = std::cell::RefCell::new(Default::default());
 }
 
 fn shimmer_block(cols: usize, rows: usize, fs: f32, seed: u32, radius: f32) -> Div {
+    let _ = cols;
     div()
         .size_full()
         .overflow_hidden()
         .rounded(px(radius))
         .bg(gpui::hsla(0.0, 0.0, 1.0, 0.03))
-        .flex()
-        .flex_col()
-        .justify_center()
-        .font_family(theme::MONO)
-        .text_size(px(fs))
-        .line_height(px(fs * 1.05))
-        .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.32))
-        .children(shimmer_text(cols, rows, seed).into_iter().map(|l| div().whitespace_nowrap().child(l)))
+        .child(canvas(|_, _, _| (), move |bounds, _, window, cx| paint_shimmer(bounds, rows, fs, seed, window, cx)).size_full())
+}
+
+/// Paints the shimmer field into `bounds`, vertically centred.
+fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed: u32, window: &mut Window, cx: &mut gpui::App) {
+    SKELETON_SEEN.with(|c| c.set(true));
+    let key_fs = (fs * 10.0).round() as u32;
+    let glyphs: Vec<Option<gpui::ShapedLine>> = SHIMMER_GLYPHS.with(|g| {
+        let mut g = g.borrow_mut();
+        SHIMMER_RAMP
+            .iter()
+            .map(|&b| {
+                (b != b' ').then(|| {
+                    g.entry((b, key_fs))
+                        .or_insert_with(|| {
+                            window.text_system().shape_line(
+                                SharedString::from((b as char).to_string()),
+                                px(fs),
+                                &[gpui::TextRun {
+                                    len: 1,
+                                    font: gpui::font(theme::MONO),
+                                    color: gpui::hsla(0.0, 0.0, 1.0, 0.32),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                None,
+                            )
+                        })
+                        .clone()
+                })
+            })
+            .collect()
+    });
+    let cw = glyphs.iter().flatten().next().map(|l| f32::from(l.width)).filter(|w| *w > 0.5).unwrap_or(fs * 0.6);
+    let lh = fs * 1.05;
+    let w = f32::from(bounds.size.width);
+    let h = f32::from(bounds.size.height);
+    let cols = (w / cw).ceil().max(1.0) as usize;
+    let rows = rows.min(((h / lh).floor() as usize).max(1));
+    let ox = f32::from(bounds.origin.x);
+    let oy = f32::from(bounds.origin.y) + ((h - rows as f32 * lh) / 2.0).max(0.0);
+    let t = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    let period = (cols as f32 + 40.0) / 60.0;
+    let x0 = ((t % period) / period) * (cols as f32 + 40.0) - 20.0;
+    // Only the visible part of the window is worth painting.
+    let vis = window.content_mask().bounds;
+    let (vy0, vy1) = (f32::from(vis.origin.y), f32::from(vis.origin.y + vis.size.height));
+    let (vx0, vx1) = (f32::from(vis.origin.x), f32::from(vis.origin.x + vis.size.width));
+    for y in 0..rows {
+        let py = oy + y as f32 * lh;
+        if py + lh < vy0 || py > vy1 {
+            continue;
+        }
+        for x in 0..cols {
+            let px_ = ox + x as f32 * cw;
+            if px_ + cw < vx0 || px_ > vx1 {
+                continue;
+            }
+            let d = (x as f32 + y as f32 * 1.6) - x0;
+            let band = (-(d * d) / 18.0).exp();
+            let hh = (x as u32).wrapping_mul(2654435761) ^ (y as u32 + seed).wrapping_mul(40503);
+            let grain = (hh % 7) as f32 / 7.0 * 0.22;
+            let v = (0.18 + grain + band * 0.8).min(1.0);
+            let i = ((v * (SHIMMER_RAMP.len() - 1) as f32).round() as usize).min(SHIMMER_RAMP.len() - 1);
+            if let Some(line) = &glyphs[i] {
+                let _ = line.paint(gpui::point(px(px_), px(py)), px(lh), gpui::TextAlign::Left, None, window, cx);
+            }
+        }
+    }
 }
 
 fn seed_of(id: &str) -> u32 {
@@ -718,6 +768,176 @@ pub fn skeleton_rows(prefix: &str, n: usize) -> Div {
     }))
 }
 
+thread_local! {
+    static VIEWPORT_H: std::cell::Cell<f32> = const { std::cell::Cell::new(900.0) };
+}
+
+/// Window height (logical px) of the frame being drawn.
+pub fn viewport_h() -> f32 {
+    VIEWPORT_H.with(|v| v.get())
+}
+
+pub fn set_viewport_h(h: f32) {
+    VIEWPORT_H.with(|v| v.set(h));
+}
+
+/// Small "E" box in front of explicit song titles.
+pub fn explicit_badge() -> Div {
+    div()
+        .flex_none()
+        .size(px(15.0))
+        .rounded(px(3.0))
+        .bg(gpui::hsla(0.0, 0.0, 1.0, 0.22))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(9.5))
+        .font_weight(FontWeight::BOLD)
+        .text_color(gpui::hsla(0.0, 0.0, 0.0, 0.85))
+        .child("E")
+}
+
+/// A song title with the "E" box in front when it is explicit (truncates).
+pub fn song_title(title: impl Into<SharedString>, explicit: bool) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w_0()
+        .when(explicit, |d| d.child(explicit_badge()))
+        .child(div().min_w_0().truncate().child(title.into()))
+}
+
+/// Opacity for something in progress (downloads): a soft 1.5 s pulse.
+pub fn pulse() -> f32 {
+    let t = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    0.35 + 0.65 * (0.5 + 0.5 * (t * std::f32::consts::TAU / 1.5).sin())
+}
+
+// ---- download badge ------------------------------------------------------
+//
+// While a song downloads a ring fills around the arrow (accent, clockwise
+// from 12 o'clock; a short spinning arc while the size is still unknown).
+// When it is done the full ring fades and the arrow shrinks away while the
+// check pops in.
+
+/// Seconds the "done" transition takes.
+pub const DL_DONE_ANIM_S: f32 = 0.65;
+
+/// What a download badge shows.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DlView {
+    None,
+    /// Fraction fetched (`None` = size not known yet).
+    Busy(Option<f32>),
+    /// Downloaded; seconds since it finished while that is still animating.
+    Done(Option<f32>),
+}
+
+/// Ring of `size` px: a faint track plus the done part. `alpha` fades both.
+pub fn progress_ring(size: f32, stroke: f32, fraction: Option<f32>, alpha: f32) -> gpui::Canvas<()> {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let spin = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let c = bounds.center();
+        let r = size / 2.0 - stroke / 2.0;
+        let mut arc = |from: f32, sweep: f32, color: Hsla| {
+            let n = ((sweep.abs() / TAU) * 64.0).ceil().max(2.0) as usize;
+            let mut b = gpui::PathBuilder::stroke(px(stroke));
+            for i in 0..=n {
+                let a = from + sweep * (i as f32 / n as f32);
+                let p = gpui::point(c.x + px(r * a.cos()), c.y + px(r * a.sin()));
+                if i == 0 {
+                    b.move_to(p)
+                } else {
+                    b.line_to(p)
+                }
+            }
+            if let Ok(path) = b.build() {
+                window.paint_path(path, color);
+            }
+        };
+        arc(0.0, TAU, gpui::hsla(0.0, 0.0, 1.0, 0.16 * alpha));
+        match fraction {
+            Some(f) if f > 0.0 => arc(-FRAC_PI_2, TAU * f.min(1.0), theme::pink().opacity(alpha)),
+            Some(_) => {}
+            None => arc(spin * TAU * 1.1 - FRAC_PI_2, TAU * 0.28, theme::pink().opacity(alpha)),
+        }
+    })
+    .size(px(size))
+}
+
+/// Icon of a round play button (`button` px): pause / play, or a spinning
+/// arc just inside the button's edge while a song loads.
+pub fn play_glyph(loading: bool, playing: bool, size: f32, button: f32) -> AnyElement {
+    if !loading {
+        return icon(if playing { "pause" } else { "play" }, size, gpui::black()).into_any_element();
+    }
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let spin = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    let ring = button * 0.56;
+    let stroke = (button / 16.0).max(2.0);
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let c = bounds.center();
+        let r = ring / 2.0 - stroke / 2.0;
+        // A ~100° arc that turns once every 0.8 s.
+        let (from, sweep) = (spin * TAU / 0.8 - FRAC_PI_2, TAU * 0.28);
+        let mut b = gpui::PathBuilder::stroke(px(stroke));
+        for i in 0..=24 {
+            let a = from + sweep * (i as f32 / 24.0);
+            let p = gpui::point(c.x + px(r * a.cos()), c.y + px(r * a.sin()));
+            if i == 0 {
+                b.move_to(p)
+            } else {
+                b.line_to(p)
+            }
+        }
+        if let Ok(path) = b.build() {
+            window.paint_path(path, gpui::black());
+        }
+    })
+    .size(px(ring))
+    .into_any_element()
+}
+
+/// The download state as a `size` px badge: ring + `arrow` icon while busy,
+/// the pink check when done. `None` for songs that are not downloaded.
+pub fn download_badge(view: DlView, size: f32, arrow: &str) -> Option<Div> {
+    let stroke = (size / 9.0).max(1.5);
+    let inner = size * 0.58;
+    let frame = || div().flex_none().relative().size(px(size)).flex().items_center().justify_center();
+    let ring = |f: Option<f32>, alpha: f32| div().absolute().inset_0().child(progress_ring(size, stroke, f, alpha));
+    match view {
+        DlView::None => None,
+        DlView::Busy(f) => Some(frame().child(ring(f, 1.0)).child(icon(arrow, inner, theme::text()))),
+        DlView::Done(None) => Some(frame().child(icon("circle-check", size, theme::pink()))),
+        DlView::Done(Some(age)) => {
+            // Ring + arrow out over the first 0.25 s ...
+            let out = 1.0 - (age / 0.25).min(1.0);
+            // ... check in from 0.15 s: 0.4 → 1.15 → 1.0.
+            let p = ((age - 0.15) / (DL_DONE_ANIM_S - 0.15)).clamp(0.0, 1.0);
+            let scale = if p < 0.6 { 0.4 + p / 0.6 * 0.75 } else { 1.15 - (p - 0.6) / 0.4 * 0.15 };
+            let mut d = frame();
+            if out > 0.0 {
+                d = d.child(ring(Some(1.0), out)).child(icon(arrow, (inner * out).max(0.1), theme::text().opacity(out)));
+            }
+            if p > 0.0 {
+                d = d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity((p * 3.0).min(1.0))
+                        .child(icon("circle-check", size * scale, theme::pink())),
+                );
+            }
+            Some(d)
+        }
+    }
+}
+
 /// Skeleton rows for artists in search results: round picture, name, chip.
 pub fn skeleton_artist_rows(prefix: &str, n: usize) -> Div {
     div().flex().flex_col().gap(px(2.0)).children((0..n).map(|i| {
@@ -751,6 +971,9 @@ const DECODE_RAMP: &[char] = &['#', '%', '&', '*', '+', '=', '-', ':', '.', '@',
 pub fn reveal_k(key: &str, dur: f32) -> f32 {
     REVEALS.with(|r| {
         let mut m = r.borrow_mut();
+        if m.len() > 4000 {
+            m.retain(|_, at| at.elapsed().as_secs() < 120);
+        }
         let at = *m.entry(key.to_string()).or_insert_with(std::time::Instant::now);
         (at.elapsed().as_secs_f32() / dur.max(0.01)).min(1.0)
     })
@@ -774,7 +997,7 @@ pub fn decode(text: &str, k: f32) -> String {
     }
     let n = text.chars().count();
     let done = (k.max(0.0) * n as f32) as usize;
-    let tick = SKELETON_T0.with(|t0| (t0.elapsed().as_secs_f32() * 24.0) as u32);
+    let tick = SKELETON_T0.with(|t0| (t0.elapsed().as_secs_f32() * 12.0) as u32);
     text.chars()
         .enumerate()
         .map(|(i, c)| {
@@ -837,12 +1060,15 @@ pub fn track_row(
     let (t_next, t_q, t_like, t_share) = (t.clone(), t.clone(), t.clone(), t.clone());
     let art = cover(app, &t, 44.0, 6.0, cx);
     // Search results decode in (ASCII), everywhere else they just appear.
-    let reveal = if id_prefix == "search-row" { reveal_k(&format!("search:{}", track_key(&t)), 0.5) } else { 1.0 };
-    let art = if reveal < 1.0 { ascii_veil(art, format!("rv-{}", track_key(&t)), 44.0, 44.0, 6.0, reveal) } else { art };
+    let reveal = if id_prefix == "search-row" { reveal_k(&format!("search:{}", track_key(&t)), 0.9) } else { 1.0 };
+
 
     let t_menu = t.clone();
+    let t_hover = t.clone();
     div()
         .id((id_prefix, i))
+        // Resting on a YouTube song starts yt-dlp early (see ui::ytdlp).
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.prefetch_on_hover(&t_hover, *hovered, cx)))
         .on_mouse_down(
             gpui::MouseButton::Right,
             cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
@@ -870,11 +1096,19 @@ pub fn track_row(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .truncate()
-                        .text_size(theme::text_md())
-                        .font_weight(if playing { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                        .text_color(theme::text())
-                        .child(decode(&t.title, reveal)),
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w_0()
+                        .when(t.explicit, |d| d.child(explicit_badge()))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(theme::text_md())
+                                .font_weight(if playing { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                                .text_color(theme::text())
+                                .child(decode(&t.title, reveal)),
+                        ),
                 )
                 .child(
                     div()
@@ -972,9 +1206,19 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
         None => (1.0, 1.0),
     };
     let (show_top, show_bottom) = (top_k > 0.0, bottom_k > 0.0);
+    // The band also fades out towards its left and right ends (strips with
+    // falling strength), so it has no hard corners against the background.
+    const RAMP: [f32; 8] = [0.06, 0.16, 0.3, 0.45, 0.6, 0.74, 0.86, 0.95];
     let edge = |top: bool| {
         let k = if top { top_k } else { bottom_k };
-        let color = Hsla { a: color.a * k, ..color };
+        let strip = move |f: f32| {
+            let c = Hsla { a: color.a * k * f, ..color };
+            gpui::linear_gradient(
+                if top { 180.0 } else { 0.0 },
+                gpui::linear_color_stop(c, 0.0),
+                gpui::linear_color_stop(c.opacity(0.0), 1.0),
+            )
+        };
         div()
             .absolute()
             .left_0()
@@ -982,11 +1226,10 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
             .h(px(h))
             .when(top, |d| d.top_0())
             .when(!top, |d| d.bottom_0())
-            .bg(gpui::linear_gradient(
-                if top { 180.0 } else { 0.0 },
-                gpui::linear_color_stop(color, 0.0),
-                gpui::linear_color_stop(color.opacity(0.0), 1.0),
-            ))
+            .flex()
+            .children(RAMP.iter().map(move |f| div().flex_none().w(px(6.0)).h_full().bg(strip(*f))))
+            .child(div().flex_1().h_full().bg(strip(1.0)))
+            .children(RAMP.iter().rev().map(move |f| div().flex_none().w(px(6.0)).h_full().bg(strip(*f))))
     };
     div().relative().child(el).when(show_top, |d| d.child(edge(true))).when(show_bottom, |d| d.child(edge(false)))
 }
@@ -995,7 +1238,15 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
 
 thread_local! {
     /// Smooth wheel scrolling in progress: (handle, target offset y).
-    static SMOOTH: std::cell::RefCell<Option<(gpui::ScrollHandle, f32)>> = const { std::cell::RefCell::new(None) };
+    /// Smooth scroll in progress: (handle, target offset x, target offset y).
+    static SMOOTH: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
+    /// Scroll frames that take the wheel, in paint order (inner ones later).
+    static WHEEL_FRAMES: std::cell::RefCell<Vec<(gpui::Bounds<gpui::Pixels>, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The frame the wheel moved last and when.
+    static LAST_WHEEL: std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, std::time::Instant)>> = const { std::cell::Cell::new(None) };
+    /// Scroll handles for frames that have none of their own (dropdowns, rows).
+    static HANDLES: std::cell::RefCell<std::collections::HashMap<String, gpui::ScrollHandle>> = std::cell::RefCell::new(Default::default());
+    static SMOOTH_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// One animation step of smooth wheel scrolling; true while it still moves.
@@ -1003,14 +1254,23 @@ thread_local! {
 pub fn step_smooth_scroll() -> bool {
     SMOOTH.with(|s| {
         let mut s = s.borrow_mut();
-        let Some((h, target)) = s.as_ref() else { return false };
-        let cur = f32::from(h.offset().y);
-        let next = cur + (*target - cur) * 0.28;
-        if (target - next).abs() < 0.5 {
-            h.set_offset(gpui::point(px(0.0), px(*target)));
+        let Some((h, tx, ty)) = s.as_ref() else {
+            SMOOTH_AT.with(|a| a.set(None));
+            return false;
+        };
+        let (tx, ty) = (*tx, *ty);
+        // Exponential ease by real frame time (vsync-paced, no fixed step).
+        let now = std::time::Instant::now();
+        let dt = SMOOTH_AT.with(|a| a.replace(Some(now))).map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(1.0 / 60.0).clamp(0.001, 0.05);
+        let k = 1.0 - (-dt / 0.07).exp();
+        let (cx_, cy_) = (f32::from(h.offset().x), f32::from(h.offset().y));
+        let (nx, ny) = (cx_ + (tx - cx_) * k, cy_ + (ty - cy_) * k);
+        if (tx - nx).abs() < 0.5 && (ty - ny).abs() < 0.5 {
+            h.set_offset(gpui::point(px(tx), px(ty)));
             *s = None;
+            SMOOTH_AT.with(|a| a.set(None));
         } else {
-            h.set_offset(gpui::point(px(0.0), px(next)));
+            h.set_offset(gpui::point(px(nx), px(ny)));
         }
         true
     })
@@ -1019,6 +1279,94 @@ pub fn step_smooth_scroll() -> bool {
 thread_local! {
     /// Thumb being dragged: (scroll handle, mouse y at grab, scroll y at grab).
     static SCROLL_DRAG: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Starts a new frame's list of wheel targets (called at the top of render).
+pub fn begin_wheel_frames() {
+    WHEEL_FRAMES.with(|f| f.borrow_mut().clear());
+}
+
+fn register_wheel(bounds: gpui::Bounds<gpui::Pixels>, horizontal: bool) -> usize {
+    WHEEL_FRAMES.with(|f| {
+        let mut f = f.borrow_mut();
+        f.push((bounds, horizontal));
+        f.len() - 1
+    })
+}
+
+/// The innermost (last painted) frame under the mouse for that axis.
+fn topmost_wheel(pos: gpui::Point<gpui::Pixels>, horizontal: bool) -> Option<usize> {
+    WHEEL_FRAMES.with(|f| f.borrow().iter().rposition(|(b, h)| *h == horizontal && b.contains(&pos)))
+}
+
+/// The wheel moved the frame of `handle` within `within`.
+pub fn wheeled_recently(handle: &gpui::ScrollHandle, within: std::time::Duration) -> bool {
+    LAST_WHEEL.with(|l| l.get()).is_some_and(|(b, at)| b == handle.bounds() && at.elapsed() < within)
+}
+
+/// A shared scroll handle for a frame that has none of its own.
+pub fn handle_for(key: &str) -> gpui::ScrollHandle {
+    HANDLES.with(|h| h.borrow_mut().entry(key.to_string()).or_default().clone())
+}
+
+/// One wheel notch: glide the frame there. `false` if it cannot move that way.
+fn wheel_step(hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: bool) -> bool {
+    let gpui::ScrollDelta::Lines(lines) = e.delta else { return false };
+    // Shift turns the wheel sideways for horizontal rows.
+    let d = if horizontal { if lines.x != 0.0 { lines.x } else if e.modifiers.shift { lines.y } else { 0.0 } } else { lines.y };
+    if d == 0.0 {
+        return false;
+    }
+    let max = hs.max_offset();
+    let (mx, my) = (f32::from(max.x), f32::from(max.y));
+    if (horizontal && mx <= 0.0) || (!horizontal && my <= 0.0) {
+        return false;
+    }
+    let (bx, by) = SMOOTH
+        .with(|s| s.borrow().as_ref().filter(|(h, _, _)| h.bounds() == hs.bounds()).map(|(_, x, y)| (*x, *y)))
+        .unwrap_or_else(|| (f32::from(hs.offset().x), f32::from(hs.offset().y)));
+    let (tx, ty) = if horizontal { ((bx + d * 56.0).clamp(-mx, 0.0), by) } else { (bx, (by + d * 56.0).clamp(-my, 0.0)) };
+    SMOOTH.with(|s| *s.borrow_mut() = Some((hs.clone(), tx, ty)));
+    LAST_WHEEL.with(|l| l.set(Some((hs.bounds(), std::time::Instant::now()))));
+    true
+}
+
+/// Smooth mouse-wheel scrolling for any frame tracked by `handle` (put it
+/// next to the frame, inside a `relative()` wrapper).
+pub fn smooth_wheel(handle: &gpui::ScrollHandle, horizontal: bool, cx: &mut Context<crate::app::Glyph>) -> AnyElement {
+    let handle = handle.clone();
+    let view = cx.entity().downgrade();
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let idx = register_wheel(handle.bounds(), horizontal);
+            let (hs, vs) = (handle.clone(), view.clone());
+            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
+                    return;
+                }
+                if topmost_wheel(e.position, horizontal) != Some(idx) {
+                    return;
+                }
+                if wheel_step(&hs, e, horizontal) {
+                    cx.stop_propagation();
+                    vs.update(cx, |_, cx| cx.notify()).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
+
+/// A dropdown, context menu or dialog is open over the page: page scroll
+/// frames leave the mouse wheel alone then.
+fn overlay_open(view: &gpui::WeakEntity<crate::app::Glyph>, cx: &gpui::App) -> bool {
+    view.upgrade().is_some_and(|v| {
+        let a = v.read(cx);
+        a.open_select.is_some() || a.ctx_menu.is_some() || a.name_dialog.is_some()
+    })
 }
 
 /// Thin overlay scrollbar for a frame tracked by `handle` (shown only when
@@ -1059,7 +1407,11 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                         // instead of letting it wobble up and down.
                         if max > 0.0 {
                             let hs = handle.clone();
+                            let vs = view.clone();
                             window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                                if overlay_open(&vs, cx) {
+                                    return;
+                                }
                                 if phase == gpui::DispatchPhase::Capture && hs.bounds().contains(&e.position) && e.delta.pixel_delta(px(20.0)).y != px(0.0) {
                                     cx.stop_propagation();
                                 }
@@ -1072,23 +1424,19 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                     if smooth {
                         let hs = handle.clone();
                         let vs = view.clone();
+                        let idx = register_wheel(handle.bounds(), false);
                         window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
                             if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
                                 return;
                             }
-                            let gpui::ScrollDelta::Lines(lines) = e.delta else { return };
-                            if lines.y == 0.0 {
+                            // An inner frame or a menu on top takes the wheel.
+                            if topmost_wheel(e.position, false) != Some(idx) || overlay_open(&vs, cx) {
                                 return;
                             }
-                            let max = f32::from(hs.max_offset().y);
-                            let base = SMOOTH.with(|s| {
-                                s.borrow().as_ref().filter(|(h, _)| h.bounds() == hs.bounds()).map(|(_, t)| *t)
-                            });
-                            let from = base.unwrap_or_else(|| f32::from(hs.offset().y));
-                            let target = (from + lines.y * 56.0).clamp(-max, 0.0);
-                            SMOOTH.with(|s| *s.borrow_mut() = Some((hs.clone(), target)));
-                            cx.stop_propagation();
-                            vs.update(cx, |_, cx| cx.notify()).ok();
+                            if wheel_step(&hs, e, false) {
+                                cx.stop_propagation();
+                                vs.update(cx, |_, cx| cx.notify()).ok();
+                            }
                         });
                     }
                     let track_h = f32::from(bounds.size.height);

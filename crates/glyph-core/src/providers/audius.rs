@@ -47,6 +47,10 @@ struct ATrack {
     isrc: Option<String>,
     #[serde(default)]
     is_delete: Option<bool>,
+    #[serde(default)]
+    is_downloadable: Option<bool>,
+    #[serde(default)]
+    download_conditions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +75,15 @@ struct AUser {
 struct Access {
     #[serde(default)]
     stream: Option<bool>,
+    #[serde(default)]
+    download: Option<bool>,
+}
+
+/// The artist enabled downloads and did not put them behind a purchase.
+fn downloadable(t: &ATrack) -> bool {
+    let gated = t.download_conditions.as_ref().is_some_and(|v| !v.is_null());
+    let allowed = t.access.as_ref().and_then(|a| a.download).unwrap_or(false) || t.is_downloadable == Some(true);
+    !gated && allowed && t.is_delete != Some(true)
 }
 
 fn convert(t: ATrack) -> Option<Track> {
@@ -97,6 +110,7 @@ fn convert(t: ATrack) -> Option<Track> {
         isrc: t.isrc.filter(|s| !s.is_empty()),
         permalink: t.permalink.map(|p| format!("https://audius.co{p}")),
         external_ids: Default::default(),
+        explicit: false,
     })
 }
 
@@ -182,6 +196,16 @@ impl MusicProvider for Audius {
             url: format!("{host}/v1/tracks/{id}/stream?app_name={APP_NAME}"),
             mime: Some("audio/mpeg".into()),
         })
+    }
+
+    async fn download_url(&self, track: &Track) -> Result<Option<String>> {
+        let Some(id) = id_at(ProviderId::Audius, track) else { return Ok(None) };
+        let env: Envelope<ATrack> = self.get(&format!("/v1/tracks/{id}"), &[]).await?;
+        if !downloadable(&env.data) {
+            return Ok(None);
+        }
+        let host = self.host().await?;
+        Ok(Some(format!("{host}/v1/tracks/{id}/download?app_name={APP_NAME}")))
     }
 }
 

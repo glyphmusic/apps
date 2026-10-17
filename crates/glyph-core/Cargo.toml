@@ -12,7 +12,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 futures.workspace = true
 reqwest.workspace = true
 async-trait = "0.1"
@@ -28,7 +28,21 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 self-replace = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
+base64 = "0.22"
 tar = "0.4"
+# Password key derivation on the device (see glyph_protocol::password_kdf).
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+chacha20poly1305 = "0.10"
+
+# Account refresh token in the OS keychain (same backends as glyph-server).
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3"

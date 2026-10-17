@@ -42,12 +42,17 @@ fn names_match(name: &str, title: &str) -> bool {
 
 /// Looks the artist up on Wikipedia in `lang`, then English.
 pub async fn lookup(http: &reqwest::Client, name: &str, lang: &str) -> Result<Option<ArtistInfo>> {
+    lookup_via(http, name, lang, None).await
+}
+
+pub async fn lookup_via(http: &reqwest::Client, name: &str, lang: &str, server: Option<&crate::server_client::ServerClient>) -> Result<Option<ArtistInfo>> {
+    let lang = if matches!(lang, "en" | "de" | "ru") { lang } else { "en" };
     let mut langs = vec![lang.to_string()];
     if lang != "en" {
         langs.push("en".into());
     }
     for l in langs {
-        match lookup_in(http, name, &l).await {
+        match lookup_in(http, name, &l, server).await {
             Ok(Some(info)) => return Ok(Some(info)),
             Ok(None) => {}
             Err(e) => tracing::debug!(lang = %l, "wikipedia lookup failed: {e}"),
@@ -56,11 +61,12 @@ pub async fn lookup(http: &reqwest::Client, name: &str, lang: &str) -> Result<Op
     Ok(None)
 }
 
-async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str) -> Result<Option<ArtistInfo>> {
+async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Option<&crate::server_client::ServerClient>) -> Result<Option<ArtistInfo>> {
     let api = format!("https://{lang}.wikipedia.org/w/api.php");
+    let api = reqwest::Url::parse_with_params(&api, &[("action", "query"), ("list", "search"), ("srsearch", name), ("srlimit", "5"), ("format", "json")])?;
+    let api = server.map(|s| s.upstream_url(api.as_str())).unwrap_or_else(|| api.into());
     let found: Value = http
-        .get(&api)
-        .query(&[("action", "query"), ("list", "search"), ("srsearch", name), ("srlimit", "5"), ("format", "json")])
+        .get(api)
         .timeout(Duration::from_secs(8))
         .send()
         .await?
@@ -74,6 +80,7 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str) -> Result<Opt
     for title in titles.into_iter().filter(|t| names_match(name, t)) {
         let mut url = reqwest::Url::parse(&format!("https://{lang}.wikipedia.org/api/rest_v1/page/summary/"))?;
         url.path_segments_mut().map_err(|_| anyhow::anyhow!("bad url"))?.pop_if_empty().push(&title.replace(' ', "_"));
+        let url = server.map(|s| s.upstream_url(url.as_str())).unwrap_or_else(|| url.into());
         let s: Value = http.get(url).timeout(Duration::from_secs(8)).send().await?.error_for_status()?.json().await?;
         if s["type"].as_str() == Some("disambiguation") {
             continue;
@@ -88,7 +95,10 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str) -> Result<Opt
         let page = s["content_urls"]["desktop"]["page"].as_str().unwrap_or("").to_string();
         let img_url = s["originalimage"]["source"].as_str().or(s["thumbnail"]["source"].as_str()).map(str::to_string);
         let image = match img_url {
-            Some(u) => fetch_image(http, &u).await.ok(),
+            Some(u) => {
+                let u = server.map(|s| s.upstream_url(&u)).unwrap_or(u);
+                fetch_image(http, &u).await.ok()
+            },
             None => None,
         };
         return Ok(Some(ArtistInfo { about, url: page, image }));

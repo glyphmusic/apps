@@ -24,6 +24,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Quiet time after the last settings change before the file is written.
+const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(700);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Home,
@@ -46,6 +49,8 @@ pub enum ListRef {
     Album { title: String, artist: String, tracks: Vec<Track> },
     /// Liked songs by one artist.
     ArtistLiked(String),
+    /// Songs saved for offline use.
+    Downloads,
 }
 
 /// "New playlist" / "Rename" dialog.
@@ -66,6 +71,7 @@ impl ListRef {
             ListRef::User(id) => K::Playlist { id: id.clone() },
             ListRef::Album { title, artist, tracks } => K::Album { title: title.clone(), artist: artist.clone(), tracks: tracks.clone() },
             ListRef::ArtistLiked(a) => K::ArtistLiked { artist: a.clone() },
+            ListRef::Downloads => K::Downloads,
         }
     }
 
@@ -77,6 +83,7 @@ impl ListRef {
             K::Playlist { id } => ListRef::User(id.clone()),
             K::Album { title, artist, tracks } => ListRef::Album { title: title.clone(), artist: artist.clone(), tracks: tracks.clone() },
             K::ArtistLiked { artist } => ListRef::ArtistLiked(artist.clone()),
+            K::Downloads => ListRef::Downloads,
         }
     }
 
@@ -101,6 +108,8 @@ pub struct ArtistPage {
     pub loading: bool,
     pub info: Option<glyph_core::artist::ArtistInfo>,
     pub info_loading: bool,
+    /// Fans + verified badge.
+    pub stats: Option<glyph_core::catalog::ArtistStats>,
     pub show_all: bool,
     pub about_open: bool,
     _tasks: Vec<Task<()>>,
@@ -201,6 +210,7 @@ pub enum SettingsPage {
     Audio,
     Appearance,
     Server,
+    Account,
     Storage,
     About,
     Support,
@@ -225,6 +235,10 @@ pub struct Glyph {
     pub settings_scroll: gpui::ScrollHandle,
     pub queue_scroll: gpui::ScrollHandle,
     pub lyrics_scroll: gpui::ScrollHandle,
+    /// The user scrolled the lyrics by hand (auto-follow pauses a moment).
+    pub lyrics_user_scroll: Option<Instant>,
+    /// Last reported position and when it arrived (smooth position between reports).
+    pos_anchor: Option<(Duration, Instant)>,
     pub name_dialog: Option<NameDialog>,
     /// Sidebar icon under the mouse and since when (hover animation).
     pub nav_hover: Option<(View, Instant)>,
@@ -232,6 +246,18 @@ pub struct Glyph {
     album_task: Option<Task<()>>,
     /// Recently played keys last put into the taskbar / dock menu.
     dock_keys: Vec<String>,
+    /// Songs being downloaded right now (`track_key`).
+    pub downloading: HashSet<String>,
+    /// When songs finished downloading (`track_key`), for the check animation.
+    pub download_done: std::collections::HashMap<String, Instant>,
+    /// Audio outputs found on this computer (settings list).
+    pub output_devices: Vec<String>,
+    /// Album year + type per "title|artist" (None while loading / unknown).
+    pub album_meta: std::collections::HashMap<String, Option<glyph_core::catalog::AlbumMeta>>,
+    /// Home: songs picked for the user, and what is popular right now.
+    pub recs: Vec<Track>,
+    pub trending: Vec<Track>,
+    feeds_loading: bool,
     /// Startup animation while it runs.
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
@@ -248,6 +274,8 @@ pub struct Glyph {
 
     pub config: Config,
     pub backend: Option<Arc<Backend>>,
+    /// Settings -> Account state and the sync loop.
+    pub account: crate::ui::account::AccountUi,
     pub backend_state: BackendState,
     pub player: Option<Arc<PlayerController>>,
     pub player_ok: bool,
@@ -266,6 +294,9 @@ pub struct Glyph {
     pub current: Option<Track>,
     pub current_source: Option<ProviderId>,
     pub current_preview: bool,
+    /// Track whose expired preview URL was already retried once (see
+    /// [`App::retry_expired_preview`]); reset whenever playback starts.
+    pub retried_expired: Option<Track>,
     pub resolving: bool,
     pub palette: Option<Palette>,
     pub cover: Option<CoverArt>,
@@ -274,6 +305,8 @@ pub struct Glyph {
     pub lyrics: LyricsState,
     pub update: UpdateState,
     pub conn_test: Option<ConnTest>,
+    /// yt-dlp status / install state for the settings page.
+    pub ytdlp: crate::ui::ytdlp::YtDlpUi,
 
     pub show_queue: bool,
     pub show_lyrics: bool,
@@ -283,8 +316,15 @@ pub struct Glyph {
     pub bar_slide: Slide,
     pub radio: bool,
     pub mini_on_top: bool,
+    /// The saved config was applied (player prefs may be written back).
+    config_loaded: bool,
+    /// Unsaved config change: (last change, show the "saved" toast).
+    config_dirty: Option<(Instant, bool)>,
     /// Settings modal.
     pub settings_open: bool,
+    /// When settings opened / started closing (fade + lift).
+    settings_at: Instant,
+    settings_closing: Option<Instant>,
     pub settings_page: SettingsPage,
     pub settings_search: Entity<TextInput>,
     /// Which dropdown in the settings modal is open.
@@ -295,7 +335,15 @@ pub struct Glyph {
     pub storage: Option<glyph_core::storage::StorageStats>,
     /// Which storage kinds "Clear cache" removes (order of StorageKind::ALL).
     pub storage_selected: [bool; 4],
-    pub toast: Option<(String, Instant)>,
+    /// Notification stack, newest first.
+    pub toasts: Vec<Toast>,
+    toast_seq: u64,
+    /// Toast being swiped and the mouse y where the swipe started.
+    pub toast_drag: Option<(u64, f32)>,
+    /// Mouse over the toast stack (fans it out, keeps it on screen).
+    pub toast_hover: bool,
+    /// Since when (long texts start scrolling after a moment).
+    pub toast_hover_at: Option<Instant>,
     pub lang: crate::i18n::Lang,
     /// Eased text ink per background zone (0 light .. 1 dark).
     pub ink: [f32; 3],
@@ -304,7 +352,7 @@ pub struct Glyph {
     /// Covers currently being fetched (drawn as skeletons).
     pub covers_loading: std::collections::HashSet<String>,
     /// Covers rendered as ASCII, per (track, cols, rows); `None` = computing.
-    pub ascii_covers: std::collections::HashMap<(String, u32, u32), Option<Vec<crate::visuals::ascii::ColoredRow>>>,
+    pub ascii_covers: std::collections::HashMap<(String, u32), Option<Arc<gpui::RenderImage>>>,
     pub embed: crate::embed::EmbedHost,
     /// Last (track, playing, position/5 s) pushed to the OS media controls.
     media_keys_sent: Option<(Option<(glyph_protocol::ProviderId, String)>, bool, u64)>,
@@ -312,6 +360,8 @@ pub struct Glyph {
     pub started: Instant,
     _subs: Vec<Subscription>,
     _poll: Task<()>,
+    /// Writes a still pending config change when the app quits.
+    _save_on_quit: gpui::Subscription,
 }
 
 /// A 0..1 slide-in/out value eased over time (player bar).
@@ -365,6 +415,52 @@ fn by_artist(name: &str, credit: &str) -> bool {
 
 /// How long a toast stays.
 pub const TOAST_FOR: Duration = Duration::from_millis(3500);
+/// At most this many toasts are stacked; older ones drop off.
+const MAX_TOASTS: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToastIcon {
+    Check,
+    Info,
+}
+
+/// One notification of the top stack (`crate::ui::toasts`).
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub id: u64,
+    pub title: String,
+    /// Detail after the dot, shown in caps (song, artist, playlist).
+    pub sub: Option<String>,
+    pub icon: ToastIcon,
+    pub at: Instant,
+    /// Current and wanted top offset (NaN until first drawn).
+    pub y: f32,
+    pub target: f32,
+    /// Swipe offset (negative = up).
+    pub drag: f32,
+    /// Place in the collapsed deck (0 = front), eased.
+    pub depth: f32,
+    pub depth_target: f32,
+    /// Swiped away: dismiss animation since.
+    pub gone: Option<Instant>,
+}
+
+pub fn eq_gains(v: &[f32]) -> [f32; 10] {
+    let mut g = [0.0; 10];
+    for (i, x) in v.iter().take(10).enumerate() {
+        g[i] = *x;
+    }
+    g
+}
+
+fn level_of(l: glyph_core::config::VolumeLevel) -> glyph_audio::loudness::Level {
+    use glyph_core::config::VolumeLevel as V;
+    match l {
+        V::Loud => glyph_audio::loudness::Level::Loud,
+        V::Normal => glyph_audio::loudness::Level::Normal,
+        V::Quiet => glyph_audio::loudness::Level::Quiet,
+    }
+}
 
 pub fn track_key(t: &Track) -> String {
     format!("{:?}:{}", t.source, t.id)
@@ -433,6 +529,14 @@ impl Glyph {
         }
 
         let hwnd = window_hwnd(window);
+        // Like / previous / play-pause / next under the taskbar preview.
+        #[cfg(windows)]
+        if let Some(h) = hwnd {
+            crate::thumbbar::init(
+                h,
+                [t("ctx.like").to_string(), t("dock.previous").to_string(), t("dock.play_pause").to_string(), t("dock.next").to_string()],
+            );
+        }
 
         let poll = cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -458,11 +562,20 @@ impl Glyph {
             settings_scroll: gpui::ScrollHandle::new(),
             queue_scroll: gpui::ScrollHandle::new(),
             lyrics_scroll: gpui::ScrollHandle::new(),
+            lyrics_user_scroll: None,
+            pos_anchor: None,
             name_dialog: None,
             nav_hover: None,
             album_task: None,
             // Read straight from disk: the async config load comes too late for the first frame.
             dock_keys: Vec::new(),
+            downloading: HashSet::new(),
+            download_done: Default::default(),
+            album_meta: Default::default(),
+            output_devices: Vec::new(),
+            recs: Vec::new(),
+            trending: Vec::new(),
+            feeds_loading: false,
             splash: Config::load()
                 .map(|c| c.visuals.startup_animation)
                 .unwrap_or(true)
@@ -493,6 +606,7 @@ impl Glyph {
             current: None,
             current_source: None,
             current_preview: false,
+            retried_expired: None,
             resolving: false,
             palette: None,
             cover: None,
@@ -500,21 +614,31 @@ impl Glyph {
             lyrics: LyricsState::default(),
             update: UpdateState::default(),
             conn_test: None,
+            ytdlp: Default::default(),
             show_queue: false,
             show_lyrics: true,
             lyrics_only: false,
             bar_slide: Slide::default(),
             radio: true,
             mini_on_top: true,
+            config_loaded: false,
+            config_dirty: None,
             settings_open: false,
+            settings_at: Instant::now(),
+            settings_closing: None,
             settings_page: SettingsPage::Playback,
+            account: Default::default(),
             settings_search,
             open_select: None,
             settings_advanced: false,
             storage: None,
             // Downloads are offline songs: opt-in, never cleared by default.
             storage_selected: [true, false, true, true],
-            toast: None,
+            toasts: Vec::new(),
+            toast_seq: 0,
+            toast_drag: None,
+            toast_hover: false,
+            toast_hover_at: None,
             lang: crate::i18n::lang(),
             ink: [0.0; 3],
             covers: Default::default(),
@@ -525,6 +649,16 @@ impl Glyph {
             started: Instant::now(),
             _subs: subs,
             _poll: poll,
+            _save_on_quit: cx.on_app_quit(|s: &mut Glyph, _| {
+                let pending = s.config_dirty.take().is_some().then(|| s.config.clone());
+                async move {
+                    if let Some(cfg) = pending {
+                        if let Err(e) = guard_res(|| cfg.save()) {
+                            tracing::warn!("saving config on quit: {e}");
+                        }
+                    }
+                }
+            }),
         };
         this.boot(cx);
         this
@@ -578,6 +712,11 @@ impl Glyph {
                     Ok(p) => {
                         let p = Arc::new(p);
                         p.set_crossfade(Duration::from_secs(s.config.audio.crossfade_s as u64));
+                        p.set_loudness(level_of(s.config.audio.level), s.config.audio.normalize);
+                        p.set_equalizer(s.config.audio.eq_enabled, eq_gains(&s.config.audio.eq_gains));
+                        p.set_output_device(s.config.audio.output_device.clone());
+                        p.set_volume(s.config.player.volume);
+                        p.set_mini_player_options(MiniPlayerOptions { always_on_top: s.mini_on_top, position: None });
                         s.player_events = guard(|| p.events());
                         s.player_ok = true;
                         s.glow.update(cx, |g, _| g.set_player(Some(p.clone())));
@@ -611,7 +750,65 @@ impl Glyph {
         }
     }
 
-    fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
+    /// Volume, shuffle, repeat and panels as saved in `config.player`.
+    fn restore_player_prefs(&mut self) {
+        let prefs = self.config.player.clone();
+        let repeat = match prefs.repeat.as_str() {
+            "all" => RepeatMode::All,
+            "one" => RepeatMode::One,
+            _ => RepeatMode::Off,
+        };
+        guard(|| {
+            self.queue.set_shuffle(prefs.shuffle);
+            self.queue.set_repeat(repeat);
+        });
+        self.show_queue = prefs.show_queue;
+        self.mini_on_top = prefs.mini_on_top;
+        if let Some(p) = &self.player {
+            p.set_volume(prefs.volume);
+            p.set_mini_player_options(MiniPlayerOptions { always_on_top: prefs.mini_on_top, position: None });
+        }
+        // The cached state is read before the next refresh: keep it in step.
+        if let Some(st) = self.player_state.as_mut() {
+            st.volume = prefs.volume;
+        }
+        self.config_loaded = true;
+    }
+
+    /// Player prefs as they are now (`None` before the config is loaded).
+    fn current_player_prefs(&self) -> Option<glyph_core::config::PlayerPrefs> {
+        if !self.config_loaded {
+            return None;
+        }
+        let volume = self.player_state.as_ref().map_or(self.config.player.volume, |s| s.volume);
+        let repeat = match self.repeat() {
+            RepeatMode::Off => "off",
+            RepeatMode::All => "all",
+            RepeatMode::One => "one",
+        };
+        Some(glyph_core::config::PlayerPrefs {
+            volume,
+            shuffle: self.shuffle(),
+            repeat: repeat.into(),
+            show_queue: self.show_queue,
+            mini_on_top: self.mini_on_top,
+        })
+    }
+
+    /// Notes changed player prefs (saved quietly by `flush_config`).
+    fn save_player_prefs(&mut self, cx: &mut Context<Self>) {
+        if let Some(prefs) = self.current_player_prefs() {
+            if prefs != self.config.player {
+                self.config.player = prefs;
+                // Keeps a pending settings toast; restarts the delay.
+                let toast = self.config_dirty.is_some_and(|(_, t)| t);
+                self.config_dirty = Some((Instant::now(), toast));
+            }
+        }
+        self.flush_config(cx);
+    }
+
+    pub(crate) fn apply_config(&mut self, config: Config, cx: &mut Context<Self>) {
         self.server_input
             .update(cx, |i, cx| i.set_value(config.server_url.clone(), cx));
         for (name, input) in &self.key_inputs {
@@ -633,8 +830,11 @@ impl Glyph {
         let intensity = config.visuals.intensity;
         self.glow.update(cx, |g, _| g.set_intensity(intensity));
         self.config = config;
+        self.restore_player_prefs();
         if let Some(p) = &self.player {
             p.set_crossfade(Duration::from_secs(self.config.audio.crossfade_s as u64));
+            p.set_loudness(level_of(self.config.audio.level), self.config.audio.normalize);
+            p.set_equalizer(self.config.audio.eq_enabled, eq_gains(&self.config.audio.eq_gains));
         }
         cx.notify();
     }
@@ -648,12 +848,14 @@ impl Glyph {
                     None => BackendState::Ready(BackendMode::Direct),
                 };
                 self.backend = Some(b);
+                self.load_feeds(cx);
                 // Misses recorded without a backend are not real misses.
                 self.covers.retain(|_, v| v.is_some());
                 self.ascii_covers.clear();
                 if self.config.updates.check_on_start {
                     self.check_updates(false, cx);
                 }
+                self.start_sync_loop(cx);
             }
             Err(e) => {
                 tracing::warn!("backend offline: {e}");
@@ -681,6 +883,7 @@ impl Glyph {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut dirty = false;
+        self.save_player_prefs(cx);
         if let Some(p) = self.player.clone() {
             let embed_playing = self.embed_playing();
             if embed_playing {
@@ -717,6 +920,9 @@ impl Glyph {
                                 self.media_keys_sent = Some(key);
                             }
                         }
+                        if self.pos_anchor.map(|a| a.0) != Some(st.position) {
+                            self.pos_anchor = Some((st.position, Instant::now()));
+                        }
                         self.player_state = Some(st);
                         dirty = true;
                     }
@@ -734,7 +940,16 @@ impl Glyph {
             match ev {
                 PlayerEvent::Ended => self.next(true, cx),
                 PlayerEvent::NearEnd => self.preload_next(cx),
-                PlayerEvent::Error(e) => self.toast(tf("toast.player_error", &[("e", &e)])),
+                PlayerEvent::Error(e) => {
+                    // Preview URLs are signed and expire after ~15 min. If the
+                    // one we are holding has expired, resolve once more (which
+                    // fetches a fresh URL) and replay instead of just failing.
+                    if self.retry_expired_preview(&e, cx) {
+                        tracing::info!("expired preview URL, re-resolving once");
+                    } else {
+                        self.toast_info(tf("toast.player_error", &[("e", &e)]));
+                    }
+                }
                 PlayerEvent::StatusChanged(_) => {}
             }
         }
@@ -776,10 +991,26 @@ impl Glyph {
         if crate::theme::update_inks() {
             dirty = true;
         }
-        if crate::ui::widgets::step_smooth_scroll() {
-            dirty = true;
-        }
         // Requests from another launch (jump list click, second start).
+        #[cfg(windows)]
+        {
+            for id in crate::thumbbar::take_clicks() {
+                match id {
+                    crate::thumbbar::LIKE => {
+                        if let Some(cur) = self.current.clone() {
+                            self.toggle_like(&cur, cx);
+                        }
+                    }
+                    crate::thumbbar::PREV => self.previous(cx),
+                    crate::thumbbar::PLAY => self.toggle_play(cx),
+                    crate::thumbbar::NEXT => self.next(false, cx),
+                    _ => {}
+                }
+                dirty = true;
+            }
+            let liked = self.current.as_ref().is_some_and(|c| self.is_liked(c));
+            crate::thumbbar::set_state(self.is_playing(), liked);
+        }
         while let Some(req) = crate::instance::try_recv() {
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
                 self.dock_action(n, cx);
@@ -802,11 +1033,19 @@ impl Glyph {
                 dirty = true;
             }
         }
-        if let Some((_, at)) = &self.toast {
-            if at.elapsed() > TOAST_FOR {
-                self.toast = None;
-                dirty = true;
-            }
+        if self.settings_closing.is_some_and(|at| at.elapsed() > Duration::from_millis(160)) {
+            self.settings_closing = None;
+            dirty = true;
+        }
+        let before = self.toasts.len();
+        let held = self.toast_drag.map(|(id, _)| id);
+        let hovered = self.toast_hover;
+        self.toasts.retain(|t| match t.gone {
+            Some(g) => g.elapsed().as_secs_f32() < crate::ui::toasts::GONE_S,
+            None => hovered || held == Some(t.id) || t.at.elapsed() <= TOAST_FOR,
+        });
+        if self.toasts.len() != before {
+            dirty = true;
         }
         if self.is_animating() || crate::ui::widgets::take_skeleton_seen() {
             dirty = true;
@@ -817,10 +1056,8 @@ impl Glyph {
     }
 
     pub fn is_animating(&self) -> bool {
-        let toast_fading = self.toast.as_ref().is_some_and(|(_, at)| {
-            let e = at.elapsed();
-            e < Duration::from_millis(250) || e > TOAST_FOR - Duration::from_millis(400)
-        });
+        let toast_fading = crate::ui::toasts::animating(self);
+        let settings_anim = (self.settings_open && self.settings_at.elapsed() < Duration::from_millis(220)) || self.settings_closing.is_some();
         let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700))
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
         let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200)) || self.ctx_closing.is_some();
@@ -829,13 +1066,17 @@ impl Glyph {
         toast_fading
             || crate::ui::widgets::reveal_active()
             || info_anim
+            || !self.downloading.is_empty()
+            || self.download_done.values().any(|at| at.elapsed().as_secs_f32() < crate::ui::widgets::DL_DONE_ANIM_S)
+            || settings_anim
+            || crate::ui::settings::select_animating()
             || tip_anim
             || menu_anim
             || self.splash.is_some()
             || nav_anim
             || self.bar_slide.running()
             || self.search.loading
-            || self.resolving
+            || self.is_loading()
             || self.lyrics.loading
             || self.update.checking
             || self.update.installing.is_some()
@@ -846,20 +1087,78 @@ impl Glyph {
 
     // ------------------------------------------------------------ helpers
 
+    /// Confirmation toast. "Title · detail" is split at the first dot.
     pub fn toast(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
+        self.push_toast(msg.into(), ToastIcon::Check);
+    }
+
+    /// Neutral / problem toast (info icon instead of the check).
+    pub fn toast_info(&mut self, msg: impl Into<String>) {
+        self.push_toast(msg.into(), ToastIcon::Info);
+    }
+
+    /// Toast with an explicit detail part.
+    pub fn toast_sub(&mut self, title: impl Into<String>, sub: impl Into<String>) {
+        self.push_toast(format!("{} · {}", title.into(), sub.into()), ToastIcon::Check);
+    }
+
+    fn push_toast(&mut self, msg: String, icon: ToastIcon) {
         tracing::info!("{msg}");
-        self.toast = Some((msg, Instant::now()));
+        let (title, sub) = match msg.split_once(" · ") {
+            Some((a, b)) if !b.trim().is_empty() => (a.to_string(), Some(b.to_string())),
+            _ => (msg, None),
+        };
+        let now = Instant::now();
+        // The same message again (e.g. one error repeating): bring the
+        // existing toast to the front instead of stacking copies.
+        if let Some(i) = self.toasts.iter().position(|t| t.gone.is_none() && t.title == title && t.sub == sub) {
+            let mut t = self.toasts.remove(i);
+            t.at = now;
+            self.toasts.insert(0, t);
+            return;
+        }
+        self.toast_seq += 1;
+        self.toasts.insert(
+            0,
+            Toast {
+                id: self.toast_seq,
+                title,
+                sub,
+                icon,
+                at: now,
+                y: f32::NAN,
+                target: 0.0,
+                drag: 0.0,
+                depth: 0.0,
+                depth_target: 0.0,
+                gone: None,
+            },
+        );
+        // Over the limit: the oldest visible ones swipe away.
+        let mut live = 0;
+        for t in self.toasts.iter_mut() {
+            if t.gone.is_none() {
+                live += 1;
+                if live > MAX_TOASTS {
+                    t.gone = Some(now);
+                }
+            }
+        }
     }
 
     fn with_player(&mut self, f: impl FnOnce(&PlayerController)) {
         if let Some(p) = &self.player {
             if guard(|| f(p)).is_none() {
-                self.toast(t("toast.player_not_ready"));
+                self.toast_info(t("toast.player_not_ready"));
             }
         } else {
-            self.toast(t("status.player_offline"));
+            self.toast_info(t("status.player_offline"));
         }
+    }
+
+    /// A song is being found (resolve, yt-dlp) or opened by the player.
+    pub fn is_loading(&self) -> bool {
+        self.resolving || self.player_state.as_ref().is_some_and(|s| s.status == Status::Loading)
     }
 
     pub fn is_playing(&self) -> bool {
@@ -868,6 +1167,16 @@ impl Glyph {
 
     pub fn position(&self) -> Duration {
         self.player_state.as_ref().map(|s| s.position).unwrap_or_default()
+    }
+
+    /// Position moving smoothly between player reports (embedded players
+    /// report only a few times a second); used for lyrics.
+    pub fn display_position(&self) -> Duration {
+        let base = self.position();
+        match self.pos_anchor {
+            Some((p, at)) if p == base && self.is_playing() => base + at.elapsed().min(Duration::from_millis(800)),
+            _ => base,
+        }
     }
 
     pub fn duration(&self) -> Option<Duration> {
@@ -921,10 +1230,47 @@ impl Glyph {
                 }
             })
             .detach();
+        self.schedule_sync(cx);
     }
 
+    /// Saves the config once changes stop for a moment (a slider drag is
+    /// one save, not one per step); see [`Glyph::flush_config`].
     pub fn save_config(&mut self, cx: &mut Context<Self>) {
+        self.config_dirty = Some((Instant::now(), true));
+        // Settings follow the account (debounced like library changes).
+        self.schedule_sync(cx);
+    }
+
+    /// Settings that arrived from another device: apply and save them quietly.
+    pub(crate) fn adopt_synced_config(&mut self, config: Config, providers_changed: bool, cx: &mut Context<Self>) {
+        self.apply_config(config, cx);
+        let toast = self.config_dirty.is_some_and(|(_, t)| t);
+        self.config_dirty = Some((Instant::now(), toast));
+        if providers_changed {
+            // Sources and keys are read when the backend is built.
+            self.retry_backend(cx);
+        }
+    }
+
+    /// Writes a pending config change after [`CONFIG_SAVE_DELAY`] without
+    /// further changes. `toast`: a settings change (not player prefs).
+    fn flush_config(&mut self, cx: &mut Context<Self>) {
+        let Some((at, toast)) = self.config_dirty else { return };
+        if at.elapsed() < CONFIG_SAVE_DELAY {
+            return;
+        }
+        self.config_dirty = None;
         let cfg = self.config.clone();
+        if !toast {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = guard_res(|| cfg.save()) {
+                        tracing::warn!("saving player prefs: {e}");
+                    }
+                })
+                .detach();
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_executor()
@@ -932,8 +1278,8 @@ impl Glyph {
                 .await;
             this.update(cx, |s, cx| {
                 match r {
-                    Ok(()) => s.toast(t("toast.config_saved")),
-                    Err(e) => s.toast(tf("toast.config_error", &[("e", &e)])),
+                    Ok(()) => s.toast_info(t("toast.config_saved")),
+                    Err(e) => s.toast_info(tf("toast.config_error", &[("e", &e)])),
                 }
                 cx.notify();
             })
@@ -982,6 +1328,13 @@ impl Glyph {
     // ------------------------------------------------------------ search
 
     fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
+        // A pasted playlist code imports instead of searching.
+        if glyph_core::share::is_code(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_share_code(&code, cx);
+            return;
+        }
         self.search.query = q.clone();
         self.search.seq += 1;
         let seq = self.search.seq;
@@ -1013,14 +1366,14 @@ impl Glyph {
                         return Err(None);
                     }
                     s.search.results.clear();
-                    crate::ui::widgets::reset_reveals("search:");
                     s.search.seen.clear();
                     s.search.errors.clear();
                     s.search.error = None;
                     let Some(b) = s.backend.clone() else {
                         return Err(Some(t("status.backend_offline").to_string()));
                     };
-                    guard(|| b.search(q.trim())).ok_or(Some(t("error.not_ready").to_string()))
+                    let (plain, _) = glyph_core::taste::parse_query(q.trim());
+                    guard(|| b.search(&plain)).ok_or(Some(t("error.not_ready").to_string()))
                 })
                 .ok();
             let mut stream = match stream {
@@ -1052,12 +1405,22 @@ impl Glyph {
                         }
                         match ev {
                             SearchEvent::Results { tracks, .. } => {
+                                let (plain, phrases) = glyph_core::taste::parse_query(&s.search.query);
+                                let taste = s.taste();
                                 for t in tracks {
-                                    if s.is_hidden_artist(&t.artist) {
+                                    if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) {
                                         continue;
                                     }
                                     if s.search.seen.insert((t.source, t.id.clone())) {
-                                        s.search.results.push(t);
+                                        // Ranked insert: text match, odd versions, the user's taste.
+                                        let sc = glyph_core::taste::score(&t, &plain, &taste);
+                                        let at = s
+                                            .search
+                                            .results
+                                            .iter()
+                                            .position(|x| glyph_core::taste::score(x, &plain, &taste) < sc)
+                                            .unwrap_or(s.search.results.len());
+                                        s.search.results.insert(at, t);
                                     } else if let Some(x) = s.search.results.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
                                         *x = t;
                                     }
@@ -1084,7 +1447,7 @@ impl Glyph {
     /// Artists in the current results, best matches for the query first:
     /// (name, a song of theirs for the picture).
     pub fn search_artists(&self, max: usize) -> Vec<(String, Track)> {
-        let q = self.search.query.trim().to_lowercase();
+        let q = glyph_core::taste::parse_query(self.search.query.trim()).0.to_lowercase();
         let mut found: Vec<(String, Track, usize)> = Vec::new();
         for tr in &self.search.results {
             let name = primary_artist(&tr.artist);
@@ -1118,7 +1481,7 @@ impl Glyph {
     /// Query completions taken from the current results (titles and artists
     /// that contain what was typed), for the chips above the results.
     pub fn search_completions(&self, max: usize) -> Vec<String> {
-        let q = self.search.query.trim().to_lowercase();
+        let q = glyph_core::taste::parse_query(self.search.query.trim()).0.to_lowercase();
         if q.len() < 2 {
             return Vec::new();
         }
@@ -1205,8 +1568,10 @@ impl Glyph {
         self.current = Some(track.clone());
         self.current_source = Some(track.source);
         self.current_preview = false;
+        self.retried_expired = None;
         self.resolving = true;
         if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
+            self.library.record_play(&track);
             self.save_library(cx);
         }
         let seed = format!("{}{}", track.artist, track.title);
@@ -1231,7 +1596,7 @@ impl Glyph {
         let Some(backend) = self.backend.clone() else {
             self.resolving = false;
             self.lyrics.loading = false;
-            self.toast(t("status.backend_offline"));
+            self.toast_info(t("status.backend_offline"));
             return;
         };
 
@@ -1257,9 +1622,12 @@ impl Glyph {
                             p.load(tr, src);
                             p.play();
                         });
+                        // Now that this song runs, get the next ones ready
+                        // (local yt-dlp only; one batch run, not one wait per song).
+                        s.prefetch_upcoming();
                     }
-                    Ok(None) => s.toast(crate::i18n::t("toast.no_source")),
-                    Err(e) => s.toast(tf("toast.resolve_error", &[("e", &e)])),
+                    Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
+                    Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
                 }
                 cx.notify();
             })
@@ -1346,18 +1714,23 @@ impl Glyph {
     }
 
     pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {
+        if !auto && self.library_ok && self.position() < Duration::from_secs(30) {
+            if let Some(cur) = self.current.clone() {
+                self.library.record_skip(&cur);
+            }
+        }
         match guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() }) {
             Some(Some(t)) => self.play_track(t, cx),
             Some(None) => {
                 if self.radio {
                     self.start_radio(cx);
                 } else if auto {
-                    self.toast(t("toast.queue_end"));
+                    self.toast_info(t("toast.queue_end"));
                 }
             }
             None => {
                 self.queue_ok = false;
-                self.toast("[ QUEUE OFFLINE ]");
+                self.toast_info("[ QUEUE OFFLINE ]");
             }
         }
         cx.notify();
@@ -1371,6 +1744,62 @@ impl Glyph {
         if let Some(Some(t)) = guard(|| self.queue.previous().cloned()) {
             self.play_track(t, cx);
         }
+    }
+
+    /// `true` if the error was an expired/denied stream URL and a fresh
+    /// resolve was started for the current track.
+    ///
+    /// Deezer signs preview URLs with a ~15 min lifetime, so a URL fetched
+    /// during preload can be dead by the time it plays. Only retried once per
+    /// track to avoid a loop when the provider itself is unavailable.
+    fn retry_expired_preview(&mut self, error: &str, cx: &mut Context<Self>) -> bool {
+        // "HTTP 403" when opening, "(403 Forbidden)" from a later range request.
+        let refused = ["HTTP 403", "HTTP 401", "403 Forbidden", "401 Unauthorized"].iter().any(|s| error.contains(s));
+        if !refused {
+            return false;
+        }
+        let (Some(backend), Some(current)) = (self.backend.clone(), self.current.clone()) else {
+            return false;
+        };
+        if self.retried_expired.replace(current.clone()).is_some() {
+            return false;
+        }
+        let key = track_key(&current);
+        let b = backend;
+        // Local YouTube URLs expire too (after hours): fetch fresh ones
+        // instead of dropping to a preview.
+        let youtube = self.current_source == Some(ProviderId::YouTube);
+        cx.spawn(async move |this, cx| {
+            let r = if youtube {
+                guard_async(b.refresh_source(&current)).await
+            } else {
+                match guard_async(b.refresh_preview(&current)).await {
+                    Ok(Some(r)) => Ok(Some(r)),
+                    _ => guard_async(b.resolve(&current)).await,
+                }
+            };
+            this.update(cx, |s, cx| {
+                if s.current.as_ref().map(track_key).as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                match r {
+                    Ok(Some(res)) => {
+                        let src = res.source.clone();
+                        let tr = res.track.clone();
+                        s.with_player(move |p| {
+                            p.load(tr, src);
+                            p.play();
+                        });
+                    }
+                    Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
+                    Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        true
     }
 
     fn preload_next(&mut self, cx: &mut Context<Self>) {
@@ -1395,13 +1824,13 @@ impl Glyph {
                 Ok(tracks) if !tracks.is_empty() => {
                     let tracks: Vec<Track> = tracks.into_iter().filter(|t| !s.is_hidden_artist(&t.artist)).collect();
                     if tracks.is_empty() {
-                        s.toast(t("toast.radio_empty"));
+                        s.toast_info(t("toast.radio_empty"));
                     } else {
                         s.play_list(tracks, 0, cx)
                     }
                 }
-                Ok(_) => s.toast(t("toast.radio_empty")),
-                Err(e) => s.toast(tf("toast.radio_error", &[("e", &e)])),
+                Ok(_) => s.toast_info(t("toast.radio_empty")),
+                Err(e) => s.toast_info(tf("toast.radio_error", &[("e", &e)])),
             })
             .ok();
         })
@@ -1441,8 +1870,8 @@ impl Glyph {
             guard(|| self.queue.push(t))
         };
         match ok {
-            Some(()) => self.toast(tf(if next { "toast.play_next" } else { "toast.queued" }, &[("title", &title)])),
-            None => self.toast("[ QUEUE OFFLINE ]"),
+            Some(()) => self.toast_info(tf(if next { "toast.play_next" } else { "toast.queued" }, &[("title", &title)])),
+            None => self.toast_info("[ QUEUE OFFLINE ]"),
         }
         cx.notify();
     }
@@ -1459,7 +1888,7 @@ impl Glyph {
 
     pub fn toggle_like(&mut self, t: &Track, cx: &mut Context<Self>) {
         if !self.library_ok {
-            self.toast(crate::i18n::t("status.library_offline"));
+            self.toast_info(crate::i18n::t("status.library_offline"));
             return;
         }
         if guard(|| self.library.toggle_like(t)).is_some() {
@@ -1516,9 +1945,9 @@ impl Glyph {
         match &t.permalink {
             Some(url) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                self.toast(tf("toast.link_copied", &[("source", &t.source.display_name())]));
+                self.toast_sub(crate::i18n::t("toast.link_copied_plain"), t.title.clone());
             }
-            None => self.toast(crate::i18n::t("toast.no_link")),
+            None => self.toast_info(crate::i18n::t("toast.no_link")),
         }
     }
 
@@ -1590,7 +2019,319 @@ impl Glyph {
             ListRef::User(id) => self.library.playlist(id).map(|p| p.tracks.clone()).unwrap_or_default(),
             ListRef::Album { tracks, .. } => tracks.clone(),
             ListRef::ArtistLiked(name) => self.liked_by(name),
+            ListRef::Downloads => self.backend.as_ref().map(|b| b.downloaded_tracks()).unwrap_or_default(),
         }
+    }
+
+    /// Copies a share code for the list (songs, name) to the clipboard.
+    pub fn share_list(&mut self, l: &ListRef, cx: &mut Context<Self>) {
+        let tracks = self.list_tracks(l);
+        if tracks.is_empty() {
+            self.toast_info(t("toast.share_empty"));
+            cx.notify();
+            return;
+        }
+        let code = glyph_core::share::encode(&self.list_title(l), &tracks);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+        self.toast_sub(t("toast.share_copied"), self.list_title(l));
+        cx.notify();
+    }
+
+    /// Imports a pasted share code as a new playlist and opens it.
+    pub fn import_share_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if !glyph_core::share::is_code(code) {
+            return false;
+        }
+        match glyph_core::share::decode(code) {
+            Ok((name, tracks)) if self.library_ok => {
+                let n = tracks.len();
+                let id = {
+                    let p = self.library.create_playlist(&name);
+                    p.tracks = tracks;
+                    p.id.clone()
+                };
+                self.save_library(cx);
+                self.toast_sub(tf("toast.share_imported", &[("n", &n)]), name);
+                self.open_list(ListRef::User(id), cx);
+            }
+            Ok(_) => self.toast_info(t("status.library_offline")),
+            Err(e) => self.toast_info(format!("{e:#}")),
+        }
+        cx.notify();
+        true
+    }
+
+    /// "2019 · EP"-style label for an album; looked up once, guessed from the
+    /// song count until (or unless) the catalog knows it.
+    pub fn album_label(&mut self, title: &str, artist: &str, n: usize, cx: &mut Context<Self>) -> String {
+        use glyph_core::catalog::AlbumKind;
+        let key = format!("{}|{}", title.to_lowercase(), artist.to_lowercase());
+        if !self.album_meta.contains_key(&key) {
+            self.album_meta.insert(key.clone(), None);
+            if let Some(b) = self.backend.clone() {
+                let (t2, a2, k2) = (title.to_string(), artist.to_string(), key.clone());
+                cx.spawn(async move |this, cx| {
+                    let r = guard_async(b.album_meta(&t2, &a2)).await;
+                    if let Ok(Some(m)) = r {
+                        this.update(cx, |s, cx| {
+                            s.album_meta.insert(k2, Some(m));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
+        }
+        let meta = self.album_meta.get(&key).cloned().flatten();
+        let kind = meta.as_ref().map(|m| m.kind).unwrap_or(AlbumKind::from_count(n));
+        let kind = match kind {
+            AlbumKind::Album => t("album.kind.album"),
+            AlbumKind::Ep => t("album.kind.ep"),
+            AlbumKind::Single => t("album.kind.single"),
+            AlbumKind::Compilation => t("album.kind.compilation"),
+        };
+        match meta.and_then(|m| m.year) {
+            Some(y) => format!("{y} · {kind}"),
+            None => kind.to_string(),
+        }
+    }
+
+    /// The taste profile from the library (cheap; built on demand).
+    pub fn taste(&self) -> glyph_core::taste::Taste {
+        if self.library_ok {
+            glyph_core::taste::Taste::from_library(&self.library)
+        } else {
+            Default::default()
+        }
+    }
+
+    /// Not filtered out by "Hide explicit songs".
+    pub fn allowed(&self, t: &Track) -> bool {
+        !(t.explicit && self.config.audio.hide_explicit)
+    }
+
+    /// Loads "Recommended for you" and "Popular right now" for Home.
+    pub fn load_feeds(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        if self.feeds_loading {
+            return;
+        }
+        self.feeds_loading = true;
+        // Seeds: one song for each of the user's top artists, then liked songs.
+        let taste = self.taste();
+        let mut seeds: Vec<Track> = Vec::new();
+        let pool: Vec<Track> = self.library.liked.iter().chain(self.library.recent.iter()).cloned().collect();
+        for a in taste.top_artists(4) {
+            if let Some(t) = pool.iter().find(|t| glyph_core::taste::credited(&t.artist).contains(&a)) {
+                if !seeds.iter().any(|s| s.id == t.id && s.source == t.source) {
+                    seeds.push(t.clone());
+                }
+            }
+        }
+        for t in self.library.liked.iter().take(2) {
+            if !seeds.iter().any(|s| s.id == t.id && s.source == t.source) {
+                seeds.push(t.clone());
+            }
+        }
+        seeds.truncate(5);
+        cx.spawn(async move |this, cx| {
+            let trending = b.trending(30).await.unwrap_or_default();
+            this.update(cx, |s, cx| {
+                s.trending = trending.into_iter().filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist)).take(20).collect();
+                cx.notify();
+            })
+            .ok();
+            // Similar songs per seed (via the server); songs suggested by
+            // several seeds and by liked artists come first.
+            let mut found: Vec<(Track, f32)> = Vec::new();
+            for seed in &seeds {
+                let sim = b.similar(seed).await.unwrap_or_default();
+                for (i, t) in sim.into_iter().take(25).enumerate() {
+                    let w = 1.0 - i as f32 / 30.0;
+                    let key = glyph_core::dedupe::track_key(&t);
+                    match found.iter_mut().find(|(x, _)| glyph_core::dedupe::track_key(x) == key) {
+                        Some(f) => f.1 += w,
+                        None => found.push((t, w)),
+                    }
+                }
+            }
+            this.update(cx, |s, cx| {
+                let taste = s.taste();
+                let recent: HashSet<String> = s.library.recent.iter().take(30).map(glyph_core::dedupe::track_key).collect();
+                let mut v: Vec<(Track, f32)> = found
+                    .into_iter()
+                    .filter(|(t, _)| s.allowed(t) && !taste.is_hidden(&t.artist) && !taste.is_liked(t) && !recent.contains(&glyph_core::dedupe::track_key(t)))
+                    .map(|(t, w)| {
+                        let sc = w + taste.artist_weight(&t.artist) * 0.8;
+                        (t, sc)
+                    })
+                    .collect();
+                v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                // At most two songs per artist, so it does not become one artist's page.
+                let mut per: std::collections::HashMap<String, usize> = Default::default();
+                s.recs = v
+                    .into_iter()
+                    .filter(|(t, _)| {
+                        let n = per.entry(glyph_core::dedupe::normalize_artist(&t.artist)).or_default();
+                        *n += 1;
+                        *n <= 2
+                    })
+                    .map(|(t, _)| t)
+                    .take(16)
+                    .collect();
+                s.feeds_loading = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn is_downloaded(&self, t: &Track) -> bool {
+        self.backend.as_ref().is_some_and(|b| b.is_downloaded(t))
+    }
+
+    pub fn is_downloading(&self, t: &Track) -> bool {
+        !self.downloading.is_empty() && self.downloading.contains(&track_key(t))
+    }
+
+    /// Download badge state of a song (ring while busy, check when saved).
+    pub fn download_view(&self, t: &Track) -> crate::ui::widgets::DlView {
+        use crate::ui::widgets::{DlView, DL_DONE_ANIM_S};
+        if self.is_downloading(t) {
+            // Waiting for its turn: empty ring; running with unknown size: spinner.
+            return match self.backend.as_ref().and_then(|b| b.download_progress(t)) {
+                None => DlView::Busy(Some(0.0)),
+                Some(f) => DlView::Busy(f),
+            };
+        }
+        if !self.is_downloaded(t) {
+            return DlView::None;
+        }
+        let age = if self.download_done.is_empty() {
+            None
+        } else {
+            self.download_done.get(&track_key(t)).map(|at| at.elapsed().as_secs_f32()).filter(|a| *a < DL_DONE_ANIM_S)
+        };
+        DlView::Done(age)
+    }
+
+    /// One badge for several songs: the share already fetched while any of
+    /// them downloads, the check once all are saved.
+    pub fn downloads_view(&self, tracks: &[Track]) -> crate::ui::widgets::DlView {
+        use crate::ui::widgets::DlView;
+        if tracks.is_empty() {
+            return DlView::None;
+        }
+        let views: Vec<DlView> = tracks.iter().map(|t| self.download_view(t)).collect();
+        if views.iter().any(|v| matches!(v, DlView::Busy(_))) {
+            let sum: f32 = views
+                .iter()
+                .map(|v| match v {
+                    DlView::Done(_) => 1.0,
+                    DlView::Busy(f) => f.unwrap_or(0.0),
+                    DlView::None => 0.0,
+                })
+                .sum();
+            return DlView::Busy(Some(sum / views.len() as f32));
+        }
+        if views.iter().all(|v| matches!(v, DlView::Done(_))) {
+            // Animate when the last one just finished.
+            let age = views.iter().filter_map(|v| if let DlView::Done(a) = v { *a } else { None }).reduce(f32::min);
+            return DlView::Done(age);
+        }
+        DlView::None
+    }
+
+    /// Downloads the songs one after another; songs no source offers for
+    /// download are skipped and counted in the closing toast.
+    pub fn download_tracks(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.toast_info(t("toast.dl_unready"));
+            cx.notify();
+            return;
+        };
+        let todo: Vec<Track> = tracks.into_iter().filter(|tr| !self.is_downloaded(tr) && !self.is_downloading(tr)).collect();
+        if todo.is_empty() {
+            self.toast_info(t("toast.dl_already"));
+            cx.notify();
+            return;
+        }
+        for tr in &todo {
+            self.downloading.insert(track_key(tr));
+        }
+        let total = todo.len();
+        let first_title = todo[0].title.clone();
+        self.toast(if total == 1 {
+            tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
+        } else {
+            tf("toast.dl_started", &[("n", &total)]).to_string()
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
+            for tr in todo {
+                let saved = match b.download(&tr).await {
+                    Ok(Some(_)) => {
+                        ok += 1;
+                        true
+                    }
+                    Ok(None) => {
+                        missing += 1;
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!(title = %tr.title, "download failed: {e:#}");
+                        failed += 1;
+                        false
+                    }
+                };
+                let k = track_key(&tr);
+                this.update(cx, |s, cx| {
+                    s.downloading.remove(&k);
+                    if saved {
+                        s.download_done.retain(|_, at| at.elapsed() < Duration::from_secs(5));
+                        s.download_done.insert(k, Instant::now());
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+            let msg = if ok + failed == 0 {
+                t("toast.dl_none").to_string()
+            } else if total == 1 && ok == 1 {
+                tf("toast.dl_done_one", &[("title", &first_title)]).to_string()
+            } else {
+                let mut parts = Vec::new();
+                if ok > 0 {
+                    parts.push(tf("toast.dl_done", &[("n", &ok)]).to_string());
+                }
+                if missing > 0 {
+                    parts.push(tf("toast.dl_unavailable", &[("n", &missing)]).to_string());
+                }
+                if failed > 0 {
+                    parts.push(tf("toast.dl_failed", &[("n", &failed)]).to_string());
+                }
+                parts.join(" · ")
+            };
+            this.update(cx, |s, cx| {
+                s.toast(msg);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Deletes the downloaded files of `tracks`.
+    pub fn remove_downloads(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        let n = tracks.iter().filter(|tr| b.remove_download(tr)).count();
+        if n > 0 {
+            self.toast(if n == 1 { t("toast.dl_removed_one").to_string() } else { tf("toast.dl_removed", &[("n", &n)]).to_string() });
+        }
+        cx.notify();
     }
 
     pub fn is_following(&self, name: &str) -> bool {
@@ -1599,7 +2340,7 @@ impl Glyph {
 
     pub fn toggle_follow(&mut self, name: &str, track: Option<Track>, cx: &mut Context<Self>) {
         if !self.library_ok {
-            self.toast(t("status.library_offline"));
+            self.toast_info(t("status.library_offline"));
             return;
         }
         if let Some(now) = guard(|| self.library.toggle_follow(name, track)) {
@@ -1616,7 +2357,7 @@ impl Glyph {
     /// Heart on an album: save it to / remove it from the library.
     pub fn toggle_saved(&mut self, l: &ListRef, cx: &mut Context<Self>) {
         if !self.library_ok {
-            self.toast(t("status.library_offline"));
+            self.toast_info(t("status.library_offline"));
             return;
         }
         if let Some(saved) = guard(|| self.library.toggle_saved(l.key())) {
@@ -1652,6 +2393,7 @@ impl Glyph {
             ListRef::User(id) => self.library.playlist(id).map(|p| p.name.clone()).unwrap_or_default(),
             ListRef::Album { title, .. } => title.clone(),
             ListRef::ArtistLiked(_) => t("library.liked").to_string(),
+            ListRef::Downloads => t("library.downloads").to_string(),
         }
     }
 
@@ -1723,6 +2465,19 @@ impl Glyph {
                 .ok();
             })
         };
+        let stats = {
+            let (name, b) = (name.clone(), b.clone());
+            cx.spawn(async move |this, cx| {
+                let r = guard_async(b.artist_stats(&name)).await;
+                this.update(cx, |s, cx| {
+                    if let (Some(p), Ok(Some(st))) = (s.artists.get_mut(&name), r) {
+                        p.stats = Some(st);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+        };
         let info = {
             let (name, lang) = (name.clone(), self.lang.code());
             cx.spawn(async move |this, cx| {
@@ -1747,9 +2502,10 @@ impl Glyph {
                 loading: true,
                 info: None,
                 info_loading: true,
+                stats: None,
                 show_all: false,
                 about_open: false,
-                _tasks: vec![songs, info],
+                _tasks: vec![songs, info, stats],
             },
         );
     }
@@ -1923,6 +2679,7 @@ impl Glyph {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
+            explicit: false,
         });
         self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: None, artist: Some(name.to_string()) });
         self.ctx_opened = Instant::now();
@@ -1940,9 +2697,9 @@ impl Glyph {
         match url {
             Some(u) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(u));
-                self.toast(t("toast.link_copied_plain"));
+                self.toast_sub(t("toast.link_copied_plain"), name.to_string());
             }
-            None => self.toast(t("toast.no_link")),
+            None => self.toast_info(t("toast.no_link")),
         }
     }
 
@@ -1986,6 +2743,7 @@ impl Glyph {
                 isrc: None,
                 permalink: None,
                 external_ids: Default::default(),
+                explicit: false,
             },
             None => return,
         };
@@ -2034,6 +2792,11 @@ impl Glyph {
                 }
             }
             ListRef::Album { .. } => {}
+            ListRef::Downloads => {
+                if let Some(tr) = self.list_tracks(l).get(i).cloned() {
+                    self.remove_downloads(vec![tr], cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -2090,7 +2853,7 @@ impl Glyph {
                             }
                         }
                     }
-                    Err(e) => s.toast(tf("toast.cover_error", &[("e", &e)])),
+                    Err(e) => s.toast_info(tf("toast.cover_error", &[("e", &e)])),
                 }
                 cx.notify();
             })
@@ -2138,7 +2901,7 @@ impl Glyph {
                         _ => self.add_many_to_playlist(&id, d.tracks, cx),
                     }
                 }
-                None => self.toast(t("status.library_offline")),
+                None => self.toast_info(t("status.library_offline")),
             }
         }
         cx.notify();
@@ -2148,7 +2911,24 @@ impl Glyph {
 
     // ------------------------------------------------------------ settings modal
 
+    /// 0..1 how far the settings modal is shown (eased open / close).
+    pub fn settings_k(&self) -> f32 {
+        if self.settings_open {
+            let k = (self.settings_at.elapsed().as_secs_f32() / 0.18).min(1.0);
+            1.0 - (1.0 - k).powi(3)
+        } else if let Some(at) = self.settings_closing {
+            let k = (at.elapsed().as_secs_f32() / 0.14).min(1.0);
+            (1.0 - k).powi(2)
+        } else {
+            0.0
+        }
+    }
+
     pub fn open_settings(&mut self, page: Option<SettingsPage>, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            self.settings_at = Instant::now();
+        }
+        self.settings_closing = None;
         self.settings_open = true;
         if let Some(p) = page {
             self.settings_page = p;
@@ -2157,10 +2937,14 @@ impl Glyph {
         if self.settings_page == SettingsPage::Storage {
             self.refresh_storage(cx);
         }
+        self.refresh_output_devices(cx);
         cx.notify();
     }
 
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.settings_closing = Some(Instant::now());
+        }
         self.settings_open = false;
         self.open_select = None;
         let f = self.focus.clone();
@@ -2173,6 +2957,9 @@ impl Glyph {
         self.open_select = None;
         if page == SettingsPage::Storage {
             self.refresh_storage(cx);
+        }
+        if page == SettingsPage::Account {
+            self.account_page_opened(cx);
         }
         cx.notify();
     }
@@ -2200,11 +2987,16 @@ impl Glyph {
             let res = cx.background_executor().spawn(async move { glyph_core::storage::clear(kind) }).await;
             this.update(cx, |s, cx| {
                 if let Err(e) = res {
-                    s.toast(format!("{e:#}"));
+                    s.toast_info(format!("{e:#}"));
                 }
                 if kind == glyph_core::storage::StorageKind::Covers {
                     s.covers.clear();
                     s.ascii_covers.clear();
+                }
+                if kind == glyph_core::storage::StorageKind::Downloads {
+                    if let Some(b) = &s.backend {
+                        b.reload_downloads();
+                    }
                 }
                 s.refresh_storage(cx);
             })
@@ -2226,6 +3018,9 @@ impl Glyph {
 
     /// Crossfade between songs, 0 (off) to 20 s.
     pub fn set_crossfade(&mut self, secs: u32, cx: &mut Context<Self>) {
+        if self.config.audio.crossfade_s == secs.min(20) {
+            return;
+        }
         self.config.audio.crossfade_s = secs.min(20);
         if let Some(p) = &self.player {
             p.set_crossfade(Duration::from_secs(self.config.audio.crossfade_s as u64));
@@ -2234,8 +3029,78 @@ impl Glyph {
         cx.notify();
     }
 
+    pub fn set_volume_level(&mut self, l: glyph_core::config::VolumeLevel, cx: &mut Context<Self>) {
+        self.config.audio.level = l;
+        self.open_select = None;
+        if let Some(p) = &self.player {
+            p.set_loudness(level_of(l), self.config.audio.normalize);
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Equalizer changes apply live; the config is written when asked
+    /// (`save`), so dragging a band does not write the file on every move.
+    pub fn set_eq(&mut self, enabled: bool, preset: &str, gains: [f32; 10], save: bool, cx: &mut Context<Self>) {
+        self.config.audio.eq_enabled = enabled;
+        self.config.audio.eq_preset = preset.to_string();
+        self.config.audio.eq_gains = gains.to_vec();
+        self.open_select = None;
+        if let Some(p) = &self.player {
+            p.set_equalizer(enabled, gains);
+        }
+        if save {
+            self.save_config(cx);
+        }
+        cx.notify();
+    }
+
+    /// Re-reads the list of audio outputs (off the UI thread).
+    pub fn refresh_output_devices(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let list = cx.background_executor().spawn(async move { glyph_audio::PlayerController::output_devices() }).await;
+            this.update(cx, |s, cx| {
+                s.output_devices = list;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn set_output_device(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.config.audio.output_device = name.clone();
+        self.open_select = None;
+        if let Some(p) = &self.player {
+            p.set_output_device(name);
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_normalize(&mut self, cx: &mut Context<Self>) {
+        self.config.audio.normalize = !self.config.audio.normalize;
+        if let Some(p) = &self.player {
+            p.set_loudness(level_of(self.config.audio.level), self.config.audio.normalize);
+        }
+        self.save_config(cx);
+        cx.notify();
+    }
+
     pub fn set_audio_quality(&mut self, q: glyph_core::config::AudioQuality, cx: &mut Context<Self>) {
         self.config.audio.quality = q;
+        self.open_select = None;
+        self.save_config(cx);
+        if let Some(b) = self.backend.clone() {
+            let cfg = self.config.clone();
+            guard(|| b.set_config(cfg));
+        }
+        cx.notify();
+    }
+
+    /// Quality of new downloads (songs already saved stay as they are).
+    pub fn set_download_quality(&mut self, q: glyph_core::config::AudioQuality, cx: &mut Context<Self>) {
+        self.config.audio.download_quality = q;
         self.open_select = None;
         self.save_config(cx);
         if let Some(b) = self.backend.clone() {
@@ -2520,22 +3385,29 @@ impl Glyph {
         None
     }
 
-    /// The cover at `path` as ASCII rows; computed on the background executor.
-    pub fn ascii_cover(&mut self, t: &Track, path: &std::path::Path, cols: u32, rows: u32, cx: &mut Context<Self>) -> Option<Vec<crate::visuals::ascii::ColoredRow>> {
-        let key = (track_key(t), cols, rows);
+    /// The ASCII picture for this cover size is rendered already.
+    pub fn ascii_ready(&self, t: &Track, size: f32) -> bool {
+        self.ascii_covers.get(&(track_key(t), (size * 2.0) as u32)).is_some_and(|v| v.is_some())
+    }
+
+    /// The cover at `path` as an ASCII picture of `px` pixels (rendered once
+    /// on the background executor, then cached).
+    pub fn ascii_cover(&mut self, t: &Track, path: &std::path::Path, px: u32, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+        let key = (track_key(t), px);
         if let Some(v) = self.ascii_covers.get(&key) {
             return v.clone();
         }
         self.ascii_covers.insert(key.clone(), None);
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
-            let rows_ = cx
+            let img = cx
                 .background_executor()
-                .spawn(async move { crate::visuals::ascii::from_image_colored(&path, cols, rows) })
+                .spawn(async move { crate::visuals::ascii::cover_raster(&path, px) })
                 .await;
             this.update(cx, |s, cx| {
-                // Undecodable image: empty rows, the caller shows the image.
-                s.ascii_covers.insert(key, Some(rows_.unwrap_or_default()));
+                if let Some(img) = img {
+                    s.ascii_covers.insert(key, Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(img)]))));
+                }
                 cx.notify();
             })
             .ok();

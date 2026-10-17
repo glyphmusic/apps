@@ -4,6 +4,7 @@
 //! (`visuals::glow`). Everything here is flat: black 60–75 % panels,
 //! 1 px white 10–15 % borders, song colours only as flat fills.
 
+pub mod account;
 pub mod chrome;
 pub mod input;
 pub mod lists;
@@ -11,8 +12,10 @@ pub mod now_playing;
 pub mod player_bar;
 pub mod settings;
 pub mod splash;
+pub mod toasts;
 pub mod views;
 pub mod widgets;
+pub mod ytdlp;
 
 use crate::app::{Glyph, View};
 use crate::theme;
@@ -122,6 +125,11 @@ impl Render for Shell {
 
 impl Render for Glyph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        widgets::set_viewport_h(f32::from(window.viewport_size().height));
+        widgets::begin_wheel_frames();
+        if widgets::step_smooth_scroll() {
+            window.request_animation_frame();
+        }
         theme::set_ink(self.ink);
         theme::set_zone(Some(0));
         let titlebar = chrome::titlebar(self, window, cx).into_any_element();
@@ -177,12 +185,9 @@ impl Render for Glyph {
                 )
                 .into_any_element()
         });
-        let toast = self.toast.as_ref().map(|(m, at)| {
-            let e = at.elapsed().as_secs_f32();
-            let left = crate::app::TOAST_FOR.as_secs_f32() - e;
-            (m.clone(), ((e / 0.2).min(1.0) * (left / 0.35).clamp(0.0, 1.0)).clamp(0.0, 1.0))
-        });
-        let modal = self.settings_open.then(|| settings::modal(self, window, cx));
+        let toasts = toasts::layer(self, window, cx);
+        let sk = self.settings_k();
+        let modal = (sk > 0.0).then(|| div().absolute().inset_0().opacity(sk).child(settings::modal(self, window, cx)));
         let menu = lists::ctx_menu(self, window, cx);
         if self.splash.as_ref().is_some_and(|s| !s.active()) {
             self.splash = None;
@@ -202,7 +207,8 @@ impl Render for Glyph {
                 .child(s.element())
         });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
-        let dim = self.settings_open;
+        let dim = sk > 0.0;
+        let dim_a = 1.0 - 0.92 * sk;
 
         div()
             .id("glyph-root")
@@ -272,7 +278,7 @@ impl Render for Glyph {
             .flex_col()
             // Behind the settings modal only the (already soft) glow stays
             // visible: GPUI has no backdrop blur, so the UI fades out instead.
-            .child(div().flex_none().when(dim, |d| d.opacity(0.08)).child(titlebar))
+            .child(div().flex_none().when(dim, |d| d.opacity(dim_a)).child(titlebar))
             .child(
                 div()
                     .flex_1()
@@ -280,45 +286,16 @@ impl Render for Glyph {
                     .flex()
                     .gap(px(theme::GAP))
                     .px(px(theme::GAP))
-                    .when(dim, |d| d.opacity(0.08))
+                    .when(dim, |d| d.opacity(dim_a))
                     .child(sidebar)
                     .child(main_panel)
                     .children(queue),
             )
-            .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(0.08)).child(b)))
+            .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(dim_a)).child(b)))
             .children(modal)
             .children(menu)
             .children(dialog)
             .children(splash)
-            .when_some(toast, |d, (m, alpha)| {
-                // Centred above the player bar; fades and lifts in, fades out.
-                let bottom = if shown > 0.0 { (theme::PLAYER_H + theme::GAP * 2.0) * shown + 12.0 } else { 24.0 };
-                d.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom(px(bottom + (1.0 - alpha) * 8.0))
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .px(px(14.0))
-                                .h(px(34.0))
-                                .rounded(px(8.0))
-                                .bg(gpui::hsla(0.0, 0.0, 0.1, 0.97))
-                                .border_1()
-                                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
-                                .opacity(alpha)
-                                .text_size(px(13.0))
-                                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
-                                .child(widgets::icon("circle-check", 14.0, gpui::hsla(0.0, 0.0, 1.0, 0.7)))
-                                .child(m),
-                        ),
-                )
-            })
+            .children(toasts)
     }
 }

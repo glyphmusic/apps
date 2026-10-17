@@ -36,6 +36,11 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
         cover_row(app, recent, "home-row", cx).into_any_element()
     };
 
+    let recs: Vec<Track> = app.recs.iter().filter(|t| app.allowed(t)).cloned().collect();
+    let trending: Vec<Track> = app.trending.iter().filter(|t| app.allowed(t)).cloned().collect();
+    let recs_row = (!recs.is_empty()).then(|| cover_row_with(app, recs, "home-recs", false, cx));
+    let trend_row = (!trending.is_empty()).then(|| cover_row_with(app, trending, "home-trend", false, cx));
+
     scroll_area("home-scroll").track_scroll(&app.main_scroll).child(
         div()
             .flex()
@@ -44,7 +49,9 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
             .child(heading(greeting()))
             .child(cards)
             .child(section_title("disc-3", t("home.recent")))
-            .child(row),
+            .child(row)
+            .when_some(recs_row, |d, r| d.child(section_title("heart", t("home.recs"))).child(r))
+            .when_some(trend_row, |d, r| d.child(section_title("headphones", t("home.trending"))).child(r)),
     )
 }
 
@@ -124,7 +131,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
                         .flex_col()
                         .min_w_0()
                         .gap(px(2.0))
-                        .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tr.title.clone()))
+                        .child(song_title(tr.title.clone(), tr.explicit).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                         .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist)),
                 )
                 .into_any_element(),
@@ -135,6 +142,11 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
 
 /// Horizontal row of square covers (176 px) with title / artist below.
 fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    cover_row_with(app, tracks, prefix, true, cx)
+}
+
+/// Row of big covers; `recent`: the menu offers "Remove from recently played".
+fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, recent: bool, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
     let list = Rc::new(tracks);
     let items: Vec<_> = (0..list.len())
         .map(|i| {
@@ -155,12 +167,13 @@ fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut
                 .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 1.0, 0.05)))
                 .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)))
                 .child(art)
-                .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tr.title.clone()))
+                .child(song_title(tr.title.clone(), tr.explicit).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                 .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist));
-            with_menu(el, tr, Some((ListRef::Recent, i)), cx)
+            with_menu(el, tr, recent.then_some((ListRef::Recent, i)), cx)
         })
         .collect();
-    div().id(prefix).flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().children(items)
+    let h = handle_for(prefix);
+    div().id(prefix).track_scroll(&h).flex().gap(px(4.0)).ml(px(-8.0)).overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
 }
 
 // ------------------------------------------------------------------ search
@@ -212,8 +225,8 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                     .into_iter()
                     .enumerate()
                     .map(|(i, (name, tr))| {
-                        let k = reveal_k(&format!("search:artist:{name}"), 0.5);
-                        let art = ascii_veil(cover(app, &tr, 48.0, 24.0, cx), format!("rva-{i}"), 48.0, 48.0, 24.0, k);
+                        let k = reveal_k(&format!("search:artist:{name}"), 0.9);
+                        let art = cover(app, &tr, 48.0, 24.0, cx);
                         let shown = decode(&name, k);
                         let follow = crate::ui::lists::follow_button(("search-follow", i), &name, Some(tr.clone()), app, 30.0, cx);
                         let n2 = name.clone();
@@ -430,7 +443,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .child(div().truncate().text_size(theme::text_sm()).child(tr.title.clone()))
+                                .child(song_title(tr.title.clone(), tr.explicit).text_size(theme::text_sm()))
                                 .child(div().truncate().text_size(theme::text_xs()).text_color(theme::text_dim()).child(tr.artist.clone())),
                         )
                         .child(icon_button(("q-up", i), "arrow-up", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| {

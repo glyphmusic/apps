@@ -47,14 +47,15 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .ok();
     });
 
-    let title_lines = |title: gpui::SharedString, sub: gpui::AnyElement| {
+    let explicit = app.current.as_ref().is_some_and(|t| t.explicit);
+    let title_lines = move |title: gpui::SharedString, sub: gpui::AnyElement| {
         div()
             .flex()
             .flex_col()
             .justify_center()
             .min_w_0()
             .gap(px(2.0))
-            .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(title))
+            .child(crate::ui::widgets::song_title(title, explicit).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
             .child(sub)
     };
 
@@ -72,9 +73,6 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .when_some(app.current_source, |d, p| d.child(badge(p)))
                 .when(app.current_preview, |d| {
                     d.child(mono().flex_none().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))
-                })
-                .when(app.resolving, |d| {
-                    d.child(mono().flex_none().text_size(theme::text_xs()).text_color(theme::text_faint()).child(app.spinner().to_string()))
                 })
                 .into_any_element();
             div()
@@ -139,7 +137,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .cursor_pointer()
         .hover(|s| s.opacity(0.88))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx)))
-        .child(icon(if playing { "pause" } else { "play" }, 15.0, gpui::black()));
+        .child(crate::ui::widgets::play_glyph(app.is_loading(), playing, 15.0, 34.0));
 
     let time = |s: String, right: bool| {
         mono()

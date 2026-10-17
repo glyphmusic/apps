@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 /// Public Glyph server used when `server_url` is empty, so nobody has to set
 /// anything up. `server_url = "off"` switches to direct mode.
-pub const DEFAULT_SERVER_URL: &str = "https://glyph-server.glyphmusic.workers.dev";
+pub const DEFAULT_SERVER_URL: &str = "https://api.glyph.my";
+/// Earlier address of the public server; a saved copy of it means the default.
+const OLD_SERVER_URL: &str = "https://glyph-server.glyphmusic.workers.dev";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,6 +24,8 @@ pub struct Config {
     pub updates: UpdatesConfig,
     pub audio: AudioConfig,
     pub storage: StorageConfig,
+    /// Player state kept across restarts (volume, shuffle, ...).
+    pub player: PlayerPrefs,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -48,6 +52,10 @@ pub struct ProvidersConfig {
     pub priority: Vec<ProviderId>,
     /// Max YouTube `search.list` calls per day (each costs 100 of 10 000 quota units).
     pub youtube_daily_searches: u32,
+    /// yt-dlp executable for local YouTube playback. `None` = `yt-dlp` on
+    /// PATH, else the copy installed from settings (data dir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ytdlp_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,13 +92,56 @@ pub enum AudioQuality {
     High,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
     /// Seconds two songs overlap (0 = off, max 20).
     #[serde(default)]
     pub crossfade_s: u32,
     pub quality: AudioQuality,
+    /// Quality of offline downloads (High = lossless where the source has it).
+    pub download_quality: AudioQuality,
+    /// Overall loudness target.
+    pub level: VolumeLevel,
+    /// Level every song to the same loudness (no jumps between songs).
+    pub normalize: bool,
+    /// Leave out songs marked explicit.
+    pub hide_explicit: bool,
+    /// Equalizer on, chosen preset ("custom" after manual changes) and the
+    /// ten band gains in dB (32 Hz .. 16 kHz).
+    pub eq_enabled: bool,
+    pub eq_preset: String,
+    pub eq_gains: Vec<f32>,
+    /// Output device name; None = system default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            crossfade_s: 0,
+            quality: AudioQuality::default(),
+            download_quality: AudioQuality::default(),
+            level: VolumeLevel::Normal,
+            normalize: true,
+            hide_explicit: false,
+            eq_enabled: false,
+            eq_preset: "flat".into(),
+            eq_gains: vec![0.0; 10],
+            output_device: None,
+        }
+    }
+}
+
+/// Loud / Normal / Quiet (about -11 / -14 / -19 LUFS).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeLevel {
+    Loud,
+    #[default]
+    Normal,
+    Quiet,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,6 +149,27 @@ pub struct AudioConfig {
 pub struct StorageConfig {
     /// Cover cache limit in MB; 0 = no limit.
     pub cache_limit_mb: u64,
+}
+
+/// Player controls as the user left them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlayerPrefs {
+    /// 0..=1.
+    pub volume: f32,
+    pub shuffle: bool,
+    /// "off" | "all" | "one".
+    pub repeat: String,
+    /// Queue panel open.
+    pub show_queue: bool,
+    /// Mini player stays on top.
+    pub mini_on_top: bool,
+}
+
+impl Default for PlayerPrefs {
+    fn default() -> Self {
+        Self { volume: 1.0, shuffle: false, repeat: "off".into(), show_queue: false, mini_on_top: true }
+    }
 }
 
 impl Default for StorageConfig {
@@ -110,13 +182,14 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         use ProviderId::*;
         Self {
-            // YouTube / SoundCloud (embed players) are opt-in fallbacks.
-            enabled: ProviderId::ALL
-                .into_iter()
-                .filter(|p| !matches!(p, YouTube | SoundCloud))
-                .collect(),
-            priority: vec![Audius, Jamendo, SoundCloud, YouTube],
+            // YouTube first: with a local yt-dlp it plays full songs from this
+            // machine (Deezer only has 30 s previews and often the wrong cut).
+            // Without yt-dlp or an API key the YouTube provider simply is not
+            // built. SoundCloud (embed player) stays opt-in.
+            enabled: ProviderId::ALL.into_iter().filter(|p| !matches!(p, SoundCloud)).collect(),
+            priority: vec![YouTube, Audius, Jamendo, SoundCloud],
             youtube_daily_searches: 90,
+            ytdlp_path: None,
         }
     }
 }
@@ -251,6 +324,7 @@ impl Config {
     pub fn effective_server_url(&self) -> &str {
         match self.server_url.trim() {
             "" => DEFAULT_SERVER_URL,
+            u if u.trim_end_matches('/').eq_ignore_ascii_case(OLD_SERVER_URL) => DEFAULT_SERVER_URL,
             u if u.eq_ignore_ascii_case("off") || u.eq_ignore_ascii_case("direct") => "",
             u => u,
         }
@@ -260,15 +334,14 @@ impl Config {
         self.save_to(&Self::path())
     }
 
-    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let mut out = self.clone();
-        // Do not persist keys that only exist because of an env var.
-        if let Some(file_keys) = &self.file_keys {
+    /// The user's own keys: what the file holds, never values that only exist
+    /// because of an env var (those are neither saved nor synced).
+    pub fn persisted_keys(&self) -> ApiKeys {
+        let mut k = self.keys.clone();
+        if let Some(f) = &self.file_keys {
             let mut env_cfg = Config::default();
             env_cfg.apply_env();
             let e = &env_cfg.keys;
-            let f = file_keys;
-            let k = &mut out.keys;
             macro_rules! keep {
                 ($field:ident) => {
                     if e.$field.is_some() && k.$field == e.$field {
@@ -283,6 +356,24 @@ impl Config {
             keep!(spotify_client_secret);
             keep!(lastfm);
         }
+        k
+    }
+
+    /// Replace the user's own keys (env overrides still win at runtime).
+    pub fn set_persisted_keys(&mut self, keys: ApiKeys) {
+        let mut keys = keys;
+        keys.blank_to_none();
+        self.file_keys = Some(keys.clone());
+        self.keys = keys;
+        let url = std::mem::take(&mut self.server_url);
+        self.apply_env();
+        self.server_url = url;
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let mut out = self.clone();
+        // Do not persist keys that only exist because of an env var.
+        out.keys = self.persisted_keys();
         let text = toml::to_string_pretty(&out)?;
         crate::paths::write_atomic(path, text.as_bytes())
     }
@@ -300,6 +391,8 @@ mod tests {
         assert_eq!(c.effective_server_url(), "");
         c.server_url = " https://mine.example ".into();
         assert_eq!(c.effective_server_url(), "https://mine.example");
+        c.server_url = "https://glyph-server.glyphmusic.workers.dev/".into();
+        assert_eq!(c.effective_server_url(), DEFAULT_SERVER_URL);
     }
 
     #[test]
@@ -322,12 +415,17 @@ youtube = \"abc\"").unwrap();
     }
 
     #[test]
-    fn default_providers_exclude_embed_sources() {
+    fn default_providers_prefer_youtube() {
         let e = Config::default().providers.enabled;
-        assert!(!e.contains(&ProviderId::YouTube) && !e.contains(&ProviderId::SoundCloud));
+        assert!(e.contains(&ProviderId::YouTube) && !e.contains(&ProviderId::SoundCloud));
         assert!(e.contains(&ProviderId::Audius) && e.contains(&ProviderId::LrcLib));
-        // priority is unchanged; disabled providers are simply ignored by the resolver
-        assert!(Config::default().providers.priority.contains(&ProviderId::YouTube));
+        // YouTube (local yt-dlp) first; disabled providers are ignored by the resolver
+        assert_eq!(Config::default().providers.priority[0], ProviderId::YouTube);
+        // Older files without [player] / download_quality still load.
+        let c: Config = toml::from_str("[audio]\nquality = \"low\"\n").unwrap();
+        assert_eq!(c.player, PlayerPrefs::default());
+        assert_eq!(c.audio.download_quality, AudioQuality::High);
+        assert_eq!(c.audio.quality, AudioQuality::Low);
     }
 
     #[test]
