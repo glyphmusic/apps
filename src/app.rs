@@ -1349,8 +1349,8 @@ impl Glyph {
             self.import_settings_text(&code, cx);
             return;
         }
-        // A pasted playlist code imports instead of searching.
-        if glyph_core::share::is_code(&q) {
+        // A pasted playlist code or link imports instead of searching.
+        if glyph_core::share::is_code(&q) || glyph_core::share::link_id(&q).is_some() {
             let code = q.clone();
             self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             self.import_share_code(&code, cx);
@@ -2153,7 +2153,8 @@ impl Glyph {
         }
     }
 
-    /// Copies a share code for the list (songs, name) to the clipboard.
+    /// Copies a short link for the list (public server) or its share code
+    /// (songs, name) to the clipboard.
     pub fn share_list(&mut self, l: &ListRef, cx: &mut Context<Self>) {
         let tracks = self.list_tracks(l);
         if tracks.is_empty() {
@@ -2161,23 +2162,82 @@ impl Glyph {
             cx.notify();
             return;
         }
-        let code = glyph_core::share::encode(&self.list_title(l), &tracks);
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
-        self.toast_sub(t("toast.share_copied"), self.list_title(l));
-        cx.notify();
+        let title = self.list_title(l);
+        let Some(b) = self.backend.clone() else {
+            let code = glyph_core::share::encode(&title, &tracks);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+            self.toast_sub(t("toast.share_copied"), title);
+            cx.notify();
+            return;
+        };
+        // Artist albums carry no author; a list opened from a link keeps its link.
+        let kind = if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
+        let origin = match l {
+            ListRef::User(id) => self.library.playlist(id).and_then(|p| p.origin.clone()),
+            _ => None,
+        };
+        cx.spawn(async move |this, cx| {
+            let text = b.share_text(&title, &tracks, kind, origin).await;
+            this.update(cx, |s, cx| {
+                let key = if glyph_core::share::link_id(&text).is_some() { "toast.share_link_copied" } else { "toast.share_copied" };
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                s.toast_sub(t(key), title);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    /// Imports a pasted share code as a new playlist and opens it.
+    /// Imports a pasted share code (or short link) as a new playlist and opens it.
     pub fn import_share_code(&mut self, code: &str, cx: &mut Context<Self>) -> bool {
+        if glyph_core::share::link_id(code).is_some() {
+            let Some(b) = self.backend.clone() else {
+                self.toast_info(t("status.library_offline"));
+                cx.notify();
+                return true;
+            };
+            let link = code.to_string();
+            cx.spawn(async move |this, cx| {
+                let r = b.resolve_share_link(&link).await;
+                this.update(cx, |s, cx| match r {
+                    Ok(p) if glyph_core::share::is_code(&p.code) => {
+                        let author = p.author.filter(|_| p.kind != "album");
+                        s.import_code(&p.code, Some(link.clone()), author, cx);
+                    }
+                    Ok(_) => {
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        tracing::info!("playlist link failed: {e:#}");
+                        s.toast_info(t("toast.share_link_failed"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return true;
+        }
         if !glyph_core::share::is_code(code) {
             return false;
         }
+        self.import_code(code, None, None, cx);
+        true
+    }
+
+    /// Adds the playlist of a share code; `origin` / `shared_by` come from a
+    /// short link (its URL and the author's handle).
+    fn import_code(&mut self, code: &str, origin: Option<String>, shared_by: Option<String>, cx: &mut Context<Self>) {
         match glyph_core::share::decode(code) {
             Ok((name, tracks)) if self.library_ok => {
                 let n = tracks.len();
                 let id = {
                     let p = self.library.create_playlist(&name);
                     p.tracks = tracks;
+                    p.origin = origin;
+                    p.shared_by = shared_by;
                     p.id.clone()
                 };
                 self.save_library(cx);
@@ -2188,7 +2248,6 @@ impl Glyph {
             Err(e) => self.toast_info(format!("{e:#}")),
         }
         cx.notify();
-        true
     }
 
     /// "2019 · EP"-style label for an album; looked up once, guessed from the

@@ -102,7 +102,7 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
         push(k(kind::LIKED, track_id(t)), serde_json::to_value(t).unwrap_or_default());
     }
     for p in &lib.playlists {
-        let mut v = serde_json::json!({ "name": p.name, "tracks": p.tracks, "origin": p.origin });
+        let mut v = serde_json::json!({ "name": p.name, "tracks": p.tracks, "origin": p.origin, "shared_by": p.shared_by });
         if let Some(bytes) = p.cover.as_deref().and_then(|c| std::fs::read(c).ok()) {
             let sha = sha_hex(&bytes);
             v["cover"] = Value::String(sha.clone());
@@ -291,6 +291,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                         cover: if v.get("cover").is_some() { cover.or(old_cover) } else { None },
                         // Device setting, never part of the synced value.
                         auto_download: pos.is_some_and(|p| lib.playlists[p].auto_download),
+                        shared_by: v["shared_by"].as_str().map(str::to_string),
                     };
                     match pos {
                         Some(p) => lib.playlists[p] = pl,

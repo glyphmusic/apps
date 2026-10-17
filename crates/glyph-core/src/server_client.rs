@@ -14,6 +14,19 @@ use tokio::sync::mpsc::UnboundedSender;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// `GET /v1/share/<id>`: a playlist behind a short link.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SharedPlaylist {
+    pub code: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    /// Handle of the account that shared it (none for artist albums).
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
 /// Non-2xx answer of the server.
 #[derive(Debug, thiserror::Error)]
 #[error("server error {status}: {code} {message}")]
@@ -174,6 +187,12 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `GET /v1/share/<id>`: the playlist behind a short link.
+    pub async fn shared_playlist(&self, id: &str) -> Result<SharedPlaylist> {
+        let resp = Self::check(self.get(&format!("/v1/share/{id}")).timeout(Duration::from_secs(10)).send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Route public media and metadata through the Worker allowlist.
     pub fn upstream_url(&self, upstream: &str) -> String {
         reqwest::Url::parse_with_params(&self.url("/v1/upstream"), &[("url", upstream)])
@@ -316,6 +335,14 @@ impl ServerClient {
 
     pub async fn password_login(&self, body: &PasswordLoginRequest) -> Result<Session> {
         Self::json_of(self.post("/v1/account/password/login").json(body)).await
+    }
+
+    /// `POST /v1/share` (signed in): stores a playlist code under the
+    /// account and returns its short link.
+    pub async fn share_playlist(&self, token: &str, code: &str, name: &str, songs: usize, kind: &str) -> Result<String> {
+        let body = serde_json::json!({ "code": code, "name": name, "songs": songs, "kind": kind });
+        let value: serde_json::Value = Self::json_of(self.authed(reqwest::Method::POST, "/v1/share", token).json(&body)).await?;
+        value["url"].as_str().map(str::to_string).ok_or_else(|| anyhow!("server sent no link"))
     }
 
     pub async fn set_password(&self, token: &str, body: &PasswordSetRequest) -> Result<Account> {
