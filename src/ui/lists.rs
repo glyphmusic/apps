@@ -617,11 +617,13 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         _ => None,
     };
     let kind = match &l {
+        _ if app.shared_preview.is_some() => t("list.kind.playlist"),
         ListRef::Album { .. } if author.is_none() => t("list.kind.album"),
         _ => t("list.kind.playlist"),
     };
     // Albums and "liked by artist" show the artist, shared playlists their author.
     let sub: Option<AnyElement> = match &l {
+        _ if app.shared_preview.is_some() => None,
         ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) if !artist.starts_with('@') => Some(
             div()
                 .flex()
@@ -645,7 +647,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     let has = !tracks.is_empty();
     // Albums (and artist collections) can be saved to the library with the heart.
     let saveable = matches!(l, ListRef::Album { .. });
-    let saved = app.is_saved(&l);
+    let saved = app.shared_preview.is_none() && app.is_saved(&l);
     let l_save = l.clone();
     let user_id = match &l {
         ListRef::User(id) => Some(id.clone()),
@@ -756,7 +758,13 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     })))
                     .child(icon_button("list-queue", "list-plus", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_all(t_queue.clone(), cx))))
                 })
-                .when(saveable, |d| {
+                .when(app.shared_preview.is_some(), |d| {
+                    let l2 = l_save.clone();
+                    d.child(div().id("share-add-library").cursor_pointer().px(px(10.0)).py(px(6.0)).rounded(px(8.0))
+                        .text_size(theme::text_sm()).child(t("list.add_shared").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_saved(&l2, cx))))
+                })
+                .when(saveable && app.shared_preview.is_none(), |d| {
                     let key: SharedString = "list-save".into();
                     let k = key.clone();
                     let l2 = l_save.clone();

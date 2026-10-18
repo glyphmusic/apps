@@ -1,4 +1,15 @@
-# Glyph 0.2.2 — local test build
+# Glyph 0.2.2
+
+- Warm audio bytes ahead of clicks and queue transitions. Saved downloads always take priority over server playback.
+- Check downloaded audio for changed ETags/dates at most daily, with weekly content-hash checks when revision metadata is unavailable; preserve the old file on failure.
+
+- Start decoding HTTP audio as bytes arrive and reuse received ranges locally for loops and replays (512 MiB cache).
+- Hold the requested seek position while buffering, preload the next song early, and fix transitions that stayed paused after seeking past the crossfade window.
+
+- Signed-in sharing copies short Glyph links for songs, artists and playlists, with rich previews and desktop deep links. Shared playlists open as a preview with an explicit Add to library action.
+
+- Prefetch HTTP audio blocks before the current buffer runs out, with larger startup and decoded reserves to prevent chunk-boundary pauses.
+- Enable Windows multimedia scheduling for the WASAPI callback to improve playback under load and when minimized.
 
 - Start local YouTube playback from chunks while the complete cache fills in the background.
 

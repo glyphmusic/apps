@@ -10,8 +10,8 @@
 "home.recent" = "Recently played"
 "ctx.share_list" = "Share playlist"
 "toast.share_copied" = "Playlist code copied"
-"toast.share_link_copied" = "Playlist link copied"
-"toast.share_link_failed" = "Could not open the playlist link"
+"toast.share_link_copied" = "Glyph link copied"
+"toast.share_link_failed" = "Could not create or open the Glyph link"
 "toast.share_imported" = "{n} songs imported"
 "toast.share_empty" = "Nothing to share yet"
 "artist.fans" = "{n} FANS"
@@ -687,3 +687,5 @@
 "profile.crop.reset" = "Reset"
 "profile.crop.apply" = "Apply"
 "account.unreachable" = "Could not reach the Glyph server. Check your connection and try again."
+
+"list.add_shared" = "Add to library"

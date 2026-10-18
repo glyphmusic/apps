@@ -36,7 +36,7 @@ fn marker() -> PathBuf {
 }
 
 fn stamp(exe: &Path) -> String {
-    format!("{}\n{}", exe.display(), env!("CARGO_PKG_VERSION"))
+    format!("{}\n{}\nlinks-v1", exe.display(), env!("CARGO_PKG_VERSION"))
 }
 
 fn up_to_date(exe: &Path, entry: &Path) -> bool {
@@ -65,6 +65,20 @@ mod platform {
             return Ok(());
         }
         std::fs::create_dir_all(&dir)?;
+        // Register for this user only. Pass values as arguments, never shell code.
+        use std::os::windows::process::CommandExt;
+        let key = r"HKCU\Software\Classes\glyph";
+        for (subkey, value, data) in [
+            (key.to_string(), None, "URL:Glyph Protocol".to_string()),
+            (key.to_string(), Some("URL Protocol"), String::new()),
+            (format!(r"{key}\shell\open\command"), None, format!(r#""{}" "%1""#, exe.display())),
+        ] {
+            let mut command = std::process::Command::new("reg.exe");
+            command.args(["add", &subkey, "/f"]);
+            if let Some(value) = value { command.args(["/v", value]); } else { command.arg("/ve"); }
+            let output = command.args(["/d", &data]).creation_flags(0x08000000).output()?;
+            anyhow::ensure!(output.status.success(), "could not register Glyph URL protocol");
+        }
         // The shortcut's file name is the name Windows search and the Start
         // menu show.
         unsafe {
@@ -147,7 +161,8 @@ mod platform {
              Name=Glyph\n\
              GenericName=Music Player\n\
              Comment=Search everywhere, play from free sources\n\
-             Exec={}\n\
+             Exec={} %u\n\
+             MimeType=x-scheme-handler/glyph;\n\
              Icon=glyph\n\
              Terminal=false\n\
              Categories=AudioVideo;Audio;Player;\n\

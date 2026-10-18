@@ -71,6 +71,12 @@ pub const LINK_HOSTS: [&str; 2] = ["glyph.my", "api.glyph.my"];
 /// The id of a short playlist link (`https://glyph.my/p/AbC123xy`).
 pub fn link_id(s: &str) -> Option<String> {
     let s = s.trim();
+    let canonical;
+    let s = if let Some(id) = s.strip_prefix("glyph://p/") {
+        if !((id.len() == 8 || id.len() == 12) && id.bytes().all(|b| b.is_ascii_alphanumeric())) { return None; }
+        canonical = format!("https://glyph.my/p/{id}");
+        &canonical
+    } else { s };
     let rest = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
     let (host, path) = rest.split_once('/')?;
     if !LINK_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h)) {
@@ -161,6 +167,10 @@ mod tests {
     fn short_links() {
         assert_eq!(link_id(" https://glyph.my/p/AbC123xy \n").as_deref(), Some("AbC123xy"));
         assert_eq!(link_id("glyph.my/p/AbC123xyAbC1/").as_deref(), Some("AbC123xyAbC1"));
+        assert_eq!(link_id("glyph://p/AbC123xy").as_deref(), Some("AbC123xy"));
+        for bad in ["glyph://p/AbC123xy?exec=bad", "glyph://p/AbC123xy/other", "glyph://evil/AbC123xy", "glyph://p/AbC123xy\nactivate", "https://glyph.my.evil/p/AbC123xy"] {
+            assert_eq!(link_id(bad), None, "{bad}");
+        }
         assert_eq!(link_id("https://evil.example/p/AbC123xy"), None);
         assert_eq!(link_id("https://glyph.my/p/short"), None);
     }

@@ -20,6 +20,7 @@ toml = "0.8"
 dirs = "6"
 lru = "0.12"
 sha2 = "0.10"
+tempfile = "3"
 semver = "1"
 sys-locale = "0.3"
 uuid = { version = "1", features = ["v4"] }
@@ -46,6 +47,3 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
-
-[dev-dependencies]
-tempfile = "3"

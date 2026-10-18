@@ -393,6 +393,20 @@ mod tests {
         let event = wait_for(&rx, startup_timeout, |e| matches!(e, PlayerEvent::StatusChanged(Status::Playing) | PlayerEvent::Error(_)));
         println!("audio startup after {:?}: {event:?}", start.elapsed());
         assert!(matches!(event, Some(PlayerEvent::StatusChanged(Status::Playing))), "{event:?}");
+        if let Ok(seconds) = std::env::var("GLYPH_TEST_CONTINUITY_SECONDS") {
+            let seconds: u64 = seconds.parse().unwrap();
+            let underruns = native::TEST_UNDERRUNS.load(std::sync::atomic::Ordering::Relaxed);
+            let mut previous = p.state().position;
+            for _ in 0..seconds {
+                std::thread::sleep(Duration::from_secs(1));
+                let current = p.state().position;
+                let progress = current.saturating_sub(previous);
+                assert!(progress >= Duration::from_millis(750), "audio stalled: {progress:?} progress in one second at {current:?}");
+                previous = current;
+            }
+            assert_eq!(native::TEST_UNDERRUNS.load(std::sync::atomic::Ordering::Relaxed), underruns, "decoder ran out of audio during playback");
+            println!("continuous audio position advanced for {seconds} seconds with no decoder underruns");
+        }
         if let Ok(seek) = std::env::var("GLYPH_TEST_SEEK_SECONDS") {
             let seek: f64 = seek.parse().unwrap();
             p.seek(Duration::from_secs_f64(seek));

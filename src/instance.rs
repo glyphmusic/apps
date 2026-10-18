@@ -17,6 +17,10 @@ static INBOX: Mutex<Option<flume::Receiver<String>>> = Mutex::new(None);
 /// What this launch asks for, from the command line.
 pub fn request_from_args() -> String {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(link) = args.iter().skip(1).find(|s| glyph_core::share::link_id(s).is_some()) {
+        let id = glyph_core::share::link_id(link).unwrap();
+        return format!("open https://glyph.my/p/{id}");
+    }
     match args.iter().position(|a| a == "--dock-action").and_then(|i| args.get(i + 1)) {
         Some(n) if n.parse::<usize>().is_ok() => format!("dock {n}"),
         _ => "activate".into(),
@@ -42,7 +46,7 @@ pub fn claim_or_forward(request: &str) -> bool {
                         let mut line = String::new();
                         if BufReader::new(stream).read_line(&mut line).is_ok() {
                             let line = line.trim();
-                            if line == "activate" || line.starts_with("dock ") {
+                            if line == "activate" || line.starts_with("dock ") || line.strip_prefix("open ").is_some_and(|s| glyph_core::share::link_id(s).is_some()) {
                                 let _ = tx.send(line.to_string());
                             }
                         }

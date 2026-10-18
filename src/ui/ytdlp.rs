@@ -39,7 +39,8 @@ impl Glyph {
     pub fn prefetch_upcoming(&mut self) {
         let Some(b) = self.backend.as_ref() else { return };
         let next: Vec<Track> = self.queue.upcoming().into_iter().take(AHEAD).cloned().collect();
-        guard(|| b.prefetch(next));
+        if b.local_youtube() { guard(|| b.prefetch(next)); }
+        else { guard(|| b.warm(next)); }
     }
 
     /// Hover over a YouTube song: after a short rest start resolving it, so

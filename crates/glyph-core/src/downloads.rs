@@ -114,6 +114,27 @@ pub fn jamendo_format_url(url: &str, q: AudioQuality) -> Option<String> {
 const MAX_BYTES: u64 = 500 * 1024 * 1024;
 const INDEX: &str = "index.json";
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Revision {
+    pub etag: Option<String>,
+    pub modified: Option<String>,
+    pub sha256: Option<String>,
+    pub checked_at: u64,
+    pub hashed_at: u64,
+    pub quality: AudioQuality,
+}
+
+fn digest_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut hash = Sha256::new();
+    let mut file = std::fs::File::open(path)?;
+    let mut block = [0u8; 64 * 1024];
+    loop { let n = file.read(&mut block)?; if n == 0 { break; } hash.update(&block[..n]); }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 /// One downloaded song.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -124,17 +145,96 @@ pub struct Entry {
     pub bytes: u64,
     /// Unix seconds.
     pub ts: u64,
+    #[serde(default)]
+    pub revision: Revision,
 }
 
 /// The downloads folder and its index.
 pub struct Downloads {
     dir: PathBuf,
     map: Mutex<HashMap<String, Entry>>,
+    index_io: Mutex<()>,
 }
 
 impl Downloads {
+    /// Called by maintenance, never by playback. Claiming also backs off errors.
+    pub fn claim_refresh(&self, limit: usize) -> Vec<Entry> {
+        let mut map = self.map.lock().unwrap();
+        let mut due: Vec<_> = map.values_mut().filter(|e| now().saturating_sub(e.revision.checked_at.max(e.ts)) >= 86400).collect();
+        due.sort_by_key(|e| e.revision.checked_at.max(e.ts));
+        let entries: Vec<Entry> = due.into_iter().take(limit).map(|e| { e.revision.checked_at = now(); e.clone() }).collect();
+        drop(map);
+        if !entries.is_empty() { self.save(); }
+        entries
+    }
+
+    pub async fn refresh(self: &std::sync::Arc<Self>, http: &reqwest::Client, old: Entry, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<()> {
+        let request = http.head(url);
+        let mut request = server.map(|s| s.authorize_url(http.head(url), url)).unwrap_or(request);
+        if let Some(etag) = &old.revision.etag { request = request.header("if-none-match", etag); }
+        else if let Some(modified) = &old.revision.modified { request = request.header("if-modified-since", modified); }
+        let response = request.timeout(Duration::from_secs(15)).send().await?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED { return Ok(()); }
+        let supported = response.status().is_success();
+        if !supported && !matches!(response.status().as_u16(), 405 | 501) { response.error_for_status()?; return Ok(()); }
+        let etag = response.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let modified = response.headers().get("last-modified").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let size = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+        let changed = supported && (size.is_some_and(|n| n != old.bytes)
+            || old.revision.etag.as_ref().zip(etag.as_ref()).is_some_and(|(a,b)| a != b)
+            || old.revision.modified.as_ref().zip(modified.as_ref()).is_some_and(|(a,b)| a != b));
+        let matched = supported && (old.revision.etag.as_ref().zip(etag.as_ref()).is_some_and(|(a,b)| a == b)
+            || old.revision.modified.as_ref().zip(modified.as_ref()).is_some_and(|(a,b)| a == b));
+        let new_validator = old.revision.etag.is_none() && etag.is_some() || old.revision.modified.is_none() && modified.is_some();
+        if !changed && (matched || !new_validator && now().saturating_sub(old.revision.hashed_at) < 7 * 86400) { return Ok(()); }
+        drop(response);
+        // A disposable download cannot replace the index or the playing file.
+        let temp = tempfile::tempdir_in(&self.dir)?;
+        let staged = Downloads::load(temp.path().to_path_buf());
+        let path = staged.fetch(http, &old.track, old.provider, url, server).await?;
+        let fresh = staged.map.lock().unwrap().get(&track_key(&old.track)).cloned().unwrap();
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _temp = temp;
+            this.install_refresh(&old, fresh, &path)
+        }).await??;
+        Ok(())
+    }
+
+    fn install_refresh(&self, old: &Entry, mut fresh: Entry, source: &Path) -> Result<()> {
+        let old_path = self.dir.join(&old.file);
+        let old_hash = match &old.revision.sha256 { Some(hash) => hash.clone(), None => digest_file(&old_path)? };
+        let changed = fresh.revision.sha256.as_ref() != Some(&old_hash);
+        let replacement = if changed {
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+            let name = format!("{}-{nonce}.{}", paths::hash_hex(&track_key(&old.track)), extension("", &source.to_string_lossy()));
+            let path = self.dir.join(&name);
+            std::fs::copy(source, &path)?;
+            fresh.file = name;
+            Some(path)
+        } else { fresh.file = old.file.clone(); fresh.ts = old.ts; None };
+        let _index_io = self.index_io.lock().unwrap();
+        let mut map = self.map.lock().unwrap();
+        if !map.get(&track_key(&old.track)).is_some_and(|e| e.file == old.file) {
+            if let Some(path) = replacement { let _ = std::fs::remove_file(path); }
+            return Ok(()); // Removed or manually replaced during the check.
+        }
+        let mut snapshot = map.clone();
+        snapshot.insert(track_key(&old.track), fresh);
+        if let Err(e) = paths::write_json(&self.dir.join(INDEX), &snapshot) {
+            if let Some(path) = replacement { let _ = std::fs::remove_file(path); }
+            return Err(e);
+        }
+        *map = snapshot;
+        drop(map);
+        // On Windows an active decoder may still hold this file. Keep it if
+        // deletion is refused; the new index already points at the new version.
+        if changed { let _ = std::fs::remove_file(old_path); }
+        Ok(())
+
+    }
     pub fn load(dir: PathBuf) -> Self {
-        let d = Self { dir, map: Mutex::new(HashMap::new()) };
+        let d = Self { dir, map: Mutex::new(HashMap::new()), index_io: Mutex::new(()) };
         d.reload();
         d
     }
@@ -148,6 +248,7 @@ impl Downloads {
     }
 
     fn save(&self) {
+        let _index_io = self.index_io.lock().unwrap();
         let snapshot = self.map.lock().unwrap().clone();
         let _ = std::fs::create_dir_all(&self.dir);
         if let Err(e) = paths::write_json(&self.dir.join(INDEX), &snapshot) {
@@ -207,7 +308,8 @@ impl Downloads {
         let name = self.free_name(t, ext);
         let path = self.dir.join(&name);
         std::fs::copy(src, &path)?;
-        let entry = Entry { track: t.clone(), file: name, provider, bytes: len, ts: now() };
+        let entry = Entry { track: t.clone(), file: name, provider, bytes: len, ts: now(),
+            revision: Revision { sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality(), ..Default::default() } };
         self.map.lock().unwrap().insert(track_key(t), entry);
         self.save();
         Ok(path)
@@ -221,6 +323,8 @@ impl Downloads {
         std::fs::create_dir_all(&self.dir)?;
         let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
         let resp = request.timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
+        let etag = resp.headers().get("etag").and_then(|h| h.to_str().ok()).map(str::to_string);
+        let modified = resp.headers().get("last-modified").and_then(|h| h.to_str().ok()).map(str::to_string);
         if resp.content_length().is_some_and(|n| n > MAX_BYTES) {
             bail!("file too large");
         }
@@ -261,7 +365,8 @@ impl Downloads {
         glyph_protocol::network::observe(bytes, started.elapsed());
         let path = self.dir.join(&name);
         std::fs::rename(&part, &path)?;
-        let entry = Entry { track: t.clone(), file: name, provider, bytes, ts: now() };
+        let entry = Entry { track: t.clone(), file: name, provider, bytes, ts: now(),
+            revision: Revision { etag, modified, sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality() } };
         self.map.lock().unwrap().insert(track_key(t), entry);
         self.save();
         Ok(path)
@@ -390,6 +495,48 @@ mod tests {
     }
 
     #[test]
+    fn refresh_installs_complete_changes_and_keeps_identical_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mp3");
+        std::fs::write(&source, b"old").unwrap();
+        let d = Downloads::load(dir.path().join("downloads"));
+        let t = track("Refresh");
+        d.store_copy(&t, ProviderId::Archive, &source).unwrap();
+        let old = d.map.lock().unwrap()[&track_key(&t)].clone();
+        let held = std::fs::File::open(d.dir.join(&old.file)).unwrap();
+        std::fs::write(&source, b"new complete audio").unwrap();
+        let mut fresh = old.clone();
+        fresh.bytes = 18;
+        fresh.revision.sha256 = Some(digest_file(&source).unwrap());
+        d.install_refresh(&old, fresh, &source).unwrap();
+        let changed = d.map.lock().unwrap()[&track_key(&t)].clone();
+        assert_ne!(changed.file, old.file);
+        assert_eq!(std::fs::read(d.local(&t).unwrap().0).unwrap(), b"new complete audio");
+        d.install_refresh(&changed, changed.clone(), &source).unwrap();
+        assert_eq!(d.map.lock().unwrap()[&track_key(&t)].file, changed.file);
+        drop(held);
+    }
+
+    #[test]
+    fn refresh_cannot_resurrect_removed_downloads_or_replace_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mp3");
+        std::fs::write(&source, b"old").unwrap();
+        let d = Downloads::load(dir.path().join("downloads"));
+        let t = track("Cancelled");
+        let path = d.store_copy(&t, ProviderId::Archive, &source).unwrap();
+        let old = d.map.lock().unwrap()[&track_key(&t)].clone();
+        let mut fresh = old.clone();
+        fresh.revision.sha256 = Some("different".into());
+        assert!(d.install_refresh(&old, fresh.clone(), &dir.path().join("missing.mp3")).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"old");
+        assert!(d.remove(&t));
+        d.install_refresh(&old, fresh, &source).unwrap();
+        assert!(!d.contains(&t));
+        assert!(d.tracks().is_empty());
+    }
+
+    #[test]
     fn index_round_trip_and_remove() {
         let dir = std::env::temp_dir().join(format!("glyph-dl-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -399,7 +546,7 @@ mod tests {
         let name = d.free_name(&t, "mp3");
         assert_eq!(name, "Band - Song.mp3");
         std::fs::write(dir.join(&name), b"x").unwrap();
-        d.map.lock().unwrap().insert(track_key(&t), Entry { track: t.clone(), file: name.clone(), provider: ProviderId::Archive, bytes: 1, ts: 1 });
+        d.map.lock().unwrap().insert(track_key(&t), Entry { track: t.clone(), file: name.clone(), provider: ProviderId::Archive, bytes: 1, ts: 1, revision: Revision::default() });
         d.save();
         // Same song from another source counts as downloaded.
         let mut other = t.clone();

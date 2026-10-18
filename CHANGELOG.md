@@ -2,7 +2,18 @@
 
 Changes are recorded here for every release, newest first.
 
-## 0.2.2 — Unreleased
+## 0.2.2 — 2026-10-18
+
+- Speculatively warm the first audio bytes of hovered songs, opened lists and upcoming queue tracks, with bounded background work and data-saver support.
+- Play saved downloads locally before any network request; check remote revisions in the background and replace changed audio only after a complete SHA-256-checked download.
+
+- Decode arriving HTTP ranges immediately, including after seeking. Keep received audio ranges in a bounded local disk cache for replays and loops.
+- Keep the seek cursor at its requested position while buffering, preload the next queue item early, and resume a prepared crossfade player when a seek skips the fade window.
+
+- Signed-in sharing copies short Glyph links for songs, artists and playlists, with rich previews and desktop deep links. Shared playlists open as a preview with an explicit Add to library action.
+
+- Prefetch HTTP audio blocks before the current buffer runs out, with larger startup and decoded reserves to prevent chunk-boundary pauses.
+- Enable Windows multimedia scheduling for the WASAPI callback to improve playback under load and when minimized.
 
 - Local yt-dlp playback starts from HTTP chunks while parallel background ranges fill the cache. Subsequent reads switch to the completed local file; downloaded songs remain immediate local playback.
 
@@ -23,7 +34,7 @@ Changes are recorded here for every release, newest first.
 - Add diagnostics around opening the output and queueing decoded audio.
 - Server fixes prepared alongside this build: retry full playback sources before reusing a Deezer preview; avoid redundant YouTube metadata requests and long cooldowns after transient YouTube failures.
 
-This is a local test build. Antivirus heuristic reports for the unsigned 0.2.1 installer remain under investigation; no clean VirusTotal result is claimed.
+Antivirus heuristic reports for the unsigned 0.2.1 installer remain under investigation; no clean VirusTotal result is claimed for this release.
 
 ## 0.2.1 — 2026-10-18
 

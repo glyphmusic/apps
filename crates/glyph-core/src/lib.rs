@@ -74,6 +74,10 @@ pub enum BackendMode {
 
 type WarmCache = Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<Resolved>)>>>;
 
+type StreamWarmer = Arc<dyn Fn(String) + Send + Sync>;
+static STREAM_WARMER: std::sync::RwLock<Option<StreamWarmer>> = std::sync::RwLock::new(None);
+pub fn set_stream_warmer(warmer: StreamWarmer) { *STREAM_WARMER.write().unwrap() = Some(warmer); }
+
 /// Songs played lately, kept on disk (oldest dropped above the limit).
 fn stream_cache_dir() -> PathBuf {
     paths::cache_dir().join("streams")
@@ -805,6 +809,15 @@ impl Backend {
             let (inner, cache) = (self.cur(), self.warm.clone());
             rt.spawn(async move {
                 let r = inner.resolve(&t).await.ok().flatten();
+                if !inner.config.storage.data_saver {
+                    if let Some(Resolved { source: PlaybackSource::Stream { url, .. }, .. }) = &r {
+                        if url.starts_with("https://") || url.starts_with("http://") {
+                            let url = inner.server.as_ref().map(|s| s.audio_quality_url(url, inner.config.audio.quality)).unwrap_or_else(|| url.clone());
+                            let warmer = STREAM_WARMER.read().unwrap().clone();
+                            if let Some(warmer) = warmer { warmer(url); }
+                        }
+                    }
+                }
                 let mut w = cache.lock().unwrap_or_else(|e| e.into_inner());
                 match r {
                     // Previews carry signed URLs that die fast: not kept.
@@ -955,6 +968,33 @@ impl Backend {
     /// files count as downloaded.
     pub fn is_downloaded(&self, track: &Track) -> bool {
         self.downloads.contains(track) || self.imports.contains(track)
+    }
+
+    /// Slow maintenance stays entirely separate from the local playback path.
+    pub fn refresh_downloads(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        let Some(rt) = &self.rt else { return };
+        let inner = self.cur();
+        if inner.config.storage.data_saver || RUNNING.swap(true, Ordering::SeqCst) { return; }
+        let downloads = self.downloads.clone();
+        rt.spawn(async move {
+            struct Running;
+            impl Drop for Running { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
+            let _running = Running;
+            for entry in downloads.claim_refresh(2) {
+                let job = downloads::Job { progress: Arc::default(), quality: entry.revision.quality };
+                downloads::run_job(job, async {
+                    if let Ok(Some((provider, url))) = inner.download_url(&entry.track).await {
+                        if provider == entry.provider && url.starts_with("https://") {
+                            if let Err(e) = downloads.refresh(&inner.http, entry, &url, inner.server.as_ref()).await {
+                                tracing::debug!("download freshness check deferred: {e}");
+                            }
+                        }
+                    }
+                }).await;
+            }
+        });
     }
 
     /// The downloaded or imported file of `track`.
@@ -1195,6 +1235,16 @@ mod tests {
         assert!(matches!(result.source, PlaybackSource::Stream { url, .. } if url == format!("{base}/v1/audio/audius/known")));
         assert!(backend.resolve(&track).await.is_err(), "server errors must not use cached direct URLs");
         assert_eq!(fixture.join().unwrap(), ["GET /v1/health HTTP/1.1", "POST /v1/resolve HTTP/1.1", "POST /v1/resolve HTTP/1.1"]);
+        // Even with a configured (now offline) server, saved audio wins before
+        // warm-cache lookups, resolver requests or network authentication.
+        let source = dir.path().join("saved.mp3");
+        std::fs::write(&source, b"saved audio").unwrap();
+        let saved = backend.downloads.store_copy(&track, ProviderId::Audius, &source).unwrap();
+        backend.warm(vec![track.clone()]);
+        for _ in 0..2 {
+            let result = backend.resolve(&track).await.unwrap().unwrap();
+            assert!(matches!(result.source, PlaybackSource::Stream { url, .. } if url == saved.to_string_lossy()));
+        }
         std::env::remove_var("GLYPH_DATA_DIR");
         std::env::remove_var("GLYPH_CACHE_DIR");
     }

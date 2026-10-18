@@ -143,6 +143,7 @@ pub(crate) struct Engine {
     volume: f32,
     want_play: bool,
     last_load: Option<(Track, PlaybackSource)>,
+    next_load: Option<(Track, PlaybackSource)>,
     variant_changed: Instant,
     pending_seek: Option<Duration>,
     analyzer: Analyzer,
@@ -194,6 +195,7 @@ impl Engine {
             volume,
             want_play: false,
             last_load: None,
+            next_load: None,
             variant_changed: Instant::now(),
             pending_seek: None,
             analyzer: Analyzer::new(),
@@ -476,6 +478,7 @@ impl Engine {
         }
         self.pending_cur = None;
         self.pending_next = None;
+        self.next_load = None;
         if let Some(p) = self.player.take() {
             p.stop();
         }
@@ -606,6 +609,7 @@ impl Engine {
     }
 
     fn preload(&mut self, track: Track, source: PlaybackSource) {
+        let next_source = source.clone();
         let (url, mime, is_preview) = match source {
             PlaybackSource::Stream { url, mime, .. } => (url, mime, false),
             PlaybackSource::Preview { url, .. } => (url, None, true),
@@ -625,6 +629,7 @@ impl Engine {
             return;
         }
         let id = self.alloc_id();
+        self.next_load = Some((track.clone(), next_source));
         self.pending_next = Some(Pending { id, track, is_preview });
         native::spawn_decoder(id, url, mime, self.tx.clone());
     }
@@ -633,6 +638,7 @@ impl Engine {
     /// current song ends normally and the UI starts the real next one.
     fn drop_next(&mut self) {
         self.pending_next = None;
+        self.next_load = None;
         if let Some(n) = self.next.take() {
             // A gapless next sits behind the current one on the same player;
             // stopped, it ends at once when reached.
@@ -648,6 +654,7 @@ impl Engine {
 
     fn promote_next(&mut self) {
         let Some(n) = self.next.take() else { return };
+        if let Some(load) = self.next_load.take() { self.last_load = Some(load); }
         // The loop belongs to the song that just ended.
         if !self.cur.as_ref().is_some_and(|c| same_track(&c.track, &n.track)) {
             self.ab_loop = None;
@@ -964,10 +971,11 @@ impl Engine {
         let mut analysed = false;
         if let Some(cur) = self.cur.as_mut() {
             let finished = cur.shared.finished.load(Ordering::SeqCst);
-            let started = cur.shared.started.load(Ordering::Relaxed);
+            let started = cur.shared.started.load(Ordering::Relaxed)
+                && cur.shared.playback_gen.load(Ordering::Acquire) == cur.ctl.gen.load(Ordering::SeqCst);
             let pos = Duration::from_secs_f64(cur.shared.pos_frames.load(Ordering::Relaxed) as f64 / cur.rate.max(1) as f64);
             let duration = cur.duration;
-            let due = near_end_due(pos, duration, cur.near_end_sent, self.crossfade);
+            let due = started && near_end_due(pos, duration, cur.near_end_sent, self.crossfade);
             let fade_due = !self.crossfade.is_zero()
                 && self.fading.is_none()
                 && self.next_player.is_some()
@@ -1076,7 +1084,9 @@ impl Engine {
             // Right after a jump the decoder may still report the old
             // position: wait for it before checking the end point again.
             let settling = self.loop_jump.is_some_and(|t| t.elapsed() < Duration::from_millis(250));
-            let pos = self.cur.as_ref().filter(|c| c.shared.started.load(Ordering::Relaxed) && !c.shared.finished.load(Ordering::SeqCst)).map(|c| {
+            let pos = self.cur.as_ref().filter(|c| c.shared.started.load(Ordering::Relaxed)
+                && c.shared.playback_gen.load(Ordering::Acquire) == c.ctl.gen.load(Ordering::SeqCst)
+                && !c.shared.finished.load(Ordering::SeqCst)).map(|c| {
                 Duration::from_secs_f64(c.shared.pos_frames.load(Ordering::Relaxed) as f64 / c.rate.max(1) as f64)
             });
             if let Some(pos) = pos.filter(|_| !settling && self.fading.is_none()) {
@@ -1147,6 +1157,15 @@ impl Engine {
             }
         }
         if self.next.is_some() {
+            // A seek can skip the crossfade window. The next source then
+            // still sits paused on its own player: explicitly start it.
+            if let Some(next_player) = self.next_player.take() {
+                if let Some(old) = self.player.replace(next_player) { old.stop(); }
+                if let Some(player) = &self.player {
+                    player.set_volume(self.out_volume());
+                    if self.want_play { player.play(); }
+                }
+            }
             self.promote_next();
             self.emit(PlayerEvent::Ended);
         } else {

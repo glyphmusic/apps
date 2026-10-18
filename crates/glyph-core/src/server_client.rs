@@ -90,7 +90,7 @@ impl ServerClient {
     pub fn media_credentials(&self) -> Option<(String,String)> { self.bearer.as_ref().map(|t| (self.base.clone(),t.clone())) }
     pub fn authorize_url(&self, fallback: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
         if crate::server_access::same_server(&self.base,url) {
-            let request = self.authorize(self.http.get(url));
+            let request = self.authorize(fallback);
             match crate::account::cached_access(&self.base) {
                 Some(token) => request.bearer_auth(token),
                 None => request,
@@ -570,6 +570,9 @@ mod access_tests {
             let search = futures::executor::block_on(c.member_request(c.get("/v1/search"))).build().unwrap();
             let media_url = format!("{base}/v1/audio/youtube/test");
             let media = c.authorize_url(reqwest::Client::new().get(&media_url), &media_url).build().unwrap();
+            let head = c.authorize_url(reqwest::Client::new().head(&media_url).header("if-none-match", "revision-1"), &media_url).build().unwrap();
+            assert_eq!(head.method(), reqwest::Method::HEAD);
+            assert_eq!(head.headers()["if-none-match"], "revision-1");
             for request in [account, search, media] {
                 assert_eq!(request.headers().get_all(reqwest::header::AUTHORIZATION).iter().count(), 1);
                 assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer test-token");

@@ -321,6 +321,8 @@ pub struct Glyph {
     pub backend: Option<Arc<Backend>>,
     /// Settings -> Account state and the sync loop.
     pub account: crate::ui::account::AccountUi,
+    pub shared_preview: Option<(String, String, Option<String>)>,
+    pending_share_link: Option<String>,
     /// User profiles (open page, own settings).
     pub profile: crate::ui::profile::ProfileUi,
     /// Settings export / import (Settings -> Backup & share).
@@ -355,6 +357,8 @@ pub struct Glyph {
     /// Next song handed to the player for a gapless start:
     /// (queue `track_key`, resolved track the player knows it as).
     preloaded: Option<(String, Track)>,
+    preload_attempt: Option<(String, String, Instant)>,
+    download_check_at: Instant,
     /// Volume to go back to when unmuting from the speaker icon.
     unmute_volume: f32,
     pub palette: Option<Palette>,
@@ -743,6 +747,8 @@ impl Glyph {
             resolving: false,
             hold_play: false,
             preloaded: None,
+            preload_attempt: None,
+            download_check_at: Instant::now(),
             unmute_volume: 0.8,
             palette: None,
             cover: None,
@@ -777,6 +783,8 @@ impl Glyph {
             settings_closing: None,
             settings_page: SettingsPage::Playback,
             account: Default::default(),
+            shared_preview: None,
+            pending_share_link: None,
             profile: Default::default(),
             transfer: Default::default(),
             settings_search,
@@ -1005,6 +1013,8 @@ impl Glyph {
                 glyph_audio::http::set_server_access(b.server_media_credentials());
                 glyph_audio::http::set_account_access_provider(Arc::new(glyph_core::account::media_access));
                 glyph_audio::http::set_local_access_provider(Arc::new(glyph_core::ytdlp::local_stream_access));
+                glyph_audio::http::set_cache_dir(glyph_core::paths::cache_dir().join("audio-ranges"));
+                glyph_core::set_stream_warmer(Arc::new(glyph_audio::http::prewarm));
                 let b = Arc::new(b);
                 self.backend_state = match guard(|| b.mode()) {
                     Some(m) => BackendState::Ready(m),
@@ -1046,6 +1056,10 @@ impl Glyph {
     // ------------------------------------------------------------ polling
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self.download_check_at.elapsed() >= Duration::from_secs(60) {
+            self.download_check_at = Instant::now();
+            if let Some(backend) = &self.backend { backend.refresh_downloads(); }
+        }
         let mut dirty = false;
         self.save_player_prefs(cx);
         if let Some(p) = self.player.clone() {
@@ -1171,6 +1185,11 @@ impl Glyph {
                 PlayerEvent::StatusChanged(_) => {}
             }
         }
+        // Resolve and buffer the next queue item while this song plays,
+        // leaving enough time for a cold companion instead of waiting to EOF.
+        if self.is_playing() && !self.resolving && !self.embed_playing() {
+            self.preload_next(cx);
+        }
         let keys: Vec<MediaKeyEvent> = self
             .media_events
             .as_ref()
@@ -1229,9 +1248,18 @@ impl Glyph {
             let liked = self.current.as_ref().is_some_and(|c| self.is_liked(c));
             crate::thumbbar::set_state(self.is_playing(), liked);
         }
+        if self.backend.is_some() {
+            if let Some(link) = self.pending_share_link.take() {
+                self.import_share_code(&link, cx);
+            }
+        }
         while let Some(req) = crate::instance::try_recv() {
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
                 self.dock_action(n, cx);
+            }
+            if let Some(link) = req.strip_prefix("open ") {
+                if self.backend.is_some() { self.import_share_code(link, cx); }
+                else { self.pending_share_link = Some(link.to_string()); }
             }
             cx.activate(true);
         }
@@ -1945,6 +1973,7 @@ impl Glyph {
     /// given resolved track), so only the UI follows; nothing is reloaded.
     fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
         let key = track_key(&track);
+        self.preload_attempt = None;
         self.current = Some(track.clone());
         self.activity_recorded = false;
         self.current_source = Some(adopted.as_ref().map_or(track.source, |a| a.source));
@@ -2242,12 +2271,19 @@ impl Glyph {
         let Some(b) = self.backend.clone() else { return };
         let cur = self.current.as_ref().map(track_key);
         let want = track_key(&next);
+        if self.preloaded.as_ref().is_some_and(|(key, _)| key == &want) { return; }
+        let Some(current_key) = cur.as_ref() else { return; };
+        if self.preload_attempt.as_ref().is_some_and(|(current, next, at)|
+            current == current_key && next == &want && at.elapsed() < Duration::from_secs(15)) { return; }
+        let attempt = Instant::now();
+        self.preload_attempt = Some((current_key.clone(), want.clone(), attempt));
         cx.spawn(async move |this, cx| {
             if let Ok(Some(res)) = guard_async(b.resolve(&next)).await {
                 this.update(cx, |s, _| {
                     // Resolving can take a while: if another song started or
                     // the queue changed meanwhile, this one is not next anymore.
-                    if s.current.as_ref().map(track_key) != cur || s.next_key().as_deref() != Some(want.as_str()) {
+                    if s.current.as_ref().map(track_key) != cur || s.next_key().as_deref() != Some(want.as_str())
+                        || s.preload_attempt.as_ref().map(|(_, _, at)| *at) != Some(attempt) {
                         return;
                     }
                     s.preloaded = Some((want, res.track.clone()));
@@ -2563,7 +2599,27 @@ impl Glyph {
         self.download_tracks_with(added, true, cx);
     }
 
+    fn copy_glyph_link(&mut self, title: String, tracks: Vec<Track>, kind: &'static str, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let text = b.share_text(&title, &tracks, kind, None).await;
+            this.update(cx, |s, cx| {
+                if glyph_core::share::link_id(&text).is_some() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    s.toast_sub(t("toast.share_link_copied"), title);
+                } else {
+                    s.toast_info(t("toast.share_link_failed"));
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     pub fn share(&mut self, t: &Track, cx: &mut Context<Self>) {
+        if self.backend.as_ref().is_some_and(|b| b.account().is_some()) {
+            self.copy_glyph_link(t.title.clone(), vec![t.clone()], "track", cx);
+            return;
+        }
         match &t.permalink {
             Some(url) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
@@ -2633,6 +2689,7 @@ impl Glyph {
 
     /// Opens a song list (never starts playback).
     pub fn open_list(&mut self, l: ListRef, cx: &mut Context<Self>) {
+        self.shared_preview = None;
         if self.view == View::List && self.open_list.as_ref() == Some(&l) {
             return;
         }
@@ -2642,6 +2699,10 @@ impl Glyph {
         if self.library_ok && !self.nav_quiet && guard(|| self.library.push_recent_list(l.key())).is_some() {
             self.library.record_list_use(&l.key(), 0.25, glyph_core::paths::now_unix());
             self.save_library(cx);
+        }
+        if let Some(b) = &self.backend {
+            let first = self.list_tracks(&l).into_iter().take(2).collect();
+            guard(|| b.warm(first));
         }
         self.open_list = Some(l);
         self.open_artist = None;
@@ -2678,14 +2739,20 @@ impl Glyph {
             return;
         };
         // Artist albums carry no author; a list opened from a link keeps its link.
-        let kind = if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
-        let origin = match l {
+        let kind = if self.shared_preview.is_some() { "playlist" } else if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
+        let origin = if let Some((_, link, _)) = &self.shared_preview { Some(link.clone()) } else { match l {
             ListRef::User(id) => self.library.playlist(id).and_then(|p| p.origin.clone()),
             _ => None,
-        };
+        }};
+        let signed_in = b.account().is_some();
         cx.spawn(async move |this, cx| {
             let text = b.share_text(&title, &tracks, kind, origin).await;
             this.update(cx, |s, cx| {
+                if signed_in && glyph_core::share::link_id(&text).is_none() {
+                    s.toast_info(t("toast.share_link_failed"));
+                    cx.notify();
+                    return;
+                }
                 let key = if glyph_core::share::link_id(&text).is_some() { "toast.share_link_copied" } else { "toast.share_copied" };
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 s.toast_sub(t(key), title);
@@ -2704,13 +2771,24 @@ impl Glyph {
                 cx.notify();
                 return true;
             };
-            let link = code.to_string();
+            let link = format!("https://glyph.my/p/{}", glyph_core::share::link_id(code).unwrap());
             cx.spawn(async move |this, cx| {
                 let r = b.resolve_share_link(&link).await;
                 this.update(cx, |s, cx| match r {
                     Ok(p) if glyph_core::share::is_code(&p.code) => {
                         let author = p.author.filter(|_| p.kind != "album");
-                        s.import_code(&p.code, Some(link.clone()), author, cx);
+                        match glyph_core::share::decode(&p.code) {
+                            Ok((name, _)) if p.kind == "artist" => s.open_artist(&name, cx),
+                            Ok((name, tracks)) => {
+                                let quiet = s.nav_quiet;
+                                s.nav_quiet = true;
+                                s.open_list(ListRef::Album { title: name, artist: String::new(), tracks }, cx);
+                                s.nav_quiet = quiet;
+                                s.shared_preview = Some((p.code, link.clone(), author));
+                                cx.notify();
+                            }
+                            Err(_) => { s.toast_info(t("toast.share_link_failed")); cx.notify(); }
+                        }
                     }
                     Ok(_) => {
                         s.toast_info(t("toast.share_link_failed"));
@@ -2739,6 +2817,10 @@ impl Glyph {
     fn import_code(&mut self, code: &str, origin: Option<String>, shared_by: Option<String>, cx: &mut Context<Self>) {
         match glyph_core::share::decode(code) {
             Ok((name, tracks)) if self.library_ok => {
+                if let Some(id) = origin.as_ref().and_then(|link| self.library.playlists.iter().find(|p| p.origin.as_ref() == Some(link)).map(|p| p.id.clone())) {
+                    self.open_list(ListRef::User(id), cx);
+                    return;
+                }
                 let n = tracks.len();
                 let id = {
                     let p = self.library.create_playlist(&name);
@@ -3079,6 +3161,12 @@ impl Glyph {
 
     /// Heart on an album: save it to / remove it from the library.
     pub fn toggle_saved(&mut self, l: &ListRef, cx: &mut Context<Self>) {
+        if self.open_list.as_ref().is_some_and(|open| open.same(l)) {
+            if let Some((code, link, author)) = self.shared_preview.take() {
+                self.import_code(&code, Some(link), author, cx);
+                return;
+            }
+        }
         if !self.library_ok {
             self.toast_info(t("status.library_offline"));
             return;
@@ -3511,9 +3599,14 @@ impl Glyph {
         cx.notify();
     }
 
-    /// Copies a link for the artist: the Wikipedia article if known, else
+    /// Signed-in users share a Glyph artist link; guests copy the Wikipedia article, else
     /// their top song on its platform.
     pub fn copy_artist_link(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.backend.as_ref().is_some_and(|b| b.account().is_some()) {
+            let tracks = self.artists.get(name).map(|p| p.tracks.clone()).unwrap_or_default();
+            self.copy_glyph_link(name.to_string(), tracks, "artist", cx);
+            return;
+        }
         let page = self.artists.get(name);
         let url = page
             .and_then(|p| p.info.as_ref().map(|i| i.url.clone()).filter(|u| !u.is_empty()))

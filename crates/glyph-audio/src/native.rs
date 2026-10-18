@@ -27,7 +27,10 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 /// Chunks (one per codec packet) buffered between decoder and audio thread.
-const CHUNK_CAP: usize = 128;
+// ~12 seconds of AAC packets, insulating playback from brief CPU/network stalls.
+const CHUNK_CAP: usize = 512;
+#[cfg(test)]
+pub(crate) static TEST_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
 /// Mono samples collected per tap flush.
 const TAP_FLUSH: usize = 512;
 /// Mono samples kept for the FFT.
@@ -62,6 +65,8 @@ impl DecodeCtl {
 #[derive(Default)]
 pub struct TrackShared {
     pub pos_frames: AtomicU64,
+    /// Generation of the last audible position; older positions cannot undo a seek.
+    pub playback_gen: AtomicU64,
     pub started: AtomicBool,
     pub finished: AtomicBool,
     /// Decoder starvation events; consumed and logged by the engine, never the callback.
@@ -378,6 +383,7 @@ pub struct TrackSource {
     cur: Vec<f32>,
     idx: usize,
     base_frame: u64,
+    gen: u64,
     channels: ChannelCount,
     rate: SampleRate,
     duration: Option<Duration>,
@@ -403,6 +409,7 @@ impl TrackSource {
             cur: Vec::new(),
             idx: 0,
             base_frame: 0,
+            gen: 0,
             channels: opened.channels,
             rate: opened.rate,
             duration: opened.duration,
@@ -424,6 +431,7 @@ impl TrackSource {
         let ch = self.channels.get() as usize;
         let frame = self.base_frame + (self.idx / ch) as u64;
         self.shared.pos_frames.store(frame, Ordering::Relaxed);
+        self.shared.playback_gen.store(self.gen, Ordering::Release);
     }
 
     fn flush_tap(&mut self) {
@@ -444,6 +452,13 @@ impl Iterator for TrackSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        let requested = self.ctl.gen.load(Ordering::SeqCst);
+        if requested != self.gen {
+            self.cur.clear();
+            self.idx = 0;
+            self.silence_remaining = 0;
+            self.gen = requested;
+        }
         // Retry only at complete interleaved-frame boundaries. Otherwise a
         // decoder waking after an odd number of zero samples swaps L/R.
         if self.silence_remaining > 0 {
@@ -467,6 +482,7 @@ impl Iterator for TrackSource {
                         self.cur = c.samples;
                         self.idx = 0;
                         self.base_frame = c.start_frame;
+                        self.gen = c.gen;
                         self.shared.started.store(true, Ordering::Relaxed);
                         self.publish_pos();
                         break;
@@ -474,6 +490,8 @@ impl Iterator for TrackSource {
                     Err(flume::TryRecvError::Empty) => {
                         if !self.starving {
                             self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                            #[cfg(test)]
+                            TEST_UNDERRUNS.fetch_add(1, Ordering::Relaxed);
                             self.starving = true;
                         }
                         self.silence_remaining = self.channels.get() as usize - 1;
@@ -604,6 +622,30 @@ mod tests {
         // Raw MPEG frames, no tag at all.
         let raw = vec![0xFF, 0xFB, 0x92, 0x64, 0x00, 0x00];
         assert_eq!(degenerate_id3v2_offset(&mut file_source(raw)), None);
+    }
+
+    #[test]
+    fn seek_holds_position_until_new_generation_arrives() {
+        let (tx, rx) = flume::bounded(8);
+        let ctl = Arc::new(DecodeCtl::default());
+        let shared = Arc::new(TrackShared::default());
+        let opened = Opened { rx, rate: NonZeroU32::new(48_000).unwrap(),
+            channels: NonZeroU16::new(2).unwrap(), duration: None, ctl: ctl.clone() };
+        let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
+        src.level = crate::loudness::Leveller::bypass();
+        src.eq = crate::eq::Equalizer::bypass();
+        tx.send(Chunk { gen: 0, start_frame: 100, samples: vec![0.5; 4096] }).unwrap();
+        assert_eq!(src.next(), Some(0.5));
+        assert_eq!(src.next(), Some(0.5));
+        ctl.request_seek(60.0);
+        assert_eq!(src.next(), Some(0.0));
+        assert_ne!(shared.playback_gen.load(Ordering::Acquire), ctl.gen.load(Ordering::SeqCst));
+        assert_eq!(shared.pos_frames.load(Ordering::Relaxed), 100);
+        tx.send(Chunk { gen: 1, start_frame: 2_880_000, samples: vec![0.25; 4] }).unwrap();
+        assert_eq!(src.next(), Some(0.0)); // finish the silent stereo frame
+        assert_eq!(src.next(), Some(0.25));
+        assert_eq!(shared.playback_gen.load(Ordering::Acquire), ctl.gen.load(Ordering::SeqCst));
+        assert_eq!(shared.pos_frames.load(Ordering::Relaxed), 2_880_000);
     }
 
     #[test]

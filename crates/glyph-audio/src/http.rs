@@ -5,6 +5,39 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[path = "range_cache.rs"]
+mod range_cache;
+pub use range_cache::set_cache_dir;
+
+/// Speculation is bounded independently of playback and never queues work.
+/// The same persistent range cache serves the subsequent foreground open.
+pub fn prewarm(url: String) {
+    use std::collections::HashMap;
+    use std::time::Instant;
+    static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static SEEN: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    if ACTIVE.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+        |n| (n < 2).then_some(n + 1)).is_err() { return; }
+    let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
+    seen.retain(|_, at| at.elapsed() < Duration::from_secs(300));
+    if seen.contains_key(&url) {
+        ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    if seen.len() >= 64 { seen.clear(); }
+    seen.insert(url.clone(), Instant::now());
+    drop(seen);
+    if std::thread::Builder::new().name("glyph-audio-warm".into()).spawn(move || {
+        struct Active;
+        impl Drop for Active { fn drop(&mut self) { ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); } }
+        let _active = Active;
+        if let Ok(mut source) = HttpSource::open(&url) {
+            source.prefetch_enabled = false;
+            let _ = io::copy(&mut source.take(64 * 1024), &mut io::sink());
+        }
+    }).is_err() { ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+}
+
 static SERVER_ACCESS: std::sync::RwLock<Option<(String,String)>> = std::sync::RwLock::new(None);
 pub fn set_server_access(value: Option<(String,String)>) { *SERVER_ACCESS.write().unwrap() = value; }
 type AccountAccess = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -43,7 +76,8 @@ fn credential(url: &str) -> Option<reqwest::header::HeaderValue> {
 }
 
 const CHUNK: u64 = 384 * 1024;
-const FIRST_CHUNK: u64 = 64 * 1024;
+// About 12 seconds at 160 kbps: covers companion latency during the first refill.
+const FIRST_CHUNK: u64 = 256 * 1024;
 const RETRIES: usize = 3;
 
 pub fn client() -> reqwest::Result<reqwest::blocking::Client> {
@@ -94,6 +128,11 @@ pub struct HttpSource {
     mode: Mode,
     bearer: Option<reqwest::header::HeaderValue>,
     account: Option<reqwest::header::HeaderValue>,
+    ahead: Option<(u64, flume::Receiver<io::Result<Vec<u8>>>)>,
+    // Keep the first range open: decoding must not wait for its entire body.
+    initial: Option<(reqwest::blocking::Response, u64)>,
+    cache: Option<range_cache::Entry>,
+    prefetch_enabled: bool,
 }
 
 fn io_err(e: impl std::fmt::Display) -> io::Error {
@@ -116,6 +155,13 @@ impl HttpSource {
         let bearer = credential(url);
         let account = account_credential(url);
         let client = if bearer.is_some() || account.is_some() { reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).build() } else { client() }.map_err(io_err)?;
+        if let Some(cache) = range_cache::Entry::open(url, None) {
+            if let Some(buf) = cache.read(0, FIRST_CHUNK) {
+                return Ok(Self { client, url: url.into(), pos: 0, buf, buf_start: 0,
+                    mode: Mode::Ranged { total: cache.total }, bearer, account, ahead: None,
+                    initial: None, cache: Some(cache), prefetch_enabled: true });
+            }
+        }
         let mut last = None;
         for attempt in 0..RETRIES {
             if attempt > 0 {
@@ -126,6 +172,7 @@ impl HttpSource {
             let request = if let Some(value) = &bearer { request.header("x-glyph-server-authorization",value.clone()) } else { request };
             match request
                 .header(reqwest::header::RANGE, range_header(0, FIRST_CHUNK, None))
+                .timeout(Duration::from_secs(20))
                 .send()
             {
                 Ok(resp) => return Self::from_first_response(client, url, resp, account),
@@ -152,11 +199,7 @@ impl HttpSource {
                 .and_then(range_bounds)
                 .ok_or_else(|| io_err("invalid audio Content-Range"))?;
             if start != 0 || end >= FIRST_CHUNK { return Err(io_err("audio response returned the wrong byte range")); }
-            let mut buf = Vec::new();
-            let started = std::time::Instant::now();
-            (&mut resp).take(FIRST_CHUNK + 1).read_to_end(&mut buf)?;
-            if buf.len() as u64 != end + 1 { return Err(io_err("incomplete audio byte range")); }
-            glyph_protocol::network::observe(buf.len() as u64, started.elapsed());
+            let buf = Vec::new();
             Ok(Self {
                 client,
                 bearer: credential(url),
@@ -166,6 +209,10 @@ impl HttpSource {
                 buf,
                 buf_start: 0,
                 mode: Mode::Ranged { total },
+                ahead: None,
+                initial: Some((resp, end + 1)),
+                cache: range_cache::Entry::open(url, Some(total)),
+                prefetch_enabled: true,
             })
         } else if status.is_success() {
             let total = resp.content_length();
@@ -176,8 +223,10 @@ impl HttpSource {
                 let mut buf = Vec::with_capacity(size as usize);
                 (&mut resp).take(size + 1).read_to_end(&mut buf)?;
                 if buf.len() as u64 != size { return Err(io_err("incomplete full audio response")); }
+                let cache = range_cache::Entry::open(url, Some(size));
+                if let Some(cache) = &cache { cache.write(0, &buf); }
                 return Ok(Self { client, bearer: credential(url), account, url: url.into(),
-                    pos: 0, buf, buf_start: 0, mode: Mode::Ranged { total: size } });
+                    pos: 0, buf, buf_start: 0, ahead: None, initial: None, cache, prefetch_enabled: true, mode: Mode::Ranged { total: size } });
             }
             Ok(Self {
                 client,
@@ -188,6 +237,10 @@ impl HttpSource {
                 buf_start: 0,
                 mode: Mode::Sequential { body: Mutex::new(resp), total },
                 account,
+                ahead: None,
+                initial: None,
+                cache: total.and_then(|size| range_cache::Entry::open(url, Some(size))),
+                prefetch_enabled: true,
             })
         } else {
             Err(io_err(format!("HTTP {status}")))
@@ -205,8 +258,54 @@ impl HttpSource {
         }
     }
 
-    fn fetch(&mut self, at: u64) -> io::Result<()> {
+    // One bounded block ahead, independent of the decoder. No waiting or
+    // network work occurs on the audio callback. Seeking discards stale results.
+    fn prefetch(&mut self) {
+        if !self.prefetch_enabled { return; }
+        let Mode::Ranged { total } = self.mode else { return };
+        let at = self.initial.as_ref().map(|(_, end)| *end)
+            .unwrap_or(self.buf_start + self.buf.len() as u64);
+        if at >= total || self.ahead.is_some() { return; }
+        let mut worker = Self {
+            client: self.client.clone(), url: self.url.clone(), pos: at,
+            buf: Vec::new(), buf_start: at, mode: Mode::Ranged { total },
+            bearer: self.bearer.clone(), account: self.account.clone(), ahead: None,
+            initial: None,
+            cache: self.cache.clone(),
+            prefetch_enabled: true,
+        };
+        let (tx, rx) = flume::bounded(1);
+        if std::thread::Builder::new().name("glyph-audio-prefetch".into()).spawn(move || {
+            let result = worker.fetch(at, false).map(|()| worker.buf);
+            let _ = tx.send(result);
+        }).is_ok() { self.ahead = Some((at, rx)); }
+    }
+
+    fn read_initial(&mut self, requested: usize) -> io::Result<()> {
+        let buf_end = self.buf_start + self.buf.len() as u64;
+        if self.pos != buf_end { return Ok(()); }
+        if let Some((body, end)) = &mut self.initial {
+            let mut block = [0u8; 16 * 1024];
+            let limit = (*end - buf_end).min(block.len() as u64).min(requested as u64) as usize;
+            let started = std::time::Instant::now();
+            let n = body.read(&mut block[..limit])?;
+            if n == 0 { return Err(io_err("incomplete audio byte range")); }
+            self.buf.extend_from_slice(&block[..n]);
+            if let Some(cache) = &self.cache { cache.write(buf_end, &block[..n]); }
+            glyph_protocol::network::observe(n as u64, started.elapsed());
+            if self.buf_start + self.buf.len() as u64 == *end { self.initial = None; }
+        }
+        Ok(())
+    }
+
+    fn fetch(&mut self, at: u64, progressive: bool) -> io::Result<()> {
+        self.initial = None;
         let Mode::Ranged { total } = self.mode else { unreachable!() };
+        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.read(at, CHUNK)) {
+            self.buf = bytes;
+            self.buf_start = at;
+            return Ok(());
+        }
         if let Some((_, Some(path))) = local_access(&self.url) {
             if let Ok(mut file) = std::fs::File::open(path) {
                 if file.metadata().is_ok_and(|m| m.len() == total) {
@@ -230,7 +329,7 @@ impl HttpSource {
             // small measured first request must not shrink later refills to
             // 32 KiB and repeat that latency for every MP4 segment.
             let chunk_bytes = if self.url.contains("/v1/audio/youtube/") { 1024 * 1024 }
-                else { glyph_protocol::network::chunk_bytes().min(CHUNK) };
+                else { CHUNK };
             #[cfg(test)]
             eprintln!("audio fetch: at={at}, chunk={chunk_bytes}, total={total}");
             let started = std::time::Instant::now();
@@ -264,11 +363,18 @@ impl HttpSource {
                         }
                         limit = end - start + 1;
                     }
+                    if progressive {
+                        self.buf.clear();
+                        self.buf_start = at;
+                        self.initial = Some((resp, at + limit));
+                        return Ok(());
+                    }
                     let mut buf = Vec::with_capacity(CHUNK as usize);
                     match read_progress(&mut resp, limit, &mut buf, &transfer) {
                         Ok(_) => {
                             if buf.len() as u64 != limit { return Err(io_err("audio response ended before requested byte range")); }
                             glyph_protocol::network::observe(buf.len() as u64, started.elapsed());
+                            if let Some(cache) = &self.cache { cache.write(at, &buf); }
                             self.buf = buf;
                             self.buf_start = at;
                             return Ok(());
@@ -291,6 +397,7 @@ impl Read for HttpSource {
         match &self.mode {
             Mode::Sequential { body, .. } => {
                 let n = body.lock().unwrap().read(out)?;
+                if let Some(cache) = &self.cache { cache.write(self.pos, &out[..n]); }
                 self.pos += n as u64;
                 Ok(n)
             }
@@ -299,10 +406,19 @@ impl Read for HttpSource {
                 if self.pos >= total {
                     return Ok(0);
                 }
+                self.read_initial(out.len())?;
                 let buf_end = self.buf_start + self.buf.len() as u64;
                 if !(self.pos >= self.buf_start && self.pos < buf_end) {
-                    self.fetch(self.pos)?;
+                    let cached = self.ahead.take().and_then(|(at, rx)| {
+                        (at == self.pos).then(|| rx.recv().ok()).flatten()
+                    });
+                    if let Some(Ok(bytes)) = cached {
+                        self.buf_start = self.pos;
+                        self.buf = bytes;
+                    } else { self.fetch(self.pos, true)?; }
+                    self.read_initial(out.len())?;
                 }
+                self.prefetch();
                 let off = (self.pos - self.buf_start) as usize;
                 let n = out.len().min(self.buf.len().saturating_sub(off));
                 if n == 0 {
@@ -460,6 +576,81 @@ mod tests {
     }
 
     #[test]
+    fn distant_seek_reads_before_its_range_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let (prefix_tx, prefix_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/100\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789").unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            let n = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..n]).contains("bytes=90-99"));
+            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 90-99/100\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc").unwrap();
+            stream.flush().unwrap();
+            let released = continue_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            stream.write_all(b"defghij").unwrap();
+            released
+        });
+        let client = std::thread::spawn(move || {
+            let mut source = HttpSource::open(&format!("http://{address}/seek")).unwrap();
+            source.seek(SeekFrom::Start(90)).unwrap();
+            let mut prefix = [0; 3];
+            source.read_exact(&mut prefix).unwrap();
+            prefix_tx.send(prefix).unwrap();
+            let mut tail = Vec::new();
+            source.read_to_end(&mut tail).unwrap();
+            tail
+        });
+        let prefix = prefix_rx.recv_timeout(Duration::from_secs(2));
+        let _ = continue_tx.send(());
+        assert_eq!(client.join().unwrap(), b"defghij");
+        assert!(server.join().unwrap());
+        assert_eq!(prefix.unwrap(), *b"abc");
+    }
+
+    #[test]
+    fn first_range_decodes_before_download_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let (prefix_tx, prefix_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/10\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc").unwrap();
+            stream.flush().unwrap();
+            // A whole-range buffer would deadlock until this timeout.
+            let released = continue_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            stream.write_all(b"defghij").unwrap();
+            released
+        });
+        let client = std::thread::spawn(move || {
+            let mut source = HttpSource::open(&format!("http://{address}/slow-audio")).unwrap();
+            let mut prefix = [0; 3];
+            source.read_exact(&mut prefix).unwrap();
+            prefix_tx.send(prefix).unwrap();
+            // Already received bytes remain seekable during the download.
+            source.seek(SeekFrom::Start(0)).unwrap();
+            let mut all = Vec::new();
+            source.read_to_end(&mut all).unwrap();
+            all
+        });
+        let prefix = prefix_rx.recv_timeout(Duration::from_secs(2));
+        let _ = continue_tx.send(());
+        let all = client.join().unwrap();
+        let released = server.join().unwrap();
+        assert_eq!(prefix.unwrap(), *b"abc");
+        assert!(released);
+        assert_eq!(all, b"abcdefghij");
+    }
+
+    #[test]
     fn small_full_response_is_seekable_for_header_probing() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -515,6 +706,40 @@ mod tests {
         source.read_to_end(&mut tail).unwrap();
         assert_eq!(tail, data[data.len() - 37..]);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn prefetches_before_boundary_without_losing_or_repeating_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let data: Vec<u8> = (0..FIRST_CHUNK + CHUNK).map(|i| (i % 251) as u8).collect();
+        let served = data.clone();
+        let (requested, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                stream.read(&mut request).unwrap();
+                let start = if index == 0 { 0 } else { FIRST_CHUNK as usize };
+                let end = if index == 0 { FIRST_CHUNK as usize } else { served.len() };
+                if index == 1 {
+                    requested.send(()).unwrap();
+                    // Model a slow tunnel while the decoder still owns its first block.
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", start, end-1, served.len(), end-start).unwrap();
+                stream.write_all(&served[start..end]).unwrap();
+            }
+        });
+        let mut source = HttpSource::open(&format!("http://{address}/song")).unwrap();
+        let mut first = [0u8; 1];
+        source.read_exact(&mut first).unwrap();
+        // The refill starts before the first block is consumed.
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut actual = first.to_vec();
+        source.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+        server.join().unwrap();
     }
 
     /// Tiny Range-capable server; verifies seeking + chunk refetch.

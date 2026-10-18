@@ -380,11 +380,8 @@ impl Backend {
     pub async fn resolve_share_link(&self, link: &str) -> Result<crate::server_client::SharedPlaylist> {
         let id = crate::share::link_id(link).ok_or_else(|| anyhow!("not a Glyph playlist link"))?;
         let inner = self.cur();
-        let server = match inner.server.clone() {
-            Some(s) => s,
-            // Links always live on the public server.
-            None => ServerClient::new(crate::config::DEFAULT_SERVER_URL, inner.http.clone(), crate::server_client::install_id()),
-        };
+        // Public links must never resolve against a custom account server.
+        let server = ServerClient::new(crate::config::DEFAULT_SERVER_URL, inner.http.clone(), crate::server_client::install_id());
         self.spawn(async move { server.shared_playlist(&id).await }).await?
     }
 
