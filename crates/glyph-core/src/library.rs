@@ -535,7 +535,7 @@ mod tests {
         assert!(lib.is_saved(&same));
         assert!(!lib.toggle_saved(same));
         assert!(lib.saved_albums.is_empty());
-        for i in 0..10 {
+        for i in 0..(RECENT_LISTS_LIMIT + 2) {
             lib.push_recent_list(ListKey::Playlist { id: i.to_string() });
         }
         lib.push_recent_list(ListKey::Playlist { id: "5".into() });
