@@ -29,6 +29,9 @@ pub struct ProfileUi {
     pub error: Option<String>,
     /// Pictures and covers by sha256: local file (`None` = loading or missing).
     pub images: HashMap<String, Option<PathBuf>>,
+    /// Songs of profile playlists the server sent without a preview, for
+    /// their automatic cover (by `handle/id`; `None` = loading or failed).
+    pub previews: HashMap<String, Option<Vec<Track>>>,
     /// Own settings (Settings -> Profile), `None` until loaded.
     pub settings: Option<ProfileSettings>,
     /// An image is being prepared / uploaded.
@@ -82,6 +85,8 @@ impl Glyph {
         }
         self.profile.loading = true;
         self.profile.error = None;
+        // Playlists may have changed since: fetch their songs again.
+        self.profile.previews.clear();
         cx.spawn(async move |this, cx| {
             let r = b.profile(&handle).await;
             this.update(cx, |s, cx| {
@@ -118,6 +123,31 @@ impl Glyph {
             }
             this.update(cx, |s, cx| {
                 s.profile.images.insert(sha, r.ok());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    /// First songs of a profile playlist for its automatic cover, when the
+    /// profile came without them (older servers); fetched once.
+    pub fn profile_preview(&mut self, handle: &str, id: &str, cx: &mut Context<Self>) -> Option<Vec<Track>> {
+        let key = format!("{handle}/{id}");
+        if let Some(p) = self.profile.previews.get(&key) {
+            return p.clone();
+        }
+        let Some(b) = self.backend.clone() else { return None };
+        self.profile.previews.insert(key.clone(), None);
+        let (h, id) = (handle.to_string(), id.to_string());
+        cx.spawn(async move |this, cx| {
+            let r = b.profile_playlist(&h, &id).await;
+            if let Err(e) = &r {
+                tracing::info!("profile playlist preview: {e:#}");
+            }
+            this.update(cx, |s, cx| {
+                s.profile.previews.insert(key, r.ok().map(|p| p.tracks.into_iter().take(12).collect()));
                 cx.notify();
             })
             .ok();
@@ -240,19 +270,7 @@ impl Glyph {
             let bytes = cx
                 .background_executor()
                 .spawn(async move {
-                    let img = image::open(&src).map_err(|e| e.to_string())?;
-                    // Picture: centre square, 512 px. Banner: centre 3:1, 1500 px wide.
-                    let (w, h) = (img.width(), img.height());
-                    let img = if banner {
-                        let (cw, ch) = if w >= h * 3 { (h * 3, h) } else { (w, w / 3) };
-                        img.crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch.max(1)).thumbnail(1500, 500)
-                    } else {
-                        let side = w.min(h);
-                        img.crop_imm((w - side) / 2, (h - side) / 2, side, side).thumbnail(512, 512)
-                    };
-                    let mut out = std::io::Cursor::new(Vec::new());
-                    img.to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
-                    Ok::<_, String>(out.into_inner())
+                    glyph_core::profile_images::prepare(&src,banner).map_err(|e| e.to_string())
                 })
                 .await;
             let r = match bytes {
@@ -378,7 +396,8 @@ pub fn search_hit(app: &mut Glyph, query: &str, cx: &mut Context<Glyph>) -> Opti
             .py(px(6.0))
             .rounded(px(8.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme::card()))
+            .relative()
+            .child(hover_fill("search-profile", theme::card(), 8.0))
             .on_click(cx.listener(move |this, _, _, cx| this.open_profile(&h, cx)))
             .child(
                 div()
@@ -417,7 +436,7 @@ fn avatar(path: Option<PathBuf>, size: f32) -> Div {
     }
 }
 
-pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+pub fn view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(handle) = app.open_profile.clone() else { return div().into_any_element() };
     let scroll = app.main_scroll.clone();
     let wrap = move |el: AnyElement| div().id("profile-scroll").track_scroll(&scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(el).into_any_element();
@@ -433,21 +452,35 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
         return wrap(div().flex().flex_col().gap(px(16.0)).children(crate::ui::lists::back_button(app, cx)).child(body).into_any_element());
     };
 
-    let banner = p.banner.clone().and_then(|s| app.profile_image(&p.handle, &s, cx));
+    // The banner with its fade baked in (like the artist hero), so it melts
+    // into the page instead of ending on an edge.
+    const BANNER_H: f32 = 260.0;
+    for im in app.stale_heroes.drain(..) {
+        let _ = window.drop_image(im);
+    }
+    let min_w = f32::from(window.viewport_size().width) * 300.0 / BANNER_H;
+    let banner = p.banner.clone().and_then(|s| app.profile_image(&p.handle, &s, cx)).and_then(|path| app.hero_image(&path, min_w, 300, true, cx));
     let pic = p.avatar.clone().and_then(|s| app.profile_image(&p.handle, &s, cx));
     let hero = div()
         .relative()
         .mx(px(-24.0))
         .mt(px(-12.0))
-        .h(px(220.0))
+        .h(px(BANNER_H))
         .rounded_t(px(14.0))
         .overflow_hidden()
-        .bg(gpui::linear_gradient(
-            135.0,
-            gpui::linear_color_stop(gpui::hsla(330.0 / 360.0, 0.45, 0.22, 1.0), 0.0),
-            gpui::linear_color_stop(gpui::hsla(260.0 / 360.0, 0.35, 0.12, 1.0), 1.0),
-        ))
-        .when_some(banner, |d, b| d.child(img(b).absolute().inset_0().size_full().object_fit(ObjectFit::Cover)))
+        // Like the artist hero, it melts into the page at the bottom instead
+        // of ending on an edge: colour on top, fully transparent below.
+        .when(banner.is_none(), |d| {
+            d.child(div().absolute().inset_0().rounded_t(px(14.0)).bg(gpui::linear_gradient(
+                0.0,
+                gpui::linear_color_stop(gpui::hsla(300.0 / 360.0, 0.40, 0.16, 0.0), 0.0),
+                gpui::linear_color_stop(theme::accent_tile(0.22, 0.45), 1.0),
+            )))
+        })
+        .when_some(banner, |d, b| {
+            let k = reveal_k(&format!("profile:banner:{}", p.handle), 0.5);
+            d.child(img(b).absolute().inset_0().size_full().rounded_t(px(14.0)).object_fit(ObjectFit::Cover).opacity(k))
+        })
         .children(crate::ui::lists::back_button(app, cx).map(|b| div().absolute().top(px(20.0)).left(px(32.0)).child(b)));
 
     let own = p.own;
@@ -455,14 +488,14 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
         .flex()
         .items_end()
         .gap(px(20.0))
-        .mt(px(-56.0))
+        .mt(px(-56.0 - 22.0))
         .px(px(8.0))
         .child(avatar(pic, 112.0))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .pb(px(6.0))
+                .pb(px(56.0 + 14.0))
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
@@ -470,7 +503,7 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
                 .child(div().text_size(px(36.0)).line_height(px(40.0)).font_weight(FontWeight::BOLD).text_color(gpui::white()).truncate().child(format!("@{}", p.handle))),
         )
         .when(own, |d| {
-            d.child(div().pb(px(10.0)).child(button("profile-edit", t("profile.edit")).on_click(cx.listener(|this, _, _, cx| {
+            d.child(div().pb(px(56.0 + 18.0)).child(button("profile-edit", t("profile.edit")).on_click(cx.listener(|this, _, _, cx| {
                 this.open_settings(Some(SettingsPage::Profile), cx);
                 this.profile_page_opened(cx);
             }))))
@@ -491,8 +524,24 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
             .iter()
             .enumerate()
             .map(|(i, pl)| {
+                // Own picture first; else the automatic cover from the songs:
+                // the local playlist on the own profile, the preview the
+                // server sent, or (servers without previews) its songs.
+                let local = own && app.library.playlist(&pl.id).is_some();
+                let songs = if local || pl.cover.is_some() || !pl.preview.is_empty() || pl.songs == 0 {
+                    pl.preview.clone()
+                } else {
+                    app.profile_preview(&p.handle, &pl.id, cx).unwrap_or_default()
+                };
                 let art = match pl.cover.clone().and_then(|s| app.profile_image(&p.handle, &s, cx)) {
                     Some(path) => img(path).size(px(160.0)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
+                    None if local => crate::ui::lists::list_cover(app, &ListRef::User(pl.id.clone()), 160.0, cx),
+                    None if !songs.is_empty() => crate::ui::lists::list_cover(
+                        app,
+                        &ListRef::Album { title: pl.name.clone(), artist: format!("@{}", p.handle), tracks: songs },
+                        160.0,
+                        cx,
+                    ),
                     None => div()
                         .size(px(160.0))
                         .rounded(px(8.0))
@@ -510,7 +559,8 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
                     .w(px(176.0))
                     .p(px(8.0))
                     .rounded(px(10.0))
-                    .hover(|s| s.bg(white(0.05)))
+                    .relative()
+                    .child(hover_fill(format!("profile-pl-{i}"), white(0.05), 10.0))
                     .flex()
                     .flex_col()
                     .gap(px(4.0))

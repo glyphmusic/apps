@@ -183,15 +183,25 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             .child(div().w_full().max_w(px(820.0)).h_full().child(lyrics(app, cx)))
             .into_any_element();
     }
+    // Cover column + lyrics as one centred block (not pinned to the left
+    // edge on wide windows).
     div()
         .id("np-root")
         .size_full()
         .flex()
-        .items_center()
-        .gap(px(40.0))
+        .justify_center()
         .px(px(40.0))
-        .child(left)
-        .when(app.show_lyrics, |d| d.child(lyrics(app, cx)))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(1180.0))
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(56.0))
+                .child(left)
+                .when(app.show_lyrics, |d| d.child(lyrics(app, cx))),
+        )
         .into_any_element()
 }
 
@@ -222,6 +232,32 @@ thread_local! {
     /// Eased opacity per lyric line, for the song it belongs to.
     static LINE_ALPHA: std::cell::RefCell<(String, Vec<f32>, Option<std::time::Instant>)> = std::cell::RefCell::new((String::new(), Vec::new(), None));
     static FOLLOW_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// Eased "is the active line" per lyric line (0..1): it grows a little.
+    static LINE_BIG: std::cell::RefCell<(String, Vec<f32>, Option<std::time::Instant>)> = std::cell::RefCell::new((String::new(), Vec::new(), None));
+}
+
+/// 1 for the line being sung, easing to 0 for the others.
+fn line_big(key: String, n: usize, active: Option<usize>) -> Vec<f32> {
+    LINE_BIG.with(|c| {
+        let mut c = c.borrow_mut();
+        let now = std::time::Instant::now();
+        let target = |i: usize| if Some(i) == active { 1.0 } else { 0.0 };
+        if c.0 != key || c.1.len() != n {
+            *c = (key, (0..n).map(target).collect(), Some(now));
+            return c.1.clone();
+        }
+        let dt = c.2.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.016).clamp(0.0, 0.1);
+        c.2 = Some(now);
+        let k = 1.0 - (-dt / 0.12).exp();
+        for i in 0..n {
+            let t = target(i);
+            c.1[i] += (t - c.1[i]) * k;
+            if (t - c.1[i]).abs() < 0.002 {
+                c.1[i] = t;
+            }
+        }
+        c.1.clone()
+    })
 }
 
 /// Line opacities easing towards: active 1, the next few a soft step down,
@@ -231,7 +267,8 @@ fn line_alphas(key: String, n: usize, active: Option<usize>) -> Vec<f32> {
         match active {
             Some(a) if i == a => 1.0,
             Some(a) if i > a => (0.48 - 0.05 * (i - a - 1) as f32).max(0.26),
-            Some(_) => 0.26,
+            // Lines already sung stay white.
+            Some(_) => 0.9,
             None => 0.4,
         }
     };
@@ -357,6 +394,7 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         // Every line is a direct child of the scroll frame, so the frame can
         // glide to the active one; colours ease instead of jumping.
         let alphas = line_alphas(app.lyrics.key.clone().unwrap_or_default(), l.synced.len(), active);
+        let bigs = line_big(app.lyrics.key.clone().unwrap_or_default(), l.synced.len(), active);
         (0..l.synced.len())
             .map(|i| {
                 let line = &l.synced[i];
@@ -378,8 +416,10 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
                     .cursor_pointer()
                     .on_click(seek)
                     .when(centered, |d| d.text_center())
-                    .text_size(px(28.0))
-                    .line_height(px(38.0))
+                    // The line being sung is a size bigger, so it is clear
+                    // where the song is.
+                    .text_size(px(28.0 + 8.0 * bigs.get(i).copied().unwrap_or(0.0)))
+                    .line_height(px(38.0 + 9.0 * bigs.get(i).copied().unwrap_or(0.0)))
                     .font_weight(FontWeight::BOLD);
                 if Some(i) == active {
                     // Sung part fills in white inside one paragraph (wraps like the line).

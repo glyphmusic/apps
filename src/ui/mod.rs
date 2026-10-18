@@ -8,6 +8,7 @@ pub mod account;
 pub mod chrome;
 pub mod input;
 pub mod lists;
+pub mod mini;
 pub mod now_playing;
 pub mod player_bar;
 pub mod profile;
@@ -36,6 +37,19 @@ actions!(
         FocusSearch,
         ToggleLyrics,
         ToggleQueue,
+        Nav1,
+        Nav2,
+        Nav3,
+        Nav4,
+        Nav5,
+        Nav6,
+        Nav7,
+        Nav8,
+        Nav9,
+        Nav0,
+        LoopStart,
+        LoopEnd,
+        LoopClear,
         CloseOverlay,
         Quit,
         PlayRecent0,
@@ -49,6 +63,7 @@ actions!(
 const MAIN: &str = "Glyph && !TextInput";
 
 pub fn bind_keys(cx: &mut App) {
+    input::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("space", TogglePlay, Some(MAIN)),
         KeyBinding::new("left", SeekBack, Some(MAIN)),
@@ -59,6 +74,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-l", ToggleLyrics, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", CloseOverlay, Some("Glyph")),
+        // Ctrl+1..9 pick sidebar entries top to bottom, Ctrl+0 is Settings.
+        KeyBinding::new("secondary-1", Nav1, None),
+        KeyBinding::new("secondary-2", Nav2, None),
+        KeyBinding::new("secondary-3", Nav3, None),
+        KeyBinding::new("secondary-4", Nav4, None),
+        KeyBinding::new("secondary-5", Nav5, None),
+        KeyBinding::new("secondary-6", Nav6, None),
+        KeyBinding::new("secondary-7", Nav7, None),
+        KeyBinding::new("secondary-8", Nav8, None),
+        KeyBinding::new("secondary-9", Nav9, None),
+        KeyBinding::new("secondary-0", Nav0, None),
+        // A-B loop: Alt+1 start, Alt+2 end, Alt+0 off.
+        KeyBinding::new("alt-1", LoopStart, None),
+        KeyBinding::new("alt-2", LoopEnd, None),
+        KeyBinding::new("alt-0", LoopClear, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
@@ -125,14 +155,28 @@ impl Render for Shell {
     }
 }
 
+thread_local! {
+    static WINDOW_TITLE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
 impl Render for Glyph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         widgets::set_viewport_h(f32::from(window.viewport_size().height));
+        // Window title = the song, so the taskbar / dock preview shows it.
+        let title = match &self.current {
+            Some(t) => format!("{} - {}", t.artist, t.title),
+            None => "Glyph".to_string(),
+        };
+        if WINDOW_TITLE.with(|w| w.replace(title.clone())) != title {
+            window.set_window_title(&title);
+        }
         widgets::begin_wheel_frames();
         if widgets::step_smooth_scroll() {
             window.request_animation_frame();
         }
         theme::set_ink(self.ink);
+        widgets::set_ascii_effects(self.config.visuals.ascii_effects);
+        theme::set_theme(&self.config.visuals.theme);
         theme::set_zone(Some(0));
         let titlebar = chrome::titlebar(self, window, cx).into_any_element();
         theme::set_zone(Some(1));
@@ -146,6 +190,7 @@ impl Render for Glyph {
             View::List => lists::list_view(self, window, cx),
             View::Artist => lists::artist_view(self, window, cx),
             View::Profile => profile::view(self, window, cx),
+            View::Section => views::section_view(self, window, cx).into_any_element(),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),
@@ -156,13 +201,58 @@ impl Render for Glyph {
         let main = if self.view == View::NowPlaying {
             main
         } else {
-            let bar = widgets::scrollbar(&self.main_scroll, !self.settings_open, cx);
-            widgets::fade_edges(main, gpui::hsla(0.0, 0.0, 0.0, 0.3), 28.0, Some(&self.main_scroll)).size_full().child(bar).into_any_element()
+            // The bottom edge is deeper, so lists sink away instead of being cut off.
+            widgets::fade_edges_split(main, (gpui::hsla(0.0, 0.0, 0.0, 0.3), 28.0), (gpui::hsla(0.0, 0.0, 0.0, 0.5), 52.0), Some(&self.main_scroll))
+                .size_full()
+                .into_any_element()
         };
-        let main_panel = div().flex_1().min_w_0().h_full().overflow_hidden().child(main);
-        let queue = self
-            .show_queue
-            .then(|| views::queue_panel(self, window, cx).into_any_element());
+        let main_bar = (self.view != View::NowPlaying).then(|| widgets::scrollbar(&self.main_scroll, !self.settings_open, cx));
+        if self.show_queue {
+            if let Some(a) = self.add_songs.as_mut() {
+                a.open = false;
+            }
+        }
+        // "Add songs" belongs to its playlist: leaving the page closes it.
+        let on_list = |id: &str| self.view == View::List && self.open_list.as_ref().is_some_and(|l| *l == crate::app::ListRef::User(id.to_string()));
+        if self.add_songs.as_ref().is_some_and(|a| a.open && !on_list(&a.id)) {
+            if let Some(a) = self.add_songs.as_mut() {
+                a.open = false;
+            }
+        }
+        let add_open = self.add_songs.as_ref().is_some_and(|a| a.open);
+        let right_open = self.show_queue || add_open;
+        // The page reaches into the window margin on the right so its
+        // scrollbar sits there, next to the content instead of over it.
+        let main_panel = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .mr(px(-theme::GAP))
+            // Next to the queue the page runs right up to it (no gap), like it
+            // runs under the player bar's margin.
+            .child(div().size_full().pr(px(if right_open { 0.0 } else { theme::GAP })).child(div().relative().size_full().overflow_hidden().child(main)))
+            .when_some(main_bar, |d, bar| {
+                d.child(div().absolute().top_0().bottom_0().right(px(if right_open { 0.0 } else { -5.0 })).w(px(theme::GAP + 2.0)).child(bar))
+            });
+        // The queue slides in from the right edge and out again.
+        // Same slot for "Add songs": opening one closes the other.
+        let qk = self.queue_slide.update(right_open);
+        if qk <= 0.001 && !add_open {
+            self.add_songs = None;
+        }
+        let show_add = add_open || (!self.show_queue && self.add_songs.is_some());
+        let queue = (qk > 0.001).then(|| {
+            let inner = if show_add { views::add_songs_panel(self, window, cx).into_any_element() } else { views::queue_panel(self, window, cx).into_any_element() };
+            div()
+                .flex_none()
+                .h_full()
+                .w(px(views::QUEUE_W * qk))
+                .ml(px(-theme::GAP * (1.0 - qk)))
+                .overflow_hidden()
+                .child(div().w(px(views::QUEUE_W)).h_full().child(inner))
+                .into_any_element()
+        });
         // Song + lyrics in Now Playing carries its own transport (Liner):
         // no second player bar there. Lyrics-only keeps the bar.
         let full_np = self.view == View::NowPlaying && self.current.is_some() && !(self.show_lyrics && self.lyrics_only);
@@ -230,6 +320,19 @@ impl Render for Glyph {
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.previous(cx)))
             // Taskbar jump list / dock menu: recently played.
             .on_action(cx.listener(|this, _: &PlayRecent0, _, cx| this.play_recent(0, cx)))
+            .on_action(cx.listener(|this, _: &Nav1, w, cx| this.nav_slot(1, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav2, w, cx| this.nav_slot(2, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav3, w, cx| this.nav_slot(3, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav4, w, cx| this.nav_slot(4, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav5, w, cx| this.nav_slot(5, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav6, w, cx| this.nav_slot(6, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav7, w, cx| this.nav_slot(7, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav8, w, cx| this.nav_slot(8, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav9, w, cx| this.nav_slot(9, w, cx)))
+            .on_action(cx.listener(|this, _: &Nav0, w, cx| this.nav_slot(0, w, cx)))
+            .on_action(cx.listener(|this, _: &LoopStart, _, cx| this.set_loop_point(true, cx)))
+            .on_action(cx.listener(|this, _: &LoopEnd, _, cx| this.set_loop_point(false, cx)))
+            .on_action(cx.listener(|this, _: &LoopClear, _, cx| this.clear_loop(cx)))
             .on_action(cx.listener(|this, _: &PlayRecent1, _, cx| this.play_recent(1, cx)))
             .on_action(cx.listener(|this, _: &PlayRecent2, _, cx| this.play_recent(2, cx)))
             .on_action(cx.listener(|this, _: &PlayRecent3, _, cx| this.play_recent(3, cx)))
@@ -289,10 +392,14 @@ impl Render for Glyph {
                     .flex()
                     .gap(px(theme::GAP))
                     .px(px(theme::GAP))
+                    // The page runs on under the player bar's top margin
+                    // instead of stopping at a hard edge above it.
+                    .mb(px(-theme::GAP * shown))
                     .when(dim, |d| d.opacity(dim_a))
-                    .child(sidebar)
+                    // Side panels keep their gap to the bar.
+                    .child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar))
                     .child(main_panel)
-                    .children(queue),
+                    .children(queue.map(|q| div().flex_none().h_full().pb(px(theme::GAP * shown)).child(q))),
             )
             .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(dim_a)).child(b)))
             .children(modal)
@@ -300,5 +407,6 @@ impl Render for Glyph {
             .children(dialog)
             .children(splash)
             .children(toasts)
+            .children(widgets::tooltip_layer(window))
     }
 }

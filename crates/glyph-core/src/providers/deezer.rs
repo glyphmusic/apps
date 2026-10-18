@@ -224,7 +224,12 @@ impl MusicProvider for Deezer {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Track>> {
-        let v = self.get(&format!("{API}/search"), &[("q", query), ("limit", "20")]).await?;
+        self.search_page(query, 0).await
+    }
+
+    async fn search_page(&self, query: &str, page: usize) -> Result<Vec<Track>> {
+        let index = (page * 20).to_string();
+        let v = self.get(&format!("{API}/search"), &[("q", query), ("limit", "20"), ("index", index.as_str())]).await?;
         let l: DList = serde_json::from_value(v)?;
         Ok(l.data.into_iter().filter_map(convert).collect())
     }

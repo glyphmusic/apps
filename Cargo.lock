@@ -2438,6 +2438,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2460,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "glyph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -2474,16 +2480,18 @@ dependencies = [
  "image",
  "noise",
  "raw-window-handle",
+ "serde_json",
  "sys-locale",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "windows 0.61.3",
 ]
 
 [[package]]
 name = "glyph-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flume 0.11.1",
@@ -2505,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2535,12 +2543,13 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "webp",
  "zip",
 ]
 
 [[package]]
 name = "glyph-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3673,6 +3682,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libwebp-sys"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54cd30df7c7165ce74a456e4ca9732c603e8dc5e60784558c1c6dc047f876733"
+dependencies = [
+ "cc",
+ "glob",
 ]
 
 [[package]]
@@ -7915,6 +7934,15 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
+]
+
+[[package]]
+name = "webp"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c071456adef4aca59bf6a583c46b90ff5eb0b4f758fc347cea81290288f37ce1"
+dependencies = [
+ "libwebp-sys",
 ]
 
 [[package]]

@@ -91,8 +91,15 @@ impl Preset {
         }
     }
 
-    pub fn ramps(self, palette: Option<&Palette>, blend: f32) -> (Ramp, Ramp) {
-        let (c, w) = self.native();
+    /// `theme`: the colour theme's glow colours, in place of the preset's own.
+    pub fn ramps(self, theme: Option<&Palette>, palette: Option<&Palette>, blend: f32) -> (Ramp, Ramp) {
+        let (c, w) = match theme {
+            Some(t) => {
+                let [a, b, d] = t.0;
+                (Ramp([a.scale(0.35), a, b, b.lighten(0.85)]), Ramp([a.scale(0.35), b, d, d.lighten(0.85)]))
+            }
+            None => self.native(),
+        };
         match palette {
             Some(p) if blend > 0.0 => {
                 let [a, b, d] = p.0;
@@ -109,7 +116,7 @@ impl Preset {
 pub struct Ramp(pub [Rgb; 4]);
 
 impl Ramp {
-    fn lerp(&self, o: &Ramp, t: f32) -> Ramp {
+    pub fn lerp(&self, o: &Ramp, t: f32) -> Ramp {
         Ramp([
             self.0[0].lerp(o.0[0], t),
             self.0[1].lerp(o.0[1], t),

@@ -123,7 +123,7 @@ impl MusicBrainz {
         self.throttle().await;
         let url = reqwest::Url::parse_with_params(&format!("{API}/recording"), &[("query", query), ("fmt", "json"), ("limit", limit)])?;
         let url = self.server.as_ref().map(|s| s.upstream_url(url.as_str())).unwrap_or_else(|| url.into());
-        let req = self.http.get(url);
+        let req = self.server.as_ref().map(|s| s.authorize_url(self.http.get(&url), &url)).unwrap_or_else(|| self.http.get(&url));
         let l: RecordingList = send_json(req).await?;
         Ok(l.recordings)
     }

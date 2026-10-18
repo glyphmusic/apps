@@ -83,7 +83,7 @@ pub fn job() -> Option<Job> {
 
 /// Quality wanted by the current download (`Standard` outside a download).
 pub fn job_quality() -> AudioQuality {
-    job().map(|j| j.quality).unwrap_or(AudioQuality::Standard)
+    job().map(|j| j.quality.effective()).unwrap_or(AudioQuality::Standard)
 }
 
 /// Reports fetched bytes to the current job, if any.
@@ -102,9 +102,9 @@ pub async fn run_job<F: Future>(job: Job, fut: F) -> F::Output {
 /// (`.../download/track/<id>/mp32/`); other qualities are the same URL with
 /// another format.
 pub fn jamendo_format_url(url: &str, q: AudioQuality) -> Option<String> {
-    let fmt = match q {
+    let fmt = match q.effective() {
         AudioQuality::Low => "mp31",
-        AudioQuality::Standard => return None,
+        AudioQuality::Auto | AudioQuality::Standard => return None,
         AudioQuality::High => "flac",
     };
     url.contains("/download/track/").then(|| url.replacen("/mp32/", &format!("/{fmt}/"), 1)).filter(|u| u != url)
@@ -214,12 +214,13 @@ impl Downloads {
     }
 
     /// Fetches `url` into the folder and records it for `t`.
-    pub async fn fetch(&self, http: &reqwest::Client, t: &Track, provider: ProviderId, url: &str) -> Result<PathBuf> {
+    pub async fn fetch(&self, http: &reqwest::Client, t: &Track, provider: ProviderId, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<PathBuf> {
         if !url.starts_with("https://") {
             bail!("refusing non-HTTPS download URL");
         }
         std::fs::create_dir_all(&self.dir)?;
-        let resp = http.get(url).timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
+        let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
+        let resp = request.timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
         if resp.content_length().is_some_and(|n| n > MAX_BYTES) {
             bail!("file too large");
         }
@@ -232,6 +233,7 @@ impl Downloads {
         let part = self.dir.join(format!("{name}.part"));
         let mut out = std::fs::File::create(&part)?;
         let mut bytes = 0u64;
+        let started = std::time::Instant::now();
         let mut body = resp.bytes_stream();
         let res: Result<()> = async {
             while let Some(chunk) = body.next().await {
@@ -256,6 +258,7 @@ impl Downloads {
             let _ = std::fs::remove_file(&part);
             bail!("empty file");
         }
+        glyph_protocol::network::observe(bytes, started.elapsed());
         let path = self.dir.join(&name);
         std::fs::rename(&part, &path)?;
         let entry = Entry { track: t.clone(), file: name, provider, bytes, ts: now() };

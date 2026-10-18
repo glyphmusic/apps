@@ -153,6 +153,9 @@ impl PlaybackSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    /// Optional server access gate; older servers are public.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_auth_required: bool,
     pub server_version: String,
     pub protocol_version: u32,
     pub providers: Vec<ProviderId>,
@@ -392,6 +395,9 @@ pub struct ApproveResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
+    /// Approximate region/country observed by the server, never client-provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approximate_location: Option<String>,
     pub id: String,
     pub name: String,
     pub platform: String,
@@ -458,6 +464,9 @@ pub struct ProfilePlaylist {
     pub songs: u32,
     #[serde(default)]
     pub cover: Option<String>,
+    /// First songs, for the automatic cover mosaic when there is no cover.
+    #[serde(default)]
+    pub preview: Vec<Track>,
 }
 
 /// `GET /v1/profiles/{handle}`
@@ -502,6 +511,8 @@ pub mod sync_kind {
     pub const SEARCH: &str = "search";
     pub const DOWNLOAD: &str = "download";
     pub const SETTING: &str = "setting";
+    /// A list downloads its new songs by itself (key: `liked` or a playlist id).
+    pub const AUTO_DOWNLOAD: &str = "autodl";
     /// End-to-end encrypted on the device; the server only stores the blob.
     pub const SECRET: &str = "secret";
 }
@@ -675,3 +686,5 @@ mod account_tests {
         assert!(!cover_cache_allowed("https://i.ytimg.com:444/x.jpg"));
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+pub mod network;

@@ -3,7 +3,8 @@
 //! Settings sync as a few `setting` items, one per section, so a change to the
 //! equalizer on one device and to the language on another do not overwrite
 //! each other. Device-bound values stay local: server address, paths (yt-dlp,
-//! downloads, cache size), output device, volume and the mini player.
+//! downloads, cache size), output device, volume and the mini player's
+//! window (always-on-top, size); its style (bar or card) syncs.
 //!
 //! API keys sync as one `secret` item, encrypted on the device with
 //! XChaCha20-Poly1305. The key ([`Vault`]) is `Argon2id(password, salt)` with a
@@ -63,6 +64,9 @@ struct Player {
     shuffle: bool,
     repeat: String,
     show_queue: bool,
+    /// Mini player as the card (`None`: sent by an older version).
+    #[serde(default)]
+    mini_large: Option<bool>,
 }
 
 fn json<T: Serialize>(v: &T) -> Value {
@@ -166,7 +170,12 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
         ),
         (
             setting("player"),
-            json(&Player { shuffle: cfg.player.shuffle, repeat: cfg.player.repeat.clone(), show_queue: cfg.player.show_queue }),
+            json(&Player {
+                shuffle: cfg.player.shuffle,
+                repeat: cfg.player.repeat.clone(),
+                show_queue: cfg.player.show_queue,
+                mini_large: Some(cfg.player.mini_large),
+            }),
         ),
     ];
     if let Some(vault) = vault {
@@ -246,6 +255,9 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
                 cfg.player.shuffle = x.shuffle;
                 cfg.player.repeat = x.repeat;
                 cfg.player.show_queue = x.show_queue;
+                if let Some(big) = x.mini_large {
+                    cfg.player.mini_large = big;
+                }
             }
             (kind::SECRET, API_KEYS) => {
                 let opened = vault.and_then(|k| k.open(v)).and_then(|p| serde_json::from_slice::<ApiKeys>(&p).ok());

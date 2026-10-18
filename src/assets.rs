@@ -20,7 +20,7 @@ icons!(
     "skip-forward", "square", "timer", "trash-2", "volume-2", "volume-x", "x",
     "info", "check", "database", "server", "headphones", "book-open", "life-buoy", "github", "external-link", "palette", "folder-open", "circle-check",
     "ellipsis-vertical", "arrow-left", "history", "user-round", "circle-minus", "pencil", "eye", "eye-off",
-    "arrow-down-to-line",
+    "arrow-down-to-line", "pin", "pin-fill", "circle-plus", "image-plus", "maximize-2", "grip-horizontal",
 );
 
 pub struct Assets;

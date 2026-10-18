@@ -64,13 +64,21 @@ pub struct TrackShared {
     pub pos_frames: AtomicU64,
     pub started: AtomicBool,
     pub finished: AtomicBool,
+    /// Decoder starvation events; consumed and logged by the engine, never the callback.
+    pub underruns: AtomicU64,
     pub loudness: crate::loudness::TrackLoudness,
 }
 
 /// Rolling mono tap for the FFT.
-#[derive(Default)]
 pub struct Tap {
     pub samples: Mutex<Vec<f32>>,
+}
+
+impl Default for Tap {
+    fn default() -> Self {
+        // The real-time callback must not allocate when publishing FFT samples.
+        Self { samples: Mutex::new(Vec::with_capacity(TAP_KEEP * 2)) }
+    }
 }
 
 pub struct Opened {
@@ -324,6 +332,8 @@ pub struct TrackSource {
     tap_acc: f32,
     tap_n: usize,
     counter: u32,
+    silence_remaining: usize,
+    starving: bool,
     level: crate::loudness::Leveller,
     eq: crate::eq::Equalizer,
 }
@@ -343,10 +353,12 @@ impl TrackSource {
             ctl: opened.ctl,
             shared,
             tap,
-            tap_local: Vec::with_capacity(TAP_FLUSH),
+            tap_local: Vec::with_capacity(TAP_KEEP),
             tap_acc: 0.0,
             tap_n: 0,
             counter: 0,
+            silence_remaining: 0,
+            starving: false,
             level,
             eq,
         }
@@ -366,7 +378,7 @@ impl TrackSource {
                 g.drain(..len - TAP_KEEP);
             }
             self.tap_local.clear();
-        } else if self.tap_local.len() > TAP_KEEP {
+        } else if self.tap_local.len() >= TAP_KEEP {
             self.tap_local.clear();
         }
     }
@@ -376,6 +388,12 @@ impl Iterator for TrackSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        // Retry only at complete interleaved-frame boundaries. Otherwise a
+        // decoder waking after an odd number of zero samples swaps L/R.
+        if self.silence_remaining > 0 {
+            self.silence_remaining -= 1;
+            return Some(0.0);
+        }
         if self.idx >= self.cur.len() {
             // Dropped (e.g. a preloaded next song that is no longer next):
             // end now instead of playing what is still buffered.
@@ -388,6 +406,8 @@ impl Iterator for TrackSource {
                 match self.rx.try_recv() {
                     Ok(c) if c.gen < gen => continue,
                     Ok(c) => {
+                        if c.samples.is_empty() { continue; }
+                        self.starving = false;
                         self.cur = c.samples;
                         self.idx = 0;
                         self.base_frame = c.start_frame;
@@ -395,7 +415,14 @@ impl Iterator for TrackSource {
                         self.publish_pos();
                         break;
                     }
-                    Err(flume::TryRecvError::Empty) => return Some(0.0),
+                    Err(flume::TryRecvError::Empty) => {
+                        if !self.starving {
+                            self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                            self.starving = true;
+                        }
+                        self.silence_remaining = self.channels.get() as usize - 1;
+                        return Some(0.0);
+                    },
                     Err(flume::TryRecvError::Disconnected) => {
                         self.shared.finished.store(true, Ordering::SeqCst);
                         return None;
@@ -547,6 +574,24 @@ mod tests {
         assert!(shared.finished.load(Ordering::SeqCst));
         assert!(shared.started.load(Ordering::SeqCst));
         assert_eq!(shared.pos_frames.load(Ordering::SeqCst), 100);
+    }
+
+    #[test]
+    fn stereo_starvation_preserves_frames_when_decoder_wakes_between_channels() {
+        let (tx, rx) = flume::bounded::<Chunk>(4);
+        let shared = Arc::new(TrackShared::default());
+        let opened = Opened { rx, rate: NonZeroU32::new(48_000).unwrap(),
+            channels: NonZeroU16::new(2).unwrap(), duration: None,
+            ctl: Arc::new(DecodeCtl::default()) };
+        let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
+        src.level = crate::loudness::Leveller::bypass();
+        src.eq = crate::eq::Equalizer::bypass();
+        assert_eq!(src.next(), Some(0.0)); // missing left channel
+        tx.send(Chunk { gen: 0, start_frame: 0, samples: vec![0.75,-0.25] }).unwrap();
+        assert_eq!(src.next(), Some(0.0)); // finish the silent stereo frame
+        assert_eq!(src.next(), Some(0.75));
+        assert_eq!(src.next(), Some(-0.25));
+        assert_eq!(shared.underruns.load(Ordering::Relaxed),1);
     }
 
     #[test]

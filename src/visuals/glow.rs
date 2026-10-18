@@ -295,6 +295,10 @@ pub struct GlowView {
     last_tick: Instant,
     preset: Preset,
     prev_preset: Preset,
+    /// Colour theme glow colours, the previous ones and since when (fade).
+    theme: Option<Palette>,
+    prev_theme: Option<Palette>,
+    theme_since: Instant,
     preset_since: Instant,
     fade: PaletteFade,
     player: Option<Arc<PlayerController>>,
@@ -304,6 +308,7 @@ pub struct GlowView {
     bands: [f32; 3],
     pulse: f32,
     intensity: f32,
+    music_reactivity: f32,
     /// Field clock (s). Stands still while the intensity is 0.
     anim_t: f32,
     /// How much the field moves (1 = normal, 0 = still at intensity 0).
@@ -315,6 +320,7 @@ pub struct GlowView {
     /// Last size change (resize in progress → hold the frame).
     moved_at: Instant,
     window_size: Size<Pixels>,
+    window_origin: gpui::Point<Pixels>,
     view_size: Size<Pixels>,
     scale: f32,
     frame_no: u64,
@@ -378,9 +384,10 @@ impl GlowView {
         // changes nothing in the picture, so the field keeps running; pausing
         // it there made the first frames after the drag hitch.
         cx.observe_window_bounds(window, |v, window, _| {
-            let size = window.bounds().size;
-            if size != v.window_size {
-                v.window_size = size;
+            let b = window.bounds();
+            if b.size != v.window_size || b.origin != v.window_origin {
+                v.window_size = b.size;
+                v.window_origin = b.origin;
                 v.moved_at = Instant::now();
             }
         })
@@ -391,6 +398,9 @@ impl GlowView {
             last_tick: now,
             preset: Preset::Strahl,
             prev_preset: Preset::Strahl,
+            theme: None,
+            prev_theme: None,
+            theme_since: Instant::now() - Duration::from_secs(10),
             preset_since: now - Duration::from_secs(10),
             fade: PaletteFade::default(),
             player: None,
@@ -400,12 +410,14 @@ impl GlowView {
             bands: [0.0; 3],
             pulse: 0.0,
             intensity: 0.8,
+            music_reactivity: 1.0,
             anim_t: 0.0,
             motion_k: 1.0,
             still_drawn: None,
             active: true,
             moved_at: now - Duration::from_secs(10),
             window_size: window.bounds().size,
+            window_origin: window.bounds().origin,
             view_size: size(px(0.0), px(0.0)),
             scale: window.scale_factor(),
             frame_no: 0,
@@ -432,8 +444,22 @@ impl GlowView {
     pub fn set_playing(&mut self, playing: bool) {
         self.playing_target = playing;
     }
+    pub fn set_music_reactivity(&mut self, v: f32) {
+        self.music_reactivity = v.clamp(0.0, 1.0);
+        self.still_drawn = None;
+    }
+
     pub fn set_intensity(&mut self, v: f32) {
         self.intensity = v.clamp(0.0, 1.0);
+    }
+    /// Colour theme glow colours (`None`: the presets' own).
+    pub fn set_theme(&mut self, theme: Option<Palette>) {
+        if theme != self.theme {
+            self.prev_theme = self.theme;
+            self.theme = theme;
+            self.theme_since = Instant::now();
+            self.still_drawn = None;
+        }
     }
     pub fn set_palette(&mut self, palette: Option<Palette>) {
         self.fade.set(palette);
@@ -444,6 +470,16 @@ impl GlowView {
             self.preset = preset;
             self.preset_since = Instant::now();
         }
+    }
+    /// Ramps of `preset`, fading from the previous theme to the current one.
+    fn themed_ramps(&self, preset: Preset, pal: Option<&Palette>, blend: f32, theme_t: f32) -> (super::field::Ramp, super::field::Ramp) {
+        let now = preset.ramps(self.theme.as_ref(), pal, blend);
+        if theme_t >= 1.0 {
+            return now;
+        }
+        let before = preset.ramps(self.prev_theme.as_ref(), pal, blend);
+        let t = theme_t * theme_t * (3.0 - 2.0 * theme_t);
+        (before.0.lerp(&now.0, t), before.1.lerp(&now.1, t))
     }
     pub fn preset(&self) -> Preset {
         self.preset
@@ -487,6 +523,13 @@ impl GlowView {
     /// Collects a finished frame and queues the next job. Returns true when
     /// there is something new to draw.
     fn tick(&mut self) -> bool {
+        // Only paint can release GPU images via Window::drop_image. When a
+        // window is minimized/occluded, generating more frames would keep
+        // appending retired images forever. Apply backpressure until paint
+        // drains them; keep requesting paint so restoration resumes naturally.
+        if self.stale.len() >= 4 {
+            return true;
+        }
         let mut fresh = false;
         if let Ok(out) = self.results.try_recv() {
             self.busy = false;
@@ -550,20 +593,22 @@ impl GlowView {
             return fresh;
         }
         let mk = self.motion_k;
-        let [bass, mids, highs] = self.bands.map(|b| b * mk);
-        let pulse = self.pulse * mk;
+        let [bass, mids, highs] = self.bands.map(|b| b * mk * self.music_reactivity);
+        let pulse = self.pulse * mk * self.music_reactivity;
+        let playing = self.playing * self.music_reactivity;
         let preset_t = (self.preset_since.elapsed().as_secs_f32() / PRESET_FADE).min(1.0);
+        let theme_t = (self.theme_since.elapsed().as_secs_f32() / PRESET_FADE).min(1.0);
         let mut still_key = None;
         if mk == 0.0 {
             // Still: draw again only when the picture can differ.
             let key = (w, h, self.scroll);
-            let settled = self.fade.settled() && preset_t >= 1.0 && (target - self.playing).abs() < 0.001;
+            let settled = self.fade.settled() && preset_t >= 1.0 && theme_t >= 1.0 && (target - self.playing).abs() < 0.001;
             if settled && self.glow_img.is_some() && self.ascii_img.is_some() && self.still_drawn == Some(key) {
                 return fresh;
             }
             still_key = settled.then_some(key);
         }
-        let mut motion = Motion::new(&self.noise, t, self.playing, bass, mids);
+        let mut motion = Motion::new(&self.noise, t, playing, bass, mids);
         motion.gain += pulse * 0.25;
         let (pal, blend) = self.fade.current();
         let job = Job {
@@ -572,11 +617,11 @@ impl GlowView {
             scale: self.scale,
             motion,
             preset: self.preset,
-            ramps: self.preset.ramps(pal.as_ref(), blend),
+            ramps: self.themed_ramps(self.preset, pal.as_ref(), blend, theme_t),
             prev: (preset_t < 1.0)
-                .then(|| (self.prev_preset, self.prev_preset.ramps(pal.as_ref(), blend), preset_t)),
+                .then(|| (self.prev_preset, self.themed_ramps(self.prev_preset, pal.as_ref(), blend, theme_t), preset_t)),
             level: 0.5 + 0.5 * self.intensity,
-            density: 0.75 + 0.45 * highs + 0.08 * self.playing,
+            density: 0.75 + 0.45 * highs + 0.08 * playing,
             threshold: 0.42 - 0.06 * highs,
             // 15 fps normally, every frame while the page scrolls or stands still
             // (a still frame is the last one for a while).

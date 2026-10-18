@@ -76,3 +76,22 @@ An empty `server_url` switches to direct mode, where the app talks to the provid
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 Icons from [Lucide](https://lucide.dev) ([license](assets/icons/ui/LICENSE-lucide.txt)).
+
+### Fast Windows development
+
+Run `./scripts/run-dev.ps1` to build and open the latest dev app. For an immediate
+restart of the already built version use `./scripts/run-dev.ps1 -NoBuild`.
+`./scripts/dev-watch.ps1` rebuilds after edits and restarts only on success.
+All three share the ordinary Cargo `target` cache and overwrite one
+`glyph-run.exe`. Keep the incremental/dependency cache: `cargo clean` makes the
+next start slower. Dependencies stay optimized and Windows links with rust-lld.
+
+For quick compiler feedback without linking or launching, use `./scripts/run-dev.ps1 -Check` (or `cargo check -p glyph` on any platform). Add `-Timings` to collect Cargo's HTML compilation report in `target/cargo-timings/`. `-NoBuild` restarts the existing debug binary immediately. Dev scripts share one target directory and use half the logical CPUs, capped at four compiler jobs; set `CARGO_BUILD_JOBS` explicitly to override. Keep the dependency cache for fast incremental edits: removing it forces GPUI, audio codecs and all other dependencies to compile again. Workspace crates already inherit level-1 dev optimization; third-party codecs, FFT and GPUI retain level 3. The desktop binary omits debug tables during normal development; use `cargo build -p glyph --config 'profile.dev.package.glyph.debug=1'` when source-level debugging is needed. Release optimization is unchanged.
+
+With Glyph closed, run `./scripts/measure-startup.ps1` for three process-to-window measurements. This opens and closes only its own test instances and reports the median; it does not measure server/feed readiness. Startup logs separately mark platform, font, window, library and audio initialization. Settings load once alongside platform initialization, translations load per language, and library/audio initialize independently. The optional splash preserves its original 2.9-second animation.
+
+The `fast` profile is for local tests with release-level optimization but without LTO (`cargo build --profile fast -p glyph`). Own workspace crates inherit incremental code generation; third-party dependencies use compact non-incremental artifacts. LTO is explicitly `"off"` so local ThinLTO is disabled as well. It uses `target/fast`, separate from `target/debug`: use one profile consistently for an edit cycle instead of alternating and rebuilding both. Normal `dev` uses less optimization for frequently edited code and is preferable for UI iteration.
+
+### Automatic build retention
+
+Dev launch/check and the watcher run `scripts/clean-builds.ps1` automatically. The watcher retries once a minute when idle. Cleanup never invokes Cargo and defers while any compiler is running. It removes the obsolete `target/ui` tree, inactive profiles unused for 24 hours, old duplicate Cargo executables, and all but five timing reports. The selected profile, running apps and current dependency/incremental caches are retained. For direct Cargo commands, the repository agent rules require the same cleanup afterward with `-KeepProfile debug`, `fast` or `release`. `-Plan` previews the candidates and `-WhatIf` exercises the deletion plan without removing anything. Paths outside this checkout's target directory and linked directories are rejected.

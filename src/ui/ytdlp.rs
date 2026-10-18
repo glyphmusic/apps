@@ -11,12 +11,13 @@ use crate::app::track_key;
 use glyph_core::ytdlp::YtDlpStatus;
 use glyph_protocol::{ProviderId, Track};
 use gpui::{div, hsla, prelude::*, px, AnyElement, Context, Hsla, SharedString};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct YtDlpUi {
     pub status: Option<YtDlpStatus>,
     pub checking: bool,
+    pub checked_at: Option<Instant>,
     pub installing: bool,
     pub error: Option<String>,
     /// Row the pointer rests on (hover prefetch).
@@ -24,7 +25,7 @@ pub struct YtDlpUi {
 }
 
 /// How long the pointer has to rest on a row before yt-dlp starts.
-const HOVER_DELAY: Duration = Duration::from_millis(400);
+const HOVER_DELAY: Duration = Duration::from_millis(250);
 /// Songs of the queue resolved ahead.
 const AHEAD: usize = 3;
 
@@ -52,14 +53,22 @@ impl Glyph {
             return;
         }
         let youtube = t.source == ProviderId::YouTube || t.external_ids.contains_key(&ProviderId::YouTube);
-        let Some(b) = self.backend.clone().filter(|b| youtube && b.local_youtube()) else { return };
+        let Some(b) = self.backend.clone() else { return };
+        if self.current.as_ref().is_some_and(|c| track_key(c) == key) {
+            return;
+        }
         self.ytdlp.hovered = Some(key.clone());
         let t = t.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOVER_DELAY).await;
             this.update(cx, |s, _| {
                 if s.ytdlp.hovered.as_deref() == Some(key.as_str()) {
-                    guard(|| b.prefetch(vec![t]));
+                    // Find the source now; YouTube songs also get yt-dlp going.
+                    if youtube && b.local_youtube() {
+                        guard(|| b.prefetch(vec![t]));
+                    } else {
+                        guard(|| b.warm(vec![t]));
+                    }
                 }
             })
             .ok();
@@ -69,7 +78,7 @@ impl Glyph {
 
     /// Loads the status once (the settings page calls this while drawing).
     pub fn ensure_ytdlp_status(&mut self, cx: &mut Context<Self>) {
-        if self.ytdlp.status.is_some() || self.ytdlp.checking || self.ytdlp.installing {
+        if self.ytdlp.checking || self.ytdlp.installing || self.ytdlp.checked_at.is_some_and(|at| at.elapsed()<Duration::from_secs(900)) {
             return;
         }
         let Some(b) = self.backend.clone() else { return };
@@ -78,6 +87,7 @@ impl Glyph {
             let r = guard_async(b.ytdlp_status()).await;
             this.update(cx, |s, cx| {
                 s.ytdlp.checking = false;
+                s.ytdlp.checked_at = Some(Instant::now());
                 match r {
                     Ok(st) => s.ytdlp.status = Some(st),
                     Err(e) => {
@@ -108,6 +118,7 @@ impl Glyph {
                     Ok(st) => {
                         let v = st.version.clone().unwrap_or_default();
                         s.ytdlp.status = Some(st);
+                        s.ytdlp.checked_at = Some(Instant::now());
                         s.toast_info(tf("ytdlp.installed", &[("v", &v)]));
                     }
                     Err(e) => {
@@ -142,6 +153,16 @@ pub fn description(app: &Glyph) -> SharedString {
         s.push_str(" · ");
         s.push_str(&t("ytdlp.no_js"));
     }
+    if st.version.is_some() {
+        s.push_str(" · ");
+        if ui.checking { s.push_str(&t("ytdlp.checking_update")); } else {
+            match st.update_available {
+                Some(true) => s.push_str(&tf("ytdlp.update_available", &[("v", &st.latest_version.as_deref().unwrap_or("-"))])),
+                Some(false) => s.push_str(&t("ytdlp.up_to_date")),
+                None => s.push_str(&t("ytdlp.update_check_failed")),
+            }
+        }
+    }
     if let Some(e) = &ui.error {
         s.push_str(" · ");
         s.push_str(e);
@@ -158,7 +179,7 @@ pub fn control(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
     let ok = st.version.is_some();
     let dot = div().size(px(8.0)).rounded_full().bg(if ok { gpui::white() } else { white(0.25) });
     // A yt-dlp from PATH or the config belongs to the user: no button.
-    let show_button = ui.status.is_some() && st.can_install && (st.path.is_none() || st.managed);
+    let show_button = ui.status.is_some() && st.can_install && (st.path.is_none() || st.managed && (ui.installing || st.version.is_none() || st.update_available==Some(true)));
     let label = if ui.installing {
         t("ytdlp.installing_short")
     } else if st.managed {
@@ -172,6 +193,9 @@ pub fn control(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
         .items_center()
         .gap(px(10.0))
         .child(dot)
+        .when(ui.status.is_some() && st.update_error.is_some() && !ui.checking && !ui.installing, |d| d.child(
+            crate::ui::widgets::button("ytdlp-recheck",t("ytdlp.recheck")).on_click(cx.listener(|this,_,_,cx| { this.ytdlp.checked_at=None; this.ensure_ytdlp_status(cx); cx.notify(); }))
+        ))
         .when(show_button, |d| {
             d.child(
                 div()

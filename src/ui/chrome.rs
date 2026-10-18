@@ -4,7 +4,7 @@
 use crate::app::{BackendState, Glyph, View};
 use crate::i18n::{t, tf};
 use crate::theme;
-use crate::ui::widgets::{cover, icon, mono};
+use crate::ui::widgets::{cover, hover_fill, hover_k, icon, mono};
 use gpui::{div, prelude::*, px, Context, FontWeight, MouseButton, SharedString, Window, WindowControlArea};
 
 const IS_MAC: bool = cfg!(target_os = "macos");
@@ -170,9 +170,9 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
             };
             let is_song = matches!(item, glyph_core::SearchItem::Song { .. });
             let pick = item.clone();
+            let hk = hover_k(&group);
             div()
                 .id(("sugg", i))
-                .group(group.clone())
                 .flex()
                 .items_center()
                 .gap(px(12.0))
@@ -180,7 +180,8 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                 .py(px(6.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 1.0, 0.08)))
+                .relative()
+                .child(hover_fill(group.clone(), gpui::hsla(0.0, 0.0, 1.0, 0.08), 6.0))
                 // Stop here: the search bar's own click would refocus the input.
                 .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
@@ -204,8 +205,7 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                                     .items_center()
                                     .justify_center()
                                     .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
-                                    .invisible()
-                                    .group_hover(group.clone(), |s| s.visible())
+                                    .opacity(hk)
                                     .child(icon("play", 16.0, gpui::white())),
                             )
                         }),
@@ -230,9 +230,11 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                             .flex()
                             .items_center()
                             .justify_center()
-                            .invisible()
-                            .group_hover(group.clone(), |s| s.visible())
-                            .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 1.0, 0.10)))
+                            // Fades with the row; not clickable while hidden.
+                            .opacity(hk)
+                            .when(hk < 0.05, |d| d.invisible())
+                            .relative()
+                            .child(hover_fill(format!("sugg-x-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.10), 6.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.remove_search_history(i, cx);
@@ -358,32 +360,60 @@ fn nav_motion(view: View, t: f32) -> (f32, f32, f32) {
 }
 
 /// Label that floats to the right of a sidebar item after a short hover.
+thread_local! {
+    /// Start of the sidebar hover whose tooltip shows without the wait.
+    static SIDE_INSTANT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Wait before a sidebar tooltip shows (none when tooltips are warm).
+const SIDE_TIP_WAIT: f32 = 0.35;
+
+fn side_tip_wait(at: std::time::Instant) -> f32 {
+    if SIDE_INSTANT.with(|c| c.get()) == Some(at) { 0.0 } else { SIDE_TIP_WAIT }
+}
+
+/// The tooltip of the sidebar hover that started at `at` is showing.
+fn side_tip_visible(at: std::time::Instant) -> bool {
+    at.elapsed().as_secs_f32() >= side_tip_wait(at)
+}
+
+/// A sidebar item is entered: its hover start. Right after another tooltip
+/// (this sidebar's `prev`, or any other) it shows at once.
+fn side_tip_enter(prev: Option<std::time::Instant>) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    if crate::ui::widgets::tips_warm() || prev.is_some_and(side_tip_visible) {
+        SIDE_INSTANT.with(|c| c.set(Some(now)));
+    }
+    now
+}
+
+/// A sidebar item is left: if its tooltip was showing, tooltips are warm.
+fn side_tip_leave(at: std::time::Instant) {
+    if side_tip_visible(at) {
+        crate::ui::widgets::tip_closed();
+    }
+}
+
 fn side_tooltip(label: SharedString, since: Option<std::time::Instant>) -> Option<gpui::AnyElement> {
-    let t = since?.elapsed().as_secs_f32();
-    let a = ((t - 0.35) / 0.15).clamp(0.0, 1.0);
+    let since = since?;
+    let t = since.elapsed().as_secs_f32();
+    let a = ((t - side_tip_wait(since)) / 0.15).clamp(0.0, 1.0);
     if a <= 0.0 {
         return None;
     }
     Some(
         gpui::deferred(
+            // Same look as the other tooltips, arrow pointing at the icon.
             div()
                 .absolute()
-                .left(px(52.0 - 4.0 * (1.0 - a)))
-                .top(px(9.0))
+                .left(px(47.0 - 4.0 * (1.0 - a)))
+                .top_0()
+                .h(px(44.0))
                 .opacity(a)
                 .flex()
                 .items_center()
-                .h(px(26.0))
-                .px(px(10.0))
-                .rounded(px(6.0))
-                .bg(gpui::hsla(0.0, 0.0, 0.12, 0.98))
-                .border_1()
-                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
-                .whitespace_nowrap()
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
-                .child(label),
+                .child(crate::ui::widgets::tip_arrow(crate::ui::widgets::TipArrow::Left))
+                .child(crate::ui::widgets::tip_box(label)),
         )
         .with_priority(2)
         .into_any_element(),
@@ -409,8 +439,10 @@ fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyEle
                 .relative()
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if *hovered {
-                        this.side_hover = Some((i, std::time::Instant::now()));
-                    } else if this.side_hover.is_some_and(|(h, _)| h == i) {
+                        let prev = this.side_hover.map(|(_, at)| at).or(this.nav_hover.map(|(_, at)| at));
+                        this.side_hover = Some((i, side_tip_enter(prev)));
+                    } else if let Some((_, at)) = this.side_hover.filter(|(h, _)| *h == i) {
+                        side_tip_leave(at);
                         this.side_hover = None;
                     }
                     cx.notify();
@@ -485,8 +517,10 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
             .hover(|s| s.bg(theme::hover()))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
-                    this.nav_hover = Some((view, std::time::Instant::now()));
+                    let prev = this.nav_hover.map(|(_, at)| at).or(this.side_hover.map(|(_, at)| at));
+                    this.nav_hover = Some((view, side_tip_enter(prev)));
                 } else if let Some((v, at)) = this.nav_hover.filter(|(v, _)| *v == view) {
+                    side_tip_leave(at);
                     this.nav_hover = None;
                     this.nav_leave = Some((v, std::time::Instant::now(), at.elapsed().as_secs_f32()));
                 }
@@ -507,8 +541,8 @@ pub fn sidebar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .flex()
         .flex_col()
         .items_center()
-        .pt(px(6.0))
-        .pb(px(16.0))
+        .pt(px(12.0))
+        .pb(px(12.0))
         .gap(px(6.0))
         .child(home)
         .child(search)

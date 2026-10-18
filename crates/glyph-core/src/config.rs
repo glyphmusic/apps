@@ -63,9 +63,16 @@ pub struct ProvidersConfig {
 pub struct VisualsConfig {
     /// 0.0..=1.0
     pub intensity: f32,
+    pub music_reactivity: f32,
     pub ascii_covers: bool,
     /// Particle animation that forms the logo at startup.
     pub startup_animation: bool,
+    /// ASCII effects: new text and pictures decode in, loading placeholders
+    /// shimmer as ASCII. Off: things just appear, placeholders are plain boxes.
+    pub ascii_effects: bool,
+    /// Colour theme id (accent, background glow, base): see the app's
+    /// `theme::THEMES`.
+    pub theme: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +90,8 @@ pub struct UpdatesConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioQuality {
+    /// Choose conservatively from recent measured transfers.
+    Auto,
     /// Data saver (~96 kbps MP3).
     Low,
     /// ~128–160 kbps.
@@ -90,6 +99,23 @@ pub enum AudioQuality {
     /// Best the source offers.
     #[default]
     High,
+}
+
+impl AudioQuality {
+    pub fn effective(self) -> Self {
+        if self != Self::Auto { return self; }
+        match glyph_protocol::network::class() {
+            glyph_protocol::network::Class::Slow => Self::Low,
+            glyph_protocol::network::Class::Standard => Self::Standard,
+            glyph_protocol::network::Class::Fast => Self::High,
+        }
+    }
+
+    pub fn server_name(self) -> &'static str {
+        match self.effective() {
+            Self::Low => "low", Self::High => "high", _ => "standard",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,6 +180,8 @@ pub enum VolumeLevel {
 pub struct StorageConfig {
     /// Cover cache limit in MB; 0 = no limit.
     pub cache_limit_mb: u64,
+    /// Data saver: small covers, feeds kept for hours, slower sync.
+    pub data_saver: bool,
 }
 
 /// Player controls as the user left them.
@@ -169,17 +197,22 @@ pub struct PlayerPrefs {
     pub show_queue: bool,
     /// Mini player stays on top.
     pub mini_on_top: bool,
+    /// Mini player as the big card (else the slim bar).
+    pub mini_large: bool,
+    /// Size of the card (the user can resize it freely).
+    pub mini_card_w: f32,
+    pub mini_card_h: f32,
 }
 
 impl Default for PlayerPrefs {
     fn default() -> Self {
-        Self { volume: 1.0, shuffle: false, repeat: "off".into(), show_queue: false, mini_on_top: true }
+        Self { volume: 1.0, shuffle: false, repeat: "off".into(), show_queue: false, mini_on_top: true, mini_large: false, mini_card_w: 300.0, mini_card_h: 384.0 }
     }
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { cache_limit_mb: 1024 }
+        Self { cache_limit_mb: 1024, data_saver: false }
     }
 }
 
@@ -201,7 +234,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, ascii_covers: false, startup_animation: true }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into() }
     }
 }
 
@@ -269,12 +302,17 @@ impl Config {
     }
 
     pub fn dir() -> PathBuf {
+        if let Some(d) = crate::paths::demo_dir() {
+            return d.join("config");
+        }
         dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("glyph")
     }
 
     pub fn path() -> PathBuf {
-        if let Some(p) = env("GLYPH_CONFIG") {
-            return PathBuf::from(p);
+        if crate::paths::demo_dir().is_none() {
+            if let Some(p) = env("GLYPH_CONFIG") {
+                return PathBuf::from(p);
+            }
         }
         Self::dir().join("config.toml")
     }
@@ -438,6 +476,17 @@ youtube = \"abc\"").unwrap();
         assert_eq!(c.player, PlayerPrefs::default());
         assert_eq!(c.audio.download_quality, AudioQuality::High);
         assert_eq!(c.audio.quality, AudioQuality::Low);
+    }
+
+    #[test]
+    fn legacy_glow_strength_keeps_music_response_default() {
+        let mut cfg = Config::from_toml("[visuals]\nintensity = 0.42\n").unwrap();
+        assert_eq!(cfg.visuals.intensity, 0.42);
+        assert_eq!(cfg.visuals.music_reactivity, 1.0);
+        cfg.visuals.music_reactivity = 0.0;
+        let back = Config::from_toml(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.visuals.intensity, 0.42);
+        assert_eq!(back.visuals.music_reactivity, 0.0);
     }
 
     #[test]

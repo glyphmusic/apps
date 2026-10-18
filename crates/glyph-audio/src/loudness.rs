@@ -120,11 +120,15 @@ pub struct Leveller {
     block_n: usize,
     /// Mean square of every block above the absolute gate.
     blocks: Vec<f32>,
+    integrated_lufs: Option<f32>,
     step_len: usize,
     step_n: usize,
     samples_per_s: f32,
     gain_db: f32,
     gain: f32,
+    gain_target: f32,
+    gain_delta: f32,
+    gain_remaining: usize,
     started: bool,
     bypass: bool,
 }
@@ -146,9 +150,10 @@ fn integrated(blocks: &[f32], channels: usize) -> Option<f32> {
         let (s, n) = it.fold((0f64, 0usize), |(s, n), v| (s + v as f64, n + 1));
         (n > 0).then(|| s / n as f64)
     };
-    let ungated = lufs_of(mean(&mut blocks.iter().copied())?, channels);
-    let gate = ungated - 10.0;
-    let kept = mean(&mut blocks.iter().copied().filter(|&b| lufs_of(b as f64, channels) >= gate))?;
+    // A -10 LU gate is exactly one tenth of the ungated linear energy.
+    // Avoid evaluating log10 for every historical block in the audio callback.
+    let gate = mean(&mut blocks.iter().copied())? * 0.1;
+    let kept = mean(&mut blocks.iter().copied().filter(|&b| b as f64 >= gate))?;
     Some(lufs_of(kept, channels))
 }
 
@@ -172,12 +177,17 @@ impl Leveller {
             block_len: ((sps * 0.4) as usize).max(1),
             block_sum: 0.0,
             block_n: 0,
-            blocks: Vec::new(),
+            // Reserve an hour of 400 ms blocks outside the audio callback.
+            blocks: Vec::with_capacity(9000),
+            integrated_lufs: None,
             step_len: 512,
             step_n: 0,
             samples_per_s: sps,
             gain_db: 0.0,
             gain: 1.0,
+            gain_target: 1.0,
+            gain_delta: 0.0,
+            gain_remaining: 0,
             started: false,
             bypass: false,
         }
@@ -193,11 +203,9 @@ impl Leveller {
         if !NORMALIZE.load(Ordering::Relaxed) {
             return lvl.fixed_db();
         }
-        let est = if self.blocks.len() >= MIN_BLOCKS {
-            integrated(&self.blocks, self.channels).unwrap_or(DEFAULT_LUFS)
-        } else {
-            shared.known().unwrap_or(DEFAULT_LUFS)
-        };
+        // Only a newly completed measurement block changes this estimate.
+        // Re-scanning the entire song every 512 samples creates callback spikes.
+        let est = self.integrated_lufs.unwrap_or_else(|| shared.known().unwrap_or(DEFAULT_LUFS));
         (lvl.target_lufs() - est).clamp(MAX_CUT_DB, MAX_BOOST_DB)
     }
 
@@ -211,6 +219,7 @@ impl Leveller {
             // Start right at the expected gain (no ramp from 0 dB).
             self.gain_db = self.desired_db(shared);
             self.gain = db_to_lin(self.gain_db);
+            self.gain_target = self.gain;
             self.started = true;
         }
         self.block_sum += (s * s) as f64;
@@ -221,6 +230,7 @@ impl Leveller {
                 self.blocks.push(ms as f32);
                 if self.blocks.len() >= MIN_BLOCKS {
                     if let Some(l) = integrated(&self.blocks, self.channels) {
+                        self.integrated_lufs = Some(l);
                         shared.measured.store((l * 100.0).round() as i32, Ordering::Relaxed);
                     }
                 }
@@ -236,8 +246,16 @@ impl Leveller {
             let d = (want - self.gain_db).clamp(-max_step, max_step);
             if d != 0.0 {
                 self.gain_db += d;
-                self.gain = db_to_lin(self.gain_db);
+                self.gain_target = db_to_lin(self.gain_db);
+                self.gain_delta = (self.gain_target - self.gain) / self.step_len as f32;
+                self.gain_remaining = self.step_len;
             }
+        }
+        // Interpolate gain instead of a small discontinuity every 512 samples.
+        if self.gain_remaining > 0 {
+            self.gain += self.gain_delta;
+            self.gain_remaining -= 1;
+            if self.gain_remaining == 0 { self.gain = self.gain_target; }
         }
         limit(s * self.gain)
     }
@@ -276,5 +294,38 @@ mod tests {
         let (loud, quiet) = (run(0.9), run(0.1));
         assert!((loud - quiet).abs() < 1.5, "loud {loud} vs quiet {quiet}");
         assert!((loud - -14.0).abs() < 2.0, "target missed: {loud}");
+    }
+}
+
+#[cfg(test)]
+mod callback_regression_tests {
+    use super::*;
+    #[test]
+    fn linear_gate_matches_original_decibel_gate() {
+        let blocks = [1e-7, 1e-5, 0.001, 0.04, 0.5];
+        let mean = blocks.iter().map(|&b| b as f64).sum::<f64>() / blocks.len() as f64;
+        for channels in [1, 2, 6] {
+            let gate = lufs_of(mean, channels) - 10.0;
+            let kept: Vec<_> = blocks.iter().copied().filter(|&b| lufs_of(b as f64, channels) >= gate).collect();
+            let expected = lufs_of(kept.iter().map(|&b| b as f64).sum::<f64>() / kept.len() as f64, channels);
+            assert!((integrated(&blocks, channels).unwrap() - expected).abs() < 1e-5);
+        }
+    }
+    #[test]
+    fn normalization_gain_changes_have_no_sample_step() {
+        let mut processor = Leveller::new(48_000, 2);
+        processor.started = true;
+        processor.gain = 0.5;
+        processor.gain_target = 0.6;
+        processor.gain_delta = 0.001;
+        processor.gain_remaining = 100;
+        let shared = TrackLoudness::default();
+        let mut previous = 0.05;
+        for _ in 0..100 {
+            let sample = processor.process(0.1, &shared);
+            assert!((sample - previous).abs() <= 0.00011);
+            previous = sample;
+        }
+        assert!((previous - 0.06).abs() < 1e-6);
     }
 }

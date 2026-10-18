@@ -56,7 +56,7 @@ impl Lang {
 }
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
-static TABLES: OnceLock<[HashMap<String, String>; 3]> = OnceLock::new();
+static TABLES: [OnceLock<HashMap<String, String>>; 3] = [const { OnceLock::new() }; 3];
 
 fn parse(src: &str, name: &str) -> HashMap<String, String> {
     match toml::from_str::<toml::Table>(src) {
@@ -71,13 +71,13 @@ fn parse(src: &str, name: &str) -> HashMap<String, String> {
     }
 }
 
-fn tables() -> &'static [HashMap<String, String>; 3] {
-    TABLES.get_or_init(|| {
-        [
-            parse(include_str!("../assets/i18n/en.toml"), "en"),
-            parse(include_str!("../assets/i18n/de.toml"), "de"),
-            parse(include_str!("../assets/i18n/ru.toml"), "ru"),
-        ]
+fn table(lang: Lang) -> &'static HashMap<String, String> {
+    TABLES[lang as usize].get_or_init(|| {
+        match lang {
+            Lang::En => parse(include_str!("../assets/i18n/en.toml"), "en"),
+            Lang::De => parse(include_str!("../assets/i18n/de.toml"), "de"),
+            Lang::Ru => parse(include_str!("../assets/i18n/ru.toml"), "ru"),
+        }
     })
 }
 
@@ -94,10 +94,9 @@ pub fn lang() -> Lang {
 }
 
 fn lookup(key: &str) -> String {
-    let t = tables();
-    t[lang() as usize]
+    table(lang())
         .get(key)
-        .or_else(|| t[0].get(key))
+        .or_else(|| table(Lang::En).get(key))
         .cloned()
         .unwrap_or_else(|| key.to_string())
 }

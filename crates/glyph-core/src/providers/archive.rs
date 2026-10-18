@@ -133,10 +133,10 @@ fn pick_download_file(files: &[MetaFile], q: AudioQuality) -> Option<&MetaFile> 
     let want = stem(&played.name);
     let fmt_has = |f: &MetaFile, s: &str| f.format.as_deref().is_some_and(|x| x.to_lowercase().contains(s));
     let sibling = |s: &str| files.iter().find(|f| fmt_has(f, s) && stem(&f.name) == want);
-    let better = match q {
+    let better = match q.effective() {
         AudioQuality::High => sibling("flac"),
         AudioQuality::Low => sibling("64kbps"),
-        AudioQuality::Standard => None,
+        AudioQuality::Auto | AudioQuality::Standard => None,
     };
     Some(better.unwrap_or(played))
 }

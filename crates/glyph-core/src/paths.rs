@@ -2,8 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
+/// `GLYPH_DEMO=1`: a throwaway profile in the temp dir (screenshots, demos),
+/// never the user's library, account or settings.
+pub fn demo_dir() -> Option<PathBuf> {
+    std::env::var("GLYPH_DEMO").ok().filter(|v| !v.trim().is_empty() && v != "0").map(|_| std::env::temp_dir().join("glyph-demo"))
+}
+
 /// App data dir (`dirs::data_dir()/glyph`); `GLYPH_DATA_DIR` overrides (tests, portable installs).
 pub fn data_dir() -> PathBuf {
+    if let Some(d) = demo_dir() {
+        return d.join("data");
+    }
     if let Ok(p) = std::env::var("GLYPH_DATA_DIR") {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
@@ -14,6 +23,9 @@ pub fn data_dir() -> PathBuf {
 
 /// Cache dir (`dirs::cache_dir()/glyph`) for covers.
 pub fn cache_dir() -> PathBuf {
+    if let Some(d) = demo_dir() {
+        return d.join("cache");
+    }
     if let Ok(p) = std::env::var("GLYPH_CACHE_DIR") {
         if !p.trim().is_empty() {
             return PathBuf::from(p);

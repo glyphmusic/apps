@@ -40,6 +40,8 @@ pub enum View {
     Artist,
     /// A user's profile: `Glyph::open_profile`.
     Profile,
+    /// One Home section on its own ("Show all"): `Glyph::section`.
+    Section,
 }
 
 /// Which song list the list view shows.
@@ -53,6 +55,22 @@ pub enum ListRef {
     ArtistLiked(String),
     /// Songs saved for offline use.
     Downloads,
+}
+
+/// "Add songs" side panel of one of the user's playlists: suggestions,
+/// liked / recent songs, or a search.
+pub struct AddSongs {
+    pub id: String,
+    pub open: bool,
+    /// 0 suggested, 1 liked, 2 recently played.
+    pub tab: u8,
+    pub sugg: Vec<Track>,
+    pub sugg_loading: bool,
+    pub query: String,
+    pub results: Vec<Track>,
+    pub searching: bool,
+    seq: u64,
+    task: Option<Task<()>>,
 }
 
 /// "New playlist" / "Rename" dialog.
@@ -174,6 +192,11 @@ pub struct SearchState {
     pub filter: Option<SearchFilter>,
     pub error: Option<String>,
     task: Option<Task<()>>,
+    /// Last result page asked for (0 = first) and whether more may come.
+    pub page: usize,
+    pub exhausted: bool,
+    pub loading_more: bool,
+    more_task: Option<Task<()>>,
 }
 
 #[derive(Default)]
@@ -231,6 +254,8 @@ pub struct Glyph {
     pub open_artist: Option<String>,
     /// Handle of the open user profile (`View::Profile`).
     pub open_profile: Option<String>,
+    /// Home section shown on its own page: title, songs.
+    pub section: Option<(String, Vec<Track>)>,
     pub artists: std::collections::HashMap<String, ArtistPage>,
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
@@ -239,7 +264,7 @@ pub struct Glyph {
     pub ctx_closing: Option<(CtxMenu, Instant)>,
     /// Artist hero images rendered as ASCII, per source image and raster width
     /// (None = computing), plus replaced ones waiting to leave the GPU atlas.
-    pub heroes: std::collections::HashMap<(PathBuf, bool, u32), Option<Arc<gpui::RenderImage>>>,
+    pub heroes: std::collections::HashMap<(PathBuf, bool, u32, u32), Option<Arc<gpui::RenderImage>>>,
     pub stale_heroes: Vec<Arc<gpui::RenderImage>>,
     /// Scroll state of the main view, the settings page, the queue and the lyrics
     /// (edge fades show only where there is more to scroll).
@@ -252,6 +277,10 @@ pub struct Glyph {
     /// Last reported position and when it arrived (smooth position between reports).
     pos_anchor: Option<(Duration, Instant)>,
     pub name_dialog: Option<NameDialog>,
+    /// "Add songs" panel (shares the queue's slot on the right).
+    pub add_songs: Option<AddSongs>,
+    pub add_input: Entity<TextInput>,
+    pub add_scroll: gpui::ScrollHandle,
     /// Sidebar icon under the mouse and since when (hover animation).
     pub nav_hover: Option<(View, Instant)>,
     /// Fills the open album with its other songs (search in the background).
@@ -282,6 +311,9 @@ pub struct Glyph {
     pub glow: Entity<GlowView>,
     pub search_input: Entity<TextInput>,
     pub server_input: Entity<TextInput>,
+    pub server_bearer_input: Entity<TextInput>,
+    pub server_auth_required: bool,
+    server_probe_seq: u64,
     pub key_inputs: Vec<(&'static str, Entity<TextInput>)>,
 
     pub config: Config,
@@ -308,12 +340,17 @@ pub struct Glyph {
     pub library_ok: bool,
 
     pub current: Option<Track>,
+    activity_recorded: bool,
+    home_activity_cache: Option<(u64, Vec<Track>)>,
     pub current_source: Option<ProviderId>,
     pub current_preview: bool,
     /// Track whose expired preview URL was already retried once (see
     /// [`App::retry_expired_preview`]); reset whenever playback starts.
     pub retried_expired: Option<Track>,
     pub resolving: bool,
+    /// Play/pause pressed while the new song was still being found: it is
+    /// loaded paused instead of starting (the old song never resumes).
+    pub hold_play: bool,
     /// Next song handed to the player for a gapless start:
     /// (queue `track_key`, resolved track the player knows it as).
     preloaded: Option<(String, Track)>,
@@ -335,8 +372,33 @@ pub struct Glyph {
     pub lyrics_only: bool,
     /// Slide state of the player bar.
     pub bar_slide: Slide,
+    /// Queue panel sliding in from the right.
+    pub queue_slide: Slide,
+    /// A-B loop of the current song (Alt+1 / Alt+2): start, end.
+    pub loop_ab: (Option<Duration>, Option<Duration>),
+    /// The song the loop belongs to; another song ends it.
+    loop_song: Option<String>,
+    /// The A-B loop the native player was last told about.
+    loop_sent: Option<(Duration, Duration)>,
+    /// Queue reorder in progress: (dragged index, slot it would land in).
+    pub queue_drop: Option<(usize, usize)>,
+    /// Song of an own playlist being dragged: (from, slot it would land in).
+    pub list_drop: Option<(usize, usize)>,
     pub radio: bool,
     pub mini_on_top: bool,
+    /// The open mini player window, if any.
+    pub mini_window: Option<gpui::AnyWindowHandle>,
+    /// The mini player is on screen (its window may stay around hidden).
+    pub mini_shown: bool,
+    /// Mini player as the big card instead of the slim bar (remembered).
+    pub mini_big: bool,
+    /// Card width of the mini player (resizable).
+    pub mini_card_w: f32,
+    pub mini_card_h: f32,
+    /// Opening a list without counting it as use (Ctrl+number).
+    nav_quiet: bool,
+    /// The list the queue was started from (for list activity).
+    playing_from: Option<ListRef>,
     /// The saved config was applied (player prefs may be written back).
     config_loaded: bool,
     /// Unsaved config change: (last change, show the "saved" toast).
@@ -352,6 +414,8 @@ pub struct Glyph {
     pub open_select: Option<&'static str>,
     /// Selected sub-tab of the settings page (see `ui::settings::subtabs`).
     pub settings_sub: u8,
+    pub settings_collapsed: HashSet<usize>,
+    pub settings_group_motion: std::collections::HashMap<usize, (Instant, f32, f32)>,
     /// Storage breakdown for "Cache & Storage" (None = not measured yet).
     pub storage: Option<glyph_core::storage::StorageStats>,
     /// Which storage kinds "Clear cache" removes (order of StorageKind::ALL).
@@ -424,6 +488,25 @@ impl Slide {
     }
 }
 
+/// "Popular" and "Recommended for you" as last loaded (data saver).
+fn feeds_cache_path() -> PathBuf {
+    glyph_core::paths::data_dir().join("feeds.json")
+}
+
+fn save_feeds_cache(trending: &[Track], recs: &[Track]) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if let Ok(bytes) = serde_json::to_vec(&(at, trending, recs)) {
+        let _ = glyph_core::paths::write_atomic(&feeds_cache_path(), &bytes);
+    }
+}
+
+/// The cached feeds when younger than `max_age_s` and not empty.
+fn load_feeds_cache(max_age_s: u64) -> Option<(Vec<Track>, Vec<Track>)> {
+    let (at, trending, recs): (u64, Vec<Track>, Vec<Track>) = serde_json::from_slice(&std::fs::read(feeds_cache_path()).ok()?).ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    (now.saturating_sub(at) < max_age_s && !(trending.is_empty() && recs.is_empty())).then_some((trending, recs))
+}
+
 /// The song is (co-)credited to `name`.
 fn by_artist(name: &str, credit: &str) -> bool {
     let lower = credit.to_lowercase();
@@ -488,13 +571,15 @@ pub fn track_key(t: &Track) -> String {
 }
 
 impl Glyph {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, config: Config, cx: &mut Context<Self>) -> Self {
         let glow = cx.new(|cx| GlowView::new(window, cx));
         let search_input =
             cx.new(|cx| TextInput::new("search.placeholder", cx));
         let server_input = cx.new(|cx| TextInput::new("settings.server.placeholder", cx));
+        let server_bearer_input = cx.new(|cx| TextInput::new("settings.server.bearer.placeholder", cx).masked());
         let settings_search = cx.new(|cx| TextInput::new("settings.search", cx));
         let playlist_name = cx.new(|cx| TextInput::new("dialog.playlist.placeholder", cx));
+        let add_input = cx.new(|cx| TextInput::new("add.search", cx));
         let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
             "youtube",
             "jamendo_client_id",
@@ -514,6 +599,10 @@ impl Glyph {
                 InputEvent::Cancel => {}
             }
         })];
+        subs.push(cx.subscribe(&add_input, |this, _, ev: &InputEvent, cx| match ev {
+            InputEvent::Changed(q) | InputEvent::Submit(q) => this.add_search(q.clone(), cx),
+            InputEvent::Cancel => this.close_add_songs(cx),
+        }));
         subs.push(cx.subscribe(&playlist_name, |this, _, ev: &InputEvent, cx| match ev {
             InputEvent::Submit(_) => this.submit_name_dialog(cx),
             InputEvent::Cancel => this.close_name_dialog(cx),
@@ -523,6 +612,20 @@ impl Glyph {
             if let InputEvent::Changed(v) | InputEvent::Submit(v) = ev {
                 this.config.server_url = v.trim().to_string();
                 this.conn_test = None;
+                this.server_auth_required = false;
+                this.server_bearer_input.update(cx, |i,cx| i.set_value(String::new(),cx));
+                this.server_probe_seq += 1;
+                let seq = this.server_probe_seq;
+                let base = this.config.effective_server_url().to_string();
+                cx.spawn(async move |this,cx| {
+                    cx.background_executor().timer(Duration::from_millis(600)).await;
+                    if !this.update(cx, |s,_| s.server_probe_seq == seq && s.config.effective_server_url() == base).unwrap_or(false) { return; }
+                    let probe_base = base.clone();
+                    let required = cx.background_executor().spawn(async move {
+                        glyph_core::server_access::probe(&probe_base).ok()
+                    }).await;
+                    this.update(cx, |s,cx| { if s.server_probe_seq == seq && s.config.effective_server_url() == base { s.server_auth_required = required.unwrap_or(false); cx.notify(); } }).ok();
+                }).detach();
                 if matches!(ev, InputEvent::Submit(_)) {
                     this.save_config(cx);
                 }
@@ -574,6 +677,7 @@ impl Glyph {
             open_list: None,
             open_artist: None,
             open_profile: None,
+            section: None,
             artists: Default::default(),
             history: Vec::new(),
             ctx_menu: None,
@@ -588,6 +692,9 @@ impl Glyph {
             lyrics_user_scroll: None,
             pos_anchor: None,
             name_dialog: None,
+            add_songs: None,
+            add_input,
+            add_scroll: gpui::ScrollHandle::new(),
             nav_hover: None,
             album_task: None,
             // Read straight from disk: the async config load comes too late for the first frame.
@@ -599,10 +706,7 @@ impl Glyph {
             recs: Vec::new(),
             trending: Vec::new(),
             feeds_loading: false,
-            splash: Config::load()
-                .map(|c| c.visuals.startup_animation)
-                .unwrap_or(true)
-                .then(crate::ui::splash::Splash::new),
+            splash: config.visuals.startup_animation.then(crate::ui::splash::Splash::new),
             nav_leave: None,
             lyrics_info: None,
             side_hover: None,
@@ -610,6 +714,9 @@ impl Glyph {
             glow,
             search_input,
             server_input,
+            server_bearer_input,
+            server_auth_required: false,
+            server_probe_seq: 0,
             key_inputs,
             config: Config::default(),
             backend: None,
@@ -627,10 +734,13 @@ impl Glyph {
             library: Library::default(),
             library_ok: false,
             current: None,
+            activity_recorded: false,
+            home_activity_cache: None,
             current_source: None,
             current_preview: false,
             retried_expired: None,
             resolving: false,
+            hold_play: false,
             preloaded: None,
             unmute_volume: 0.8,
             palette: None,
@@ -644,8 +754,21 @@ impl Glyph {
             show_lyrics: true,
             lyrics_only: false,
             bar_slide: Slide::default(),
+            queue_slide: Slide::default(),
+            loop_ab: (None, None),
+            loop_song: None,
+            loop_sent: None,
+            queue_drop: None,
+            list_drop: None,
             radio: true,
             mini_on_top: true,
+            mini_window: None,
+            mini_shown: false,
+            mini_big: false,
+            mini_card_w: crate::ui::mini::CARD_W,
+            mini_card_h: crate::ui::mini::CARD_H,
+            nav_quiet: false,
+            playing_from: None,
             config_loaded: false,
             config_dirty: None,
             settings_open: false,
@@ -658,6 +781,8 @@ impl Glyph {
             settings_search,
             open_select: None,
             settings_sub: 0,
+            settings_collapsed: HashSet::new(),
+            settings_group_motion: Default::default(),
             storage: None,
             // Downloads are offline songs: opt-in, never cleared by default.
             storage_selected: [true, false, true, true],
@@ -687,28 +812,16 @@ impl Glyph {
                 }
             }),
         };
-        this.boot(cx);
+        this.apply_config(config.clone(), cx);
+        this.boot(config, cx);
         this
     }
 
     // ------------------------------------------------------------ startup
 
-    fn boot(&mut self, cx: &mut Context<Self>) {
-        // Config → Backend, entirely off the UI thread.
+    fn boot(&mut self, config: Config, cx: &mut Context<Self>) {
+        // Backend remains off the UI thread; config was already loaded once.
         cx.spawn(async move |this, cx| {
-            let config = cx
-                .background_executor()
-                .spawn(async { guard_res(Config::load) })
-                .await;
-            let config = match config {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("config: {e}");
-                    Config::default()
-                }
-            };
-            let cfg = config.clone();
-            this.update(cx, |s, cx| s.apply_config(cfg, cx)).ok();
             let backend = cx
                 .background_executor()
                 .spawn(async move { guard_async(Backend::new(config)).await })
@@ -717,24 +830,31 @@ impl Glyph {
         })
         .detach();
 
-        // Library + player, also in the background.
+        // Publish the library without waiting for audio device initialization.
         cx.spawn(async move |this, cx| {
             let lib = cx
                 .background_executor()
                 .spawn(async { guard_res(Library::load) })
                 .await;
-            let player = cx
-                .background_executor()
-                .spawn(async { guard_res(PlayerController::new) })
-                .await;
             this.update(cx, |s, cx| {
+                tracing::info!(elapsed_ms = s.started.elapsed().as_millis() as u64, "startup: library ready");
                 match lib {
                     Ok(l) => {
                         s.library = l;
+                        s.home_activity_cache = None;
                         s.library_ok = true;
                     }
                     Err(e) => tracing::warn!("library: {e}"),
                 }
+                cx.notify();
+            }).ok();
+        }).detach();
+
+        cx.spawn(async move |this, cx| {
+            let player = cx.background_executor()
+                .spawn(async { guard_res(PlayerController::new) }).await;
+            this.update(cx, |s, cx| {
+                tracing::info!(elapsed_ms = s.started.elapsed().as_millis() as u64, "startup: player ready");
                 match player {
                     Ok(p) => {
                         let p = Arc::new(p);
@@ -791,6 +911,9 @@ impl Glyph {
         });
         self.show_queue = prefs.show_queue;
         self.mini_on_top = prefs.mini_on_top;
+        self.mini_big = prefs.mini_large;
+        self.mini_card_w = prefs.mini_card_w;
+        self.mini_card_h = prefs.mini_card_h;
         if let Some(p) = &self.player {
             p.set_volume(prefs.volume);
             p.set_mini_player_options(MiniPlayerOptions { always_on_top: prefs.mini_on_top, position: None });
@@ -819,6 +942,9 @@ impl Glyph {
             repeat: repeat.into(),
             show_queue: self.show_queue,
             mini_on_top: self.mini_on_top,
+            mini_large: self.mini_big,
+            mini_card_w: self.mini_card_w,
+            mini_card_h: self.mini_card_h,
         })
     }
 
@@ -854,8 +980,12 @@ impl Glyph {
         let lang = crate::config_ext::language(&config);
         crate::i18n::set_lang(lang);
         self.lang = lang;
+        let reactivity = config.visuals.music_reactivity;
+        self.glow.update(cx, |g, _| g.set_music_reactivity(reactivity));
         let intensity = config.visuals.intensity;
         self.glow.update(cx, |g, _| g.set_intensity(intensity));
+        let glow = crate::theme::glow_palette(&config.visuals.theme);
+        self.glow.update(cx, |g, _| g.set_theme(glow));
         self.config = config;
         self.restore_player_prefs();
         if let Some(p) = &self.player {
@@ -869,12 +999,17 @@ impl Glyph {
     fn backend_ready(&mut self, res: Result<Backend, String>, cx: &mut Context<Self>) {
         match res {
             Ok(b) => {
+                if b.config().effective_server_url() != self.config.effective_server_url() { return; }
+                self.server_auth_required = b.server_auth_required();
+                glyph_audio::http::set_server_access(b.server_media_credentials());
+                glyph_audio::http::set_account_access_provider(Arc::new(glyph_core::account::media_access));
                 let b = Arc::new(b);
                 self.backend_state = match guard(|| b.mode()) {
                     Some(m) => BackendState::Ready(m),
                     None => BackendState::Ready(BackendMode::Direct),
                 };
                 self.backend = Some(b);
+                glyph_core::cover::set_data_saver(self.config.storage.data_saver);
                 self.load_feeds(cx);
                 // Misses recorded without a backend are not real misses.
                 self.covers.retain(|_, v| v.is_some());
@@ -926,10 +1061,23 @@ impl Glyph {
         }
 
         if let (Some(p), true) = (self.player.clone(), self.player_ok) {
-            match guard(|| p.state()) {
-                Some(st) => {
+            match guard(|| p.state_if_changed(self.player_state.as_ref())) {
+                Some(Some(st)) => {
                     if self.player_state.as_ref() != Some(&st) {
                         let playing = st.status == Status::Playing;
+                        if playing && !self.activity_recorded && !self.resolving && self.library_ok {
+                            if let Some(track) = self.current.clone() {
+                                let threshold = track.duration_ms.map(|ms| (ms / 2000).clamp(5,30)).unwrap_or(30);
+                                if st.position.as_secs() >= threshold && st.track.as_ref().is_some_and(|t| glyph_core::dedupe::same_song(t,&track)) {
+                                    self.library.record_listen(&track, glyph_core::paths::now_unix());
+                                    if let Some(l) = self.playing_from.clone() {
+                                        self.library.record_list_use(&l.key(), 1.0, glyph_core::paths::now_unix());
+                                    }
+                                    self.activity_recorded = true;
+                                    self.save_library(cx);
+                                }
+                            }
+                        }
                         self.glow.update(cx, |g, _| g.set_playing(playing));
                         if let Some(mk) = &self.media_keys {
                             // The OS media controls only need track, play state
@@ -950,11 +1098,52 @@ impl Glyph {
                         if self.pos_anchor.map(|a| a.0) != Some(st.position) {
                             self.pos_anchor = Some((st.position, Instant::now()));
                         }
+                        // Only the position moved: redraw when the bar or the
+                        // clock can show it (every 250 ms), not ~60 times a
+                        // second; the whole window redrawing that often made
+                        // dragging the window stutter. Now Playing animates
+                        // on its own (see `is_animating`).
+                        let step = |p: Duration| p.as_millis() / 250;
+                        let visible = match &self.player_state {
+                            Some(old) => {
+                                let mut same = old.clone();
+                                same.position = st.position;
+                                same != st || step(old.position) != step(st.position)
+                            }
+                            None => true,
+                        };
                         self.player_state = Some(st);
-                        dirty = true;
+                        if visible {
+                            dirty = true;
+                        }
                     }
                 }
+                Some(None) => {},
                 None => self.player_ok = false,
+            }
+        }
+        // A-B loop: back to the start point once the end point is passed.
+        if self.loop_ab != (None, None) && self.current.as_ref().map(track_key) != self.loop_song {
+            self.loop_ab = (None, None);
+            dirty = true;
+        }
+        // Native playback loops (with a fade) in the player itself; embedded
+        // players are sent back from here.
+        let embed = self.embed_playing();
+        if let (Some(a), Some(b)) = self.loop_ab {
+            if embed && self.current.is_some() && self.position() >= b {
+                self.seek_to(a);
+                dirty = true;
+            }
+        }
+        let want = match self.loop_ab {
+            (Some(a), Some(b)) if !embed => Some((a, b)),
+            _ => None,
+        };
+        if want != self.loop_sent {
+            self.loop_sent = want;
+            if let Some(p) = &self.player {
+                p.set_loop(want);
             }
         }
         let events: Vec<PlayerEvent> = self
@@ -1095,6 +1284,7 @@ impl Glyph {
             || info_anim
             || !self.downloading.is_empty()
             || self.download_done.values().any(|at| at.elapsed().as_secs_f32() < crate::ui::widgets::DL_DONE_ANIM_S)
+            || (self.settings_open && self.settings_group_motion.values().any(|(at,_,_)| at.elapsed() < Duration::from_millis(180)))
             || settings_anim
             || crate::ui::settings::select_animating()
             || crate::ui::settings::flash_animating()
@@ -1103,6 +1293,10 @@ impl Glyph {
             || self.splash.is_some()
             || nav_anim
             || self.bar_slide.running()
+            || self.queue_slide.running()
+            || crate::ui::widgets::press_running()
+            || crate::ui::views::queue_anim_running()
+            || crate::ui::widgets::drag_shift_running()
             || self.search.loading
             || self.is_loading()
             || self.lyrics.loading
@@ -1194,6 +1388,9 @@ impl Glyph {
     }
 
     pub fn position(&self) -> Duration {
+        if self.resolving {
+            return Duration::ZERO;
+        }
         self.player_state.as_ref().map(|s| s.position).unwrap_or_default()
     }
 
@@ -1208,6 +1405,11 @@ impl Glyph {
     }
 
     pub fn duration(&self) -> Option<Duration> {
+        if self.resolving || self.player_state.as_ref().is_some_and(|s| s.status == Status::Loading) {
+            if let Some(d) = self.current.as_ref().and_then(|t| t.duration_ms) {
+                return Some(Duration::from_millis(d));
+            }
+        }
         self.player_state
             .as_ref()
             .and_then(|s| s.duration)
@@ -1246,7 +1448,18 @@ impl Glyph {
         S[(self.started.elapsed().as_millis() / 110 % 4) as usize]
     }
 
+    pub fn active_home_tracks(&mut self) -> Vec<Track> {
+        let now = glyph_core::paths::now_unix();
+        let minute = now / 60;
+        if self.home_activity_cache.as_ref().is_none_or(|(at, _)| *at != minute) {
+            self.home_activity_cache = Some((minute, self.library.active_tracks(500, now)));
+        }
+        self.home_activity_cache.as_ref().unwrap().1.iter()
+            .filter(|track| self.allowed(track)).take(5).cloned().collect()
+    }
+
     fn save_library(&mut self, cx: &mut Context<Self>) {
+        self.home_activity_cache = None;
         if !self.library_ok {
             return;
         }
@@ -1263,6 +1476,14 @@ impl Glyph {
 
     /// Saves the config once changes stop for a moment (a slider drag is
     /// one save, not one per step); see [`Glyph::flush_config`].
+    /// Data saver on / off (Settings -> Storage).
+    pub fn set_data_saver(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.config.storage.data_saver = on;
+        glyph_core::cover::set_data_saver(on);
+        self.save_config(cx);
+        cx.notify();
+    }
+
     pub fn save_config(&mut self, cx: &mut Context<Self>) {
         self.config_dirty = Some((Instant::now(), true));
         // Settings follow the account (debounced like library changes).
@@ -1341,6 +1562,7 @@ impl Glyph {
                 View::Settings => Preset::Horizont,
                 View::List => Preset::Horizont,
                 View::Artist | View::Profile => Preset::Sonnenaufgang,
+                View::Section => Preset::Strahl,
             };
             self.glow.update(cx, |g, _| g.set_preset(preset));
         }
@@ -1410,6 +1632,10 @@ impl Glyph {
                     s.search.seen.clear();
                     s.search.errors.clear();
                     s.search.error = None;
+                    s.search.page = 0;
+                    s.search.exhausted = false;
+                    s.search.loading_more = false;
+                    s.search.more_task = None;
                     let Some(b) = s.backend.clone() else {
                         return Err(Some(t("status.backend_offline").to_string()));
                     };
@@ -1470,7 +1696,15 @@ impl Glyph {
                             SearchEvent::ProviderError { provider, message } => {
                                 s.search.errors.push((provider, message))
                             }
-                            SearchEvent::Done => s.search.loading = false,
+                            SearchEvent::Done => {
+                                s.search.loading = false;
+                                // The top hits are the likely clicks: find
+                                // their sources now so they start at once.
+                                if let Some(b) = s.backend.clone() {
+                                    let top: Vec<Track> = s.search.results.iter().take(2).cloned().collect();
+                                    guard(|| b.warm(top));
+                                }
+                            }
                         }
                         cx.notify();
                         true
@@ -1480,6 +1714,65 @@ impl Glyph {
                     break;
                 }
             }
+        }));
+    }
+
+    /// Scrolled near the end of the results: fetch the next page and append
+    /// it (sources that can page; stops when a page brings nothing new).
+    pub fn search_load_more(&mut self, cx: &mut Context<Self>) {
+        let s = &self.search;
+        if s.loading || s.loading_more || s.exhausted || s.query.trim().is_empty() || s.results.is_empty() || s.page >= 20 {
+            return;
+        }
+        let Some(b) = self.backend.clone() else { return };
+        self.search.page += 1;
+        self.search.loading_more = true;
+        let (seq, page) = (self.search.seq, self.search.page);
+        let (plain, _) = glyph_core::taste::parse_query(self.search.query.trim());
+        let Some(mut stream) = guard(|| b.search_page(&plain, page)) else {
+            self.search.loading_more = false;
+            return;
+        };
+        cx.notify();
+        self.search.more_task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            let mut added = 0usize;
+            while let Some(ev) = stream.next().await {
+                let done = matches!(ev, SearchEvent::Done);
+                let alive = this
+                    .update(cx, |s, cx| {
+                        if s.search.seq != seq {
+                            return false;
+                        }
+                        if let SearchEvent::Results { tracks, .. } = ev {
+                            let (_, phrases) = glyph_core::taste::parse_query(&s.search.query);
+                            for t in tracks {
+                                if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) {
+                                    continue;
+                                }
+                                // Later pages go below what is already shown.
+                                if s.search.seen.insert((t.source, t.id.clone())) {
+                                    s.search.results.push(t);
+                                    added += 1;
+                                }
+                            }
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if done || !alive {
+                    break;
+                }
+            }
+            this.update(cx, |s, cx| {
+                if s.search.seq == seq {
+                    s.search.loading_more = false;
+                    s.search.exhausted = added == 0;
+                    cx.notify();
+                }
+            })
+            .ok();
         }));
     }
 
@@ -1589,9 +1882,25 @@ impl Glyph {
         cx.notify();
     }
 
-    /// Replace the queue with `tracks` and start at `index`.
+    /// "Hide explicit songs" is on and `t` is explicit: say so (it does not play).
+    fn blocked_explicit(&mut self, tr: &Track, cx: &mut Context<Self>) -> bool {
+        if self.allowed(tr) {
+            return false;
+        }
+        self.toast_info(t("toast.explicit_blocked").to_string());
+        cx.notify();
+        true
+    }
+
+    /// Replace the queue with `tracks` and start at `index`. With "Hide
+    /// explicit songs" on, explicit songs neither start nor join the queue.
     pub fn play_list(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
         let Some(track) = tracks.get(index).cloned() else { return };
+        if self.blocked_explicit(&track, cx) {
+            return;
+        }
+        let index = tracks[..index].iter().filter(|t| self.allowed(t)).count();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
         // Picked from search results: remember it for the search dropdown
         // (saved together with "recent" in `play_track`).
         if self.library_ok && self.view == View::Search {
@@ -1601,10 +1910,18 @@ impl Glyph {
         if guard(|| self.queue.set(tracks, index)).is_none() {
             self.queue_ok = false;
         }
+        // Started from an open list: its listening counts for the sidebar.
+        self.playing_from = if self.view == View::List { self.open_list.clone() } else { None };
+        if let Some(l) = self.playing_from.clone() {
+            self.touch_list(&l, 0.5);
+        }
         self.play_track(track, cx);
     }
 
     pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.blocked_explicit(&track, cx) {
+            return;
+        }
         self.start_track(track, None, cx);
     }
 
@@ -1613,10 +1930,12 @@ impl Glyph {
     fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
         let key = track_key(&track);
         self.current = Some(track.clone());
+        self.activity_recorded = false;
         self.current_source = Some(adopted.as_ref().map_or(track.source, |a| a.source));
         self.current_preview = adopted.is_some() && self.player_state.as_ref().is_some_and(|s| s.is_preview);
         self.retried_expired = None;
         self.resolving = adopted.is_none();
+        self.hold_play = false;
         if adopted.is_none() {
             self.preloaded = None;
             // Fade the old song out right away instead of letting it run
@@ -1637,6 +1956,7 @@ impl Glyph {
         });
         // The player bar and Now Playing cover "ASCII in" again with every new
         // song, also when that cover was already shown somewhere before.
+        crate::ui::widgets::reset_reveals(&format!("bar-meta:{key}"));
         for size in [crate::ui::player_bar::COVER, crate::ui::now_playing::COVER] {
             crate::ui::widgets::reset_reveals(&format!("cover:{key}:{size}"));
         }
@@ -1680,9 +2000,12 @@ impl Glyph {
                                 matches!(res.source, glyph_protocol::PlaybackSource::Preview { .. });
                             let src = res.source.clone();
                             let tr = res.track.clone();
+                            let start = !s.hold_play;
                             s.with_player(move |p| {
                                 p.load(tr, src);
-                                p.play();
+                                if start {
+                                    p.play();
+                                }
                             });
                             // Now that this song runs, get the next ones ready
                             // (local yt-dlp only; one batch run, not one wait per song).
@@ -1755,6 +2078,13 @@ impl Glyph {
             if !recent.is_empty() {
                 self.play_list(recent, 0, cx);
             }
+            return;
+        }
+        // The new song is still being found: the player holds the old one,
+        // so toggling it would resume that. Remember the wish instead.
+        if self.resolving {
+            self.hold_play = !self.hold_play;
+            cx.notify();
             return;
         }
         self.with_player(|p| p.toggle());
@@ -1965,16 +2295,70 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Shows or hides the mini player. Its window is kept hidden rather than
+    /// closed where possible: opening a new window takes a moment.
     pub fn toggle_mini(&mut self, cx: &mut Context<Self>) {
-        self.mini_on_top = !self.mini_on_top;
-        let on_top = self.mini_on_top;
-        self.with_player(|p| {
-            p.set_mini_player_options(MiniPlayerOptions { always_on_top: on_top, position: None })
+        use crate::ui::mini;
+        if self.mini_shown {
+            self.mini_shown = false;
+            if let Some(h) = self.mini_window {
+                if !h.update(cx, |_, w, cx| mini::set_visible(w, false, cx)).unwrap_or(false) {
+                    let _ = h.update(cx, |_, w, _| w.remove_window());
+                    self.mini_window = None;
+                }
+            }
+            cx.notify();
+            return;
+        }
+        self.mini_shown = true;
+        cx.notify();
+        if let Some(h) = self.mini_window {
+            if h.update(cx, |_, w, cx| mini::set_visible(w, true, cx)).unwrap_or(false) {
+                return;
+            }
+            self.mini_window = None;
+        }
+        let me = cx.entity();
+        cx.defer(move |cx| {
+            let h = mini::MiniPlayer::open(me.clone(), cx);
+            me.update(cx, |g, cx| {
+                g.mini_shown = h.is_some();
+                g.mini_window = h;
+                cx.notify();
+            });
         });
+    }
+
+    /// Settings -> Appearance: bar or card. An open mini player switches at once.
+    pub fn set_mini_big(&mut self, big: bool, cx: &mut Context<Self>) {
+        if self.mini_big == big {
+            return;
+        }
+        self.set_mini_big_flag(big, cx);
+        if let Some(h) = self.mini_window {
+            let sz = crate::ui::mini::mini_size(big, (self.mini_card_w, self.mini_card_h));
+            let _ = h.update(cx, |_, w, cx| crate::ui::mini::fit_window(w, sz, cx));
+        }
+    }
+
+    /// Bar or card, remembered (the caller resizes an open window).
+    pub fn set_mini_big_flag(&mut self, big: bool, cx: &mut Context<Self>) {
+        self.mini_big = big;
+        self.save_player_prefs(cx);
         cx.notify();
     }
 
+    /// The card was resized: remember its size.
+    pub fn set_mini_card_size(&mut self, w: f32, h: f32, cx: &mut Context<Self>) {
+        self.mini_card_w = w;
+        self.mini_card_h = h;
+        self.save_player_prefs(cx);
+    }
+
     pub fn queue_add(&mut self, t: Track, next: bool, cx: &mut Context<Self>) {
+        if self.blocked_explicit(&t, cx) {
+            return;
+        }
         let title = t.title.clone();
         let ok = if next {
             guard(|| self.queue.play_next(t))
@@ -2006,10 +2390,35 @@ impl Glyph {
             self.toast_info(crate::i18n::t("status.library_offline"));
             return;
         }
+        let was = self.is_liked(t);
+        if !was {
+            self.touch_list(&ListRef::Liked, 0.3);
+        }
         if guard(|| self.library.toggle_like(t)).is_some() {
             self.save_library(cx);
+            // Liked Songs downloads new likes once it was downloaded.
+            if !was && self.library.liked_auto_download && !self.is_downloaded(t) && !self.is_downloading(t) {
+                self.download_tracks(vec![t.clone()], cx);
+            }
         }
         cx.notify();
+    }
+
+    /// Counts an interaction with a list towards its sidebar place
+    /// (listening from it counts 1, playing it 0.5, editing it 0.3-0.5).
+    pub fn touch_list(&mut self, l: &ListRef, amount: f64) {
+        if self.library_ok {
+            self.library.record_list_use(&l.key(), amount, glyph_core::paths::now_unix());
+        }
+    }
+
+    /// Liked Songs keeps downloading new likes (turned on by downloading the
+    /// list, off by removing its downloads).
+    pub fn set_liked_auto_download(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.library_ok && self.library.liked_auto_download != on {
+            self.library.liked_auto_download = on;
+            self.save_library(cx);
+        }
     }
 
     pub fn delete_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2026,6 +2435,7 @@ impl Glyph {
 
     /// Adds several songs at once (one toast).
     pub fn add_many_to_playlist(&mut self, id: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.touch_list(&ListRef::User(id.to_string()), 0.5);
         let mut added = Vec::new();
         let mut name = String::new();
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
@@ -2093,12 +2503,17 @@ impl Glyph {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
                 p.tracks.push(t.clone());
                 let name = p.name.clone();
+                self.touch_list(&ListRef::User(id.to_string()), 0.5);
                 self.save_library(cx);
                 self.toast(tf("toast.added_to_playlist", &[("name", &name)]));
                 self.auto_download_added(id, vec![t], cx);
             }
         }
         cx.notify();
+    }
+
+    pub fn is_liked_auto_download(&self) -> bool {
+        self.library_ok && self.library.liked_auto_download
     }
 
     pub fn is_auto_download(&self, id: &str) -> bool {
@@ -2155,6 +2570,16 @@ impl Glyph {
         Route { view: self.view, list: self.open_list.clone(), artist: self.open_artist.clone(), profile: self.open_profile.clone() }
     }
 
+    /// "Show all" of a Home section: just its songs on a page.
+    pub fn open_section(&mut self, title: String, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        self.push_route();
+        self.view = View::Section;
+        self.section = Some((title, tracks));
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        self.ctx_menu = None;
+        cx.notify();
+    }
+
     pub(crate) fn push_route(&mut self) {
         let r = self.route();
         if self.history.last() != Some(&r) {
@@ -2195,7 +2620,8 @@ impl Glyph {
         self.push_route();
         self.view = View::List;
         self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
-        if self.library_ok && guard(|| self.library.push_recent_list(l.key())).is_some() {
+        if self.library_ok && !self.nav_quiet && guard(|| self.library.push_recent_list(l.key())).is_some() {
+            self.library.record_list_use(&l.key(), 0.25, glyph_core::paths::now_unix());
             self.save_library(cx);
         }
         self.open_list = Some(l);
@@ -2368,6 +2794,15 @@ impl Glyph {
         if self.feeds_loading {
             return;
         }
+        // Data saver: reuse the last feeds for up to 12 hours.
+        if self.config.storage.data_saver {
+            if let Some((trending, recs)) = load_feeds_cache(12 * 3600) {
+                self.trending = trending;
+                self.recs = recs;
+                cx.notify();
+                return;
+            }
+        }
         self.feeds_loading = true;
         // Seeds: one song for each of the user's top artists, then liked songs.
         let taste = self.taste();
@@ -2432,6 +2867,7 @@ impl Glyph {
                     .take(16)
                     .collect();
                 s.feeds_loading = false;
+                save_feeds_cache(&s.trending, &s.recs);
                 cx.notify();
             })
             .ok();
@@ -2636,17 +3072,115 @@ impl Glyph {
     }
 
     /// Recently opened lists that still exist (sidebar).
+    /// Ctrl+number: 1 Home, 2 Search, 3 Library, 4 Now Playing, 5..9 the
+    /// lists in the sidebar from the top, 0 Settings.
+    pub fn nav_slot(&mut self, n: usize, w: &mut Window, cx: &mut Context<Self>) {
+        let view = match n {
+            0 => Some(View::Settings),
+            1 => Some(View::Home),
+            2 => Some(View::Search),
+            3 => Some(View::Library),
+            4 => Some(View::NowPlaying),
+            _ => None,
+        };
+        match view {
+            Some(v) => self.navigate(v, w, cx),
+            None => {
+                if let Some(l) = self.recent_lists(5).into_iter().nth(n - 5) {
+                    // Jumping by shortcut leaves the sidebar order as it is.
+                    self.nav_quiet = true;
+                    self.open_list(l, cx);
+                    self.nav_quiet = false;
+                }
+            }
+        }
+    }
+
+    /// Alt+1 / Alt+2: the current position becomes the loop start / end.
+    pub fn set_loop_point(&mut self, start: bool, cx: &mut Context<Self>) {
+        if self.current.is_none() {
+            return;
+        }
+        // Mouse over the seek bar: the point goes where the mouse is.
+        let pos = match (crate::ui::widgets::bar_hover("seek"), self.duration()) {
+            (Some(f), Some(d)) if !d.is_zero() => d.mul_f32(f),
+            _ => self.position(),
+        };
+        self.loop_song = self.current.as_ref().map(track_key);
+        let (a, b) = &mut self.loop_ab;
+        if start {
+            *a = Some(pos);
+            if b.is_some_and(|b| b <= pos) {
+                *b = None;
+            }
+        } else if a.map_or(true, |a| pos > a) {
+            *b = Some(pos);
+            if a.is_none() {
+                *a = Some(Duration::ZERO);
+            }
+        }
+        let (a, b) = self.loop_ab;
+        let f = |d: Option<Duration>| d.map(crate::ui::widgets::fmt_time).unwrap_or_else(|| "--:--".into());
+        self.toast_info(format!("[ LOOP {} -> {} ]", f(a), f(b)));
+        cx.notify();
+    }
+
+    /// A loop end dragged on the seek bar to `frac` of the song; the ends
+    /// keep at least half a second between them.
+    pub fn drag_loop_point(&mut self, start: bool, frac: f32, cx: &mut Context<Self>) {
+        let Some(d) = self.duration().filter(|d| !d.is_zero()) else { return };
+        let pos = d.mul_f32(frac.clamp(0.0, 1.0));
+        let min_gap = Duration::from_millis(500);
+        let (a, b) = &mut self.loop_ab;
+        if start {
+            let max = b.map_or(d, |b| b.saturating_sub(min_gap));
+            *a = Some(pos.min(max));
+        } else {
+            let min = a.map_or(Duration::ZERO, |a| a + min_gap);
+            *b = Some(pos.max(min).min(d));
+        }
+        cx.notify();
+    }
+
+    pub fn clear_loop(&mut self, cx: &mut Context<Self>) {
+        if self.loop_ab != (None, None) {
+            self.loop_ab = (None, None);
+            self.toast_info("[ LOOP OFF ]");
+            cx.notify();
+        }
+    }
+
+    /// Sidebar lists: every pinned one first, then up to `max` recent ones.
     pub fn recent_lists(&self, max: usize) -> Vec<ListRef> {
-        self.library
-            .recent_lists
-            .iter()
-            .filter(|k| match k {
-                glyph_core::ListKey::Playlist { id } => self.library.playlist(id).is_some(),
-                _ => true,
-            })
-            .take(max)
-            .map(ListRef::from_key)
-            .collect()
+        let exists = |k: &&glyph_core::ListKey| match k {
+            glyph_core::ListKey::Playlist { id } => self.library.playlist(id).is_some(),
+            _ => true,
+        };
+        let pinned: Vec<_> = self.library.pinned.iter().filter(exists).collect();
+        // Pinned lists count towards `max`: pinning a recent list moves it
+        // up instead of letting another list in at the bottom.
+        let room = max.saturating_sub(pinned.len());
+        // Most used first (listening from a list counts most), ties by recency.
+        let now = glyph_core::paths::now_unix();
+        let mut recent: Vec<&glyph_core::ListKey> = self.library.recent_lists.iter().filter(exists).filter(|k| !self.library.pinned.contains(k)).collect();
+        recent.sort_by(|a, b| self.library.list_weight(b, now).total_cmp(&self.library.list_weight(a, now)));
+        pinned.into_iter().chain(recent.into_iter().take(room)).map(ListRef::from_key).collect()
+    }
+
+    pub fn is_pinned(&self, l: &ListRef) -> bool {
+        self.library.pinned.contains(&l.key())
+    }
+
+    /// Pins a list to the top of the sidebar and the library, or unpins it.
+    pub fn toggle_pin(&mut self, l: &ListRef, cx: &mut Context<Self>) {
+        let k = l.key();
+        if let Some(i) = self.library.pinned.iter().position(|p| *p == k) {
+            self.library.pinned.remove(i);
+        } else {
+            self.library.pinned.push(k);
+        }
+        self.save_library(cx);
+        cx.notify();
     }
 
     /// Liked songs (co-)credited to `name`.
@@ -2904,6 +3438,7 @@ impl Glyph {
 
     /// Plays `tracks` from a random song with shuffle on.
     pub fn play_shuffled(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
         if tracks.is_empty() {
             return;
         }
@@ -2918,6 +3453,7 @@ impl Glyph {
 
     /// Adds every song to the end of the queue.
     pub fn queue_all(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
         let n = tracks.len();
         for tr in tracks {
             guard(|| self.queue.push(tr));
@@ -3142,6 +3678,191 @@ impl Glyph {
         cx.notify();
     }
 
+    /// Opens (or closes, when open for it already) the "Add songs" panel of
+    /// playlist `id`.
+    pub fn toggle_add_songs(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_songs.as_ref().is_some_and(|a| a.open && a.id == id) {
+            self.close_add_songs(cx);
+            return;
+        }
+        self.show_queue = false;
+        self.add_songs = Some(AddSongs {
+            id: id.to_string(),
+            open: true,
+            tab: 0,
+            sugg: Vec::new(),
+            sugg_loading: false,
+            query: String::new(),
+            results: Vec::new(),
+            searching: false,
+            seq: 0,
+            task: None,
+        });
+        self.add_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+        let f = self.add_input.read(cx).focus.clone();
+        window.focus(&f, cx);
+        self.load_add_suggestions(cx);
+        cx.notify();
+    }
+
+    pub fn close_add_songs(&mut self, cx: &mut Context<Self>) {
+        if let Some(a) = self.add_songs.as_mut() {
+            a.open = false;
+            a.task = None;
+            cx.notify();
+        }
+    }
+
+    /// Songs similar to the playlist's own (a few spread over it), minus
+    /// what is in it already; liked songs seed an empty playlist.
+    fn load_add_suggestions(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        let Some(id) = self.add_songs.as_ref().map(|a| a.id.clone()) else { return };
+        let own: Vec<Track> = self.library.playlist(&id).map(|p| p.tracks.clone()).unwrap_or_default();
+        let pool = if own.is_empty() { self.library.liked.clone() } else { own };
+        let n = pool.len();
+        let k = n.min(5);
+        let mut seeds: Vec<Track> = (0..k).map(|i| pool[n - 1 - i * n / k].clone()).collect();
+        seeds.dedup_by(|a, b| a.id == b.id && a.source == b.source);
+        if seeds.is_empty() {
+            // Nothing to go on: what Home recommends.
+            let v: Vec<Track> = self.recs.iter().chain(self.trending.iter()).cloned().collect();
+            if let Some(a) = self.add_songs.as_mut() {
+                a.sugg = v;
+            }
+            return;
+        }
+        if let Some(a) = self.add_songs.as_mut() {
+            a.sugg_loading = true;
+        }
+        cx.spawn(async move |this, cx| {
+            let mut found: Vec<(Track, f32)> = Vec::new();
+            for seed in &seeds {
+                let sim = b.similar(seed).await.unwrap_or_default();
+                for (i, t) in sim.into_iter().take(30).enumerate() {
+                    let w = 1.0 - i as f32 / 40.0;
+                    let key = glyph_core::dedupe::track_key(&t);
+                    match found.iter_mut().find(|(x, _)| glyph_core::dedupe::track_key(x) == key) {
+                        Some(f) => f.1 += w,
+                        None => found.push((t, w)),
+                    }
+                }
+            }
+            found.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            this.update(cx, |s, cx| {
+                if s.add_songs.as_ref().is_none_or(|a| a.id != id) {
+                    return;
+                }
+                let have: HashSet<String> = s.library.playlist(&id).map(|p| p.tracks.iter().map(glyph_core::dedupe::track_key).collect()).unwrap_or_default();
+                let mut per: std::collections::HashMap<String, usize> = Default::default();
+                let v: Vec<Track> = found
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist) && !have.contains(&glyph_core::dedupe::track_key(t)))
+                    .filter(|t| {
+                        let n = per.entry(glyph_core::dedupe::normalize_artist(&t.artist)).or_default();
+                        *n += 1;
+                        *n <= 3
+                    })
+                    .take(50)
+                    .collect();
+                if let Some(a) = s.add_songs.as_mut() {
+                    a.sugg = v;
+                    a.sugg_loading = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Search inside the "Add songs" panel (first page only, after a short pause).
+    pub fn add_search(&mut self, q: String, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        let Some(a) = self.add_songs.as_mut() else { return };
+        if a.query == q {
+            return;
+        }
+        a.query = q.clone();
+        a.seq += 1;
+        a.results.clear();
+        let seq = a.seq;
+        let plain = glyph_core::taste::parse_query(q.trim()).0;
+        if plain.trim().is_empty() {
+            a.searching = false;
+            a.task = None;
+            cx.notify();
+            return;
+        }
+        a.searching = true;
+        a.task = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            let Some(mut stream) = guard(|| b.search_page(&plain, 0)) else { return };
+            while let Some(ev) = stream.next().await {
+                let done = matches!(ev, SearchEvent::Done);
+                let alive = this
+                    .update(cx, |s, cx| {
+                        let ok: Vec<Track> = match &ev {
+                            SearchEvent::Results { tracks, .. } => tracks.iter().filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist)).cloned().collect(),
+                            _ => Vec::new(),
+                        };
+                        let Some(a) = s.add_songs.as_mut().filter(|a| a.seq == seq) else { return false };
+                        for t in ok {
+                            if a.results.len() < 50 && !a.results.iter().any(|x| x.id == t.id && x.source == t.source) {
+                                a.results.push(t);
+                            }
+                        }
+                        if done {
+                            a.searching = false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if done || !alive {
+                    break;
+                }
+            }
+            this.update(cx, |s, cx| {
+                if let Some(a) = s.add_songs.as_mut().filter(|a| a.seq == seq) {
+                    a.searching = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    pub fn set_add_tab(&mut self, tab: u8, cx: &mut Context<Self>) {
+        if let Some(a) = self.add_songs.as_mut() {
+            a.tab = tab;
+            self.add_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+            cx.notify();
+        }
+    }
+
+    /// Adds `t` to the panel's playlist, or takes it out again.
+    pub fn add_songs_toggle(&mut self, t: Track, cx: &mut Context<Self>) {
+        let Some(id) = self.add_songs.as_ref().map(|a| a.id.clone()) else { return };
+        let at = self.library.playlist(&id).and_then(|p| p.tracks.iter().position(|x| x.id == t.id && x.source == t.source));
+        match at {
+            Some(i) => self.remove_from_list(&ListRef::User(id), i, cx),
+            None => self.add_to_playlist(&id, t, cx),
+        }
+    }
+
+    /// Drag-to-reorder in an own playlist.
+    pub fn move_in_playlist(&mut self, id: &str, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from != to && guard(|| self.library.move_in_playlist(id, from, to)).is_some() {
+            self.touch_list(&ListRef::User(id.to_string()), 0.3);
+            self.save_library(cx);
+        }
+        cx.notify();
+    }
+
     pub fn close_name_dialog(&mut self, cx: &mut Context<Self>) {
         if self.name_dialog.take().is_some() {
             cx.notify();
@@ -3159,6 +3880,7 @@ impl Glyph {
                 self.toast_sub(t("toast.eq_saved"), name);
             }
         } else if let Some(id) = d.rename {
+            self.touch_list(&ListRef::User(id.clone()), 0.3);
             if !typed.is_empty() && guard(|| self.library.rename_playlist(&id, &typed)).is_some() {
                 self.save_library(cx);
             }
@@ -3231,6 +3953,14 @@ impl Glyph {
         cx.notify();
     }
 
+    pub fn settings_group_k(&self, page: SettingsPage, open: bool) -> f32 {
+        self.settings_group_motion.get(&(page as usize)).map(|(at,from,to)| {
+            let k = (at.elapsed().as_secs_f32() / 0.18).min(1.0);
+            let ease = k * k * (3.0 - 2.0 * k);
+            from + (to - from) * ease
+        }).unwrap_or(if open { 1.0 } else { 0.0 })
+    }
+
     pub fn set_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.set_settings_tab(page, 0, cx);
     }
@@ -3240,6 +3970,16 @@ impl Glyph {
         if (page, sub) != (self.settings_page, self.settings_sub) {
             self.settings_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         }
+        if page != self.settings_page {
+            // The page being left folds its sub-tabs away instead of vanishing.
+            let old = self.settings_page;
+            let from = self.settings_group_k(old, !self.settings_collapsed.contains(&(old as usize)));
+            if from > 0.001 {
+                self.settings_group_motion.insert(old as usize, (Instant::now(), from, 0.0));
+            }
+        }
+        self.settings_collapsed.remove(&(page as usize));
+        self.settings_group_motion.remove(&(page as usize));
         self.settings_page = page;
         self.settings_sub = sub;
         self.open_select = None;
@@ -3506,6 +4246,14 @@ impl Glyph {
 
     pub fn set_audio_quality(&mut self, q: glyph_core::config::AudioQuality, cx: &mut Context<Self>) {
         self.config.audio.quality = q;
+        if let Some(player) = &self.player {
+            player.set_stream_quality(match q {
+                glyph_core::config::AudioQuality::Auto => "auto",
+                glyph_core::config::AudioQuality::Low => "low",
+                glyph_core::config::AudioQuality::Standard => "standard",
+                glyph_core::config::AudioQuality::High => "high",
+            });
+        }
         self.open_select = None;
         self.save_config(cx);
         self.push_config_to_backend(cx);
@@ -3545,6 +4293,23 @@ Language: {}",
             self.config.providers.enabled,
             self.lang.code(),
         )
+    }
+
+    pub fn set_music_reactivity(&mut self, v: f32, cx: &mut Context<Self>) {
+        self.config.visuals.music_reactivity = v.clamp(0.0, 1.0);
+        self.glow.update(cx, |g, _| g.set_music_reactivity(v));
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Settings -> Appearance -> colour theme.
+    pub fn set_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.config.visuals.theme = id.to_string();
+        crate::theme::set_theme(id);
+        let glow = crate::theme::glow_palette(id);
+        self.glow.update(cx, |g, _| g.set_theme(glow));
+        self.save_config(cx);
+        cx.notify();
     }
 
     pub fn set_intensity(&mut self, v: f32, cx: &mut Context<Self>) {
@@ -3605,6 +4370,8 @@ Language: {}",
             cx.notify();
             return;
         }
+        self.server_probe_seq += 1;
+        let seq = self.server_probe_seq;
         self.conn_test = Some(ConnTest::Running);
         cx.spawn(async move |this, cx| {
             let url = cfg.effective_server_url().to_string();
@@ -3612,18 +4379,25 @@ Language: {}",
                 .background_executor()
                 .spawn(async move {
                     let b = guard_async(Backend::new(cfg)).await?;
-                    guard(|| b.mode()).ok_or_else(|| "mode -> not implemented".to_string())
+                    Ok::<_, String>((b.mode(), b.server_auth_required()))
                 })
                 .await;
             this.update(cx, |s, cx| {
+                if s.server_probe_seq != seq || s.config.effective_server_url() != url { return; }
+                if let Ok((_, required)) = &r { s.server_auth_required = *required; }
                 s.conn_test = Some(match r {
-                    Ok(BackendMode::Server { server_version, .. }) => {
+                    Ok((BackendMode::Server { server_version, .. }, required)) => {
+                        if server_version == "offline" {
+                            s.conn_test = Some(ConnTest::Failed(if required { t("settings.server.bearer.required").to_string() } else { t("settings.server.unreachable").to_string() }));
+                            cx.notify();
+                            return;
+                        }
                         ConnTest::Ok(tf("settings.server.ok", &[("url", &url), ("v", &server_version)]).to_string())
                     }
-                    Ok(BackendMode::Incompatible { protocol_version, .. }) => ConnTest::Failed(
+                    Ok((BackendMode::Incompatible { protocol_version, .. }, _)) => ConnTest::Failed(
                         tf("status.incompatible", &[("v", &protocol_version)]).to_string(),
                     ),
-                    Ok(BackendMode::Direct) => {
+                    Ok((BackendMode::Direct, _)) => {
                         ConnTest::Failed(tf("settings.server.unreachable", &[("url", &url)]).to_string())
                     }
                     Err(e) => ConnTest::Failed(e),
@@ -3639,7 +4413,21 @@ Language: {}",
     pub fn apply_server(&mut self, cx: &mut Context<Self>) {
         self.config.server_url = self.server_input.read(cx).value.trim().to_string();
         self.save_config(cx);
-        self.retry_backend(cx);
+        let base = self.config.effective_server_url().to_string();
+        let token = self.server_bearer_input.read(cx).value.trim().to_string();
+        if self.server_auth_required && !token.is_empty() {
+            let expected_base = base.clone();
+            cx.spawn(async move |this,cx| {
+                let result = cx.background_executor().spawn(async move { glyph_core::server_access::store(&base,&token).map_err(|e| e.to_string()) }).await;
+                this.update(cx,|s,cx| {
+                    if s.config.effective_server_url() != expected_base { return; }
+                    match result {
+                    Ok(()) => { s.server_bearer_input.update(cx, |i,cx| i.set_value(String::new(),cx)); s.retry_backend(cx); },
+                    Err(e) => { s.conn_test = Some(ConnTest::Failed(e)); cx.notify(); }
+                    }
+                }).ok();
+            }).detach();
+        } else { self.retry_backend(cx); }
     }
 
     pub fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
@@ -3849,16 +4637,15 @@ impl Glyph {
     /// raster width needed for the hero to crop only at the sides
     /// (`object-fit: cover`), bucketed so resizing re-renders rarely. While a
     /// new width renders, the previous one stays up.
-    pub fn hero_image(&mut self, path: &std::path::Path, min_w: f32, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
-        const H: u32 = 460;
+    pub fn hero_image(&mut self, path: &std::path::Path, min_w: f32, h: u32, photo: bool, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
         const STEP: u32 = 320;
-        let ascii = self.config.visuals.ascii_covers;
+        let ascii = self.config.visuals.ascii_covers && !photo;
         let w = ((min_w.max(0.0) as u32).div_ceil(STEP) * STEP).max(1680);
-        let key = (path.to_path_buf(), ascii, w);
+        let key = (path.to_path_buf(), ascii, w, h);
         if let Some(Some(v)) = self.heroes.get(&key) {
             return Some(v.clone());
         }
-        let fallback = self.heroes.iter().find(|((p, a, _), v)| p == path && *a == ascii && v.is_some()).and_then(|(_, v)| v.clone());
+        let fallback = self.heroes.iter().find(|((p, a, _, hh), v)| p == path && *a == ascii && *hh == h && v.is_some()).and_then(|(_, v)| v.clone());
         if self.heroes.contains_key(&key) {
             return fallback;
         }
@@ -3869,16 +4656,16 @@ impl Glyph {
                 .background_executor()
                 .spawn(async move {
                     if ascii {
-                        crate::visuals::ascii::raster(&src, w, H, 0.3)
+                        crate::visuals::ascii::raster(&src, w, h, 0.3)
                     } else {
-                        crate::visuals::ascii::photo_fade(&src, w, H, 0.3)
+                        crate::visuals::ascii::photo_fade(&src, w, h, 0.3)
                     }
                 })
                 .await;
             this.update(cx, |s, cx| {
                 if let Some(img) = img {
                     // Other finished widths of this picture are superseded.
-                    let old: Vec<_> = s.heroes.keys().filter(|k| k.0 == key.0 && k.1 == key.1 && k.2 != key.2).cloned().collect();
+                    let old: Vec<_> = s.heroes.keys().filter(|k| k.0 == key.0 && k.1 == key.1 && k.3 == key.3 && k.2 != key.2).cloned().collect();
                     for k in old {
                         if let Some(Some(im)) = s.heroes.remove(&k) {
                             s.stale_heroes.push(im);
@@ -3905,7 +4692,7 @@ fn raw_handle(window: &Window) -> Option<raw_window_handle::RawWindowHandle> {
 }
 
 /// Raw main-window handle for souvlaki on Windows.
-fn window_hwnd(window: &Window) -> Option<usize> {
+pub(crate) fn window_hwnd(window: &Window) -> Option<usize> {
     #[cfg(windows)]
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};

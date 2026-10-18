@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
+use crate::visuals::Rgb;
 
 /// Body / titles.
 pub const FONT: &str = "Inter";
@@ -20,9 +21,57 @@ pub const GAP: f32 = 10.0;
 pub const RADIUS: f32 = 10.0;
 pub const WINDOW_RADIUS: f32 = 10.0;
 
-/// Window background (#030303, inside the #000–#050505 band).
+// ---- colour themes -------------------------------------------------------
+//
+// A theme sets the accent (everything that was Glyph pink), the glow colours
+// while no song is playing (a song's own colours still take over), and a
+// faint tint in the black base. Picked in Settings -> Appearance.
+
+pub struct Theme {
+    pub id: &'static str,
+    /// i18n key of its name.
+    pub name: &'static str,
+    pub accent: u32,
+    /// Glow colours dark -> bright; `None`: each view's own colours.
+    pub glow: Option<[u32; 3]>,
+    pub base: u32,
+}
+
+pub const THEMES: [Theme; 7] = [
+    Theme { id: "glyph", name: "theme.glyph", accent: 0xff5fd2, glow: None, base: 0x030303 },
+    Theme { id: "ember", name: "theme.ember", accent: 0xff8a3d, glow: Some([0x3a1206, 0xff6516, 0xffc04a]), base: 0x050302 },
+    Theme { id: "ocean", name: "theme.ocean", accent: 0x4da3ff, glow: Some([0x06124a, 0x1d5cff, 0x46dcff]), base: 0x020308 },
+    Theme { id: "forest", name: "theme.forest", accent: 0x3ddc84, glow: Some([0x04210f, 0x1f9d55, 0x9cf0b8]), base: 0x020503 },
+    Theme { id: "violet", name: "theme.violet", accent: 0xb07cff, glow: Some([0x16052f, 0x6526d6, 0xb88dff]), base: 0x040208 },
+    Theme { id: "crimson", name: "theme.crimson", accent: 0xff4d5e, glow: Some([0x360404, 0xb11d0b, 0xff6a4d]), base: 0x060202 },
+    Theme { id: "mono", name: "theme.mono", accent: 0xe8e8e8, glow: Some([0x101010, 0x5a5a5a, 0xd0d0d0]), base: 0x030303 },
+];
+
+/// The theme with `id` (unknown ids: the default).
+pub fn theme_by_id(id: &str) -> &'static Theme {
+    THEMES.iter().find(|t| t.id == id).unwrap_or(&THEMES[0])
+}
+
+thread_local! {
+    static ACCENT: std::cell::Cell<Hsla> = std::cell::Cell::new(gpui::rgb(0xff5fd2).into());
+    static BASE: std::cell::Cell<Hsla> = std::cell::Cell::new(gpui::rgb(0x030303).into());
+}
+
+/// The theme's glow colours as a palette for the background.
+pub fn glow_palette(id: &str) -> Option<crate::visuals::Palette> {
+    theme_by_id(id).glow.map(|[a, b, c]| crate::visuals::Palette([Rgb::hex(a), Rgb::hex(b), Rgb::hex(c)]))
+}
+
+/// Makes `id` the current theme (set before each frame).
+pub fn set_theme(id: &str) {
+    let t = theme_by_id(id);
+    ACCENT.with(|c| c.set(gpui::rgb(t.accent).into()));
+    BASE.with(|c| c.set(gpui::rgb(t.base).into()));
+}
+
+/// Window background (the theme's near-black base).
 pub fn bg() -> Hsla {
-    hsla(0.0, 0.0, 0.012, 1.0)
+    BASE.with(|c| c.get())
 }
 /// Floating panel fill: black at 68 %.
 pub fn panel() -> Hsla {
@@ -257,9 +306,15 @@ pub fn text_lg() -> Pixels {
     px(16.0)
 }
 
-/// Flat accent (logo, active states) when no song palette is set.
+/// The accent colour of the theme (Glyph pink by default).
 pub fn pink() -> Hsla {
-    gpui::rgb(0xff5fd2).into()
+    ACCENT.with(|c| c.get())
+}
+
+/// Dark tile in the accent's hue (Liked Songs, Downloads covers).
+pub fn accent_tile(l: f32, s: f32) -> Hsla {
+    let a = pink();
+    hsla(a.h, if a.s < 0.05 { 0.0 } else { s }, l, 1.0)
 }
 
 /// Flat card fill (#141414-like at 75 %).

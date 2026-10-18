@@ -390,7 +390,8 @@ fn command(bin: &Path) -> tokio::process::Command {
     {
         // No console window flashing up from the GUI app.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        c.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
     c
 }
@@ -403,6 +404,8 @@ async fn run(bin: &Path, args: &[String]) -> Result<Vec<u8>> {
 /// `partial_ok`: a failed exit still returns stdout when it has output (a
 /// batch where only some videos failed).
 async fn run_with(bin: &Path, args: &[String], timeout: Duration, partial_ok: bool) -> Result<Vec<u8>> {
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let _permit = SLOTS.acquire().await.map_err(|_| anyhow!("yt-dlp scheduler stopped"))?;
     let child = command(bin).args(args).spawn().with_context(|| format!("cannot start {}", bin.display()))?;
     let out = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -727,9 +730,9 @@ pub async fn download_audio(http: &reqwest::Client, a: &LocalAudio, dir: &Path) 
         data[from as usize..=to as usize].copy_from_slice(&body);
         crate::downloads::report(|p| p.add(body.len() as u64));
     }
-    std::fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.{}", a.video_id, ext_for(a.mime.as_deref())));
-    paths::write_atomic(&path, &data)?;
+    let dest = path.clone();
+    tokio::task::spawn_blocking(move || paths::write_atomic(&dest, &data)).await??;
     Ok(path)
 }
 
@@ -768,7 +771,7 @@ impl YtDlp {
             }
             Err(e) => return Err(e),
         };
-        prune_audio_cache(&dir, AUDIO_CACHE_MAX_BYTES);
+        tokio::task::spawn_blocking(move || prune_audio_cache(&dir, AUDIO_CACHE_MAX_BYTES));
         Ok(path)
     }
 
@@ -791,6 +794,9 @@ pub fn small_audio_dir() -> PathBuf {
 /// What the settings page shows about yt-dlp.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct YtDlpStatus {
+    pub latest_version: Option<String>,
+    pub update_available: Option<bool>,
+    pub update_error: Option<String>,
     pub path: Option<PathBuf>,
     /// `None` with a path: the binary did not answer `--version`.
     pub version: Option<String>,
@@ -809,12 +815,39 @@ pub async fn status(configured: Option<&str>) -> YtDlpStatus {
         None => None,
     };
     YtDlpStatus {
+        latest_version: None,
+        update_available: None,
+        update_error: None,
         managed: path.is_some() && path == managed_path(),
         path,
         version,
         js_runtime: find_js_runtime().map(|r| r.name.to_string()),
         can_install: release_asset().is_some(),
     }
+}
+
+fn release_version(value: &str) -> Option<[u32;3]> {
+    let mut parts=value.trim().trim_start_matches('v').split('.');
+    Some([parts.next()?.parse().ok()?,parts.next()?.parse().ok()?,parts.next()?.parse().ok()?])
+}
+
+pub async fn status_with_updates(configured: Option<&str>, http: &reqwest::Client) -> YtDlpStatus {
+    let latest=async {
+        let response=http.get("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest").timeout(Duration::from_secs(8)).send().await?.error_for_status()?;
+        let json:serde_json::Value=response.json().await?;
+        let tag=json["tag_name"].as_str().filter(|s| release_version(s).is_some()).ok_or_else(|| anyhow!("invalid yt-dlp release version"))?;
+        Ok::<_,anyhow::Error>(tag.trim_start_matches('v').to_string())
+    };
+    let (mut status,latest)=tokio::join!(status(configured),latest);
+    match latest {
+        Ok(latest) => {
+            status.update_available=status.version.as_deref().and_then(release_version).zip(release_version(&latest)).map(|(installed,new)| installed<new);
+            status.latest_version=Some(latest);
+            if status.version.is_some() && status.update_available.is_none() { status.update_error=Some("unrecognized installed version".into()); }
+        }
+        Err(_) => status.update_error=Some("release check unavailable".into()),
+    }
+    status
 }
 
 /// The official release archive for this OS / CPU. The "onedir" ZIPs are
@@ -1220,5 +1253,15 @@ mod tests {
         let f = dir.path().join(exe_name("my-ytdlp"));
         std::fs::write(&f, b"").unwrap();
         assert_eq!(locate(Some(f.to_str().unwrap())), Some(f));
+    }
+}
+
+#[cfg(test)]
+mod update_version_tests {
+    use super::*;
+    #[test] fn release_dates_are_compared_numerically() {
+        assert!(release_version("2026.9.1")<release_version("2026.10.1"));
+        assert_eq!(release_version("v2026.09.01"),release_version("2026.9.1"));
+        assert!(release_version("custom build").is_none());
     }
 }

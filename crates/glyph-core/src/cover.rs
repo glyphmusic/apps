@@ -11,7 +11,41 @@ use glyph_protocol::{ProviderId, Track};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
+
+/// Data saver on: covers are fetched in a small size.
+static DATA_SAVER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_data_saver(on: bool) {
+    DATA_SAVER.store(on, Ordering::Relaxed);
+}
+
+pub fn data_saver() -> bool {
+    DATA_SAVER.load(Ordering::Relaxed)
+}
+
+/// The same picture in a small size where the host has one in the URL
+/// (Deezer, YouTube, Audius, SoundCloud, Cover Art Archive).
+pub fn small_cover_url(url: &str) -> String {
+    let mut u = url.to_string();
+    for big in ["/1000x1000-", "/500x500-"] {
+        u = u.replace(big, "/250x250-");
+    }
+    for big in ["maxresdefault", "sddefault", "hqdefault"] {
+        u = u.replace(big, "mqdefault");
+    }
+    for big in ["1000x1000.jpg", "480x480.jpg"] {
+        u = u.replace(big, "150x150.jpg");
+    }
+    for big in ["-t500x500", "-original"] {
+        u = u.replace(big, "-t200x200");
+    }
+    if u.contains("coverartarchive.org") && u.ends_with("/front") {
+        u.push_str("-250");
+    }
+    u
+}
 
 pub const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024;
 /// Longest edge of a cached cover.
@@ -68,6 +102,9 @@ impl CoverCache {
         tokio::fs::create_dir_all(&self.dir).await?;
         if let Some(server) = &self.server {
             let mut candidate = track.clone();
+            if data_saver() {
+                candidate.cover_url = candidate.cover_url.map(|u| small_cover_url(&u));
+            }
             for _ in 0..2 {
                 // An older server has no /v1/cover: fall through to the direct chain.
                 let url = match server.cover_url(&candidate).await {
@@ -185,7 +222,16 @@ impl CoverCache {
     }
 
     async fn download_and_store(&self, url: &str, dest: &Path) -> Result<()> {
-        let resp = self.http.get(url).timeout(Duration::from_secs(10)).send().await?;
+        let small;
+        let url = if data_saver() {
+            small = small_cover_url(url);
+            small.as_str()
+        } else {
+            url
+        };
+        let request = self.http.get(url);
+        let request = self.server.as_ref().map(|s| s.authorize_url(self.http.get(url),url)).unwrap_or(request);
+        let resp = request.timeout(Duration::from_secs(10)).send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("HTTP {}", resp.status()));
         }

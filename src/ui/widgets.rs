@@ -24,24 +24,199 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
         .text_color(color)
 }
 
-/// Round/square icon button with a subtle hover.
-/// Hover tooltip (GPUI shows it after a short delay next to the cursor).
-pub struct Tip(pub SharedString);
+// ---- tooltips --------------------------------------------------------------
+//
+// Tooltips sit next to their button (below it, or above near the bottom edge
+// of the window) with a small arrow pointing at it, instead of at the mouse
+// where they could cover the button. Only one is open at a time. The first
+// waits a moment; once one was open, the next opens at once while the mouse
+// moves on within TIP_WARM_S.
 
-impl gpui::Render for Tip {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(9.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .bg(gpui::hsla(0.0, 0.0, 0.12, 0.98))
-            .border_1()
-            .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.08))
-            .font_family(theme::FONT)
-            .text_size(px(12.5))
-            .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
-            .child(self.0.clone())
+const TIP_DELAY: Duration = Duration::from_millis(500);
+const TIP_WARM_S: f32 = 0.8;
+const TIP_BG: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.12, a: 0.98 };
+
+struct TipNow {
+    win: gpui::WindowId,
+    label: SharedString,
+    /// The button, in window coordinates.
+    bounds: gpui::Bounds<gpui::Pixels>,
+    since: std::time::Instant,
+    wait: Duration,
+    /// Clicked: hidden until the mouse leaves the button.
+    dismissed: bool,
+}
+
+impl TipNow {
+    fn shown(&self) -> bool {
+        !self.dismissed && self.since.elapsed() >= self.wait
     }
+}
+
+thread_local! {
+    static TIP_NOW: std::cell::RefCell<Option<TipNow>> = const { std::cell::RefCell::new(None) };
+    /// When the last tooltip closed (tooltips stay "warm" for a moment).
+    static TIP_LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// A tooltip is open or one closed a moment ago: the next opens at once.
+pub fn tips_warm() -> bool {
+    TIP_NOW.with(|t| t.borrow().as_ref().is_some_and(TipNow::shown))
+        || TIP_LAST.with(|c| c.get().is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S))
+}
+
+/// A tooltip just closed (also the sidebar's own ones).
+pub fn tip_closed() {
+    TIP_LAST.with(|c| c.set(Some(std::time::Instant::now())));
+}
+
+/// Tracks hovering of a button with a tooltip (an invisible layer over it).
+fn tip_anchor(label: SharedString) -> gpui::Canvas<gpui::Hitbox> {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |bounds, hitbox, window, cx| {
+            let win = window.window_handle().window_id();
+            let view = window.current_view();
+            let hovered = hitbox.is_hovered(window) && !MOUSE_OUT.with(|o| o.borrow().contains(&win));
+            let start = TIP_NOW.with(|t| {
+                let mut t = t.borrow_mut();
+                let mine = t.as_ref().is_some_and(|n| n.win == win && n.bounds == bounds);
+                if hovered && !mine {
+                    let warm = t.as_ref().is_some_and(TipNow::shown)
+                        || TIP_LAST.with(|c| c.get().is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S));
+                    let wait = if warm { Duration::ZERO } else { TIP_DELAY };
+                    *t = Some(TipNow { win, label: label.clone(), bounds, since: std::time::Instant::now(), wait, dismissed: false });
+                    Some(wait)
+                } else {
+                    if !hovered && mine {
+                        if t.as_ref().is_some_and(TipNow::shown) {
+                            tip_closed();
+                        }
+                        *t = None;
+                        window.request_animation_frame();
+                    }
+                    None
+                }
+            });
+            // Show it once the wait is over.
+            if let Some(wait) = start {
+                if wait.is_zero() {
+                    window.request_animation_frame();
+                } else {
+                    window
+                        .spawn(cx, async move |cx| {
+                            cx.background_executor().timer(wait).await;
+                            cx.update(|_, cx| cx.notify(view)).ok();
+                        })
+                        .detach();
+                }
+            }
+            window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture {
+                    return;
+                }
+                let back = MOUSE_OUT.with(|o| o.borrow_mut().remove(&win));
+                if back || hitbox.is_hovered(window) != hovered {
+                    cx.notify(view);
+                }
+            });
+            window.on_mouse_event(move |_: &gpui::MouseExitEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture && hovered {
+                    MOUSE_OUT.with(|o| o.borrow_mut().insert(win));
+                    cx.notify(view);
+                }
+            });
+            // A click hides it (until the mouse comes back).
+            window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture && hovered {
+                    TIP_NOW.with(|t| {
+                        if let Some(n) = t.borrow_mut().as_mut().filter(|n| n.win == win && n.bounds == bounds) {
+                            n.dismissed = true;
+                        }
+                    });
+                    cx.notify(view);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Small arrow (a stepped triangle) pointing up, down or left at the button.
+#[derive(Clone, Copy, PartialEq)]
+pub enum TipArrow {
+    Up,
+    Down,
+    Left,
+}
+
+pub fn tip_arrow(dir: TipArrow) -> Div {
+    let mut steps = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+    if dir == TipArrow::Down {
+        steps.reverse();
+    }
+    let d = div().flex_none().flex().items_center();
+    let d = if dir == TipArrow::Left { d.flex_row() } else { d.flex_col() };
+    d.children(steps.into_iter().map(move |w| {
+        let b = div().flex_none().bg(TIP_BG);
+        if dir == TipArrow::Left { b.w(px(1.0)).h(px(w)) } else { b.h(px(1.0)).w(px(w)) }
+    }))
+}
+
+/// The tooltip box itself (shared with the sidebar tooltips).
+pub fn tip_box(label: SharedString) -> Div {
+    div()
+        .flex_none()
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .bg(TIP_BG)
+        .whitespace_nowrap()
+        .font_family(theme::FONT)
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.92))
+        .child(label)
+}
+
+/// The open tooltip of this window, if any: add it on top of the window.
+pub fn tooltip_layer(window: &mut Window) -> Option<AnyElement> {
+    let win = window.window_handle().window_id();
+    let (label, bounds, k) = TIP_NOW.with(|t| {
+        let t = t.borrow();
+        let n = t.as_ref().filter(|n| n.win == win && n.shown())?;
+        let k = ((n.since.elapsed().as_secs_f32() - n.wait.as_secs_f32()) / 0.12).clamp(0.0, 1.0);
+        Some((n.label.clone(), n.bounds, k))
+    })?;
+    if k < 1.0 {
+        window.request_animation_frame();
+    }
+    let e = 1.0 - (1.0 - k) * (1.0 - k);
+    // Below the button; above it when there is no room at the bottom.
+    let below = f32::from(bounds.bottom()) + 44.0 < f32::from(window.viewport_size().height);
+    let mid = bounds.center().x;
+    let gap = px(4.0 + 4.0 * (1.0 - e));
+    let pos = if below { gpui::point(mid, bounds.bottom() + gap) } else { gpui::point(mid, bounds.top() - gap) };
+    let body = div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .opacity(e)
+        .when(below, |d| d.child(tip_arrow(TipArrow::Up)))
+        .child(tip_box(label))
+        .when(!below, |d| d.child(tip_arrow(TipArrow::Down)));
+    Some(
+        gpui::deferred(
+            gpui::anchored()
+                .anchor(if below { gpui::Anchor::TopCenter } else { gpui::Anchor::BottomCenter })
+                .position(pos)
+                .snap_to_window_with_margin(px(6.0))
+                .child(body),
+        )
+        .with_priority(4)
+        .into_any_element(),
+    )
 }
 
 /// Tooltip text for an icon button (`tip.<icon>` in the language files).
@@ -54,14 +229,20 @@ pub fn tip_for(icon_name: &str) -> Option<SharedString> {
 /// Adds a tooltip with `label` to an element.
 pub fn with_tip(el: Stateful<Div>, label: Option<SharedString>) -> Stateful<Div> {
     match label {
-        Some(l) => el.tooltip(move |_, cx| cx.new(|_| Tip(l.clone())).into()),
+        Some(l) => el.relative().child(tip_anchor(l)),
         None => el,
     }
 }
 
 pub fn icon_button(id: impl Into<ElementId>, name: &str, size: f32, color: Hsla) -> Stateful<Div> {
-    let tip = tip_for(name);
-    with_tip(div().id(id), tip)
+    with_tip(icon_button_plain(id, name, size, color), tip_for(name))
+}
+
+/// [`icon_button`] without a tooltip (for buttons whose hover opens
+/// something of its own, like a volume slider).
+pub fn icon_button_plain(id: impl Into<ElementId>, name: &str, size: f32, color: Hsla) -> Stateful<Div> {
+    div()
+        .id(id)
         .flex_none()
         .flex()
         .items_center()
@@ -149,6 +330,112 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
                     .bg(color),
             )
         })
+}
+
+// ---- hover fades ---------------------------------------------------------
+//
+// GPUI's `.hover()` switches styles instantly. Cards and rows use
+// [`hover_fill`] instead: a fill behind the box's content that fades in when
+// the mouse arrives and out when it leaves. [`hover_k`] gives the same level
+// to things that appear on hover (action buttons, the cover's Edit overlay).
+
+thread_local! {
+    /// Windows the mouse has left (their hit test can still name the last box).
+    static MOUSE_OUT: std::cell::RefCell<std::collections::HashSet<gpui::WindowId>> = std::cell::RefCell::new(Default::default());
+    /// Per key: hovered, when that last changed, level at that moment.
+    static HOVERS: std::cell::RefCell<std::collections::HashMap<SharedString, (bool, std::time::Instant, f32)>> =
+        std::cell::RefCell::new(Default::default());
+}
+
+const HOVER_IN_S: f32 = 0.12;
+const HOVER_OUT_S: f32 = 0.24;
+
+fn hover_level(on: bool, at: std::time::Instant, from: f32) -> f32 {
+    let dur = if on { HOVER_IN_S } else { HOVER_OUT_S };
+    let t = (at.elapsed().as_secs_f32() / dur).min(1.0);
+    let e = 1.0 - (1.0 - t) * (1.0 - t);
+    if on { from + (1.0 - from) * e } else { from * (1.0 - e) }
+}
+
+/// Notes the hover state of `key` this frame; returns its level and whether
+/// it is still fading.
+fn hover_track(key: &SharedString, hovered: bool, instant: bool) -> (f32, bool) {
+    HOVERS.with(|h| {
+        let mut m = h.borrow_mut();
+        if m.len() > 2000 {
+            m.retain(|_, &mut (on, at, from)| on || hover_level(on, at, from) > 0.0);
+        }
+        let e = m.entry(key.clone()).or_insert((false, std::time::Instant::now(), 0.0));
+        if e.0 != hovered {
+            *e = (hovered, std::time::Instant::now(), hover_level(e.0, e.1, e.2));
+        }
+        if instant {
+            // Reduced motion: jump to the end.
+            *e = (hovered, std::time::Instant::now(), if hovered { 1.0 } else { 0.0 });
+        }
+        let k = hover_level(e.0, e.1, e.2);
+        (k, if e.0 { k < 1.0 } else { k > 0.0 })
+    })
+}
+
+/// Hover level 0..1 of the box whose [`hover_fill`] has `key`.
+pub fn hover_k(key: &str) -> f32 {
+    HOVERS.with(|h| h.borrow().get(key).map_or(0.0, |&(on, at, from)| hover_level(on, at, from)))
+}
+
+/// Straight blend from `a` to `b` (`k` 0..1), for colours that fade with hover.
+pub fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
+    let k = k.clamp(0.0, 1.0);
+    let (a, b) = (gpui::Rgba::from(a), gpui::Rgba::from(b));
+    gpui::Rgba { r: a.r + (b.r - a.r) * k, g: a.g + (b.g - a.g) * k, b: a.b + (b.b - a.b) * k, a: a.a + (b.a - a.a) * k }.into()
+}
+
+/// Fill in `color` that fades in while the mouse is over the parent box and
+/// out when it leaves. Add it as the first child of a `.relative()` box (it
+/// fills the box, behind the rest); `radius` matches the box's corners.
+pub fn hover_fill(key: impl Into<SharedString>, color: Hsla, radius: f32) -> gpui::Canvas<gpui::Hitbox> {
+    let key = key.into();
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+        move |bounds, hitbox, window, cx| {
+            let win = window.window_handle().window_id();
+            let hovered = hitbox.is_hovered(window) && !MOUSE_OUT.with(|o| o.borrow().contains(&win));
+            let (k, moving) = hover_track(&key, hovered, cx.reduce_motion());
+            if k > 0.0 && color.a > 0.0 {
+                window.paint_quad(gpui::quad(
+                    bounds,
+                    gpui::Corners::all(px(radius)),
+                    color.opacity(k),
+                    gpui::Edges::default(),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            }
+            if moving {
+                window.request_animation_frame();
+            }
+            // Re-render when the mouse crosses the edge (as `.hover()` does).
+            let view = window.current_view();
+            window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Capture {
+                    return;
+                }
+                let back = MOUSE_OUT.with(|o| o.borrow_mut().remove(&win));
+                if back || hitbox.is_hovered(window) != hovered {
+                    cx.notify(view);
+                }
+            });
+            // Leaving the window: let the box fade out.
+            window.on_mouse_event(move |_: &gpui::MouseExitEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture && hovered {
+                    MOUSE_OUT.with(|o| o.borrow_mut().insert(win));
+                    cx.notify(view);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// Floating flat panel: black 68 %, 1 px white-12 % border.
@@ -302,11 +589,14 @@ pub fn toggle(id: impl Into<ElementId>, on: bool, label: impl Into<SharedString>
 
 /// ASCII source badge `[AU]` (mono accent).
 pub fn badge(p: ProviderId) -> Div {
-    mono()
-        .flex_none()
-        .text_size(theme::text_xs())
-        .text_color(theme::text_faint())
-        .child(format!("[{}]", p.badge()))
+    // Hover names the source the abbreviation stands for.
+    let tip: SharedString = crate::i18n::tf("tip.source", &[("name", &p.display_name())]).into();
+    div().flex_none().child(
+        with_tip(mono().id(SharedString::from(format!("src-badge-{}", p.badge()))), Some(tip))
+            .text_size(theme::text_xs())
+            .text_color(theme::text_faint())
+            .child(format!("[{}]", p.badge())),
+    )
 }
 
 pub fn badges(t: &Track) -> Div {
@@ -353,6 +643,11 @@ thread_local! {
     /// Bar under the mouse (shows the knob) and the mouse fraction on it.
     static BAR_HOVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static BAR_HOVER_AT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Fraction under the mouse on bar `id`, while the mouse is over it.
+pub fn bar_hover(id: &str) -> Option<f32> {
+    (BAR_HOVER.with(|h| h.get()) == Some(id)).then(|| BAR_HOVER_AT.with(|h| h.get()).clamp(0.0, 1.0))
 }
 
 /// Formats a bar fraction for the little label above it ("1:23", "64%").
@@ -623,6 +918,20 @@ fn cover_inner(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Cont
 // keeps re-rendering while any skeleton is on screen (see `take_skeleton_seen`).
 
 thread_local! {
+    /// Settings -> Appearance -> ASCII effects (set every frame).
+    static ASCII_FX: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub fn set_ascii_effects(on: bool) {
+    ASCII_FX.with(|c| c.set(on));
+}
+
+/// ASCII reveal and shimmer are on.
+pub fn ascii_effects() -> bool {
+    ASCII_FX.with(|c| c.get())
+}
+
+thread_local! {
     static SKELETON_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SKELETON_T0: std::time::Instant = std::time::Instant::now();
 }
@@ -645,6 +954,10 @@ thread_local! {
 
 fn shimmer_block(cols: usize, rows: usize, fs: f32, seed: u32, radius: f32) -> Div {
     let _ = cols;
+    if !ascii_effects() {
+        // ASCII effects off: a plain, still box.
+        return div().size_full().rounded(px(radius)).bg(gpui::hsla(0.0, 0.0, 1.0, 0.06));
+    }
     div()
         .size_full()
         .overflow_hidden()
@@ -729,7 +1042,7 @@ fn seed_of(id: &str) -> u32 {
 /// A placeholder block with the ASCII shimmer while content loads.
 pub fn skeleton(id: impl Into<SharedString>, w: f32, h: f32, radius: f32) -> Div {
     let id: SharedString = id.into();
-    let fs = if h < 18.0 { (h * 0.95).max(6.0) } else { 9.0 };
+    let fs = if h < 18.0 { (h * 0.95).max(6.0) } else { 9.0f32.max((w * h / (0.6 * 1.05 * 1500.0)).sqrt()) };
     let cols = ((w / (fs * 0.6)).ceil() as usize).max(1);
     let rows = ((h / (fs * 1.05)).floor() as usize).max(1);
     div().flex_none().w(px(w)).h(px(h)).child(shimmer_block(cols, rows, fs, seed_of(&id), radius))
@@ -783,7 +1096,8 @@ pub fn set_viewport_h(h: f32) {
 
 /// Small "E" box in front of explicit song titles.
 pub fn explicit_badge() -> Div {
-    div()
+    // Hover says what the "E" means.
+    div().flex_none().child(with_tip(div().id("explicit-badge"), Some(t("tip.explicit")))
         .flex_none()
         .size(px(15.0))
         .rounded(px(3.0))
@@ -794,7 +1108,7 @@ pub fn explicit_badge() -> Div {
         .text_size(px(9.5))
         .font_weight(FontWeight::BOLD)
         .text_color(gpui::hsla(0.0, 0.0, 0.0, 0.85))
-        .child("E")
+        .child("E"))
 }
 
 /// A song title with the "E" box in front when it is explicit (truncates).
@@ -969,6 +1283,9 @@ const DECODE_RAMP: &[char] = &['#', '%', '&', '*', '+', '=', '-', ':', '.', '@',
 /// Progress 0..1 of the reveal for `key`, `dur` seconds long (starts the
 /// first time it is asked for).
 pub fn reveal_k(key: &str, dur: f32) -> f32 {
+    if !ascii_effects() {
+        return 1.0;
+    }
     REVEALS.with(|r| {
         let mut m = r.borrow_mut();
         if m.len() > 4000 {
@@ -982,6 +1299,20 @@ pub fn reveal_k(key: &str, dur: f32) -> f32 {
 /// Something is still revealing (the app keeps re-rendering).
 pub fn reveal_active() -> bool {
     REVEALS.with(|r| r.borrow().values().any(|at| at.elapsed().as_secs_f32() < 1.0))
+}
+
+/// Starts the reveal under `key` over (a label that just changed).
+pub fn reveal_restart(key: &str) {
+    REVEALS.with(|r| r.borrow_mut().insert(key.to_string(), std::time::Instant::now()));
+}
+
+/// Like [`reveal_k`], but only a reveal started with [`reveal_restart`]
+/// runs; anything else is shown finished.
+pub fn reveal_peek(key: &str, dur: f32) -> f32 {
+    if !ascii_effects() {
+        return 1.0;
+    }
+    REVEALS.with(|r| r.borrow().get(key).map_or(1.0, |at| (at.elapsed().as_secs_f32() / dur.max(0.01)).min(1.0)))
 }
 
 /// Forget reveals under `prefix` (e.g. a new search starts over).
@@ -1055,6 +1386,8 @@ pub fn track_row(
     let t = list[i].clone();
     let playing = app.current.as_ref().map(track_key) == Some(track_key(&t));
     let liked = app.is_liked(&t);
+    // Hidden explicit song: shown dimmed, does not play.
+    let blocked = !app.allowed(&t);
     let group: SharedString = format!("{id_prefix}-row-{i}").into();
     let l2 = list.clone();
     let (t_next, t_q, t_like, t_share) = (t.clone(), t.clone(), t.clone(), t.clone());
@@ -1076,7 +1409,6 @@ pub fn track_row(
                 this.open_ctx(t_menu.clone(), e.position, None, cx)
             }),
         )
-        .group(group.clone())
         .flex()
         .items_center()
         .gap(px(14.0))
@@ -1084,7 +1416,9 @@ pub fn track_row(
         .py(px(6.0))
         .rounded(px(8.0))
         .cursor_pointer()
-        .hover(|s| s.bg(theme::card()))
+        .when(blocked, |d| d.opacity(0.4))
+        .relative()
+        .child(hover_fill(group.clone(), theme::card(), 8.0))
         .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l2).clone(), i, cx)))
         .child(art)
         .child(
@@ -1131,8 +1465,7 @@ pub fn track_row(
                 .flex()
                 .flex_none()
                 .gap(px(2.0))
-                .opacity(0.0)
-                .group_hover(group, |s| s.opacity(1.0))
+                .opacity(hover_k(&group))
                 .child(
                     icon_button((id_prefix, i * 10 + 1), "list-start", 15.0, theme::text_dim())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1191,6 +1524,11 @@ pub fn tr(key: &str) -> SharedString {
 /// an edge only shows while there is more content beyond it (none at the very
 /// top / bottom). The caller sizes the returned wrapper; `el` should fill it.
 pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpui::ScrollHandle>) -> Div {
+    fade_edges_split(el, (color, h), (color, h), scroll)
+}
+
+/// [`fade_edges`] with its own colour and height for the top and the bottom edge.
+pub fn fade_edges_split(el: impl IntoElement, top: (Hsla, f32), bottom: (Hsla, f32), scroll: Option<&gpui::ScrollHandle>) -> Div {
     // Edges fade in with the distance scrolled (no pop), and a page that only
     // overflows by a few pixels counts as not scrollable at all.
     let (top_k, bottom_k) = match scroll {
@@ -1206,10 +1544,12 @@ pub fn fade_edges(el: impl IntoElement, color: Hsla, h: f32, scroll: Option<&gpu
         None => (1.0, 1.0),
     };
     let (show_top, show_bottom) = (top_k > 0.0, bottom_k > 0.0);
+    let (top_spec, bottom_spec) = (top, bottom);
     // The band also fades out towards its left and right ends (strips with
     // falling strength), so it has no hard corners against the background.
     const RAMP: [f32; 8] = [0.06, 0.16, 0.3, 0.45, 0.6, 0.74, 0.86, 0.95];
     let edge = |top: bool| {
+        let (color, h) = if top { top_spec } else { bottom_spec };
         let k = if top { top_k } else { bottom_k };
         let strip = move |f: f32| {
             let c = Hsla { a: color.a * k * f, ..color };
@@ -1279,6 +1619,9 @@ pub fn step_smooth_scroll() -> bool {
 thread_local! {
     /// Thumb being dragged: (scroll handle, mouse y at grab, scroll y at grab).
     static SCROLL_DRAG: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
+    /// Per scrollbar (keyed by its position): last offset seen, when it last
+    /// moved or was hovered, and whether the mouse is over it.
+    static SCROLL_SEEN: std::cell::RefCell<std::collections::HashMap<(i32, i32), (f32, Option<std::time::Instant>, bool)>> = Default::default();
 }
 
 /// Starts a new frame's list of wheel targets (called at the top of render).
@@ -1445,14 +1788,34 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                     let y = (-f32::from(handle.offset().y)).clamp(0.0, max);
                     let top = f32::from(bounds.origin.y) + (track_h - thumb_h) * (y / max);
                     let dragging = SCROLL_DRAG.with(|d| d.borrow().as_ref().is_some_and(|(h, _, _)| h.bounds() == handle.bounds()));
+                    // Shown while scrolling, dragging or hovered; fades out
+                    // after a second of stillness.
+                    let key = (f32::from(bounds.origin.x) as i32, f32::from(bounds.origin.y) as i32);
+                    let hot = bounds.dilate(px(4.0)).contains(&window.mouse_position());
+                    let idle = SCROLL_SEEN.with(|m| {
+                        let mut m = m.borrow_mut();
+                        let e = m.entry(key).or_insert((y, None, false));
+                        if (e.0 - y).abs() > 0.5 || dragging || hot {
+                            e.1 = Some(std::time::Instant::now());
+                        }
+                        e.0 = y;
+                        e.2 = hot;
+                        e.1.map_or(f32::MAX, |t| t.elapsed().as_secs_f32())
+                    });
+                    const HOLD: f32 = 0.9;
+                    const FADE: f32 = 0.35;
+                    let vis = (1.0 - (idle - HOLD) / FADE).clamp(0.0, 1.0);
+                    if idle < HOLD + FADE {
+                        window.request_animation_frame();
+                    }
                     let thumb = gpui::Bounds {
                         origin: gpui::point(bounds.origin.x + px(2.0), px(top)),
-                        size: gpui::size(px(4.0), px(thumb_h)),
+                        size: gpui::size(px(3.0), px(thumb_h)),
                     };
                     window.paint_quad(gpui::quad(
                         thumb,
-                        gpui::Corners::all(px(2.0)),
-                        gpui::hsla(0.0, 0.0, 1.0, if dragging { 0.4 } else { 0.18 }),
+                        gpui::Corners::all(px(1.5)),
+                        gpui::hsla(0.0, 0.0, 1.0, vis * if dragging { 0.28 } else if hot { 0.16 } else { 0.09 }),
                         gpui::Edges::default(),
                         gpui::transparent_black(),
                         gpui::BorderStyle::default(),
@@ -1491,9 +1854,129 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                     window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| {
                         SCROLL_DRAG.with(|d| *d.borrow_mut() = None);
                     });
+                    let v3 = view.clone();
+                    window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
+                        let over = bounds.dilate(px(4.0)).contains(&e.position);
+                        let was = SCROLL_SEEN.with(|m| m.borrow().get(&key).is_some_and(|s| s.2));
+                        if over != was {
+                            v3.update(cx, |_, cx| cx.notify()).ok();
+                        }
+                    });
                 },
             )
             .size_full(),
         )
         .into_any_element()
+}
+
+thread_local! {
+    /// Screen y of each virtual list's top edge, from the last frame.
+    static VLIST_TOP: std::cell::RefCell<std::collections::HashMap<&'static str, f32>> = Default::default();
+}
+
+/// A long list of fixed-height rows inside the page scroll frame `scroll`:
+/// only the rows near the visible part are built, the rest is empty space of
+/// the same height. Keeps scrolling smooth with hundreds of rows.
+pub fn virtual_rows(
+    key: &'static str,
+    n: usize,
+    pitch: f32,
+    scroll: &gpui::ScrollHandle,
+    mut row: impl FnMut(usize) -> AnyElement,
+) -> Div {
+    const OVERSCAN: usize = 8;
+    let vp = scroll.bounds();
+    let top = VLIST_TOP.with(|m| m.borrow().get(key).copied());
+    let (first, last) = match top {
+        Some(top) if f32::from(vp.size.height) > 0.0 => {
+            let a = ((f32::from(vp.top()) - top) / pitch).floor().max(0.0) as usize;
+            let b = ((f32::from(vp.bottom()) - top) / pitch).ceil().max(0.0) as usize;
+            (a.saturating_sub(OVERSCAN).min(n), (b + OVERSCAN).min(n))
+        }
+        // First frame: position unknown yet, build a screenful.
+        _ => (0, n.min(24)),
+    };
+    let first = first.min(last);
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .child(
+            gpui::canvas(
+                move |bounds, _, _| VLIST_TOP.with(|m| m.borrow_mut().insert(key, f32::from(bounds.origin.y))),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_0(),
+        )
+        .child(div().flex_none().h(px(first as f32 * pitch)))
+        .children((first..last).map(|i| div().flex_none().h(px(pitch)).child(row(i)).into_any_element()))
+        .child(div().flex_none().h(px((n - last) as f32 * pitch)))
+}
+
+thread_local! {
+    /// Drag-to-reorder lists: eased shift of each row (by list key), and when
+    /// a row last moved.
+    static DRAG_SHIFT: std::cell::RefCell<std::collections::HashMap<&'static str, (std::collections::HashMap<usize, (f32, std::time::Instant)>, Option<std::time::Instant>)>> = Default::default();
+}
+
+/// Vertical shift of row `i` of list `key` while row `from` is dragged to
+/// slot `to` (`drag`): the rows in between glide one `pitch` aside to make
+/// room, easing there instead of jumping. `None` (no drag) snaps back.
+pub fn drag_shift(key: &'static str, i: usize, drag: Option<(usize, usize)>, pitch: f32) -> f32 {
+    DRAG_SHIFT.with(|m| {
+        let mut m = m.borrow_mut();
+        let Some((from, to)) = drag else {
+            m.remove(key);
+            return 0.0;
+        };
+        let target = if from < i && i <= to {
+            -pitch
+        } else if to <= i && i < from {
+            pitch
+        } else {
+            0.0
+        };
+        let (rows, moving) = m.entry(key).or_default();
+        let now = std::time::Instant::now();
+        let (cur, at) = rows.entry(i).or_insert((0.0, now));
+        let dt = now.duration_since(*at).as_secs_f32().clamp(0.0, 0.05);
+        *cur += (target - *cur) * (1.0 - (-dt / 0.06).exp());
+        *at = now;
+        if (target - *cur).abs() > 0.5 {
+            *moving = Some(now);
+        } else {
+            *cur = target;
+        }
+        *cur
+    })
+}
+
+/// A reorder animation still has distance to go (keeps frames coming).
+pub fn drag_shift_running() -> bool {
+    DRAG_SHIFT.with(|m| m.borrow().values().any(|(_, t)| t.is_some_and(|t| t.elapsed().as_secs_f32() < 0.2)))
+}
+
+thread_local! {
+    /// Last press of the transport buttons, for the little "pop" when clicked.
+    static PRESSED: std::cell::RefCell<std::collections::HashMap<&'static str, std::time::Instant>> = Default::default();
+}
+
+const PRESS_SECS: f32 = 0.22;
+
+/// Marks a button as just pressed.
+pub fn press(id: &'static str) {
+    PRESSED.with(|m| m.borrow_mut().insert(id, std::time::Instant::now()));
+}
+
+/// 1 right after a press, easing back to 0.
+pub fn press_k(id: &'static str) -> f32 {
+    PRESSED.with(|m| m.borrow().get(id).map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / PRESS_SECS).clamp(0.0, 1.0).powi(2)))
+}
+
+/// A press animation is still running (keeps frames coming).
+pub fn press_running() -> bool {
+    PRESSED.with(|m| m.borrow().values().any(|t| t.elapsed().as_secs_f32() < PRESS_SECS))
 }

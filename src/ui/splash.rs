@@ -254,3 +254,179 @@ fn paint(bounds: Bounds<Pixels>, t: f32, particles: &[Particle], fade_out: f32, 
         }
     }
 }
+
+// ---- the note as a live logo (Settings -> About) ---------------------------
+//
+// The same characters assemble into the note when the page opens (like the
+// splash, inside a small box), then react to the mouse like the landing page:
+// characters near the cursor are pushed out of a bubble, a spring pulls them
+// home and they push each other apart; now and then one flickers in the accent.
+
+struct Logo {
+    born: Instant,
+    seen: Instant,
+    /// Per character: offset from its home and velocity.
+    off: Vec<[f32; 4]>,
+    /// Per character: flicker until (seconds since born) and the stand-in.
+    glitch: Vec<(f32, char)>,
+    seed: u32,
+}
+
+thread_local! {
+    static LOGO: std::cell::RefCell<Option<Logo>> = const { std::cell::RefCell::new(None) };
+    static LOGO_PARTS: Arc<Vec<Particle>> = Splash::new().particles;
+}
+
+/// The note logo, `row_h` px per character row.
+pub fn note_logo(row_h: f32) -> impl IntoElement {
+    let cols = ART[0].len() as f32;
+    let rows = ART.len() as f32;
+    let cell_w = row_h / CELL_ASPECT;
+    let pad = row_h * 2.0;
+    canvas(|_, _, _| (), move |bounds: Bounds<Pixels>, _, window, cx| paint_logo(bounds, row_h, window, cx))
+        .w(px(cols * cell_w + pad * 2.0))
+        .h(px(rows * row_h + pad * 2.0))
+}
+
+fn paint_logo(bounds: Bounds<Pixels>, row_h: f32, window: &mut gpui::Window, cx: &mut App) {
+    let parts = LOGO_PARTS.with(|p| p.clone());
+    let settled = parts.iter().map(|p| p.delay + p.dur).fold(0.0f32, f32::max);
+    let still = cx.reduce_motion();
+    let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    let (cx_, cy_) = (f32::from(bounds.origin.x) + w / 2.0, f32::from(bounds.origin.y) + h / 2.0);
+    let cols = ART[0].len() as f32;
+    let rows = ART.len() as f32;
+    let cell_h = row_h;
+    let cell_w = row_h / CELL_ASPECT;
+    let (left, top) = (cx_ - cols * cell_w / 2.0, cy_ - rows * cell_h / 2.0);
+    let reach = w.max(h) * 0.9;
+    let at = |p: &Particle, e: f32| -> (f32, f32) {
+        let a = p.angle;
+        let side = (a + std::f32::consts::FRAC_PI_2).sin_cos();
+        let (sx, sy) = (cx_ + reach * a.cos() + side.1 * p.lane * 40.0, cy_ + reach * a.sin() + side.0 * p.lane * 40.0);
+        let ca = a + p.swirl;
+        let (kx, ky) = (cx_ + reach * 0.55 * ca.cos(), cy_ + reach * 0.55 * ca.sin());
+        let (tx, ty) = (left + p.col * cell_w, top + p.row * cell_h);
+        let u = 1.0 - e;
+        (u * u * sx + 2.0 * u * e * kx + e * e * tx, u * u * sy + 2.0 * u * e * ky + e * e * ty)
+    };
+    let mouse = window.mouse_position();
+    let mouse = bounds.contains(&mouse).then(|| (f32::from(mouse.x), f32::from(mouse.y)));
+
+    LOGO.with(|l| {
+        let mut l = l.borrow_mut();
+        // Shown already assembled (no fly-in); it only reacts to the mouse.
+        if l.as_ref().is_none_or(|s| s.seen.elapsed().as_secs_f32() > 1.0 || s.off.len() != parts.len()) {
+            let now = Instant::now();
+            *l = Some(Logo {
+                born: now.checked_sub(std::time::Duration::from_secs_f32(settled)).unwrap_or(now),
+                seen: Instant::now(),
+                off: vec![[0.0; 4]; parts.len()],
+                glitch: vec![(0.0, ' '); parts.len()],
+                seed: 1,
+            });
+        }
+        let Some(s) = l.as_mut() else { return };
+        s.seen = Instant::now();
+        let t = if still { settled } else { s.born.elapsed().as_secs_f32() };
+
+        if !still {
+            // Flicker: now and then one character turns into another for a moment.
+            s.seed = s.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if t > settled && (s.seed >> 8) % 100 < 18 {
+                const FLICKER: [char; 5] = ['.', '-', '+', '#', '0'];
+                let i = (s.seed >> 3) as usize % parts.len();
+                s.glitch[i] = (t + 0.12 + rnd(s.seed, 9) * 0.2, FLICKER[(s.seed >> 13) as usize % FLICKER.len()]);
+            }
+            // Spring home, cursor bubble, characters pushing each other apart.
+            let bubble = row_h * 4.5;
+            let gap = cell_w * 0.95;
+            let pos: Vec<(f32, f32)> = parts
+                .iter()
+                .zip(&s.off)
+                .map(|(p, o)| {
+                    let e = ease_in_out(((t - p.delay) / p.dur).clamp(0.0, 1.0));
+                    let (x, y) = at(p, e);
+                    (x + o[0] + cell_w / 2.0, y + o[1] + cell_h / 2.0)
+                })
+                .collect();
+            for (i, o) in s.off.iter_mut().enumerate() {
+                o[2] -= o[0] * 0.06;
+                o[3] -= o[1] * 0.06;
+                let (x, y) = pos[i];
+                if let Some((mx, my)) = mouse {
+                    let (dx, dy) = (x - mx, y - my);
+                    let d = (dx * dx + dy * dy).sqrt().max(0.01);
+                    if d < bubble {
+                        let f = (bubble - d) / bubble * 2.2;
+                        o[2] += dx / d * f;
+                        o[3] += dy / d * f;
+                    }
+                }
+                if t >= settled && (o[0].abs() > 0.05 || o[1].abs() > 0.05 || mouse.is_some()) {
+                    for (j, &(qx, qy)) in pos.iter().enumerate() {
+                        let (dx, dy) = (x - qx, y - qy);
+                        if j == i || dx.abs() >= gap || dy.abs() >= gap {
+                            continue;
+                        }
+                        let d = (dx * dx + dy * dy).sqrt();
+                        if d < gap && d > 0.001 {
+                            let f = (gap - d) / gap * 0.5;
+                            o[2] += dx / d * f;
+                            o[3] += dy / d * f;
+                        }
+                    }
+                }
+            }
+            for o in s.off.iter_mut() {
+                o[2] *= 0.78;
+                o[3] *= 0.78;
+                o[0] += o[2];
+                o[1] += o[3];
+            }
+            window.request_animation_frame();
+        }
+
+        // Draw: shaped glyphs per (character, colour, alpha step), reused.
+        let font_size = px(row_h * 0.95);
+        let font = gpui::Font { weight: gpui::FontWeight::BOLD, ..gpui::font(crate::theme::MONO) };
+        let white = gpui::hsla(0.0, 0.0, 0.96, 1.0);
+        let pink = crate::theme::pink();
+        let mut shaped: HashMap<(char, bool, u8), gpui::ShapedLine> = HashMap::new();
+        for (i, p) in parts.iter().enumerate() {
+            let raw = ((t - p.delay) / p.dur).clamp(0.0, 1.0);
+            if raw <= 0.0 {
+                continue;
+            }
+            let e = ease_in_out(raw);
+            let glitching = s.glitch[i].0 > t;
+            let ch = if glitching { s.glitch[i].1 } else { p.ch };
+            let is_pink = p.pink || glitching;
+            let trail: &[(f32, f32)] = if raw < 1.0 { &[(0.07, 0.18), (0.035, 0.4), (0.0, 1.0)] } else { &[(0.0, 1.0)] };
+            for (back, alpha) in trail {
+                let (x, y) = at(p, (e - back).max(0.0));
+                let step = (alpha.clamp(0.0, 1.0) * 12.0).round() as u8;
+                let line = shaped
+                    .entry((ch, is_pink, step))
+                    .or_insert_with(|| {
+                        let base: Hsla = if is_pink { pink } else { white };
+                        window.text_system().shape_line(
+                            SharedString::from(ch.to_string()),
+                            font_size,
+                            &[TextRun {
+                                len: ch.len_utf8(),
+                                font: font.clone(),
+                                color: Hsla { a: step as f32 / 12.0, ..base },
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            None,
+                        )
+                    })
+                    .clone();
+                let _ = line.paint(point(px(x + s.off[i][0]), px(y + s.off[i][1])), px(cell_h), TextAlign::Left, None, window, cx);
+            }
+        }
+    });
+}

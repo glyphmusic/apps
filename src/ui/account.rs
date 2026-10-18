@@ -502,7 +502,9 @@ impl Glyph {
             if this.update(cx, |s, cx| s.sync_now(cx)).is_err() {
                 return;
             }
-            cx.background_executor().timer(SYNC_EVERY).await;
+            // Data saver: sync a quarter as often.
+            let saver = this.update(cx, |s, _| s.config.storage.data_saver).unwrap_or(false);
+            cx.background_executor().timer(if saver { SYNC_EVERY * 4 } else { SYNC_EVERY }).await;
         })
         .detach();
     }
@@ -878,11 +880,15 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
             .enumerate()
             .map(|(i, dev)| {
                 let id = dev.id.clone();
-                let desc: SharedString = format!("{} · {}", dev.platform, when_ms(dev.last_seen)).into();
+                let location = dev.approximate_location.as_deref().map(|s| format!("≈ {s}")).unwrap_or_else(|| t("account.devices.location_unknown").to_string());
+                let desc: SharedString = format!("{} · {} · {}", dev.platform, when_ms(dev.last_seen), location).into();
                 let control = if dev.current {
-                    div().text_size(px(12.5)).text_color(white(0.5)).child(t("account.devices.this")).into_any_element()
+                    div().flex().items_center().gap(px(12.0))
+                        .child(div().text_size(px(12.5)).text_color(white(0.5)).child(t("account.devices.this")))
+                        .child(danger_button(("acct-dev-self", i), t("account.devices.signout")).on_click(cx.listener(|this, _, _, cx| this.account_sign_out(cx))))
+                        .into_any_element()
                 } else {
-                    danger_button(("acct-dev-rm", i), t("account.devices.remove"))
+                    danger_button(("acct-dev-rm", i), t("account.devices.signout"))
                         .on_click(cx.listener(move |this, _, _, cx| this.account_remove_device(id.clone(), cx)))
                         .into_any_element()
                 };

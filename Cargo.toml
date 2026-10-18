@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/glyphmusic/desktop"
@@ -32,6 +32,8 @@ license.workspace = true
 description = "Native music app: search everywhere, play only from legal free sources."
 
 [dependencies]
+serde_json.workspace = true
+unicode-segmentation = "1"
 glyph-protocol.workspace = true
 glyph-core.workspace = true
 glyph-audio.workspace = true
@@ -53,6 +55,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Threading",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_UI_Shell",
@@ -76,6 +79,27 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+# The large GPUI binary spends substantial edit-build time generating debug
+# tables. Keep optimized rendering, but omit those tables for normal UI work.
+# Opt back in with --config 'profile.dev.package.glyph.debug=1'.
+[profile.dev.package.glyph]
+debug = false
+
+# Local test builds: release speed for the app, but no LTO, parallel
+# codegen and incremental rebuilds, so an edit rebuilds in a fraction of the
+# time. `cargo build --profile fast` -> target/fast/glyph.exe. Ship with release.
+[profile.fast]
+inherits = "release"
+# `false` still permits local ThinLTO; `off` fully disables it for iteration.
+lto = "off"
+codegen-units = 256
+incremental = true
+strip = false
+
+[profile.fast.package."*"]
+codegen-units = 16
+incremental = false
 
 [profile.release]
 lto = "thin"

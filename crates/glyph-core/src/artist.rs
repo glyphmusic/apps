@@ -65,8 +65,8 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
     let api = format!("https://{lang}.wikipedia.org/w/api.php");
     let api = reqwest::Url::parse_with_params(&api, &[("action", "query"), ("list", "search"), ("srsearch", name), ("srlimit", "5"), ("format", "json")])?;
     let api = server.map(|s| s.upstream_url(api.as_str())).unwrap_or_else(|| api.into());
-    let found: Value = http
-        .get(api)
+    let request = server.map(|s| s.authorize_url(http.get(&api),&api)).unwrap_or_else(|| http.get(&api));
+    let found: Value = request
         .timeout(Duration::from_secs(8))
         .send()
         .await?
@@ -81,7 +81,8 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
         let mut url = reqwest::Url::parse(&format!("https://{lang}.wikipedia.org/api/rest_v1/page/summary/"))?;
         url.path_segments_mut().map_err(|_| anyhow::anyhow!("bad url"))?.pop_if_empty().push(&title.replace(' ', "_"));
         let url = server.map(|s| s.upstream_url(url.as_str())).unwrap_or_else(|| url.into());
-        let s: Value = http.get(url).timeout(Duration::from_secs(8)).send().await?.error_for_status()?.json().await?;
+        let request = server.map(|s| s.authorize_url(http.get(&url),&url)).unwrap_or_else(|| http.get(&url));
+        let s: Value = request.timeout(Duration::from_secs(8)).send().await?.error_for_status()?.json().await?;
         if s["type"].as_str() == Some("disambiguation") {
             continue;
         }
@@ -97,7 +98,7 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
         let image = match img_url {
             Some(u) => {
                 let u = server.map(|s| s.upstream_url(&u)).unwrap_or(u);
-                fetch_image(http, &u).await.ok()
+                fetch_image(http, &u, server).await.ok()
             },
             None => None,
         };
@@ -107,20 +108,19 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
 }
 
 /// Downloads the photo into the cache (longest edge 1280 px, JPEG).
-async fn fetch_image(http: &reqwest::Client, url: &str) -> Result<PathBuf> {
+async fn fetch_image(http: &reqwest::Client, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<PathBuf> {
     let dir = paths::cache_dir().join("artists");
-    let path = dir.join(format!("{}.jpg", paths::hash_hex(url)));
+    let path = dir.join(format!("{}.webp", paths::hash_hex(url)));
     if path.is_file() {
         return Ok(path);
     }
-    let bytes = http.get(url).timeout(Duration::from_secs(15)).send().await?.error_for_status()?.bytes().await?;
+    let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
+    let bytes = request.timeout(Duration::from_secs(15)).send().await?.error_for_status()?.bytes().await?;
     let dest = path.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        use image::codecs::jpeg::JpegEncoder;
         let img = image::load_from_memory(&bytes)?;
         let img = if img.width().max(img.height()) > 1280 { img.thumbnail(1280, 1280) } else { img };
-        let mut out = Vec::new();
-        JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img.to_rgb8())?;
+        let out = crate::profile_images::encode_webp(&img,80.0)?;
         std::fs::create_dir_all(&dir)?;
         paths::write_atomic(&dest, &out)
     })

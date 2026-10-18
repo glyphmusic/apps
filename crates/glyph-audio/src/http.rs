@@ -5,7 +5,29 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Mutex;
 use std::time::Duration;
 
+static SERVER_ACCESS: std::sync::RwLock<Option<(String,String)>> = std::sync::RwLock::new(None);
+pub fn set_server_access(value: Option<(String,String)>) { *SERVER_ACCESS.write().unwrap() = value; }
+type AccountAccess = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+static ACCOUNT_ACCESS: std::sync::RwLock<Option<AccountAccess>> = std::sync::RwLock::new(None);
+pub fn set_account_access_provider(provider: AccountAccess) { *ACCOUNT_ACCESS.write().unwrap() = Some(provider); }
+fn account_credential(url: &str) -> Option<reqwest::header::HeaderValue> {
+    let token = ACCOUNT_ACCESS.read().unwrap().as_ref()?(url)?;
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+    value.set_sensitive(true);
+    Some(value)
+}
+fn credential(url: &str) -> Option<reqwest::header::HeaderValue> {
+    let guard = SERVER_ACCESS.read().unwrap();
+    let (base,token) = guard.as_ref()?;
+    let (base,url) = (reqwest::Url::parse(base).ok()?,reqwest::Url::parse(url).ok()?);
+    if base.origin() != url.origin() || !url.path().starts_with(&format!("{}/",base.path().trim_end_matches('/'))) { return None; }
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+    value.set_sensitive(true);
+    Some(value)
+}
+
 const CHUNK: u64 = 384 * 1024;
+const FIRST_CHUNK: u64 = 64 * 1024;
 const RETRIES: usize = 3;
 
 pub fn client() -> reqwest::Result<reqwest::blocking::Client> {
@@ -47,26 +69,43 @@ pub struct HttpSource {
     buf: Vec<u8>,
     buf_start: u64,
     mode: Mode,
+    bearer: Option<reqwest::header::HeaderValue>,
+    account: Option<reqwest::header::HeaderValue>,
 }
 
 fn io_err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+fn read_progress(reader: &mut impl Read, limit: u64, out: &mut Vec<u8>, transfer: &glyph_protocol::network::Transfer) -> io::Result<()> {
+    let mut body=reader.take(limit);
+    let mut block=[0u8;16*1024];
+    loop {
+        let n=body.read(&mut block)?;
+        if n==0 {return Ok(());}
+        transfer.progress();
+        out.extend_from_slice(&block[..n]);
+    }
+}
+
 impl HttpSource {
     pub fn open(url: &str) -> io::Result<Self> {
-        let client = client().map_err(io_err)?;
+        let bearer = credential(url);
+        let account = account_credential(url);
+        let client = if bearer.is_some() || account.is_some() { reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).build() } else { client() }.map_err(io_err)?;
         let mut last = None;
         for attempt in 0..RETRIES {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(300 * attempt as u64));
             }
-            match client
-                .get(url)
-                .header(reqwest::header::RANGE, range_header(0, CHUNK, None))
+            let request = client.get(url);
+            let request = if let Some(value) = &account { request.header(reqwest::header::AUTHORIZATION, value.clone()) } else { request };
+            let request = if let Some(value) = &bearer { request.header("x-glyph-server-authorization",value.clone()) } else { request };
+            match request
+                .header(reqwest::header::RANGE, range_header(0, FIRST_CHUNK, None))
                 .send()
             {
-                Ok(resp) => return Self::from_first_response(client, url, resp),
+                Ok(resp) => return Self::from_first_response(client, url, resp, account),
                 Err(e) => last = Some(e),
             }
         }
@@ -77,6 +116,7 @@ impl HttpSource {
         client: reqwest::blocking::Client,
         url: &str,
         mut resp: reqwest::blocking::Response,
+        account: Option<reqwest::header::HeaderValue>,
     ) -> io::Result<Self> {
         let status = resp.status();
         if status.as_u16() == 206 {
@@ -87,9 +127,14 @@ impl HttpSource {
                 .and_then(parse_content_range_total)
                 .ok_or_else(|| io_err("206 response without total length"))?;
             let mut buf = Vec::new();
-            resp.read_to_end(&mut buf)?;
+            let started = std::time::Instant::now();
+            (&mut resp).take(FIRST_CHUNK + 1).read_to_end(&mut buf)?;
+            if buf.len() as u64 > FIRST_CHUNK { return Err(io_err("range response exceeds requested chunk")); }
+            glyph_protocol::network::observe(buf.len() as u64, started.elapsed());
             Ok(Self {
                 client,
+                bearer: credential(url),
+                account,
                 url: url.into(),
                 pos: 0,
                 buf,
@@ -100,11 +145,13 @@ impl HttpSource {
             let total = resp.content_length();
             Ok(Self {
                 client,
+                bearer: credential(url),
                 url: url.into(),
                 pos: 0,
                 buf: Vec::new(),
                 buf_start: 0,
                 mode: Mode::Sequential { body: Mutex::new(resp), total },
+                account,
             })
         } else {
             Err(io_err(format!("HTTP {status}")))
@@ -129,10 +176,14 @@ impl HttpSource {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(300 * attempt as u64));
             }
-            let r = self
-                .client
-                .get(&self.url)
-                .header(reqwest::header::RANGE, range_header(at, CHUNK, Some(total)))
+            let transfer = glyph_protocol::network::Transfer::start();
+            let request = self.client.get(&self.url);
+            let chunk_bytes = glyph_protocol::network::chunk_bytes().min(CHUNK);
+            let started = std::time::Instant::now();
+            let request = if let Some(value) = &self.account { request.header(reqwest::header::AUTHORIZATION, value.clone()) } else { request };
+            let request = if let Some(value) = &self.bearer { request.header("x-glyph-server-authorization",value.clone()) } else { request };
+            let r = request
+                .header(reqwest::header::RANGE, range_header(at, chunk_bytes, Some(total)))
                 .timeout(Duration::from_secs(20))
                 .send()
                 .and_then(|r| r.error_for_status());
@@ -142,8 +193,10 @@ impl HttpSource {
                         return Err(io_err("server stopped honouring Range requests"));
                     }
                     let mut buf = Vec::with_capacity(CHUNK as usize);
-                    match resp.read_to_end(&mut buf) {
+                    match read_progress(&mut resp, chunk_bytes + 1, &mut buf, &transfer) {
                         Ok(_) => {
+                            if buf.len() as u64 > chunk_bytes { return Err(io_err("range response exceeds requested chunk")); }
+                            glyph_protocol::network::observe(buf.len() as u64, started.elapsed());
                             self.buf = buf;
                             self.buf_start = at;
                             return Ok(());

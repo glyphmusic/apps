@@ -13,6 +13,50 @@ use std::rc::Rc;
 use std::time::Duration;
 
 const SIDE_W: f32 = 300.0;
+/// Width of the seek bar.
+const SEEK_W: f32 = 340.0;
+
+thread_local! {
+    /// A-B loop end being dragged (`true`: the start), and the seek bar's
+    /// left edge in window coordinates (measured while painting).
+    static LOOP_DRAG: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static SEEK_X: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    /// Width of the whole bar (measured while painting).
+    static BAR_W: std::cell::Cell<f32> = const { std::cell::Cell::new(f32::MAX) };
+}
+
+/// Below this bar width the volume slider folds into its button (it would
+/// run into the seek bar) and opens above it on hover.
+const VOL_FOLD_W: f32 = 1010.0;
+
+/// One end of the A-B loop: a tick that grows under the mouse and can be
+/// dragged along the seek bar.
+fn loop_handle(start: bool, x: f32, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    let key = if start { "loop-a" } else { "loop-b" };
+    let k = if LOOP_DRAG.with(|d| d.get()) == Some(start) { 1.0 } else { hover_k(key) };
+    div()
+        .id(key)
+        .absolute()
+        .top(px(-8.0))
+        .left(px(x - 7.0))
+        .w(px(14.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .occlude()
+        .cursor(gpui::CursorStyle::ResizeLeftRight)
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |_, _, _, cx| {
+                cx.stop_propagation();
+                LOOP_DRAG.with(|d| d.set(Some(start)));
+                cx.notify();
+            }),
+        )
+        .child(div().w(px(2.0 + 2.0 * k)).h(px(12.0 + 6.0 * k)).rounded(px(2.0)).bg(theme::pink()))
+        .child(hover_fill(key, gpui::transparent_black(), 0.0))
+}
 /// Cover size of the current song (its ASCII reveal replays on every song change).
 pub(crate) const COVER: f32 = 48.0;
 
@@ -65,13 +109,14 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         Some(tr) => {
             let liked = app.is_liked(&tr);
             let art = cover(app, &tr, COVER, 6.0, cx);
+            let reveal = reveal_k(&format!("bar-meta:{}", glyph_core::dedupe::track_key(&tr)), 0.9);
             let t_like = tr.clone();
             let sub = div()
                 .flex()
                 .gap(px(6.0))
                 .items_center()
                 .min_w_0()
-                .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link("bar-artist", &tr.artist, cx)))
+                .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link_label("bar-artist", &tr.artist, decode(&tr.artist, reveal), cx)))
                 .when_some(app.current_source, |d, p| d.child(badge(p)))
                 .when(app.current_preview, |d| {
                     d.child(mono().flex_none().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))
@@ -92,7 +137,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, w, cx| this.navigate(View::NowPlaying, w, cx)))
                         .child(art)
-                        .child(title_lines(tr.title.clone().into(), sub)),
+                        .child(title_lines(decode(&tr.title, reveal).into(), sub)),
                 )
                 .child(
                     toggle_button("bar-like", "heart", 16.0, liked, Some(theme::pink()))
@@ -127,19 +172,33 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
     let repeat = app.repeat();
     let on = |b: bool| if b { theme::text() } else { theme::text_dim() };
 
+    // Pressed buttons shrink a little and spring back.
+    use crate::ui::widgets::{press, press_k};
+    let pk = press_k("play");
+    let play_d = 34.0 - 5.0 * pk;
     let play_btn = div()
         .id("play")
         .flex_none()
         .size(px(34.0))
-        .rounded_full()
-        .bg(gpui::white())
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.opacity(0.88))
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx)))
-        .child(crate::ui::widgets::play_glyph(app.is_loading(), playing, 15.0, 34.0));
+        .on_click(cx.listener(|this, _, _, cx| {
+            press("play");
+            this.toggle_play(cx)
+        }))
+        .child(
+            div()
+                .size(px(play_d))
+                .rounded_full()
+                .bg(gpui::white())
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|s| s.opacity(0.88))
+                .child(crate::ui::widgets::play_glyph(app.is_loading(), playing, 15.0 - 2.0 * pk, play_d)),
+        );
 
     let time = |s: String, right: bool| {
         mono()
@@ -170,9 +229,15 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .flex()
                 .items_center()
                 .gap(px(18.0))
-                .child(icon_button("prev", "skip-back", 17.0, theme::text()).on_click(cx.listener(|this, _, _, cx| this.previous(cx))))
+                .child(icon_button("prev", "skip-back", 17.0 - 4.0 * press_k("prev"), theme::text()).size(px(31.0)).on_click(cx.listener(|this, _, _, cx| {
+                    press("prev");
+                    this.previous(cx)
+                })))
                 .child(play_btn)
-                .child(icon_button("next", "skip-forward", 17.0, theme::text()).on_click(cx.listener(|this, _, _, cx| this.next(false, cx)))),
+                .child(icon_button("next", "skip-forward", 17.0 - 4.0 * press_k("next"), theme::text()).size(px(31.0)).on_click(cx.listener(|this, _, _, cx| {
+                    press("next");
+                    this.next(false, cx)
+                }))),
         )
         .child(
             div()
@@ -180,7 +245,46 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .items_center()
                 .gap(px(8.0))
                 .child(time(fmt_time(pos), true))
-                .child(thin_bar("seek", 340.0, frac, seek, app.duration().map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
+                .child({
+                    // A-B loop: the range tinted pink with a tick at each end.
+                    let at = |p: Duration| dur.filter(|d| !d.is_zero()).map(|d| (p.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0) * SEEK_W);
+                    let (la, lb) = (app.loop_ab.0.and_then(at), app.loop_ab.1.and_then(at));
+                    // Dragging an end: follow the mouse anywhere in the window
+                    // until the button is released.
+                    let me = cx.entity().downgrade();
+                    let track = gpui::canvas(
+                        |_, _, _| (),
+                        move |b, _, window, _| {
+                            SEEK_X.with(|x| x.set(f32::from(b.origin.x)));
+                            let Some(start) = LOOP_DRAG.with(|d| d.get()) else { return };
+                            let me2 = me.clone();
+                            window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, _, cx| {
+                                if phase != gpui::DispatchPhase::Bubble {
+                                    return;
+                                }
+                                let f = ((f32::from(e.position.x) - SEEK_X.with(|x| x.get())) / SEEK_W).clamp(0.0, 1.0);
+                                me2.update(cx, |g, cx| g.drag_loop_point(start, f, cx)).ok();
+                            });
+                            let me3 = me.clone();
+                            window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                                if phase == gpui::DispatchPhase::Bubble && LOOP_DRAG.with(|d| d.take()).is_some() {
+                                    me3.update(cx, |_, cx| cx.notify()).ok();
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0();
+                    div()
+                        .relative()
+                        .child(thin_bar("seek", SEEK_W, frac, seek, app.duration().map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
+                        .child(track)
+                        .when_some(la.zip(lb), |d, (a, b)| {
+                            d.child(div().absolute().top(px(0.0)).bottom(px(0.0)).left(px(a)).w(px((b - a).max(0.0))).bg(theme::pink().opacity(0.25)))
+                        })
+                        .when_some(la, |d, x| d.child(loop_handle(true, x, cx)))
+                        .when_some(lb, |d, x| d.child(loop_handle(false, x, cx)))
+                })
                 .child(time(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()), false)),
         );
 
@@ -204,22 +308,68 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                     this.cycle_repeat(cx)
                 })),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(4.0))
-                .child(
-                    icon_button("mute", if app.volume() <= 0.001 { "volume-x" } else { "volume-2" }, 15.0, theme::text_dim())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_mute();
-                            cx.notify();
-                        })),
-                )
-                .child(thin_bar("vol", 80.0, app.volume(), vol, Some(Rc::new(|f: f32| format!("{:.0}%", f * 100.0)) as BarLabel), cx)),
-        )
-        .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_on_top, None).on_click(cx.listener(|this, _, _, cx| {
+        .child({
+            let folded = BAR_W.with(|w| w.get()) < VOL_FOLD_W;
+            let icon_name = if app.volume() <= 0.001 { "volume-x" } else { "volume-2" };
+            // Folded, hovering opens the slider: no tooltip over it.
+            let mute = if folded { icon_button_plain("mute", icon_name, 15.0, theme::text_dim()) } else { icon_button("mute", icon_name, 15.0, theme::text_dim()) }.on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_mute();
+                cx.notify();
+            }));
+            let vol_label = Some(Rc::new(|f: f32| format!("{:.0}%", f * 100.0)) as BarLabel);
+            if folded {
+                // Hovering the button (or the open slider) shows the slider
+                // above it; the box reaches down to the button so the mouse
+                // can move up into it.
+                let k = hover_k("vol-btn").max(hover_k("vol-pop"));
+                div()
+                    .relative()
+                    .child(mute)
+                    .when(k > 0.0, |d| {
+                        // Deferred: the bar's slot clips its contents.
+                        d.child(gpui::deferred(
+                            div()
+                                .id("vol-pop")
+                                .absolute()
+                                // Same as the mini player card's: a slim upright
+                                // slider that reaches down to the button.
+                                .bottom(px(29.0))
+                                .left(px(1.0))
+                                .w(px(28.0))
+                                .h(px(108.0))
+                                .pt(px(10.0))
+                                .pb(px(14.0))
+                                .opacity(k)
+                                .occlude()
+                                .flex()
+                                .justify_center()
+                                .child(div().absolute().top_0().left_0().right_0().bottom(px(4.0)).rounded(px(8.0)).bg(hsla(0.0, 0.0, 0.1, 0.98)))
+                                .child({
+                                    let w = cx.entity().downgrade();
+                                    crate::ui::mini::frac_bar(
+                                        "vol-bar",
+                                        true,
+                                        app.volume(),
+                                        hsla(0.0, 0.0, 1.0, 0.2),
+                                        theme::pink(),
+                                        Rc::new(move |f, cx| {
+                                            w.update(cx, |g, cx| {
+                                                g.set_volume(f);
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                        }),
+                                    )
+                                })
+                                .child(hover_fill("vol-pop", gpui::transparent_black(), 0.0)),
+                        ))
+                    })
+                    .child(hover_fill("vol-btn", gpui::transparent_black(), 0.0))
+            } else {
+                div().flex().items_center().gap(px(6.0)).px(px(4.0)).child(mute).child(thin_bar("vol", 80.0, app.volume(), vol, vol_label, cx))
+            }
+        })
+        .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_shown, None).on_click(cx.listener(|this, _, _, cx| {
             mark_toggled("mini");
             this.toggle_mini(cx)
         })))
@@ -231,6 +381,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
             })),
         );
 
+    let measure = gpui::canvas(|_, _, _| (), |b, _, _, _| BAR_W.with(|w| w.set(f32::from(b.size.width)))).absolute().inset_0();
     div()
         .relative()
         .flex_none()
@@ -242,6 +393,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .flex()
         .items_center()
         .justify_between()
+        .child(measure)
         .child(center)
         .child(div().relative().flex().w(px(SIDE_W)).min_w_0().child(now))
         .child(div().relative().flex().w(px(SIDE_W)).justify_end().child(right))

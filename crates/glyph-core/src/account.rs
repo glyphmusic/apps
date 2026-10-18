@@ -237,7 +237,31 @@ pub fn is_signed_out(e: &anyhow::Error) -> bool {
 
 const SIGNED_OUT: &str = "signed out";
 
+/// Only disclose account credentials to their bound HTTPS server (or loopback).
+pub(crate) async fn optional_access(client: &ServerClient) -> Option<String> {
+    if !crate::server_access::secure_base(client.base_url()) { return None; }
+    access_token(client, false).await.ok()
+}
+
+pub(crate) fn cached_access(base: &str) -> Option<String> {
+    if !crate::server_access::secure_base(base) { return None; }
+    let g = session().lock().unwrap();
+    let live = g.as_ref()?;
+    if live.stored.server != base { return None; }
+    live.access.as_ref().filter(|(_, exp)| *exp > Instant::now()).map(|(token, _)| token.clone())
+}
+
+/// Short-lived media credential; restricted to the signed-in server's URL.
+pub fn media_access(url: &str) -> Option<String> {
+    let base = session().lock().unwrap().as_ref()?.stored.server.clone();
+    if !crate::server_access::same_server(&base, url) { return None; }
+    cached_access(&base)
+}
+
 async fn access_token(client: &ServerClient, force: bool) -> Result<String> {
+    // Concurrent metadata/cover requests must not race rotating refresh tokens.
+    static REFRESH: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _refresh = REFRESH.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     let (device_id, cached) = {
         let g = session().lock().unwrap();
         let live = g.as_ref().ok_or_else(|| anyhow!(SIGNED_OUT))?;

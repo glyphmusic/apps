@@ -128,6 +128,13 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     for t in downloads.iter().rev() {
         push(k(kind::DOWNLOAD, track_id(t)), serde_json::to_value(t).unwrap_or_default());
     }
+    // Lists that download new songs by themselves (absent = off).
+    if lib.liked_auto_download {
+        push(k(kind::AUTO_DOWNLOAD, "liked"), serde_json::json!({ "on": true }));
+    }
+    for p in lib.playlists.iter().filter(|p| p.auto_download) {
+        push(k(kind::AUTO_DOWNLOAD, p.id.clone()), serde_json::json!({ "on": true }));
+    }
     s
 }
 
@@ -259,7 +266,10 @@ fn from<T: serde::de::DeserializeOwned>(v: &Option<Value>) -> Option<T> {
 pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downloaded: &[Track]) -> Applied {
     let mut out = Applied::default();
     let mut touched: Vec<Key> = Vec::new();
-    for i in items {
+    // Auto-download switches go last: their playlist may arrive in the
+    // same batch.
+    let (switches, items): (Vec<&SyncItem>, Vec<&SyncItem>) = items.iter().partition(|i| i.kind == kind::AUTO_DOWNLOAD);
+    for i in items.into_iter().chain(switches) {
         let gone = i.deleted || i.value.is_none();
         match i.kind.as_str() {
             kind::LIKED => {
@@ -363,6 +373,16 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 }
                 touched.push((i.kind.clone(), i.key.clone()));
                 continue;
+            }
+            kind::AUTO_DOWNLOAD => {
+                let on = !gone;
+                if i.key == "liked" {
+                    lib.liked_auto_download = on;
+                } else if let Some(p) = lib.playlists.iter_mut().find(|p| p.id == i.key) {
+                    p.auto_download = on;
+                } else {
+                    continue;
+                }
             }
             // Kinds from newer app versions are left alone.
             _ => continue,

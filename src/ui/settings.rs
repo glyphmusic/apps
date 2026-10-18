@@ -457,7 +457,8 @@ fn link_button(id: &'static str, icon_name: &'static str, label: impl Into<Share
         .rounded(px(8.0))
         .bg(white(0.07))
         .cursor_pointer()
-        .hover(|s| s.bg(white(0.12)))
+        .relative()
+        .child(hover_fill(id, white(0.05), 8.0))
         .text_size(px(13.0))
         .text_color(gpui::white())
         .child(icon(icon_name, 14.0, white(0.8)))
@@ -484,7 +485,7 @@ pub(crate) fn segmented(items: Vec<(SharedString, bool, Rc<dyn Fn(&mut Glyph, &m
                 .cursor_pointer()
                 .text_size(px(13.0))
                 .when(on, |d| d.bg(white(0.12)).text_color(gpui::white()).font_weight(FontWeight::MEDIUM))
-                .when(!on, |d| d.text_color(white(0.6)).hover(|s| s.text_color(gpui::white())))
+                .when(!on, |d| d.text_color(mix(white(0.6), gpui::white(), hover_k(&format!("{id}-{i}")))).relative().child(hover_fill(format!("{id}-{i}"), white(0.04), 7.0)))
                 .on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
                 .child(label)
         }))
@@ -592,7 +593,10 @@ fn select(
                         .cursor_pointer()
                         .text_size(px(13.5))
                         .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
-                        .when(!on, |d| d.text_color(white(0.7)).hover(|s| s.bg(white(0.05)).text_color(gpui::white())))
+                        .when(!on, |d| {
+                            let key = format!("{id}-opt-{i}");
+                            d.text_color(mix(white(0.7), gpui::white(), hover_k(&key))).relative().child(hover_fill(key, white(0.05), 7.0))
+                        })
                         .when(live, |d| {
                             d.on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_select = None;
@@ -634,7 +638,8 @@ fn select(
                 .border_1()
                 .border_color(white(0.06))
                 .cursor_pointer()
-                .hover(|s| s.bg(white(0.10)))
+                .relative()
+                .when(!open, |d| d.child(hover_fill(id, white(0.04), 8.0)))
                 .text_size(px(13.5))
                 .text_color(gpui::white())
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_select(id, cx)))
@@ -689,7 +694,7 @@ pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
         SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
         SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
         SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
-        SettingsPage::About => &["sp.sub.version", "sp.support"],
+        SettingsPage::About => &["sp.sub.version", "sp.support", "sp.sub.shortcuts"],
         _ => &[],
     }
 }
@@ -713,9 +718,13 @@ const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Audio, 0, "sp.eq.preset", "preset bass treble höhen tiefen"),
     (SettingsPage::Audio, 0, "sp.eq.share", "share teilen export import code datei file"),
     (SettingsPage::Appearance, 0, "settings.language", "language sprache"),
+    (SettingsPage::Appearance, 0, "settings.visuals.music_reactivity", "music musik reaction reaktion beat bass"),
     (SettingsPage::Appearance, 0, "settings.visuals.intensity", "background hintergrund glow intensity intensität"),
     (SettingsPage::Appearance, 0, "settings.visuals.ascii_covers", "ascii cover"),
     (SettingsPage::Appearance, 0, "sp.appearance.startup", "startup start animation splash"),
+    (SettingsPage::Appearance, 0, "sp.appearance.mini", "mini player miniplayer card karte bar leiste"),
+    (SettingsPage::Appearance, 0, "sp.appearance.theme", "theme farbe color colour accent akzent farbschema orange blau blue green grün"),
+    (SettingsPage::Appearance, 0, "sp.appearance.ascii_fx", "ascii animation reveal einblenden skeleton laden loading shimmer"),
     (SettingsPage::Account, 0, "account.handle", "handle name rename umbenennen"),
     (SettingsPage::Account, 0, "account.keys", "sync api keys schlüssel"),
     (SettingsPage::Account, 0, "account.limit", "device limit gerätelimit"),
@@ -734,6 +743,7 @@ const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Server, 1, "settings.keys.spotify_client_id", "api key spotify"),
     (SettingsPage::Server, 1, "settings.keys.jamendo_client_id", "api key jamendo"),
     (SettingsPage::Storage, 0, "sp.storage.limit", "cache limit size größe"),
+    (SettingsPage::Storage, 0, "sp.storage.saver", "data saver datensparmodus mobile traffic daten sparen"),
     (SettingsPage::Storage, 0, "sp.storage.usage", "clear leeren cache downloads covers lyrics speicher"),
     (SettingsPage::Transfer, 0, "sp.transfer.code", "share teilen export code copy kopieren"),
     (SettingsPage::Transfer, 0, "sp.transfer.file", "export file datei save speichern backup"),
@@ -743,6 +753,7 @@ const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::About, 1, "sp.support.issue", "bug issue report melden"),
     (SettingsPage::About, 1, "sp.support.diag", "diagnostics diagnose"),
     (SettingsPage::About, 1, "sp.support.data", "data daten folder ordner"),
+    (SettingsPage::About, 2, "sp.keys.play", "keyboard shortcuts tastenkürzel tastatur hotkeys keys tasten"),
 ];
 
 fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
@@ -761,6 +772,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         SettingsPage::Storage => storage(app, cx),
         SettingsPage::Transfer => crate::ui::transfer::page(app, cx),
         SettingsPage::About if app.settings_sub == 1 => support(app, cx),
+        SettingsPage::About if app.settings_sub == 2 => shortcuts(),
         SettingsPage::About => about(app, cx),
     };
 
@@ -824,7 +836,7 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(white(0.08)))
+                .child(hover_fill("settings-close", white(0.08), 8.0))
                 .on_click(cx.listener(|this, _, w, cx| this.close_settings(w, cx)))
                 .child(icon("x", 16.0, white(0.7))),
         );
@@ -953,7 +965,10 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
         col = col.child(div().flex_none().px(px(10.0)).pt(px(10.0)).pb(px(4.0)).text_size(px(12.0)).text_color(white(0.45)).child(group));
         for (page, label, icon_name, subs, sub_hit) in visible {
             let on = page == current;
-            let open = !subs.is_empty() && (on || sub_hit.contains(&true));
+            let open = !subs.is_empty() && !app.settings_collapsed.contains(&(page as usize)) && (on || sub_hit.contains(&true));
+            let has_subs = !subs.is_empty();
+            // A page left for another keeps folding its sub-tabs away (motion to 0).
+            let group_k = if on || sub_hit.contains(&true) { app.settings_group_k(page, open) } else { app.settings_group_k(page, false) };
             col = col.child(
                 div()
                     .id(("sp-nav", page as usize))
@@ -967,23 +982,36 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
                     .cursor_pointer()
                     .text_size(px(14.0))
                     .when(on, |d| d.bg(white(0.08)).text_color(gpui::white()))
-                    .when(!on, |d| d.text_color(white(0.75)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                    .when(!on, |d| {
+                        let key = format!("sp-nav-{}", page as usize);
+                        d.text_color(mix(white(0.75), gpui::white(), hover_k(&key))).relative().child(hover_fill(key, white(0.04), 8.0))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.settings_page != page {
                             this.set_settings_page(page, cx);
+                            if has_subs { this.settings_group_motion.insert(page as usize, (std::time::Instant::now(), 0.0, 1.0)); }
+                        } else if has_subs {
+                            let from = this.settings_group_k(page, !this.settings_collapsed.contains(&(page as usize)));
+                            if !this.settings_collapsed.insert(page as usize) { this.settings_collapsed.remove(&(page as usize)); }
+                            let target = if this.settings_collapsed.contains(&(page as usize)) { 0.0 } else { 1.0 };
+                            this.settings_group_motion.insert(page as usize, (std::time::Instant::now(), from, target));
+                            cx.notify();
                         }
                     }))
                     .child(icon(icon_name, 16.0, if on { gpui::white() } else { white(0.7) }))
                     .child(div().flex_1().child(label))
                     .when(!subs.is_empty(), |d| d.child(icon(if open { "chevron-down" } else { "chevron-right" }, 14.0, white(0.45)))),
             );
-            if open {
+            if has_subs && group_k > 0.001 {
                 // Sub-tabs hang off a thin line under the page's icon.
                 col = col.child(
                     div()
                         .flex_none()
                         .ml(px(18.0))
-                        .my(px(2.0))
+                        .h(px((subs.len() as f32 * 34.0 - 2.0) * group_k))
+                        .overflow_hidden()
+                        .opacity(group_k)
+                        .my(px(2.0 * group_k))
                         .pl(px(8.0))
                         .border_l_1()
                         .border_color(white(0.10))
@@ -995,6 +1023,7 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
                             let sub = i as u8;
                             div()
                                 .id(("sp-sub", page as usize * 8 + i))
+                                .flex_none()
                                 .flex()
                                 .items_center()
                                 .h(px(32.0))
@@ -1003,7 +1032,10 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
                                 .cursor_pointer()
                                 .text_size(px(13.5))
                                 .when(sel, |d| d.bg(white(0.08)).text_color(gpui::white()).font_weight(FontWeight::MEDIUM))
-                                .when(!sel, |d| d.text_color(white(0.6)).hover(|s| s.bg(white(0.04)).text_color(gpui::white())))
+                                .when(!sel, |d| {
+                                    let key = format!("sp-sub-{}", page as usize * 8 + i);
+                                    d.text_color(mix(white(0.6), gpui::white(), hover_k(&key))).relative().child(hover_fill(key, white(0.04), 7.0))
+                                })
                                 .on_click(cx.listener(move |this, _, _, cx| this.set_settings_tab(page, sub, cx)))
                                 .child(t(key))
                         })),
@@ -1032,7 +1064,8 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
                     .px(px(10.0))
                     .rounded(px(8.0))
                     .cursor_pointer()
-                    .hover(|s| s.bg(white(0.05)))
+                    .relative()
+                    .child(hover_fill(format!("sp-found-{i}"), white(0.05), 8.0))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         flash_option(l.to_string());
                         this.set_settings_tab(page, sub, cx);
@@ -1055,7 +1088,7 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         _ => {}
     }
     let cur = app.config.audio.quality;
-    let options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
+    let options = [AudioQuality::Auto, AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
         .into_iter()
         .map(|q| {
             let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_audio_quality(q, cx));
@@ -1064,7 +1097,7 @@ fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .collect();
     let quality = select(app, "sel-quality", quality_label(cur), options, cx);
     let cur_dl = app.config.audio.download_quality;
-    let dl_options = [AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
+    let dl_options = [AudioQuality::Auto, AudioQuality::Low, AudioQuality::Standard, AudioQuality::High]
         .into_iter()
         .map(|q| {
             let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_download_quality(q, cx));
@@ -1179,8 +1212,7 @@ fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .text_color(white(0.85))
                 .child(name)
                 .child(
-                    div()
-                        .id(("hidden-show", i))
+                    with_tip(div().id(("hidden-show", i)), Some(t("ctx.show_artist")))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1188,7 +1220,6 @@ fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                         .rounded(px(4.0))
                         .cursor_pointer()
                         .hover(|s| s.bg(white(0.12)))
-                        .tooltip(|_, cx| cx.new(|_| Tip(t("ctx.show_artist"))).into())
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden_artist(&n, cx)))
                         .child(icon("eye", 12.0, white(0.7))),
                 )
@@ -1284,7 +1315,8 @@ fn priority_list(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .id(("prio", i))
                 .rounded(px(8.0))
                 .cursor_grab()
-                .hover(|s| s.bg(white(0.03)))
+                .relative()
+                .child(hover_fill(format!("prio-{i}"), white(0.03), 8.0))
                 .on_drag(PrioDrag { from: i, provider: p, width }, |d, _, _, cx| cx.new(|_| d.clone()))
                 .drag_over::<PrioDrag>(|s, _, _, _| s.bg(white(0.08)))
                 .on_drop(cx.listener(move |this, d: &PrioDrag, _, cx| this.reorder_priority(d.from, i, cx)))
@@ -1294,6 +1326,7 @@ fn priority_list(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 
 fn quality_label(q: AudioQuality) -> SharedString {
     match q {
+        AudioQuality::Auto => t("sp.audio.q.auto"),
         AudioQuality::Low => t("sp.audio.q.low"),
         AudioQuality::Standard => t("sp.audio.q.standard"),
         AudioQuality::High => t("sp.audio.q.high"),
@@ -1315,6 +1348,20 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let set_int: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
         weak.update(cx, |this, cx| this.set_intensity(f, cx)).ok();
     });
+    let weak = cx.entity().downgrade();
+    let set_reactivity: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
+        weak.update(cx, |this, cx| this.set_music_reactivity(f, cx)).ok();
+    });
+    let big = app.mini_big;
+    let mini = segmented(
+        vec![
+            (t("sp.appearance.mini.bar"), !big, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_mini_big(false, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
+            (t("sp.appearance.mini.card"), big, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_mini_big(true, cx))),
+        ],
+        cx,
+        "mini-style",
+    );
+    let reactivity = app.config.visuals.music_reactivity;
     let intensity = app.config.visuals.intensity;
     rows(vec![
         row(t("settings.language"), Some(t("sp.appearance.lang.desc")), language),
@@ -1329,6 +1376,13 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(mono().w(px(36.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(format!("{:.0}%", intensity * 100.0))),
         ),
         row(
+            t("settings.visuals.music_reactivity"),
+            Some(t("sp.appearance.music_reactivity.desc")),
+            div().flex().items_center().gap(px(10.0))
+                .child(thin_bar("music-reactivity", 160.0, reactivity, set_reactivity, None, cx))
+                .child(mono().w(px(36.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(format!("{:.0}%", reactivity * 100.0))),
+        ),
+        row(
             t("settings.visuals.ascii_covers"),
             Some(t("sp.appearance.ascii.desc")),
             switch("ascii-covers", app.config.visuals.ascii_covers).on_click(cx.listener(|this, _, _, cx| {
@@ -1337,6 +1391,17 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 cx.notify();
             })),
         ),
+        row(t("sp.appearance.theme"), Some(t("sp.appearance.theme.desc")), theme_swatches(app, cx)),
+        row(
+            t("sp.appearance.ascii_fx"),
+            Some(t("sp.appearance.ascii_fx.desc")),
+            switch("ascii-fx", app.config.visuals.ascii_effects).on_click(cx.listener(|this, _, _, cx| {
+                this.config.visuals.ascii_effects = !this.config.visuals.ascii_effects;
+                this.save_config(cx);
+                cx.notify();
+            })),
+        ),
+        row(t("sp.appearance.mini"), Some(t("sp.appearance.mini.desc")), mini),
         row(
             t("sp.appearance.startup"),
             Some(t("sp.appearance.startup.desc")),
@@ -1347,6 +1412,30 @@ fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             })),
         ),
     ])
+}
+
+/// One round swatch per colour theme (accent inside, glow colour as ring),
+/// the picked one outlined.
+fn theme_swatches(app: &Glyph, cx: &mut Context<Glyph>) -> Div {
+    let cur = crate::theme::theme_by_id(&app.config.visuals.theme).id;
+    div().flex().items_center().gap(px(6.0)).children(crate::theme::THEMES.iter().enumerate().map(|(i, th)| {
+        let on = th.id == cur;
+        let id = th.id;
+        let accent: Hsla = gpui::rgb(th.accent).into();
+        let ring: Hsla = th.glow.map_or(gpui::rgb(0x1d5cff).into(), |g| gpui::rgb(g[1]).into());
+        with_tip(div().id(("theme", i)), Some(t(th.name)))
+            .flex_none()
+            .size(px(28.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .border_2()
+            .border_color(if on { gpui::white() } else { gpui::transparent_black() })
+            .on_click(cx.listener(move |this, _, _, cx| this.set_theme(id, cx)))
+            .child(div().size(px(20.0)).rounded_full().bg(ring).flex().items_center().justify_center().child(div().size(px(12.0)).rounded_full().bg(accent)))
+    }))
 }
 
 fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
@@ -1371,7 +1460,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         Some(ConnTest::Ok(s)) => Some((s.clone(), theme::ok())),
         Some(ConnTest::Failed(s)) => Some((s.clone(), theme::warn())),
     };
-    let items = vec![
+    let mut items = vec![
         row(t("settings.server.url"), Some(t("sp.server.url.desc")), input_box(app.server_input.clone())),
         row(
             mode,
@@ -1383,6 +1472,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(button("conn-apply", t("settings.server.apply")).on_click(cx.listener(|this, _, _, cx| this.apply_server(cx)))),
         ),
     ];
+    if app.server_auth_required { items.insert(1, row(t("settings.server.bearer"), Some(t("settings.server.bearer.required")), input_box(app.server_bearer_input.clone()))); }
     let keys: Vec<AnyElement> = app
         .key_inputs
         .iter()
@@ -1419,10 +1509,44 @@ fn storage_label(k: StorageKind) -> SharedString {
 }
 
 /// Ring chart of the storage split, drawn as filled ring segments.
+thread_local! {
+    /// Storage ring segment under the mouse (index into the parts).
+    static DONUT_HOVER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 fn donut(parts: Vec<(f32, Hsla)>, size: f32, thickness: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
+            // Which segment the mouse is over: by radius and angle.
+            let pm = parts.iter().map(|p| p.0).collect::<Vec<f32>>();
+            window.on_mouse_event(move |e: &gpui::MouseMoveEvent, phase, window, _| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                let c = bounds.center();
+                let (dx, dy) = (f32::from(e.position.x - c.x), f32::from(e.position.y - c.y));
+                let r = (dx * dx + dy * dy).sqrt();
+                let total: f32 = pm.iter().sum();
+                let hit = if r <= size / 2.0 && r >= size / 2.0 - thickness - 4.0 && total > 0.0 {
+                    // 0 at the top, clockwise, like the drawing.
+                    let mut a = dy.atan2(dx) + std::f32::consts::FRAC_PI_2;
+                    if a < 0.0 {
+                        a += std::f32::consts::TAU;
+                    }
+                    let mut acc = 0.0;
+                    pm.iter().position(|v| {
+                        acc += v / total * std::f32::consts::TAU;
+                        *v > 0.0 && a < acc
+                    })
+                } else {
+                    None
+                };
+                if DONUT_HOVER.with(|h| h.replace(hit)) != hit {
+                    window.refresh();
+                }
+            });
+            let hovered = DONUT_HOVER.with(|h| h.get());
             let c = bounds.center();
             let r_out = size / 2.0;
             let r_in = r_out - thickness;
@@ -1449,12 +1573,17 @@ fn donut(parts: Vec<(f32, Hsla)>, size: f32, thickness: f32) -> impl IntoElement
                 return;
             }
             let mut a = start;
-            for (v, color) in &parts {
+            for (i, (v, color)) in parts.iter().enumerate() {
                 if *v <= 0.0 {
                     continue;
                 }
                 let sweep = v / total * std::f32::consts::TAU;
-                ring(a, a + sweep - 0.0001, *color, window);
+                // The hovered part stays bright, the others step back.
+                let color = match hovered {
+                    Some(h) if h != i => color.opacity(0.35),
+                    _ => *color,
+                };
+                ring(a, a + sweep - 0.0001, color, window);
                 a += sweep;
             }
         },
@@ -1486,8 +1615,10 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         let pct = if total > 0 { v as f32 / total as f32 * 100.0 } else { 0.0 };
         let pct = if v > 0 && pct < 1.0 { "<1%".to_string() } else { format!("{pct:.0}%") };
         let on = selected[i];
+        let lit = DONUT_HOVER.with(|h| h.get()) == Some(i);
         div()
             .id(("storage-kind", i))
+            .when(lit, |d| d.bg(white(0.07)))
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -1496,7 +1627,8 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             .rounded(px(8.0))
             .cursor_pointer()
             .text_size(px(13.5))
-            .hover(|s| s.bg(white(0.05)))
+            .relative()
+            .child(hover_fill(format!("storage-kind-{i}"), white(0.05), 8.0))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.storage_selected[i] = !this.storage_selected[i];
                 cx.notify();
@@ -1667,7 +1799,8 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .rounded(px(10.0))
         .bg(white(0.07))
         .cursor_pointer()
-        .hover(|s| s.bg(white(0.11)))
+        .relative()
+        .child(hover_fill("storage-reveal", white(0.04), 10.0))
         .text_size(px(13.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(gpui::white())
@@ -1682,6 +1815,14 @@ fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .pt(px(6.0))
         .child(breakdown)
         .child(limit)
+        .child({
+            let on = app.config.storage.data_saver;
+            surface().py(px(4.0)).child(row(
+                t("sp.storage.saver"),
+                Some(t("sp.storage.saver.desc")),
+                switch("data-saver", on).on_click(cx.listener(move |this, _, _, cx| this.set_data_saver(!on, cx))),
+            ))
+        })
         .child(div().pt(px(6.0)).flex().gap(px(10.0)).child(clear).child(open))
 }
 
@@ -1716,8 +1857,9 @@ fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .flex_col()
         .items_center()
         .gap(px(10.0))
-        .py(px(28.0))
-        .child(gpui::img("icons/app/icon-256.png").size(px(64.0)).rounded(px(14.0)))
+        .py(px(20.0))
+        // The note from the landing page: assembles, then dodges the mouse.
+        .child(crate::ui::splash::note_logo(4.0))
         .child(
             div()
                 .flex()
@@ -1738,12 +1880,6 @@ fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 ),
         )
         .child(
-            mono()
-                .text_size(px(11.5))
-                .text_color(white(0.5))
-                .child(tf("sp.about.client", &[("v", &env!("CARGO_PKG_VERSION")), ("p", &glyph_protocol::PROTOCOL_VERSION), ("target", &glyph_core::updater::current_target())])),
-        )
-        .child(
             div()
                 .flex()
                 .items_center()
@@ -1760,7 +1896,8 @@ fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                         .rounded(px(8.0))
                         .bg(white(0.08))
                         .cursor_pointer()
-                        .hover(|s| s.bg(white(0.13)))
+                        .relative()
+                        .child(hover_fill("update-check", white(0.05), 8.0))
                         .text_size(px(13.5))
                         .text_color(gpui::white())
                         .on_click(cx.listener(|this, _, _, cx| this.check_updates(true, cx)))
@@ -1805,6 +1942,85 @@ fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         items.push(div().py(px(12.0)).text_size(px(12.5)).text_color(white(0.55)).child(tf("update.package_manager", &[("url", &i.html_url)])).into_any_element());
     }
     div().flex().flex_col().gap(px(10.0)).child(card).child(rows(items))
+}
+
+/// Key cap, like a keyboard key.
+fn key_cap(k: &str) -> Div {
+    mono()
+        .flex_none()
+        .min_w(px(24.0))
+        .h(px(24.0))
+        .px(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .bg(white(0.07))
+        .border_1()
+        .border_color(white(0.10))
+        .text_size(px(11.5))
+        .text_color(white(0.85))
+        .child(k.to_string())
+}
+
+/// Keys of one shortcut: `+` joins keys pressed together, `/` separates
+/// alternatives (`Ctrl+1 / … / 9`).
+fn key_combo(keys: &str) -> Div {
+    let mut d = div().flex().items_center().gap(px(4.0));
+    for (n, alt) in keys.split(" / ").enumerate() {
+        if n > 0 {
+            d = d.child(div().text_size(px(12.0)).text_color(white(0.4)).child("/"));
+        }
+        for (m, k) in alt.split('+').enumerate() {
+            if m > 0 {
+                d = d.child(div().text_size(px(12.0)).text_color(white(0.4)).child("+"));
+            }
+            d = d.child(key_cap(k));
+        }
+    }
+    d
+}
+
+/// Settings -> About -> Shortcuts: every keyboard shortcut, grouped.
+fn shortcuts() -> Div {
+    let m = if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" };
+    let alt = if cfg!(target_os = "macos") { "\u{2325}" } else { "Alt" };
+    let groups: [(&str, Vec<(&str, String)>); 3] = [
+        (
+            "sp.keys.group.playback",
+            vec![
+                ("sp.keys.play", "Space".into()),
+                ("sp.keys.seek", "\u{2190} / \u{2192}".into()),
+                ("sp.keys.prev", format!("{m}+\u{2190}")),
+                ("sp.keys.next", format!("{m}+\u{2192}")),
+                ("sp.keys.loop_start", format!("{alt}+1")),
+                ("sp.keys.loop_end", format!("{alt}+2")),
+                ("sp.keys.loop_clear", format!("{alt}+0")),
+            ],
+        ),
+        (
+            "sp.keys.group.nav",
+            vec![
+                ("sp.keys.search", format!("{m}+K")),
+                ("sp.keys.lyrics", format!("{m}+L")),
+                ("sp.keys.sidebar", format!("{m}+1 / 9")),
+                ("sp.keys.settings", format!("{m}+0")),
+                ("sp.keys.close", "Esc".into()),
+            ],
+        ),
+        ("sp.keys.group.app", vec![("sp.keys.quit", format!("{m}+Q"))]),
+    ];
+    let mut col = div().flex().flex_col().gap(px(14.0));
+    for (title, items) in groups {
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(section_label(t(title)))
+                .child(rows(items.into_iter().map(|(label, keys)| row(t(label), None, key_combo(&keys))).collect())),
+        );
+    }
+    col
 }
 
 fn support(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {

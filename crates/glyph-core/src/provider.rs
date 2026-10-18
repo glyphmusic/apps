@@ -37,6 +37,16 @@ pub trait MusicProvider: Send + Sync {
     async fn track(&self, id: &str) -> Result<Track>;
     async fn playback_source(&self, track: &Track) -> Result<PlaybackSource>;
 
+    /// Result page `page` (0 = first). Sources without paging have no
+    /// later pages.
+    async fn search_page(&self, query: &str, page: usize) -> Result<Vec<Track>> {
+        if page == 0 {
+            self.search(query).await
+        } else {
+            Ok(vec![])
+        }
+    }
+
     /// Longer search timeout than [`SEARCH_TIMEOUT`] (local tools).
     fn search_timeout(&self) -> Option<Duration> {
         None

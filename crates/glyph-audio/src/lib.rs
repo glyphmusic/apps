@@ -39,7 +39,8 @@
 
 pub mod embed;
 mod engine;
-mod http;
+mod adaptive;
+pub mod http;
 pub mod eq;
 pub mod loudness;
 mod media_keys;
@@ -83,6 +84,15 @@ pub struct PlayerState {
     pub volume: f32,
 }
 
+impl PlayerState {
+    fn ui_changed(&self, old: &Self) -> bool {
+        self.status != old.status || self.track != old.track || self.provider != old.provider
+            || self.backend != old.backend || self.is_preview != old.is_preview
+            || self.duration != old.duration || self.volume != old.volume
+            || self.position.as_millis() / 100 != old.position.as_millis() / 100
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlayerEvent {
     StatusChanged(Status),
@@ -113,8 +123,11 @@ pub(crate) enum Cmd {
     Toggle,
     Stop,
     Seek(Duration),
+    StreamQuality(String),
     Volume(f32),
     Crossfade(Duration),
+    /// A-B loop of the current song (native playback): (start, end).
+    Loop(Option<(Duration, Duration)>),
     /// Output device by name; None = follow the system default.
     OutputDevice(Option<String>),
     MiniOptions(MiniPlayerOptions),
@@ -192,6 +205,10 @@ impl PlayerController {
     pub fn stop(&self) {
         self.send(Cmd::Stop);
     }
+    /// Changes the active server stream; manual choices remain fixed.
+    pub fn set_stream_quality(&self, quality: &str) {
+        self.send(Cmd::StreamQuality(quality.into()));
+    }
     pub fn seek(&self, position: Duration) {
         self.send(Cmd::Seek(position));
     }
@@ -228,12 +245,26 @@ impl PlayerController {
         self.send(Cmd::OutputDevice(name));
     }
 
+    /// A-B loop: at the end point playback jumps back to the start, with a
+    /// short fade out and in (the crossfade length, kept short). Native
+    /// playback only; cleared when the song changes.
+    pub fn set_loop(&self, ab: Option<(Duration, Duration)>) {
+        self.send(Cmd::Loop(ab));
+    }
     pub fn set_crossfade(&self, d: Duration) {
         self.send(Cmd::Crossfade(d.min(Duration::from_secs(20))));
     }
     pub fn state(&self) -> PlayerState {
         self.shared.state.lock().unwrap().clone()
     }
+    /// Avoid cloning track metadata and repainting the complete UI for every
+    /// decoder position update. Control/track changes still arrive immediately.
+    pub fn state_if_changed(&self, previous: Option<&PlayerState>) -> Option<PlayerState> {
+        let state = self.shared.state.lock().unwrap();
+        let changed = previous.is_none_or(|old| state.ui_changed(old));
+        changed.then(|| state.clone())
+    }
+
     pub fn events(&self) -> Receiver<PlayerEvent> {
         self.shared.events_rx.clone()
     }
@@ -407,5 +438,23 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod ui_snapshot_tests {
+    use super::*;
+    #[test]
+    fn position_updates_are_coalesced_but_controls_and_seeks_are_immediate() {
+        let old = PlayerState { status: Status::Playing, track: None, provider: None,
+            backend: Some(BackendKind::Native), is_preview: false,
+            position: Duration::from_millis(1000), duration: None, volume: 0.5 };
+        let mut new = old.clone();
+        new.position = Duration::from_millis(1099); assert!(!new.ui_changed(&old));
+        new.position = Duration::from_millis(1100); assert!(new.ui_changed(&old));
+        new.position = Duration::from_millis(200); assert!(new.ui_changed(&old));
+        new = old.clone(); new.status = Status::Paused; assert!(new.ui_changed(&old));
+        new = old.clone(); new.volume = 0.25; assert!(new.ui_changed(&old));
+        new = old.clone(); new.duration = Some(Duration::from_secs(200)); assert!(new.ui_changed(&old));
     }
 }

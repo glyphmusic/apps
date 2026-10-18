@@ -49,6 +49,8 @@ pub struct ServerClient {
     base: String,
     http: reqwest::Client,
     install_id: String,
+    bearer: Option<String>,
+    auth_required: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Random anonymous install id, persisted in the data dir.
@@ -73,11 +75,53 @@ pub fn normalize_base_url(url: &str) -> String {
 
 impl ServerClient {
     pub fn new(url: &str, http: reqwest::Client, install_id: String) -> Self {
-        Self { base: normalize_base_url(url), http, install_id }
+        Self { base: normalize_base_url(url), http, install_id, bearer: None, auth_required: Default::default() }
+    }
+
+    pub fn with_bearer(mut self, token: Option<String>) -> Result<Self> {
+        if token.is_some() && !crate::server_access::secure_base(&self.base) { return Err(anyhow!("protected servers require HTTPS")); }
+        // A custom credential header must never follow redirects to another host.
+        self.http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(HEALTH_TIMEOUT).user_agent(concat!("Glyph/", env!("CARGO_PKG_VERSION"))).build()?;
+        self.bearer = token;
+        Ok(self)
+    }
+
+    pub fn auth_required(&self) -> bool { self.auth_required.load(std::sync::atomic::Ordering::Relaxed) }
+    pub fn media_credentials(&self) -> Option<(String,String)> { self.bearer.as_ref().map(|t| (self.base.clone(),t.clone())) }
+    pub fn authorize_url(&self, fallback: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        if crate::server_access::same_server(&self.base,url) { self.authorize(self.http.get(url)) } else { fallback }
+    }
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = if let Some(token) = crate::account::cached_access(&self.base) {
+            request.bearer_auth(token)
+        } else { request };
+        if let Some(token) = &self.bearer {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("invalid"));
+            value.set_sensitive(true);
+            request.header(crate::server_access::HEADER,value)
+        } else { request }
     }
 
     pub fn base_url(&self) -> &str {
         &self.base
+    }
+
+    async fn member_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(token) = crate::account::optional_access(self).await {
+            request.bearer_auth(token)
+        } else { request }
+    }
+
+    /// Concrete per-track variant; never rewrite another provider's URL.
+    pub fn audio_quality_url(&self, url: &str, quality: crate::config::AudioQuality) -> String {
+        if !crate::server_access::same_server(&self.base, url) { return url.into(); }
+        let Ok(mut parsed) = reqwest::Url::parse(url) else { return url.into(); };
+        if !parsed.path().contains("/v1/audio/youtube/") { return url.into(); }
+        let pairs: Vec<_> = parsed.query_pairs().filter(|(k, _)| k != "quality" && k != "adaptive").map(|(k,v)| (k.into_owned(),v.into_owned())).collect();
+        parsed.set_query(None);
+        parsed.query_pairs_mut().extend_pairs(pairs).append_pair("quality",quality.server_name());
+        if quality == crate::config::AudioQuality::Auto { parsed.query_pairs_mut().append_pair("adaptive", "1"); }
+        parsed.into()
     }
 
     fn url(&self, path: &str) -> String {
@@ -85,11 +129,11 @@ impl ServerClient {
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        self.http.get(self.url(path)).header(INSTALL_ID_HEADER, &self.install_id).timeout(REQUEST_TIMEOUT)
+        self.authorize(self.http.get(self.url(path))).header(INSTALL_ID_HEADER, &self.install_id).timeout(REQUEST_TIMEOUT)
     }
 
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        self.http.post(self.url(path)).header(INSTALL_ID_HEADER, &self.install_id).timeout(REQUEST_TIMEOUT)
+        self.authorize(self.http.post(self.url(path))).header(INSTALL_ID_HEADER, &self.install_id).timeout(REQUEST_TIMEOUT)
     }
 
     async fn check(resp: reqwest::Response) -> Result<reqwest::Response> {
@@ -117,12 +161,15 @@ impl ServerClient {
     pub async fn health(&self) -> Result<HealthResponse> {
         let resp = self.get("/v1/health").timeout(HEALTH_TIMEOUT).send().await?;
         let resp = Self::check(resp).await?;
-        Ok(resp.json().await.context("invalid /v1/health response")?)
+        let health: HealthResponse = resp.json().await.context("invalid /v1/health response")?;
+        self.auth_required.store(health.server_auth_required, std::sync::atomic::Ordering::Relaxed);
+        Ok(health)
     }
 
     /// Health + protocol-version check.
     pub async fn check_compat(&self) -> Result<Compat> {
         let h = self.health().await?;
+        if h.server_auth_required { Self::check(self.get("/v1/access").timeout(HEALTH_TIMEOUT).send().await?).await?; }
         Ok(if h.protocol_version == PROTOCOL_VERSION { Compat::Compatible(h) } else { Compat::Incompatible(h) })
     }
 
@@ -130,8 +177,11 @@ impl ServerClient {
     /// Returns `Ok(true)` if the stream ended with `Done`. Fails early (before
     /// anything was forwarded) if the connection or status is bad, so the
     /// caller can fall back to direct mode.
-    pub async fn search_into(&self, query: &str, tx: &UnboundedSender<SearchEvent>) -> Result<bool> {
-        let resp = self.get("/v1/search").query(&[("q", query)]).send().await?;
+    pub async fn search_into(&self, query: &str, page: usize, tx: &UnboundedSender<SearchEvent>) -> Result<bool> {
+        let req = self.member_request(self.get("/v1/search")).await.query(&[("q", query)]);
+        // Older servers ignore `page`; only send it for later pages.
+        let req = if page > 0 { req.query(&[("page", page.to_string())]) } else { req };
+        let resp = req.send().await?;
         let resp = Self::check(resp).await?;
         let mut stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
@@ -171,7 +221,7 @@ impl ServerClient {
     /// `POST /v1/resolve`.
     pub async fn resolve(&self, track: &Track, priority: &[ProviderId]) -> Result<ResolveResponse> {
         let body = ResolveRequest { track: track.clone(), priority: priority.to_vec() };
-        let resp = Self::check(self.post("/v1/resolve").json(&body).send().await?).await?;
+        let resp = Self::check(self.member_request(self.post("/v1/resolve")).await.json(&body).send().await?).await?;
         let mut resolved: ResolveResponse = resp.json().await?;
         if let Some(PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. }) = resolved.source.as_mut() {
             if url.starts_with("/v1/audio/") { *url = self.url(url); }
@@ -183,13 +233,13 @@ impl ServerClient {
     /// yt-dlp so other clients skip their search (ids only, never audio).
     pub async fn report_youtube_hint(&self, track: &Track, video_id: &str) -> Result<YouTubeHintResponse> {
         let body = YouTubeHintRequest { track: track.clone(), video_id: video_id.to_string() };
-        let resp = Self::check(self.post("/v1/youtube/hint").timeout(Duration::from_secs(15)).json(&body).send().await?).await?;
+        let resp = Self::check(self.member_request(self.post("/v1/youtube/hint")).await.timeout(Duration::from_secs(15)).json(&body).send().await?).await?;
         Ok(resp.json().await?)
     }
 
     /// `GET /v1/share/<id>`: the playlist behind a short link.
     pub async fn shared_playlist(&self, id: &str) -> Result<SharedPlaylist> {
-        let resp = Self::check(self.get(&format!("/v1/share/{id}")).timeout(Duration::from_secs(10)).send().await?).await?;
+        let resp = Self::check(self.member_request(self.get(&format!("/v1/share/{id}"))).await.timeout(Duration::from_secs(10)).send().await?).await?;
         Ok(resp.json().await?)
     }
 
@@ -200,13 +250,13 @@ impl ServerClient {
     }
 
     pub async fn cover_url(&self, track: &Track) -> Result<Option<String>> {
-        let resp = Self::check(self.post("/v1/cover").json(track).send().await?).await?;
+        let resp = Self::check(self.member_request(self.post("/v1/cover")).await.json(track).send().await?).await?;
         let value: serde_json::Value = resp.json().await?;
         Ok(value["url"].as_str().map(|u| self.upstream_url(u)))
     }
 
     pub async fn download_url(&self, track: &Track) -> Result<Option<(ProviderId, String)>> {
-        let resp = Self::check(self.post("/v1/download").json(track).send().await?).await?;
+        let resp = Self::check(self.member_request(self.post("/v1/download")).await.json(track).send().await?).await?;
         let value: Option<(ProviderId, String)> = {
             let v: serde_json::Value = resp.json().await?;
             if v.is_null() { None } else { Some((serde_json::from_value(v["provider"].clone())?, v["url"].as_str().context("missing download URL")?.into())) }
@@ -229,7 +279,7 @@ impl ServerClient {
         if let Some(d) = duration_s {
             q.push(("duration", d.to_string()));
         }
-        let resp = self.get("/v1/lyrics").query(&q).send().await?;
+        let resp = self.member_request(self.get("/v1/lyrics")).await.query(&q).send().await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -238,14 +288,14 @@ impl ServerClient {
 
     /// `GET /v1/similar`.
     pub async fn similar(&self, artist: &str, title: &str) -> Result<SimilarResponse> {
-        let resp = self.get("/v1/similar").query(&[("artist", artist), ("title", title)]).send().await?;
+        let resp = self.member_request(self.get("/v1/similar")).await.query(&[("artist", artist), ("title", title)]).send().await?;
         Ok(Self::check(resp).await?.json().await?)
     }
 
     /// `POST /v1/import/spotify` (public Spotify / Deezer / YouTube playlist links).
     pub async fn import(&self, url: &str) -> Result<ImportResponse> {
         let body = ImportRequest { url: url.to_string() };
-        let resp = Self::check(self.post("/v1/import/spotify").json(&body).send().await?).await?;
+        let resp = Self::check(self.member_request(self.post("/v1/import/spotify")).await.json(&body).send().await?).await?;
         Ok(resp.json().await?)
     }
 }
@@ -303,8 +353,8 @@ mod tests {
 
 impl ServerClient {
     fn authed(&self, method: reqwest::Method, path: &str, token: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, self.url(path))
+        self.authorize(self.http
+            .request(method, self.url(path)))
             .header(INSTALL_ID_HEADER, &self.install_id)
             .bearer_auth(token)
             .timeout(REQUEST_TIMEOUT)
@@ -496,5 +546,23 @@ mod account_tests {
         assert!(u.starts_with("https://srv.example/v1/covers/"));
         assert!(u.contains("u=https%3A%2F%2Fi.ytimg.com"));
         assert_eq!(c.cached_cover_url("https://example.com/x.jpg"), None);
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    #[test]
+    fn credentials_are_scoped_independent_and_sensitive() {
+        let c = ServerClient::new("https://private.example",reqwest::Client::new(),"install".into()).with_bearer(Some("secret-server-bearer-with-at-least-32-characters".into())).unwrap();
+        let request = c.authed(reqwest::Method::GET,"/v1/profile","account-access").build().unwrap();
+        assert_eq!(request.headers()[reqwest::header::AUTHORIZATION],"Bearer account-access");
+        let value = &request.headers()[crate::server_access::HEADER];
+        assert!(value.is_sensitive());
+        assert!(!format!("{request:?}").contains("secret-server-bearer"));
+        let outside = "https://private.example.evil/v1/audio/x";
+        let request = c.authorize_url(reqwest::Client::new().get(outside),outside).build().unwrap();
+        assert!(request.headers().get(crate::server_access::HEADER).is_none());
+        assert!(ServerClient::new("http://private.example",reqwest::Client::new(),String::new()).with_bearer(Some("secret".into())).is_err());
     }
 }

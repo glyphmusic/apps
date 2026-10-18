@@ -6,15 +6,16 @@
 # Stop with Ctrl+C.
 
 $ErrorActionPreference = 'Continue'
+if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = [string][Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount / 2)) }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $env:PATH = "$HOME\.cargo\bin;$env:PATH"
-$env:CARGO_TARGET_DIR = Join-Path $root 'target\ui'
+$env:CARGO_TARGET_DIR = Join-Path $root 'target'
 $exe = Join-Path $env:CARGO_TARGET_DIR 'debug\glyph.exe'
 # The preview runs from a copy, so builds (ours and anyone else's) can always
 # overwrite glyph.exe while the preview stays open.
-$preview = Join-Path $env:CARGO_TARGET_DIR 'debug\glyph-preview.exe'
-$watch = @('src', 'crates', 'assets', 'Cargo.toml')
+$preview = Join-Path $env:CARGO_TARGET_DIR 'debug\glyph-run.exe'
+$watch = @('src', 'crates', 'assets', '.cargo', 'Cargo.toml', 'Cargo.lock', 'build.rs')
 
 function Get-Stamp {
     # Only look at files git reports as changed: a full directory walk is
@@ -28,14 +29,7 @@ function Get-Stamp {
 }
 
 function Start-Glyph {
-    $old = Get-Process glyph-preview -ErrorAction SilentlyContinue
-    if ($old) {
-        $old | Stop-Process -Force
-        $old | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-    }
-    Copy-Item $exe $preview -Force
-    Start-Process -FilePath $preview -WorkingDirectory $root | Out-Null
-    Write-Host ("[{0:HH:mm:ss}] glyph started" -f (Get-Date)) -ForegroundColor Green
+    & (Join-Path $PSScriptRoot 'run-dev.ps1') -NoBuild
 }
 
 function Invoke-Build {
@@ -46,6 +40,7 @@ function Invoke-Build {
 }
 
 $last = $null
+$lastCleanup = [DateTime]::MinValue
 while ($true) {
     $stamp = Get-Stamp
     if ($stamp -ne $last) {
@@ -53,14 +48,23 @@ while ($true) {
         Start-Sleep -Seconds 3
         if ((Get-Stamp) -ne $stamp) { continue }
         $last = $stamp
-        if (Invoke-Build) {
+        $built = Invoke-Build
+        try { & (Join-Path $PSScriptRoot 'clean-builds.ps1') -KeepProfile debug }
+        catch { Write-Warning "Build cleanup failed: $($_.Exception.Message)" }
+        $lastCleanup = [DateTime]::UtcNow
+        if ($built) {
             Start-Glyph
         } else {
             Write-Host ("[{0:HH:mm:ss}] build failed, keeping the last good version" -f (Get-Date)) -ForegroundColor Yellow
-            if (-not (Get-Process glyph-preview -ErrorAction SilentlyContinue) -and (Test-Path $preview)) {
-                Start-Process -FilePath $preview -WorkingDirectory $root | Out-Null
+            if (-not (Get-Process glyph-run -ErrorAction SilentlyContinue) -and (Test-Path $preview)) {
+                Start-Process -FilePath $preview -WorkingDirectory $root -WindowStyle Normal | Out-Null
             }
         }
+    }
+    if (([DateTime]::UtcNow - $lastCleanup).TotalMinutes -ge 1) {
+        try { & (Join-Path $PSScriptRoot 'clean-builds.ps1') -KeepProfile debug }
+        catch { Write-Warning "Build cleanup failed: $($_.Exception.Message)" }
+        $lastCleanup = [DateTime]::UtcNow
     }
     Start-Sleep -Seconds 2
 }

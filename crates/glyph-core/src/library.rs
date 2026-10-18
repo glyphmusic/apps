@@ -22,7 +22,7 @@ pub struct Playlist {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<String>,
     /// Songs in it are downloaded automatically, newly added ones included.
-    /// Per device: not synced.
+    /// Synced (kind `autodl`) for signed-in users.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_download: bool,
     /// Handle of whoever shared it (opened from a short link); shown as the author.
@@ -83,11 +83,28 @@ pub struct FollowedArtist {
 }
 
 /// Max entries in "recently opened lists".
-pub const RECENT_LISTS_LIMIT: usize = 8;
+pub const RECENT_LISTS_LIMIT: usize = 24;
+
+/// Local listening activity; older listens lose half their weight every week.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SongActivity {
+    pub track: Track,
+    pub score: f64,
+    pub last_listened: u64,
+}
+impl SongActivity {
+    fn weight(&self, now: u64) -> f64 {
+        if !self.score.is_finite() || self.score < 0.0 { return 0.0; }
+        self.score * (-((now.saturating_sub(self.last_listened)) as f64) / (7.0 * 86400.0)).exp2()
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Library {
     pub liked: Vec<Track>,
+    /// Per-device activity; excluded from account sync. Capped at 500 songs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub song_activity: BTreeMap<String, SongActivity>,
     pub recent: Vec<Track>,
     pub playlists: Vec<Playlist>,
     /// Lyrics offsets in ms, keyed by normalised `title|artist`.
@@ -102,6 +119,16 @@ pub struct Library {
     /// Lists opened recently, newest first (sidebar).
     #[serde(default)]
     pub recent_lists: Vec<ListKey>,
+    /// Lists pinned to the top of the sidebar and the library.
+    #[serde(default)]
+    pub pinned: Vec<ListKey>,
+    /// Liked Songs was downloaded once: newly liked songs download too.
+    #[serde(default)]
+    pub liked_auto_download: bool,
+    /// How much each list is used (listening from it, opening it): list id
+    /// -> (score, last use, Unix s). Orders the sidebar; fades over weeks.
+    #[serde(default)]
+    pub list_activity: BTreeMap<String, (f64, u64)>,
     /// Followed artists, newest first.
     #[serde(default)]
     pub followed: Vec<FollowedArtist>,
@@ -185,6 +212,26 @@ impl Library {
             v.truncate(1500);
             self.artist_plays = v.into_iter().collect();
         }
+    }
+
+    /// Record a meaningful listen, once playback has reached the listening threshold.
+    pub fn record_listen(&mut self, track: &Track, now: u64) {
+        let key = format!("{}|{}", crate::dedupe::normalize_title(&track.title), crate::dedupe::normalize_artist(&track.artist));
+        let score = self.song_activity.get(&key).map(|a| a.weight(now)).unwrap_or(0.0) + 1.0;
+        self.song_activity.insert(key, SongActivity { track: track.clone(), score, last_listened: now });
+        if self.song_activity.len() > 500 {
+            let mut ranked: Vec<_> = std::mem::take(&mut self.song_activity).into_iter().collect();
+            ranked.sort_by(|a,b| b.1.weight(now).total_cmp(&a.1.weight(now)).then(b.1.last_listened.cmp(&a.1.last_listened)));
+            ranked.truncate(500);
+            self.song_activity = ranked.into_iter().collect();
+        }
+    }
+
+    /// Frequent and still-active songs, not the chronological recent list.
+    pub fn active_tracks(&self, limit: usize, now: u64) -> Vec<Track> {
+        let mut entries: Vec<_> = self.song_activity.values().map(|a| (a.weight(now), a)).filter(|(weight,_)| *weight >= 0.125).collect();
+        entries.sort_by(|(wa,a),(wb,b)| wb.total_cmp(wa).then(b.last_listened.cmp(&a.last_listened)).then(a.track.title.cmp(&b.track.title)));
+        entries.into_iter().take(limit).map(|(_,a)| a.track.clone()).collect()
     }
 
     /// Counts an early skip for the song's artists.
@@ -275,6 +322,38 @@ impl Library {
     }
 
     /// Remembers an opened list: front, deduped, capped.
+    /// Short stable id of a list for `list_activity`.
+    pub fn list_id(key: &ListKey) -> String {
+        match key {
+            ListKey::Liked => "liked".into(),
+            ListKey::Recent => "recent".into(),
+            ListKey::Downloads => "downloads".into(),
+            ListKey::Playlist { id } => format!("pl:{id}"),
+            ListKey::Album { title, artist, .. } => format!("al:{}|{}", title.to_lowercase(), artist.to_lowercase()),
+            ListKey::ArtistLiked { artist } => format!("ar:{}", artist.to_lowercase()),
+        }
+    }
+
+    /// Adds `amount` of use to a list (a song listened from it: 1, opening it: less).
+    pub fn record_list_use(&mut self, key: &ListKey, amount: f64, now: u64) {
+        let id = Self::list_id(key);
+        let w = self.list_weight(key, now) + amount;
+        self.list_activity.insert(id, (w, now));
+        if self.list_activity.len() > 200 {
+            let mut v: Vec<_> = std::mem::take(&mut self.list_activity).into_iter().collect();
+            v.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+            v.truncate(150);
+            self.list_activity = v.into_iter().collect();
+        }
+    }
+
+    /// Current use of a list, halving every two weeks without use.
+    pub fn list_weight(&self, key: &ListKey, now: u64) -> f64 {
+        self.list_activity
+            .get(&Self::list_id(key))
+            .map_or(0.0, |(s, at)| s * (-((now.saturating_sub(*at)) as f64) / (14.0 * 86400.0)).exp2())
+    }
+
     pub fn push_recent_list(&mut self, key: ListKey) {
         self.recent_lists.retain(|k| !k.same(&key));
         self.recent_lists.insert(0, key);
@@ -413,6 +492,29 @@ mod tests {
 
     fn tr(id: &str, title: &str) -> Track {
         test_track(ProviderId::Audius, id, title, "Band", Some(180_000))
+    }
+
+    #[test]
+    fn activity_favors_repeated_current_listens_and_preserves_recent_order() {
+        let mut lib = Library::default();
+        let now = 30 * 86400;
+        let favorite = tr("favorite","Favorite");
+        let latest = tr("latest","Latest");
+        lib.push_recent(favorite.clone()); lib.push_recent(latest.clone());
+        for _ in 0..5 { lib.record_listen(&favorite,now-86400); }
+        lib.record_listen(&latest,now);
+        assert_eq!(lib.active_tracks(2,now),vec![favorite.clone(),latest.clone()]);
+        assert_eq!(lib.recent,vec![latest.clone(),favorite.clone()]);
+        let hot = tr("hot","New favorite");
+        for _ in 0..3 { lib.record_listen(&hot,now+28*86400); }
+        assert_eq!(lib.active_tracks(1,now+28*86400),vec![hot]);
+        let mut alternate = favorite.clone(); alternate.source=ProviderId::Deezer; alternate.id="alternate".into();
+        let count=lib.song_activity.len(); lib.record_listen(&alternate,now+28*86400);
+        assert_eq!(lib.song_activity.len(),count,"same song on another provider is one activity entry");
+        let encoded=serde_json::to_vec(&lib).unwrap();
+        let decoded: Library = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.active_tracks(5,now+28*86400),lib.active_tracks(5,now+28*86400));
+        for (key,value) in &lib.song_activity { assert!((decoded.song_activity[key].score-value.score).abs()<1e-12); }
     }
 
     #[test]

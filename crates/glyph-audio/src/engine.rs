@@ -16,6 +16,10 @@ const TICK: Duration = Duration::from_millis(16);
 /// Pause / resume fade of native playback (no hard cut).
 const PAUSE_FADE: Duration = Duration::from_millis(220);
 const NEAR_END: Duration = Duration::from_secs(10);
+/// A-B loop jump: the fade is the crossfade length, but at most this long
+/// (and a quarter of the loop); without crossfade just a click-free dip.
+const LOOP_FADE_MAX: Duration = Duration::from_secs(2);
+const LOOP_DECLICK: Duration = Duration::from_millis(40);
 /// A `load()` of the track that just started gaplessly is the UI reacting to
 /// our `Ended`; ignore it for this long.
 const PROMOTE_GRACE: Duration = Duration::from_millis(3000);
@@ -137,6 +141,7 @@ pub(crate) struct Engine {
     volume: f32,
     want_play: bool,
     last_load: Option<(Track, PlaybackSource)>,
+    variant_changed: Instant,
     pending_seek: Option<Duration>,
     analyzer: Analyzer,
     tap: Arc<Tap>,
@@ -159,6 +164,11 @@ pub(crate) struct Engine {
     pause_gain: f32,
     /// Running pause fade: (start, gain at start, fading in).
     pause_fade: Option<(Instant, f32, bool)>,
+    /// A-B loop of the current song, its volume factor (fading out before
+    /// the end point and in after the jump) and when it last jumped.
+    ab_loop: Option<(Duration, Duration)>,
+    loop_gain: f32,
+    loop_jump: Option<Instant>,
 }
 
 impl Engine {
@@ -181,6 +191,7 @@ impl Engine {
             volume,
             want_play: false,
             last_load: None,
+            variant_changed: Instant::now(),
             pending_seek: None,
             analyzer: Analyzer::new(),
             tap: Arc::new(Tap::default()),
@@ -195,6 +206,9 @@ impl Engine {
             embed_gain: 1.0,
             pause_gain: 1.0,
             pause_fade: None,
+            ab_loop: None,
+            loop_gain: 1.0,
+            loop_jump: None,
         }
     }
 
@@ -272,8 +286,10 @@ impl Engine {
             }
             Cmd::Stop => self.stop(),
             Cmd::Seek(p) => self.seek(p),
+            Cmd::StreamQuality(q) => self.stream_quality(Some(&q)),
             Cmd::Volume(v) => self.set_volume(v),
             Cmd::Crossfade(d) => self.crossfade = d,
+            Cmd::Loop(l) => self.ab_loop = l,
             Cmd::OutputDevice(name) => {
                 if self.out_device != name {
                     self.out_device = name;
@@ -405,11 +421,19 @@ impl Engine {
         if self.device.is_some() {
             return true;
         }
-        let chosen = self.out_device.as_deref().and_then(Self::find_device);
-        let opened = match chosen {
-            Some(dev) => rodio::DeviceSinkBuilder::from_device(dev).and_then(|b| b.open_sink_or_fallback()),
-            None => rodio::DeviceSinkBuilder::open_default_sink(),
+        // A fixed ~45 ms output buffer first: the OS default (about 10 ms on
+        // Windows) runs dry, and crackles, whenever the machine is busy for a
+        // moment. Falls back to the device defaults if it is refused.
+        let builder = || match self.out_device.as_deref().and_then(Self::find_device) {
+            Some(dev) => rodio::DeviceSinkBuilder::from_device(dev),
+            None => rodio::DeviceSinkBuilder::from_default_device(),
         };
+        let opened = builder()
+            .and_then(|b| b.with_buffer_size(rodio::cpal::BufferSize::Fixed(2048)).open_stream())
+            .or_else(|_| match self.out_device.as_deref().and_then(Self::find_device) {
+                Some(dev) => rodio::DeviceSinkBuilder::from_device(dev).and_then(|b| b.open_sink_or_fallback()),
+                None => rodio::DeviceSinkBuilder::open_default_sink(),
+            });
         self.opened_device = match &self.out_device {
             Some(n) if Self::find_device(n).is_some() => Some(n.clone()),
             _ => Self::default_device_name(),
@@ -615,6 +639,10 @@ impl Engine {
 
     fn promote_next(&mut self) {
         let Some(n) = self.next.take() else { return };
+        // The loop belongs to the song that just ended.
+        if !self.cur.as_ref().is_some_and(|c| same_track(&c.track, &n.track)) {
+            self.ab_loop = None;
+        }
         {
             let mut st = self.shared.state.lock().unwrap();
             st.track = Some(n.track.clone());
@@ -745,7 +773,7 @@ impl Engine {
 
     /// Volume for the native players: user volume times the pause fade.
     fn out_volume(&self) -> f32 {
-        self.volume * self.pause_gain
+        self.volume * self.pause_gain * self.loop_gain
     }
 
     fn apply_native_volume(&self) {
@@ -881,8 +909,33 @@ impl Engine {
 
     // ---- periodic
 
+    fn stream_quality(&mut self, mode: Option<&str>) {
+        let Some((track, mut source)) = self.last_load.clone() else { return; };
+        if mode.is_none() {
+            if !self.want_play || self.cur.is_none() || self.pending_cur.is_some() || self.fading.is_some() { return; }
+            let st = self.shared.state.lock().unwrap();
+            if st.duration.is_some_and(|d| d.saturating_sub(st.position) < Duration::from_secs(12)) { return; }
+        }
+        let PlaybackSource::Stream { ref mut url, .. } = source else { return; };
+        let Some((updated,changed)) = super::adaptive::rewrite(url,mode,glyph_protocol::network::class(),self.variant_changed.elapsed()) else { return; };
+        *url = updated;
+        if !changed { self.last_load = Some((track,source)); return; }
+        let pos = self.shared.state.lock().unwrap().position;
+        let playing = self.want_play;
+        // Each MP4 has its own byte offsets and decoder state. Reopen and seek
+        // by timestamp, never splice bytes from different representations.
+        self.promoted = None;
+        self.drop_next();
+        self.load(track,source);
+        self.pending_seek = Some(pos);
+        self.want_play = playing;
+        self.shared.state.lock().unwrap().position = pos;
+        self.variant_changed = Instant::now();
+    }
+
     fn tick(&mut self) {
         self.check_default_device();
+        self.stream_quality(None);
         let mut analysed = false;
         if let Some(cur) = self.cur.as_mut() {
             let finished = cur.shared.finished.load(Ordering::SeqCst);
@@ -899,6 +952,10 @@ impl Engine {
                 cur.near_end_sent = true;
             }
             let rate = cur.rate;
+            let underruns = cur.shared.underruns.swap(0, Ordering::Relaxed);
+            if underruns > 0 {
+                tracing::warn!(track_id = cur.id, underruns, "decoder audio buffer underrun");
+            }
             if !finished {
                 {
                     let mut st = self.shared.state.lock().unwrap();
@@ -921,12 +978,14 @@ impl Engine {
                     self.emit(PlayerEvent::NearEnd);
                 }
                 if self.want_play && started {
-                    let recent: Vec<f32> = {
+                    let mut recent = [0.0; crate::spectrum::FFT_SIZE];
+                    let count = {
                         let g = self.tap.samples.lock().unwrap();
-                        let n = g.len().min(crate::spectrum::FFT_SIZE);
-                        g[g.len() - n..].to_vec()
+                        let n = g.len().min(recent.len());
+                        recent[..n].copy_from_slice(&g[g.len() - n..]);
+                        n
                     };
-                    let bands = self.analyzer.process(&recent, rate);
+                    let bands = self.analyzer.process(&recent[..count], rate);
                     *self.shared.spectrum.lock().unwrap() = bands;
                     analysed = true;
                 }
@@ -939,6 +998,7 @@ impl Engine {
         }
         self.step_fade();
         self.step_pause_fade();
+        self.step_loop();
         // Remember what was measured (replays start at the right gain).
         if let Some(cur) = &self.cur {
             if let Some(l) = cur.shared.loudness.measured() {
@@ -965,6 +1025,50 @@ impl Engine {
         if !analysed {
             let bands = self.analyzer.decay();
             *self.shared.spectrum.lock().unwrap() = bands;
+        }
+    }
+
+    // ---- A-B loop
+
+    /// Fades out towards the loop's end point, jumps back to its start and
+    /// fades in again.
+    fn step_loop(&mut self) {
+        let smooth = |k: f32| {
+            let k = k.clamp(0.0, 1.0);
+            k * k * (3.0 - 2.0 * k)
+        };
+        let mut g = 1.0;
+        if let Some((a, b)) = self.ab_loop {
+            let fade = self.crossfade.min(b.saturating_sub(a) / 4).min(LOOP_FADE_MAX).max(LOOP_DECLICK);
+            if let Some(t) = self.loop_jump {
+                let k = t.elapsed().as_secs_f32() / fade.as_secs_f32();
+                if k >= 1.0 && t.elapsed() >= Duration::from_millis(250) {
+                    self.loop_jump = None;
+                } else {
+                    g = smooth(k);
+                }
+            }
+            // Right after a jump the decoder may still report the old
+            // position: wait for it before checking the end point again.
+            let settling = self.loop_jump.is_some_and(|t| t.elapsed() < Duration::from_millis(250));
+            let pos = self.cur.as_ref().filter(|c| c.shared.started.load(Ordering::Relaxed) && !c.shared.finished.load(Ordering::SeqCst)).map(|c| {
+                Duration::from_secs_f64(c.shared.pos_frames.load(Ordering::Relaxed) as f64 / c.rate.max(1) as f64)
+            });
+            if let Some(pos) = pos.filter(|_| !settling && self.fading.is_none()) {
+                if pos >= b {
+                    self.seek(a);
+                    self.loop_jump = Some(Instant::now());
+                    g = 0.0;
+                } else if pos >= a && b - pos < fade {
+                    g = g.min(smooth((b - pos).as_secs_f32() / fade.as_secs_f32()));
+                }
+            }
+        } else {
+            self.loop_jump = None;
+        }
+        if (g - self.loop_gain).abs() > 1e-4 {
+            self.loop_gain = g;
+            self.apply_native_volume();
         }
     }
 

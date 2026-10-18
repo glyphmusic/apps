@@ -71,6 +71,7 @@ pub fn smooth(prev: &mut [f32; SPECTRUM_BANDS], new: &[f32; SPECTRUM_BANDS]) {
 
 pub struct Analyzer {
     fft: Arc<dyn Fft<f32>>,
+    scratch: Vec<Complex32>,
     window: Vec<f32>,
     buf: Vec<Complex32>,
     amps: Vec<f32>,
@@ -82,6 +83,7 @@ pub struct Analyzer {
 impl Analyzer {
     pub fn new() -> Self {
         let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+        let scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
         let window = (0..FFT_SIZE)
             .map(|i| {
                 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE as f32 - 1.0)).cos()
@@ -89,6 +91,7 @@ impl Analyzer {
             .collect();
         Self {
             fft,
+            scratch,
             window,
             buf: vec![Complex32::new(0.0, 0.0); FFT_SIZE],
             amps: vec![0.0; FFT_SIZE / 2],
@@ -112,7 +115,7 @@ impl Analyzer {
             let s = if i < pad { 0.0 } else { src[i - pad] };
             self.buf[i] = Complex32::new(s * self.window[i], 0.0);
         }
-        self.fft.process(&mut self.buf);
+        self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
         // A full-scale sine under a Hann window peaks at N/4.
         let norm = FFT_SIZE as f32 / 4.0;
         for (a, c) in self.amps.iter_mut().zip(&self.buf) {

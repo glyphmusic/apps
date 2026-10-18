@@ -260,7 +260,7 @@ impl Resolver {
     /// A batch contains new tracks and, for songs that were already sent by an
     /// earlier provider, the *updated* merged track (same `source`+`id` as before,
     /// now with more `external_ids`) — the UI replaces by `(source, id)`.
-    pub fn search_stream(self: &Arc<Self>, query: &str) -> mpsc::UnboundedReceiver<SearchEvent> {
+    pub fn search_stream(self: &Arc<Self>, query: &str, page: usize) -> mpsc::UnboundedReceiver<SearchEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = self.clone();
         let q = query.trim().to_string();
@@ -277,7 +277,7 @@ impl Resolver {
                 }
                 let q = q.clone();
                 let to = p.search_timeout().unwrap_or(this.search_timeout);
-                pending.push(async move { (id, timeout(to, p.search(&q)).await) });
+                pending.push(async move { (id, timeout(to, p.search_page(&q, page)).await) });
             }
             let mut merger = Merger::new();
             while let Some((id, res)) = pending.next().await {
@@ -636,7 +636,7 @@ mod tests {
                 m
             },
         ]);
-        let mut rx = r.search_stream("song");
+        let mut rx = r.search_stream("song", 0);
         let mut events = vec![];
         while let Some(e) = rx.recv().await {
             let done = e == SearchEvent::Done;
@@ -673,7 +673,7 @@ mod tests {
         let calls = m.calls.clone();
         let r = resolver(vec![m]);
         r.cooldowns().trip(ProviderId::Audius);
-        let mut rx = r.search_stream("x");
+        let mut rx = r.search_stream("x", 0);
         assert_eq!(rx.recv().await, Some(SearchEvent::Done));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
