@@ -20,6 +20,9 @@ souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] 
 webbrowser = "1"
 
 raw-window-handle = "0.6"
+
+# Child webview for the embed player. Phones need their own WebView glue.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 wry = "0.57"
 
 # Own-window mini-player (fallback) runs tao on its own thread where the OS allows it.

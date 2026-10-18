@@ -26,8 +26,10 @@
 
 use super::EventSink;
 use anyhow::{anyhow, Result};
-use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
-#[cfg(not(target_os = "windows"))]
+use raw_window_handle::RawWindowHandle;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
+#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -129,19 +131,23 @@ impl HostQueue {
     pub fn set_sink(&self, sink: EventSink) {
         *self.sink.lock().unwrap() = Some(sink);
     }
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
     fn emit(&self, session: u64, ev: super::EmbedEvent) {
         let sink = self.sink.lock().unwrap().clone();
         if let Some(s) = sink {
             s(session, ev);
         }
     }
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
     fn drain(&self) -> Vec<HostCmd> {
         self.q.lock().unwrap().drain()
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct Parent(RawWindowHandle);
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl HasWindowHandle for Parent {
     fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
         // SAFETY: the caller of `attach_embed_host` guarantees the handle
@@ -150,17 +156,19 @@ impl HasWindowHandle for Parent {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct HostState {
     webview: wry::WebView,
     ui_visible: bool,
     parked: bool,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
 thread_local! {
     static HOST: RefCell<Option<HostState>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn to_rect(b: Bounds) -> wry::Rect {
     wry::Rect {
         position: wry::dpi::LogicalPosition::new(b.x as f64, b.y as f64).into(),
@@ -168,6 +176,7 @@ fn to_rect(b: Bounds) -> wry::Rect {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<wry::WebView> {
     let ipc_q = queue.clone();
     let builder = wry::WebViewBuilder::new()
@@ -191,6 +200,7 @@ fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> 
     builder.build_as_child(&Parent(parent)).map_err(|e| anyhow!("child webview: {e}"))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn apply(st: &mut HostState, c: HostCmd) {
     eprintln!("DBG apply {:?}", c);
     match c {
@@ -223,7 +233,14 @@ fn apply(st: &mut HostState, c: HostCmd) {
 pub fn attach(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     return attach_threaded(queue, parent);
-    #[cfg(not(target_os = "windows"))]
+    // Phones: no wry child webview (it needs its own Kotlin/Swift glue); the
+    // caller keeps its fallback.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (queue, parent);
+        Err(anyhow!("child webviews are not supported on this platform yet"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
     {
         #[cfg(target_os = "linux")]
         {
@@ -307,11 +324,11 @@ fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -
 /// Apply queued commands. Non-Windows: must run on the thread that called
 /// [`attach`]. Windows: no-op (the embed thread applies them itself).
 pub fn pump(queue: &HostQueue) {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "ios"))]
     {
         let _ = queue;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
     {
         // Before the first attach gtk is not initialised yet (and must not be
         // touched then).
