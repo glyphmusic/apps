@@ -35,7 +35,7 @@ Prebuilt builds for every platform are on the [Releases](https://github.com/glyp
 | Linux x64 | `glyph-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux ARM64 | `glyph-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 
-Each asset has a `.sha256` file next to it.
+New releases include one `SHA256SUMS.txt` listing every asset. Earlier releases keep individual `.sha256` files. App versions before 0.2.2 need one manual upgrade to read the new manifest.
 
 ## Build from source
 

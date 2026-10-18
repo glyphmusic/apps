@@ -682,3 +682,8 @@
 "ytdlp.mode.server" = "Server"
 "ytdlp.mode.hint" = "Local uses yt-dlp on this computer. Server uses the companion. Downloaded files always play locally."
 "common.retry" = "Try again"
+"profile.crop.avatar" = "Edit picture"
+"profile.crop.banner" = "Edit banner"
+"profile.crop.reset" = "Reset"
+"profile.crop.apply" = "Apply"
+"account.unreachable" = "Could not reach the Glyph server. Check your connection and try again."

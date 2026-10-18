@@ -13,6 +13,42 @@ pub fn encode_webp(image: &DynamicImage, quality: f32) -> Result<Vec<u8>> {
         .to_vec())
 }
 pub fn prepare(path: &Path, banner: bool) -> Result<Vec<u8>> {
+    prepare_crop(path, banner, Crop::default())
+}
+
+/// User framing from the crop dialog: `zoom` >= 1 over the largest centered
+/// square / 3:1 region, `cx`/`cy` its center as fractions of the image.
+#[derive(Clone, Copy, Debug)]
+pub struct Crop {
+    pub zoom: f32,
+    pub cx: f32,
+    pub cy: f32,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Self { zoom: 1.0, cx: 0.5, cy: 0.5 }
+    }
+}
+
+/// Crop region `(x, y, w, h)` in pixels for an image of `w` x `h`.
+pub fn crop_rect(w: u32, h: u32, banner: bool, c: Crop) -> (u32, u32, u32, u32) {
+    let aspect = if banner { 3.0 } else { 1.0 };
+    let (fw, fh) = (w as f32, h as f32);
+    let (bw, bh) = if fw >= fh * aspect { (fh * aspect, fh) } else { (fw, fw / aspect) };
+    let z = c.zoom.max(1.0);
+    let (cw, ch) = ((bw / z).max(1.0), (bh / z).max(1.0));
+    let x = (c.cx * fw - cw / 2.0).clamp(0.0, fw - cw);
+    let y = (c.cy * fh - ch / 2.0).clamp(0.0, fh - ch);
+    (x as u32, y as u32, (cw as u32).max(1).min(w), (ch as u32).max(1).min(h))
+}
+
+/// Pixel size of an image file without decoding it.
+pub fn dimensions(path: &Path) -> Result<(u32, u32)> {
+    Ok(image::ImageReader::open(path)?.with_guessed_format()?.into_dimensions()?)
+}
+
+pub fn prepare_crop(path: &Path, banner: bool, crop: Crop) -> Result<Vec<u8>> {
     if std::fs::metadata(path)?.len() > MAX_SOURCE_BYTES {
         bail!("profile image source exceeds 20 MiB");
     }
@@ -23,27 +59,18 @@ pub fn prepare(path: &Path, banner: bool) -> Result<Vec<u8>> {
     limits.max_image_height = Some(16384);
     reader.limits(limits);
     let image = reader.decode()?;
-    prepare_image(&image, banner)
+    prepare_image(&image, banner, crop)
 }
-fn prepare_image(image: &DynamicImage, banner: bool) -> Result<Vec<u8>> {
+fn prepare_image(image: &DynamicImage, banner: bool, crop: Crop) -> Result<Vec<u8>> {
     let (w, h) = (image.width(), image.height());
     if w == 0 || h == 0 {
         bail!("empty image");
     }
+    let (x, y, cw, ch) = crop_rect(w, h, banner, crop);
     let image = if banner {
-        let (cw, ch) = if w >= h.saturating_mul(3) {
-            (h * 3, h)
-        } else {
-            (w, (w / 3).max(1))
-        };
-        image
-            .crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch)
-            .thumbnail(1500, 500)
+        image.crop_imm(x, y, cw, ch).thumbnail(1500, 500)
     } else {
-        let side = w.min(h);
-        image
-            .crop_imm((w - side) / 2, (h - side) / 2, side, side)
-            .thumbnail(512, 512)
+        image.crop_imm(x, y, cw, ch).thumbnail(512, 512)
     };
     for quality in [82.0, 70.0, 58.0] {
         let encoded = encode_webp(&image, quality)?;
@@ -64,7 +91,7 @@ mod tests {
             image::Rgba([90, 130, 180, 128]),
         ));
         for (banner, size) in [(false, (512, 512)), (true, (1500, 500))] {
-            let bytes = prepare_image(&source, banner).unwrap();
+            let bytes = prepare_image(&source, banner, Crop::default()).unwrap();
             assert_eq!(&bytes[..4], b"RIFF");
             assert_eq!(&bytes[8..12], b"WEBP");
             assert!(bytes.len() < MAX_UPLOAD_BYTES);

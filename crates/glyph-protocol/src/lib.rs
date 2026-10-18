@@ -688,3 +688,34 @@ mod account_tests {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub mod network;
+/// Finds the exact asset in a sha256sum manifest. A legacy sidecar may
+/// contain only a single hash; named entries must never match another file.
+pub fn checksum_for_asset(text: &str, filename: &str) -> Option<String> {
+    let mut found = None;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let hash = parts.next()?;
+        let name = parts.next().map(|n| n.trim_start().trim_start_matches('*'));
+        if name.is_some_and(|n| n != filename) { continue; }
+        if name.is_none() && text.split_whitespace().count() != 1 { continue; }
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || found.is_some() { return None; }
+        found = Some(hash.to_ascii_lowercase());
+    }
+    found
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::checksum_for_asset;
+    #[test]
+    fn selects_exact_filename_and_rejects_missing_or_duplicate_entries() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sums = format!("{b}  other.zip\r\n{a} *glyph.zip\r\n");
+        assert_eq!(checksum_for_asset(&sums, "glyph.zip"), Some(a.clone()));
+        assert_eq!(checksum_for_asset(&sums, "missing.zip"), None);
+        assert_eq!(checksum_for_asset(&sums.repeat(2), "glyph.zip"), None);
+        assert_eq!(checksum_for_asset(&a, "glyph.zip"), Some(a));
+        assert_eq!(checksum_for_asset("bad  glyph.zip", "glyph.zip"), None);
+    }
+}

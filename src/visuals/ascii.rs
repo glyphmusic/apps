@@ -266,7 +266,7 @@ pub fn photo_fade(path: &Path, w: u32, h: u32, focus_y: f32) -> Option<image::Rg
     let mut buf = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         let fy = (y as f32 + 0.5) / h as f32;
-        let f = 1.0 - ((fy - 0.4) / 0.6).clamp(0.0, 1.0);
+        let f = 1.0 - ((fy - 0.6) / 0.4).clamp(0.0, 1.0);
         let a = (f * f * (3.0 - 2.0 * f) * 255.0) as u8;
         for x in 0..w {
             let px_ = small.get_pixel(x, y).0;

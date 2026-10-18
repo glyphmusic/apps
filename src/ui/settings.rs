@@ -23,9 +23,9 @@ const DOCS_URL: &str = "https://github.com/glyphmusic/desktop#readme";
 const ISSUES_URL: &str = "https://github.com/glyphmusic/desktop/issues/new";
 const RELEASES_URL: &str = "https://github.com/glyphmusic/desktop/releases";
 
-const PANEL_W: f32 = 920.0;
+pub(crate) const PANEL_W: f32 = 920.0;
 const PANEL_H: f32 = 600.0;
-const NAV_W: f32 = 232.0;
+pub(crate) const NAV_W: f32 = 232.0;
 
 pub(crate) fn white(a: f32) -> Hsla {
     hsla(0.0, 0.0, 1.0, a)
@@ -822,7 +822,8 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
                 Some(&app.settings_scroll),
             )
             .size_full()
-            .child(scrollbar(&app.settings_scroll, true, cx)),
+            .child(scrollbar(&app.settings_scroll, true, cx))
+            .child(crate::ui::widgets::smooth_wheel(&app.settings_scroll, false, cx)),
         )
         .child(
             div()
@@ -868,13 +869,19 @@ fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
 
     div()
         .id("settings-backdrop")
+        .occlude()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
         .bg(hsla(0.0, 0.0, 0.0, 0.30))
-        .on_click(cx.listener(|this, _, w, cx| this.close_settings(w, cx)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, w, cx| {
+            cx.stop_propagation();
+            this.close_settings(w, cx);
+        }))
         .child(panel)
         .into_any_element()
 }
@@ -920,31 +927,33 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
             .collect()
     };
 
+    // Search stays on top; only the list below it scrolls.
+    let search = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.0))
+        .h(px(34.0))
+        .mx(px(6.0))
+        .mt(px(6.0))
+        .mb(px(6.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .bg(white(0.06))
+        .text_size(px(13.0))
+        .child(icon("search", 14.0, white(0.5)))
+        .child(div().flex_1().min_w_0().child(app.settings_search.clone()));
+    let nav_scroll = crate::ui::widgets::handle_for("sp-nav");
     let mut col = div()
         .id("sp-nav")
-        .flex_none()
-        .w(px(NAV_W))
-        .h_full()
+        .track_scroll(&nav_scroll)
+        .size_full()
         .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .p(px(6.0))
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(34.0))
-                .px(px(10.0))
-                .mb(px(6.0))
-                .rounded(px(8.0))
-                .bg(white(0.06))
-                .text_size(px(13.0))
-                .child(icon("search", 14.0, white(0.5)))
-                .child(div().flex_1().min_w_0().child(app.settings_search.clone())),
-        );
+        .px(px(6.0))
+        .pb(px(6.0));
     for (group, items) in groups {
         let mut visible = Vec::new();
         for (page, words) in items {
@@ -1075,7 +1084,16 @@ fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Div> {
             );
         }
     }
-    col
+    let wheel = crate::ui::widgets::smooth_wheel(&nav_scroll, false, cx);
+    div()
+        .id("sp-nav-wrap")
+        .flex_none()
+        .w(px(NAV_W))
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(search)
+        .child(div().relative().flex_1().min_h_0().child(col).child(wheel))
 }
 
 // ------------------------------------------------------------------ pages

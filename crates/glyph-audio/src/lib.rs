@@ -380,6 +380,7 @@ mod tests {
     #[ignore = "requires GLYPH_TEST_AUDIO and a real output device"]
     fn starts_downloaded_audio_promptly() {
         let path = std::env::var("GLYPH_TEST_AUDIO").expect("GLYPH_TEST_AUDIO");
+        let startup_timeout = if path.starts_with("http://") || path.starts_with("https://") { 20 } else { 5 };
         let p = PlayerController::new().unwrap();
         p.set_volume(0.0);
         p.set_output_device(std::env::var("GLYPH_TEST_OUTPUT_DEVICE").ok());
@@ -389,9 +390,19 @@ mod tests {
             provider: ProviderId::YouTube, url: path, mime: Some("audio/mp4".into()),
         });
         p.play();
-        let event = wait_for(&rx, 5, |e| matches!(e, PlayerEvent::StatusChanged(Status::Playing) | PlayerEvent::Error(_)));
-        println!("local startup after {:?}: {event:?}", start.elapsed());
+        let event = wait_for(&rx, startup_timeout, |e| matches!(e, PlayerEvent::StatusChanged(Status::Playing) | PlayerEvent::Error(_)));
+        println!("audio startup after {:?}: {event:?}", start.elapsed());
         assert!(matches!(event, Some(PlayerEvent::StatusChanged(Status::Playing))), "{event:?}");
+        if let Ok(seek) = std::env::var("GLYPH_TEST_SEEK_SECONDS") {
+            let seek: f64 = seek.parse().unwrap();
+            p.seek(Duration::from_secs_f64(seek));
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline && p.state().position.as_secs_f64() < seek + 0.25 {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(p.state().position.as_secs_f64() >= seek + 0.25, "seek did not resume audio");
+            println!("seek resumed at {:?}", p.state().position);
+        }
         p.stop();
     }
 

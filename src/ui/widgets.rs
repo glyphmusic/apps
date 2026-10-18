@@ -307,7 +307,7 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
         glyph.into_any_element()
     };
     with_tip(div()
-        .id(ElementId::Name(id)), tip_for(name))
+        .id(ElementId::Name(id.clone())), tip_for(name))
         .flex_none()
         .relative()
         .flex()
@@ -319,6 +319,7 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
         .hover(|s| s.bg(theme::hover()))
         .active(|s| s.bg(theme::active()))
         .child(glyph)
+        .children((name == "heart" && on).then(|| heart_burst(&id, size, color)).flatten())
         .when(on && !has_fill(name), |d| {
             d.child(
                 div()
@@ -330,6 +331,44 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
                     .bg(color),
             )
         })
+}
+
+/// Little dots flying out of a heart that was just liked (after
+/// [`mark_toggled`]); `None` once the burst is over.
+fn heart_burst(id: &SharedString, size: f32, color: Hsla) -> Option<AnyElement> {
+    const N: usize = 8;
+    const MS: u64 = 600;
+    let fresh = LAST_TOGGLE.with(|l| l.borrow().as_ref().is_some_and(|(k, at)| k == id && at.elapsed() < Duration::from_millis(MS)));
+    if !fresh {
+        return None;
+    }
+    let box_ = size + 14.0;
+    let c = box_ / 2.0;
+    let mut layer = div().absolute().inset_0();
+    for i in 0..N {
+        // Evenly around the heart, every other one a bit farther and smaller.
+        let a = i as f32 / N as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let (far, dot) = if i % 2 == 0 { (size * 1.05, 3.5) } else { (size * 0.8, 2.5) };
+        let (dx, dy) = (a.cos(), a.sin());
+        layer = layer.child(
+            div()
+                .absolute()
+                .size(px(dot))
+                .rounded_full()
+                .bg(color)
+                .left(px(c - dot / 2.0))
+                .top(px(c - dot / 2.0))
+                .with_animation(
+                    ElementId::Name(format!("{id}-burst-{i}").into()),
+                    gpui::Animation::new(Duration::from_millis(MS)).with_easing(gpui::ease_out_quint()),
+                    move |d, k| {
+                        let r = size * 0.35 + far * k;
+                        d.left(px(c + dx * r - dot / 2.0)).top(px(c + dy * r - dot / 2.0)).opacity((1.0 - k).powf(1.5))
+                    },
+                ),
+        );
+    }
+    Some(layer.into_any_element())
 }
 
 // ---- hover fades ---------------------------------------------------------

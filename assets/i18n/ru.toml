@@ -682,3 +682,8 @@
 "ytdlp.mode.server" = "Сервер"
 "ytdlp.mode.hint" = "Локально: yt-dlp на этом компьютере. Сервер: companion. Скачанные файлы всегда воспроизводятся локально."
 "common.retry" = "Повторить"
+"profile.crop.avatar" = "Изменить фото"
+"profile.crop.banner" = "Изменить баннер"
+"profile.crop.reset" = "Сбросить"
+"profile.crop.apply" = "Применить"
+"account.unreachable" = "Не удалось связаться с сервером Glyph. Проверьте подключение и попробуйте снова."

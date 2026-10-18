@@ -162,6 +162,54 @@ pub fn spawn_decoder(id: u64, url: String, mime: Option<String>, engine: Sender<
     }
 }
 
+/// Keeps HTTP Range seeks available after incremental MP4 initialization.
+struct ProbeSource {
+    inner: AudioSource,
+    incremental_probe: Arc<AtomicBool>,
+}
+
+impl Read for ProbeSource {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> { self.inner.read(bytes) }
+}
+impl Seek for ProbeSource {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> { self.inner.seek(to) }
+}
+impl MediaSource for ProbeSource {
+    fn is_seekable(&self) -> bool {
+        !self.incremental_probe.load(Ordering::Relaxed) && self.inner.is_seekable()
+    }
+    fn byte_len(&self) -> Option<u64> { self.inner.byte_len() }
+}
+
+/// A moov before media data makes this MP4 streamable. Inspect only the
+/// already-buffered prefix; non-fast-start files retain the normal probe.
+fn streamable_http_mp4(src: &mut AudioSource) -> bool {
+    if !matches!(src, AudioSource::Http(_)) || !src.is_seekable() { return false; }
+    let Ok(original) = src.stream_position() else { return false; };
+    let inspect = |src: &mut AudioSource| -> std::io::Result<bool> {
+        let mut offset = 0u64;
+        let mut ftyp = false;
+        while offset + 8 <= 64 * 1024 {
+            src.seek(SeekFrom::Start(offset))?;
+            let mut header = [0u8; 8];
+            src.read_exact(&mut header)?;
+            let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as u64;
+            if size < 8 { return Ok(false); }
+            match &header[4..] {
+                b"ftyp" => ftyp = true,
+                b"moov" => return Ok(ftyp),
+                b"mdat" | b"moof" => return Ok(false),
+                _ => {},
+            }
+            offset += size;
+        }
+        Ok(false)
+    };
+    let result = inspect(src).unwrap_or(false);
+    let _ = src.seek(SeekFrom::Start(original));
+    result
+}
+
 /// Opens `url` and probes its container.
 fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
     let mut src = AudioSource::open(url).map_err(|e| format!("cannot open stream: {e} [url={url}]"))?;
@@ -169,7 +217,11 @@ fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, S
     if let Some(off) = degenerate_id3v2_offset(&mut src) {
         tracing::debug!("skipping degenerate ID3v2 header ({off} bytes) in {url}");
     }
-    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+    // Symphonia scans every atom in seekable MP4s during try_new, even when
+    // moov and the first segment index are at the front. Use its streaming
+    // initialization for these network files, then restore real Range seeks.
+    let incremental_probe = Arc::new(AtomicBool::new(streamable_http_mp4(&mut src)));
+    let mss = MediaSourceStream::new(Box::new(ProbeSource { inner: src, incremental_probe: incremental_probe.clone() }), Default::default());
     let probed = symphonia::default::get_probe()
         .format(
             &hint_for(url, mime),
@@ -178,6 +230,7 @@ fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, S
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("unsupported audio format: {e}"))?;
+    incremental_probe.store(false, Ordering::Relaxed);
     Ok(probed.format)
 }
 

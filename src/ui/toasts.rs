@@ -168,6 +168,9 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
         .border_1()
         .border_color(white(0.07))
         .shadow_lg()
+        // Above the titlebar's drag strip: without this the native caption
+        // wins and the grab cursor never shows.
+        .occlude()
         .cursor_grab()
         .opacity(alpha)
         .font_family(theme::FONT)

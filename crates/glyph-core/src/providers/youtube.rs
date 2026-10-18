@@ -284,13 +284,23 @@ impl YouTube {
         self.key.as_deref().ok_or_else(|| ProviderError::Other("YouTube API key missing".into()).into())
     }
 
-    /// The song through the local yt-dlp, as a fully downloaded file in the
-    /// audio cache (googlevideo refuses streams read at playback pace).
+    /// Start from the first HTTP range; fill the complete cache concurrently
+    /// so later ranges can use disk before short-lived provider URLs fail.
     pub async fn local_source(&self, video_id: &str) -> Result<PlaybackSource> {
         let yt = self.local.as_ref().ok_or(ProviderError::Unsupported)?;
-        let path = yt.audio_file(&self.http, video_id).await?;
-        let mime = Some(crate::ytdlp::mime_for_path(&path).to_string());
-        Ok(PlaybackSource::Stream { provider: ProviderId::YouTube, url: path.to_string_lossy().into_owned(), mime })
+        if let Some(path) = crate::ytdlp::cached_audio(video_id) {
+            let mime = Some(crate::ytdlp::mime_for_path(&path).to_string());
+            return Ok(PlaybackSource::Stream { provider: ProviderId::YouTube, url: path.to_string_lossy().into_owned(), mime });
+        }
+        let audio = yt.resolve(video_id).await?;
+        crate::ytdlp::register_playing_stream(&audio);
+        let (runner, http, id) = (yt.clone(), self.http.clone(), video_id.to_string());
+        tokio::spawn(async move {
+            if let Err(e) = runner.audio_file(&http, &id).await {
+                tracing::debug!(video_id = %id, "background audio cache failed: {e:#}");
+            }
+        });
+        Ok(PlaybackSource::Stream { provider: ProviderId::YouTube, url: audio.url, mime: audio.mime })
     }
 
     fn budget_path() -> std::path::PathBuf {
@@ -486,10 +496,9 @@ impl MusicProvider for YouTube {
         if self.local.is_none() {
             return Ok(None);
         }
-        match self.local_source(id).await? {
-            PlaybackSource::Stream { url, .. } => Ok(Some(url)),
-            _ => Ok(None),
-        }
+        let yt = self.local.as_ref().ok_or(ProviderError::Unsupported)?;
+        let path = yt.audio_file(&self.http, id).await?;
+        Ok(Some(path.to_string_lossy().into_owned()))
     }
 }
 

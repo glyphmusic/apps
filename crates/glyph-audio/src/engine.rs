@@ -115,6 +115,7 @@ struct Slot {
     rate: u32,
     duration: Option<Duration>,
     near_end_sent: bool,
+    queued_at: Instant,
 }
 
 struct Pending {
@@ -132,6 +133,7 @@ pub(crate) struct Engine {
     out_device: Option<String>,
     opened_device: Option<String>,
     device_checked: Instant,
+    use_default_buffer: bool,
     player: Option<rodio::Player>,
     cur: Option<Slot>,
     next: Option<Slot>,
@@ -182,6 +184,7 @@ impl Engine {
             out_device: None,
             opened_device: None,
             device_checked: Instant::now(),
+            use_default_buffer: false,
             player: None,
             cur: None,
             next: None,
@@ -293,6 +296,7 @@ impl Engine {
             Cmd::OutputDevice(name) => {
                 if self.out_device != name {
                     self.out_device = name;
+                    self.use_default_buffer = false;
                     self.reopen_device();
                 }
             }
@@ -429,7 +433,8 @@ impl Engine {
             None => rodio::DeviceSinkBuilder::from_default_device(),
         };
         let opened = builder()
-            .and_then(|b| b.with_buffer_size(rodio::cpal::BufferSize::Fixed(2048)).open_stream())
+            .and_then(|b| if self.use_default_buffer { b.open_sink_or_fallback() }
+                else { b.with_buffer_size(rodio::cpal::BufferSize::Fixed(2048)).open_stream() })
             .or_else(|_| match self.out_device.as_deref().and_then(Self::find_device) {
                 Some(dev) => rodio::DeviceSinkBuilder::from_device(dev).and_then(|b| b.open_sink_or_fallback()),
                 None => rodio::DeviceSinkBuilder::open_default_sink(),
@@ -440,6 +445,7 @@ impl Engine {
         };
         match opened {
             Ok(mut d) => {
+                tracing::info!(device = ?self.opened_device, default_buffer = self.use_default_buffer, "audio output opened");
                 d.log_on_drop(false);
                 self.device = Some(d);
                 true
@@ -511,6 +517,7 @@ impl Engine {
     // ---- native events
 
     fn on_opened(&mut self, id: u64, opened: Opened) {
+        tracing::debug!(track_id = id, "decoder ready for audio output");
         if self.pending_cur.as_ref().is_some_and(|p| p.id == id) {
             let p = self.pending_cur.take().unwrap();
             if self.new_player().is_none() {
@@ -537,6 +544,7 @@ impl Engine {
                 }
             }
             self.cur = Some(slot);
+            tracing::debug!(track_id = id, "track queued on audio output");
         } else if self.pending_next.as_ref().is_some_and(|p| p.id == id) {
             let p = self.pending_next.take().unwrap();
             if self.cur.is_none() || self.player.is_none() {
@@ -578,6 +586,7 @@ impl Engine {
             rate: o.rate.get(),
             duration,
             near_end_sent: false,
+            queued_at: Instant::now(),
         }
     }
 
@@ -935,6 +944,22 @@ impl Engine {
 
     fn tick(&mut self) {
         self.check_default_device();
+        // A driver can accept a fixed buffer and then never request samples.
+        // Retrying the same device with its negotiated settings avoids an
+        // endless spinner without unexpectedly switching to other speakers.
+        let stalled = self.want_play && self.cur.as_ref().is_some_and(|c|
+            !c.shared.started.load(Ordering::Relaxed) && c.queued_at.elapsed() >= Duration::from_secs(5));
+        if stalled {
+            if !self.use_default_buffer {
+                tracing::warn!(device = ?self.opened_device, "audio output did not start; retrying device defaults");
+                self.use_default_buffer = true;
+                self.reopen_device();
+            } else {
+                self.stop_native();
+                self.fail("The selected audio output is not responding. Choose another output in Settings > Playback.");
+            }
+            return;
+        }
         self.stream_quality(None);
         let mut analysed = false;
         if let Some(cur) = self.cur.as_mut() {

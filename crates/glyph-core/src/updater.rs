@@ -4,7 +4,7 @@
 //!   "prerelease": `/releases`, first non-draft).
 //! * SemVer compare with `env!("CARGO_PKG_VERSION")`.
 //! * Asset naming: `glyph-{version}-{target}.zip` (Windows) / `.tar.gz`
-//!   (macOS, Linux) plus `{asset}.sha256`. Verify the hash before replacing.
+//!   (macOS, Linux) plus `SHA256SUMS.txt` (legacy: `{asset}.sha256`). Verify before replacing.
 //! * Package-manager installs (under /usr, Homebrew Cellar, WinGet) give
 //!   `UpdateStatus::Available` with `can_self_install = false`.
 //! * At most one automatic check per 24 h (timestamp in the data dir).
@@ -131,7 +131,8 @@ fn to_info(rel: &GhRelease, target: &str, can_self_install: bool) -> UpdateInfo 
     let asset = rel.assets.iter().find(|a| names.contains(&a.name));
     let sha = asset.and_then(|a| {
         let want = format!("{}.sha256", a.name);
-        rel.assets.iter().find(|s| s.name == want)
+        rel.assets.iter().find(|s| s.name == "SHA256SUMS.txt")
+            .or_else(|| rel.assets.iter().find(|s| s.name == want))
     });
     UpdateInfo {
         version,
@@ -308,15 +309,17 @@ pub async fn install(
         bail!("this installation is managed by a package manager (or the release has no matching asset); update it there");
     }
     let asset_url = info.asset_url.as_deref().ok_or_else(|| anyhow!("no asset for {}", current_target()))?;
-    let sha_url = info.sha256_url.as_deref().ok_or_else(|| anyhow!("release has no .sha256 file; refusing to install"))?;
+    let sha_url = info.sha256_url.as_deref().ok_or_else(|| anyhow!("release has no checksum manifest; refusing to install"))?;
     for u in [asset_url, sha_url] {
         if !u.starts_with("https://") {
             bail!("refusing non-HTTPS download URL");
         }
     }
 
-    let expected = parse_sha256_file(&http.get(sha_url).send().await?.error_for_status()?.text().await?)
-        .ok_or_else(|| anyhow!("invalid .sha256 file"))?;
+    let checksum_text = http.get(sha_url).send().await?.error_for_status()?.text().await?;
+    let filename = asset_url.rsplit('/').next().ok_or_else(|| anyhow!("invalid asset URL"))?;
+    let expected = glyph_protocol::checksum_for_asset(&checksum_text, filename)
+        .ok_or_else(|| anyhow!("checksum manifest has no valid, unique entry for {filename}"))?;
 
     let work = paths::data_dir().join("update").join(&info.version);
     let _ = tokio::fs::remove_dir_all(&work).await;
@@ -465,6 +468,15 @@ mod tests {
         assert_eq!(parse_sha256_file(&format!("{h}  glyph.zip\n")), Some(h.clone()));
         assert_eq!(parse_sha256_file(&h.to_uppercase()), Some(h));
         assert_eq!(parse_sha256_file("short"), None);
+    }
+
+    #[test]
+    fn shared_manifest_enables_updates_without_sidecars() {
+        let target = "x86_64-unknown-linux-gnu";
+        let rel = release("v0.2.2", false, false, &["glyph-0.2.2-x86_64-unknown-linux-gnu.tar.gz", "SHA256SUMS.txt"]);
+        let info = to_info(&rel, target, true);
+        assert!(info.can_self_install);
+        assert_eq!(info.sha256_url.as_deref(), Some("https://dl/SHA256SUMS.txt"));
     }
 
     #[test]

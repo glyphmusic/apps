@@ -2085,6 +2085,12 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
 /// "Edit details" of an own playlist: picture left (click to change), name
 /// and per-playlist switches right, Save bottom right.
 fn edit_dialog(app: &mut Glyph, id: String, cx: &mut Context<Glyph>) -> AnyElement {
+    if let Some(on) = app.profile.settings.as_ref().map(|s| s.playlists.contains(&id)) {
+        if let Some(initial) = app.name_dialog.as_mut().and_then(|d| d.initial_playlist.as_mut()) {
+            if initial.3.is_none() { initial.3 = Some(on); }
+        }
+    }
+    let changed = app.playlist_edit_changed(cx);
     let l = ListRef::User(id.clone());
     let art = list_cover(app, &l, 176.0, cx);
     let has = app.library.playlist(&id).is_some_and(|p| p.cover.is_some());
@@ -2171,8 +2177,10 @@ fn edit_dialog(app: &mut Glyph, id: String, cx: &mut Context<Glyph>) -> AnyEleme
                     primary_button("dialog-ok", t("dialog.save"))
                         .h(px(40.0))
                         .px(px(24.0))
-                        .rounded_full()
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_name_dialog(cx))),
+                        .rounded(px(8.0))
+                        .bg(if changed { gpui::white() } else { white(0.16) })
+                        .text_color(if changed { gpui::black() } else { white(0.4) })
+                        .when(changed, |d| d.on_click(cx.listener(|this, _, _, cx| this.submit_name_dialog(cx)))),
                 ),
         );
     deferred(

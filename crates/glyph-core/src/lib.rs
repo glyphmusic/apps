@@ -506,10 +506,7 @@ impl Inner {
     /// full source the resolver matched it to.
     async fn download_url(&self, t: &Track) -> Result<Option<(ProviderId, String)>> {
         if self.config.providers.youtube_mode == config::YouTubeMode::Local && t.source == ProviderId::YouTube {
-            return Ok(match self.local_youtube(t, None).await {
-                Some(Resolved { source: PlaybackSource::Stream { provider, url, .. }, .. }) => Some((provider, url)),
-                _ => None,
-            });
+            return Ok(self.download_at(ProviderId::YouTube, t).await.map(|url| (ProviderId::YouTube, url)));
         }
         if let Some(server) = &self.server {
             if let Some(hit) = server.download_url(t).await.unwrap_or_else(|e| {

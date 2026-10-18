@@ -32,7 +32,8 @@ pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         .items_center()
         .pl(px(if IS_MAC { 84.0 } else { 18.0 }))
         .pr(px(8.0))
-        .gap(px(12.0));
+        .gap(px(12.0))
+        .relative();
 
     // Windows moves/maximizes natively through the Drag strip in `Shell`.
     #[cfg(not(windows))]
@@ -57,7 +58,9 @@ pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             .child("glyph"),
     )
     .child(div().flex_1())
-    .child(theme::on_panel(|| {
+    // Centered on the window (like the toasts below it), not between the
+    // logo and the wider window controls.
+    .child(div().absolute().top_0().left_0().right_0().h_full().flex().items_center().justify_center().child(theme::on_panel(|| {
         let dropdown = (search_focused && app.search.query.trim().is_empty())
             .then(|| search_dropdown(app, cx))
             .flatten();
@@ -98,8 +101,7 @@ pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     .child(shortcut),
             )
             .children(dropdown)
-    }))
-    .child(div().flex_1())
+    })))
     .when_some(status, |d, (s, c)| {
         d.child(
             mono()

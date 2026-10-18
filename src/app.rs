@@ -82,6 +82,7 @@ pub struct NameDialog {
     pub rename: Option<String>,
     /// Naming an equalizer preset instead of a playlist.
     pub eq_preset: bool,
+    pub initial_playlist: Option<(String, Option<String>, bool, Option<bool>)>,
 }
 
 impl ListRef {
@@ -341,7 +342,7 @@ pub struct Glyph {
 
     pub current: Option<Track>,
     activity_recorded: bool,
-    home_activity_cache: Option<(u64, Vec<Track>)>,
+    home_activity_cache: Option<(u64, Vec<Track>, Vec<String>)>,
     pub current_source: Option<ProviderId>,
     pub current_preview: bool,
     /// Track whose expired preview URL was already retried once (see
@@ -1003,6 +1004,7 @@ impl Glyph {
                 self.server_auth_required = b.server_auth_required();
                 glyph_audio::http::set_server_access(b.server_media_credentials());
                 glyph_audio::http::set_account_access_provider(Arc::new(glyph_core::account::media_access));
+                glyph_audio::http::set_local_access_provider(Arc::new(glyph_core::ytdlp::local_stream_access));
                 let b = Arc::new(b);
                 self.backend_state = match guard(|| b.mode()) {
                     Some(m) => BackendState::Ready(m),
@@ -1451,11 +1453,17 @@ impl Glyph {
     pub fn active_home_tracks(&mut self) -> Vec<Track> {
         let now = glyph_core::paths::now_unix();
         let minute = now / 60;
-        if self.home_activity_cache.as_ref().is_none_or(|(at, _)| *at != minute) {
-            self.home_activity_cache = Some((minute, self.library.active_tracks(500, now)));
+        if self.home_activity_cache.as_ref().is_none_or(|(at, _, _)| *at != minute) {
+            self.home_activity_cache = Some((minute, self.library.active_tracks(500, now), self.library.active_playlists(now)));
         }
         self.home_activity_cache.as_ref().unwrap().1.iter()
             .filter(|track| self.allowed(track)).take(5).cloned().collect()
+    }
+
+    /// Own playlists by recent activity (ids, most active first).
+    pub fn active_home_playlists(&mut self) -> Vec<String> {
+        self.active_home_tracks();
+        self.home_activity_cache.as_ref().map(|c| c.2.clone()).unwrap_or_default()
     }
 
     fn save_library(&mut self, cx: &mut Context<Self>) {
@@ -3623,7 +3631,10 @@ impl Glyph {
         let current = rename.as_ref().and_then(|id| self.library.playlist(id)).map(|p| p.name.clone()).unwrap_or_default();
         self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
         self.ctx_menu = None;
-        self.name_dialog = Some(NameDialog { tracks, rename, eq_preset: false });
+        let initial_playlist = rename.as_ref().and_then(|id| self.library.playlist(id).map(|p|
+            (p.name.clone(), p.cover.clone(), self.is_auto_download(id),
+                self.profile.settings.as_ref().map(|s| s.playlists.contains(id)))));
+        self.name_dialog = Some(NameDialog { tracks, rename, eq_preset: false, initial_playlist });
         let f = self.playlist_name.read(cx).focus.clone();
         window.focus(&f, cx);
         cx.notify();
@@ -3880,7 +3891,17 @@ impl Glyph {
         }
     }
 
+    pub fn playlist_edit_changed(&self, cx: &Context<Self>) -> bool {
+        let Some(d) = &self.name_dialog else { return false; };
+        let (Some(id), Some(initial)) = (&d.rename, &d.initial_playlist) else { return false; };
+        let Some(p) = self.library.playlist(id) else { return false; };
+        let name = self.playlist_name.read(cx).value.trim();
+        !name.is_empty() && (name != initial.0 || p.cover != initial.1 || self.is_auto_download(id) != initial.2
+            || self.profile.settings.as_ref().map(|s| s.playlists.contains(id)) != initial.3)
+    }
+
     pub fn submit_name_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.name_dialog.as_ref().is_some_and(|d| d.rename.is_some()) && !self.playlist_edit_changed(cx) { return; }
         let Some(d) = self.name_dialog.take() else { return };
         let typed = self.playlist_name.read(cx).value.trim().to_string();
         if d.eq_preset {
@@ -4106,7 +4127,7 @@ impl Glyph {
         self.playlist_name.update(cx, |i, cx| i.set_value(current, cx));
         self.ctx_menu = None;
         self.open_select = None;
-        self.name_dialog = Some(NameDialog { tracks: Vec::new(), rename: None, eq_preset: true });
+        self.name_dialog = Some(NameDialog { tracks: Vec::new(), rename: None, eq_preset: true, initial_playlist: None });
         let f = self.playlist_name.read(cx).focus.clone();
         window.focus(&f, cx);
         cx.notify();

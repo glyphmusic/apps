@@ -147,9 +147,14 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         )
         .into_any_element()];
     let active: Vec<Track> = app.active_home_tracks();
-    // Active songs get priority; playlists fill remaining slots.
+    // Up to two playlists you listened to lately come first, then active
+    // songs; other playlists fill whatever is left.
+    let hot: Vec<String> = app.active_home_playlists().into_iter().take(2).collect();
+    let songs = active.len().min(5 - hot.len());
+    let mut ids = hot.clone();
+    ids.extend(app.library.playlists.iter().filter(|p| !hot.contains(&p.id)).map(|p| p.id.clone()).take(5 - hot.len() - songs));
     let pls: Vec<(String, String, usize)> =
-        app.library.playlists.iter().take(5usize.saturating_sub(active.len())).map(|p| (p.id.clone(), p.name.clone(), p.tracks.len())).collect();
+        ids.iter().filter_map(|id| app.library.playlist(id)).map(|p| (p.id.clone(), p.name.clone(), p.tracks.len())).collect();
     for (i, (id, name, count)) in pls.into_iter().enumerate() {
         let l = ListRef::User(id);
         let art = list_cover(app, &l, 56.0, cx);
@@ -472,19 +477,26 @@ const QUEUE_ROW_H: f32 = 44.0;
 thread_local! {
     /// Eased height of the opening above each slot while a row is dragged,
     /// so the rows glide aside instead of jumping.
-    static QUEUE_GAPS: std::cell::RefCell<(Vec<f32>, Option<std::time::Instant>)> = Default::default();
+    /// Per list (queue, profile playlists, ...).
+    static QUEUE_GAPS: std::cell::RefCell<std::collections::HashMap<&'static str, (Vec<f32>, Option<std::time::Instant>)>> = Default::default();
 }
 
-/// The queue gap animation still has distance to go.
+/// A drag-reorder gap animation (queue or another list) still has distance to go.
 pub fn queue_anim_running() -> bool {
-    QUEUE_GAPS.with(|g| g.borrow().1.is_some_and(|t| t.elapsed().as_secs_f32() < 0.5))
+    QUEUE_GAPS.with(|g| g.borrow().values().any(|v| v.1.is_some_and(|t| t.elapsed().as_secs_f32() < 0.5)))
 }
 
-/// Current gap heights for `slots` (+1 for "after the last row"), easing to
-/// a full row at `target`. `None` (no drag) resets at once.
 fn queue_gaps(slots: usize, target: Option<usize>) -> Vec<f32> {
+    drag_gaps("queue", QUEUE_ROW_H, slots, target)
+}
+
+/// Current gap heights of list `key` for `slots` (+1 for "after the last
+/// row"), easing to a full row (`row_h`) at `target`. `None` (no drag)
+/// resets at once. Shared by every drag-reorder list.
+pub fn drag_gaps(key: &'static str, row_h: f32, slots: usize, target: Option<usize>) -> Vec<f32> {
     QUEUE_GAPS.with(|g| {
-        let mut g = g.borrow_mut();
+        let mut all = g.borrow_mut();
+        let g = all.entry(key).or_default();
         let Some(at) = target else {
             *g = (Vec::new(), None);
             return vec![0.0; slots + 1];
@@ -493,15 +505,15 @@ fn queue_gaps(slots: usize, target: Option<usize>) -> Vec<f32> {
         if g.0.len() != slots + 1 {
             // Drag just began: the gap opens where the row was lifted.
             let mut v = vec![0.0; slots + 1];
-            v[at.min(slots)] = QUEUE_ROW_H;
+            v[at.min(slots)] = row_h;
             *g = (v, Some(now));
             return g.0.clone();
         }
-        let moving = g.0.iter().enumerate().any(|(i, h)| (h - if i == at { QUEUE_ROW_H } else { 0.0 }).abs() > 0.5);
+        let moving = g.0.iter().enumerate().any(|(i, h)| (h - if i == at { row_h } else { 0.0 }).abs() > 0.5);
         let dt = g.1.map_or(0.016, |t| t.elapsed().as_secs_f32()).clamp(0.0, 0.05);
         let k = 1.0 - (-dt / 0.06).exp();
         for (i, h) in g.0.iter_mut().enumerate() {
-            let t = if i == at { QUEUE_ROW_H } else { 0.0 };
+            let t = if i == at { row_h } else { 0.0 };
             *h += (t - *h) * k;
         }
         g.1 = if moving { Some(now) } else { g.1.filter(|t| t.elapsed().as_secs_f32() < 0.5) };

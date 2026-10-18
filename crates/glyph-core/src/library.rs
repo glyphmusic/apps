@@ -234,6 +234,30 @@ impl Library {
         entries.into_iter().take(limit).map(|(_,a)| a.track.clone()).collect()
     }
 
+    /// Own playlists by recent listening to their songs (most active first);
+    /// playlists with no recent activity are left out.
+    pub fn active_playlists(&self, now: u64) -> Vec<String> {
+        let mut ranked: Vec<(f64, &str)> = self
+            .playlists
+            .iter()
+            .filter(|p| p.shared_by.is_none())
+            .map(|p| {
+                let w: f64 = p
+                    .tracks
+                    .iter()
+                    .filter_map(|t| {
+                        let key = format!("{}|{}", crate::dedupe::normalize_title(&t.title), crate::dedupe::normalize_artist(&t.artist));
+                        self.song_activity.get(&key).map(|a| a.weight(now) as f64)
+                    })
+                    .sum();
+                (w, p.id.as_str())
+            })
+            .filter(|(w, _)| *w >= 0.125)
+            .collect();
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        ranked.into_iter().map(|(_, id)| id.to_string()).collect()
+    }
+
     /// Counts an early skip for the song's artists.
     pub fn record_skip(&mut self, track: &Track) {
         for a in crate::taste::credited(&track.artist) {

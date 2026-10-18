@@ -427,6 +427,23 @@ pub async fn version(bin: &Path) -> Option<String> {
 // ------------------------------------------------------------- the runner
 
 static URL_CACHE: Mutex<Option<HashMap<String, LocalAudio>>> = Mutex::new(None);
+static PLAYING_STREAMS: Mutex<Option<HashMap<String, LocalAudio>>> = Mutex::new(None);
+
+pub fn register_playing_stream(audio: &LocalAudio) {
+    let mut streams = PLAYING_STREAMS.lock().unwrap();
+    let streams = streams.get_or_insert_with(HashMap::new);
+    if streams.len() >= 100 { streams.retain(|_, a| a.expires > paths::now_unix()); }
+    if streams.len() >= 100 { streams.clear(); }
+    streams.insert(audio.url.clone(), audio.clone());
+}
+
+/// Only URLs explicitly extracted for local playback receive these headers
+/// and may switch to a completed local cache file. Remote server URLs cannot
+/// nominate arbitrary files on this computer.
+pub fn local_stream_access(url: &str) -> Option<(Vec<(String, String)>, Option<PathBuf>)> {
+    let audio = PLAYING_STREAMS.lock().unwrap().as_ref()?.get(url)?.clone();
+    Some((audio.headers, cached_audio(&audio.video_id)))
+}
 
 /// Drops every cached URL (after a 403 the whole batch is suspect).
 pub fn forget_urls() {

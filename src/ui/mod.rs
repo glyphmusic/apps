@@ -248,6 +248,7 @@ impl Render for Glyph {
                 .flex_none()
                 .h_full()
                 .w(px(views::QUEUE_W * qk))
+                .when(!show_add, |d| d.pt(px(theme::GAP)))
                 .ml(px(-theme::GAP * (1.0 - qk)))
                 .overflow_hidden()
                 .child(div().w(px(views::QUEUE_W)).h_full().child(inner))
@@ -300,6 +301,7 @@ impl Render for Glyph {
                 .child(s.element())
         });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
+        let crop = self.profile.crop.is_some().then(|| crate::ui::profile::crop_dialog(self, cx));
         let dim = sk > 0.0;
         let dim_a = 1.0 - 0.92 * sk;
 
@@ -405,6 +407,7 @@ impl Render for Glyph {
             .children(modal)
             .children(menu)
             .children(dialog)
+            .children(crop)
             .children(splash)
             .children(toasts)
             .children(widgets::tooltip_layer(window))

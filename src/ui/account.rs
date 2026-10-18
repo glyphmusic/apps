@@ -652,6 +652,18 @@ fn code_box(code: &str) -> Div {
 pub fn page(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     app.account_inputs(cx);
     let col = div().flex().flex_col();
+    let official = app.config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(glyph_core::config::DEFAULT_SERVER_URL);
+    if app.backend.is_some() && official && app.account.available == Some(false) {
+        // The public server always has accounts: it just could not be reached.
+        return col.child(div().py(px(14.0)).text_size(px(13.0)).text_color(white(0.6)).child(t("account.unreachable"))).child(
+            div().flex().child(
+                button("account-retry", t("common.retry"))
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .on_click(cx.listener(|this, _, _, cx| this.account_page_opened(cx))),
+            ),
+        );
+    }
     if app.backend.is_none() || app.account.available == Some(false) {
         return col.child(div().py(px(14.0)).text_size(px(13.0)).text_color(white(0.6)).child(t("account.unavailable")));
     }

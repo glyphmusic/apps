@@ -682,3 +682,8 @@
 "ytdlp.mode.server" = "Server"
 "ytdlp.mode.hint" = "Lokal verwendet yt-dlp auf diesem Computer. Server verwendet den Companion. Heruntergeladene Dateien werden immer lokal abgespielt."
 "common.retry" = "Erneut versuchen"
+"profile.crop.avatar" = "Bild bearbeiten"
+"profile.crop.banner" = "Banner bearbeiten"
+"profile.crop.reset" = "Zurücksetzen"
+"profile.crop.apply" = "Anwenden"
+"account.unreachable" = "Der Glyph-Server ist gerade nicht erreichbar. Prüfe deine Verbindung und versuche es erneut."
