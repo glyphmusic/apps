@@ -905,10 +905,11 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
         None => (Vec::new(), true, None, true, false, false),
     };
     // Hero: the artist photo (Wikipedia), else the top song's cover, as ASCII.
+    // The cover waits for the info so it never flashes before the photo.
     let src = info
         .as_ref()
         .and_then(|i| i.image.clone())
-        .or_else(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx)));
+        .or_else(|| (!info_loading).then(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx))).flatten());
     // The hero is never wider than the window; a raster at least that wide
     // (for the hero's 420 px height) keeps its bottom fade in view.
     for im in app.stale_heroes.drain(..) {
