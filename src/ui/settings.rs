@@ -1231,7 +1231,14 @@ fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 /// Playback > Sources: YouTube / SoundCloud fallback, yt-dlp, the free
 /// sources and their order.
 fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    use glyph_core::config::YouTubeMode;
+    let local = app.config.providers.youtube_mode == YouTubeMode::Local;
+    let youtube_mode = segmented(vec![
+        (t("ytdlp.mode.local"), local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Local, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
+        (t("ytdlp.mode.server"), !local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Server, cx))),
+    ], cx, "youtube-mode");
     let top = rows(vec![
+        row(t("ytdlp.mode"), Some(t("ytdlp.mode.hint")), youtube_mode),
         row(
             t("settings.sources.fallback"),
             Some(t("settings.sources.fallback.hint")),

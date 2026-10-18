@@ -1490,6 +1490,14 @@ impl Glyph {
         self.schedule_sync(cx);
     }
 
+    pub fn set_youtube_mode(&mut self, mode: glyph_core::config::YouTubeMode, cx: &mut Context<Self>) {
+        self.config.providers.youtube_mode = mode;
+        self.preloaded = None;
+        self.save_config(cx);
+        self.push_config_to_backend(cx);
+        cx.notify();
+    }
+
     /// Settings that arrived from another device: apply and save them quietly.
     pub(crate) fn adopt_synced_config(&mut self, config: Config, providers_changed: bool, cx: &mut Context<Self>) {
         self.apply_config(config, cx);
@@ -1987,7 +1995,10 @@ impl Glyph {
             let t = track.clone();
             let k = key.clone();
             cx.spawn(async move |this, cx| {
+                let started = Instant::now();
+                tracing::info!(provider = ?t.source, "playback: resolving source");
                 let r = guard_async(b.resolve(&t)).await;
+                tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, success = r.is_ok(), "playback: source resolved");
                 this.update(cx, |s, cx| {
                     if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
                         return;

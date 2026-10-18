@@ -676,3 +676,9 @@
 
 "settings.visuals.music_reactivity" = "Music reaction"
 "sp.appearance.music_reactivity.desc" = "How strongly the background responds to music."
+
+"ytdlp.mode" = "YouTube playback"
+"ytdlp.mode.local" = "Local"
+"ytdlp.mode.server" = "Server"
+"ytdlp.mode.hint" = "Local uses yt-dlp on this computer. Server uses the companion. Downloaded files always play locally."
+"common.retry" = "Try again"

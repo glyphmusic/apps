@@ -345,7 +345,8 @@ impl Inner {
 
     /// YouTube is enabled and yt-dlp runs on this machine.
     fn local_youtube_on(&self) -> bool {
-        self.providers.youtube.as_ref().is_some_and(|y| y.local().is_some())
+        (self.config.providers.youtube_mode == config::YouTubeMode::Local || self.server.is_none())
+            && self.providers.youtube.as_ref().is_some_and(|y| y.local().is_some())
     }
 
     /// YouTube through the local yt-dlp (home IP, no bot check): the song's
@@ -353,6 +354,7 @@ impl Inner {
     /// server (`hint`), else a search for "Artist - Title" — a sure search
     /// hit is shared back so the next user skips the search.
     async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+        if !self.local_youtube_on() { return None; }
         let yt = self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
         let as_video = |id: &str| {
             let mut view = t.clone();
@@ -441,6 +443,13 @@ impl Inner {
     }
 
     async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
+        if self.config.providers.youtube_mode == config::YouTubeMode::Local
+            && self.config.providers.enabled.contains(&ProviderId::YouTube)
+            && (t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
+        {
+            return self.local_youtube(t, None).await.map(Some)
+                .ok_or_else(|| anyhow!("Local YouTube playback failed. Check yt-dlp in Settings > Playback > Sources."));
+        }
         if let Some(server) = &self.server {
             let local_yt = self.local_youtube_on();
             let priority = self.resolver.priority();
@@ -450,14 +459,10 @@ impl Inner {
                     let hint = resp.youtube_hint.as_deref();
                     if let Some(source) = resp.source.clone() {
                         let matched = resp.matched.unwrap_or_else(|| t.clone());
-                        // Prefer a playable server stream. Older servers may
-                        // only offer an embed; retain local yt-dlp as fallback.
-                        // A full local source can also outrank a short preview.
-                        if local_yt && source.provider() == ProviderId::YouTube && matches!(source, PlaybackSource::Embed { .. }) {
-                            if let Some(r) = self.local_youtube(&matched, hint).await {
-                                return Ok(Some(r));
-                            }
+                        if local_yt && source.provider() == ProviderId::YouTube {
+                            return Ok(self.local_youtube(&matched, hint).await);
                         }
+                        // A full local source can outrank a short preview.
                         let preview = matches!(source, PlaybackSource::Preview { .. });
                         if local_yt && (preview || rank(ProviderId::YouTube) < rank(source.provider())) {
                             if let Some(r) = self.local_youtube(t, hint).await {
@@ -500,6 +505,12 @@ impl Inner {
     /// First source that offers a download: the song's own ids, then the
     /// full source the resolver matched it to.
     async fn download_url(&self, t: &Track) -> Result<Option<(ProviderId, String)>> {
+        if self.config.providers.youtube_mode == config::YouTubeMode::Local && t.source == ProviderId::YouTube {
+            return Ok(match self.local_youtube(t, None).await {
+                Some(Resolved { source: PlaybackSource::Stream { provider, url, .. }, .. }) => Some((provider, url)),
+                _ => None,
+            });
+        }
         if let Some(server) = &self.server {
             if let Some(hit) = server.download_url(t).await.unwrap_or_else(|e| {
                 tracing::debug!("server download lookup failed, going direct: {e}");
@@ -638,6 +649,7 @@ impl Backend {
         let cooldowns = old.cooldowns.clone();
         let inner = self.spawn(Inner::build(config, Some(cooldowns))).await??;
         *self.inner.write().unwrap() = Arc::new(inner);
+        self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
         Ok(())
     }
 
@@ -752,10 +764,14 @@ impl Backend {
         }
         let (inner, track, warm) = (self.cur(), track.clone(), self.warm.clone());
         self.spawn(async move {
-            let mut r = match take_warm(&warm, &dedupe::track_key(&track)).await {
+            // An in-flight prefetch from before a mode switch must not send
+            // a locally selected YouTube track back through the server.
+            let mut r = if inner.config.providers.youtube_mode == config::YouTubeMode::Local {
+                inner.resolve(&track).await?
+            } else { match take_warm(&warm, &dedupe::track_key(&track)).await {
                 Some(r) => Some(r),
                 None => inner.resolve(&track).await?,
-            };
+            }};
             if let (Some(server), Some(resolved)) = (&inner.server, r.as_mut()) {
                 if let PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. } = &mut resolved.source {
                     *url = server.audio_quality_url(url, inner.config.audio.quality);
@@ -847,7 +863,10 @@ impl Backend {
     pub async fn ytdlp_status(&self) -> anyhow::Result<ytdlp::YtDlpStatus> {
         let configured = self.cur().config.providers.ytdlp_path.clone();
         let http = self.cur().http.clone();
-        self.spawn(async move { ytdlp::status_with_updates(configured.as_deref(), &http).await }).await
+        self.spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(15), ytdlp::status_with_updates(configured.as_deref(), &http))
+                .await.map_err(|_| anyhow!("yt-dlp did not respond within 15 seconds. Try again or reinstall yt-dlp."))
+        }).await?
     }
 
     /// Downloads the official yt-dlp release for this OS into the data dir

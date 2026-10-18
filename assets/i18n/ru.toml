@@ -676,3 +676,9 @@
 
 "settings.visuals.music_reactivity" = "Реакция на музыку"
 "sp.appearance.music_reactivity.desc" = "Насколько сильно фон реагирует на музыку."
+
+"ytdlp.mode" = "Воспроизведение YouTube"
+"ytdlp.mode.local" = "Локально"
+"ytdlp.mode.server" = "Сервер"
+"ytdlp.mode.hint" = "Локально: yt-dlp на этом компьютере. Сервер: companion. Скачанные файлы всегда воспроизводятся локально."
+"common.retry" = "Повторить"

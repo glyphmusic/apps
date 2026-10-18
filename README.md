@@ -1,5 +1,7 @@
 # Glyph
 
+See [CHANGELOG.md](CHANGELOG.md) for the version history and [Releases](https://github.com/glyphmusic/desktop/releases) for downloads.
+
 A desktop music player for Linux, macOS and Windows, written in Rust with [GPUI](https://www.gpui.rs).
 Glyph searches many legal music sources at once, plays full tracks where the source allows it
 and keeps your library, playlists and downloads in one flat, fast UI with optional ASCII-art covers.

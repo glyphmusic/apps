@@ -377,6 +377,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires GLYPH_TEST_AUDIO and a real output device"]
+    fn starts_downloaded_audio_promptly() {
+        let path = std::env::var("GLYPH_TEST_AUDIO").expect("GLYPH_TEST_AUDIO");
+        let p = PlayerController::new().unwrap();
+        p.set_volume(0.0);
+        p.set_output_device(std::env::var("GLYPH_TEST_OUTPUT_DEVICE").ok());
+        let rx = p.events();
+        let start = Instant::now();
+        p.load(track("local-probe", ProviderId::YouTube), PlaybackSource::Stream {
+            provider: ProviderId::YouTube, url: path, mime: Some("audio/mp4".into()),
+        });
+        p.play();
+        let event = wait_for(&rx, 5, |e| matches!(e, PlayerEvent::StatusChanged(Status::Playing) | PlayerEvent::Error(_)));
+        println!("local startup after {:?}: {event:?}", start.elapsed());
+        assert!(matches!(event, Some(PlayerEvent::StatusChanged(Status::Playing))), "{event:?}");
+        p.stop();
+    }
+
+    #[test]
     fn volume_is_clamped_and_readable() {
         let p = PlayerController::new().unwrap();
         p.set_volume(3.0);

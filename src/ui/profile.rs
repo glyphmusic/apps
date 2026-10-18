@@ -181,6 +181,7 @@ impl Glyph {
         if self.signed_in().is_none() {
             return;
         }
+        self.profile.notice = None;
         cx.spawn(async move |this, cx| {
             let r = b.profile_settings().await;
             this.update(cx, |s, cx| {
@@ -594,7 +595,10 @@ pub fn settings_page(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     };
     let notice = app.profile.notice.clone().map(|(m, ok)| div().pt(px(8.0)).text_size(px(12.5)).text_color(if ok { theme::ok() } else { theme::warn() }).child(m));
     let Some(s) = app.profile.settings.clone() else {
-        return col.child(skeleton_rows("profile-settings", 3)).children(notice);
+        return if notice.is_some() {
+            col.children(notice).child(button("profile-settings-retry", t("common.retry"))
+                .on_click(cx.listener(|this, _, _, cx| this.profile_page_opened(cx))))
+        } else { col.child(skeleton_rows("profile-settings", 3)) };
     };
     let handle = acc.account.handle.clone();
     if app.settings_sub == 1 {

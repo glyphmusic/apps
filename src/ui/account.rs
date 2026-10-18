@@ -39,6 +39,7 @@ pub struct AccountUi {
     pub available: Option<bool>,
     pub login: Login,
     pub devices: Option<DevicesResponse>,
+    pub devices_error: Option<String>,
     pub syncing: bool,
     pub last_sync: Option<Instant>,
     pub sync_error: Option<String>,
@@ -242,13 +243,16 @@ impl Glyph {
     pub fn account_page_opened(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
         self.account.vault_ok = b.settings_vault().is_some();
+        self.account.devices_error = None;
         cx.spawn(async move |this, cx| {
             let available = b.accounts_available().await;
-            let devices = if b.account().is_some() { b.account_devices().await.ok() } else { None };
+            let devices = if b.account().is_some() { Some(b.account_devices().await) } else { None };
             this.update(cx, |s, cx| {
                 s.account.available = Some(available);
-                if devices.is_some() {
-                    s.account.devices = devices;
+                match devices {
+                    Some(Ok(d)) => { s.account.devices = Some(d); s.account.devices_error = None; }
+                    Some(Err(e)) => { s.account.devices_error = Some(err_text(&e)); }
+                    None => {}
                 }
                 cx.notify();
             })
@@ -873,6 +877,10 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
     ]);
 
     let devices: Vec<AnyElement> = match &a.devices {
+        None if a.devices_error.is_some() => vec![div().flex().items_center().gap(px(12.0))
+            .child(div().text_color(theme::warn()).child(a.devices_error.clone().unwrap_or_default()))
+            .child(button("devices-retry", t("common.retry")).on_click(cx.listener(|this, _, _, cx| this.account_page_opened(cx))))
+            .into_any_element()],
         None => vec![spinner_line(app.spinner(), t("account.devices.loading")).into_any_element()],
         Some(d) => d
             .devices

@@ -55,6 +55,9 @@ mod platform {
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
     pub fn register(exe: &Path) -> anyhow::Result<()> {
+        // Shell links expect ordinary Win32 paths, not canonicalize's extended prefix.
+        let normal = exe.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        let exe = Path::new(&normal);
         let appdata = std::env::var_os("APPDATA").ok_or_else(|| anyhow::anyhow!("APPDATA not set"))?;
         let dir = PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs");
         let lnk = dir.join("Glyph.lnk");

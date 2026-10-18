@@ -325,6 +325,7 @@ mod tests {
         a.player.shuffle = true;
         a.server_url = "https://mine.example".into();
         a.providers.ytdlp_path = Some("C:/yt-dlp.exe".into());
+        a.providers.youtube_mode = crate::config::YouTubeMode::Local;
         a.storage.cache_limit_mb = 50;
 
         let mut b = Config::default();
@@ -339,6 +340,7 @@ mod tests {
         assert_eq!(b.audio.output_device, None);
         assert_eq!(b.server_url, "");
         assert_eq!(b.providers.ytdlp_path, None);
+        assert_eq!(b.providers.youtube_mode, crate::config::YouTubeMode::Server);
         assert_eq!(b.storage.cache_limit_mb, Config::default().storage.cache_limit_mb);
         // Agreed: nothing to push back.
         let snap = crate::sync::Snapshot { items: items(&b, None), ..Default::default() };

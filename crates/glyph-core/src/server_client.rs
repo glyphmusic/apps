@@ -89,12 +89,17 @@ impl ServerClient {
     pub fn auth_required(&self) -> bool { self.auth_required.load(std::sync::atomic::Ordering::Relaxed) }
     pub fn media_credentials(&self) -> Option<(String,String)> { self.bearer.as_ref().map(|t| (self.base.clone(),t.clone())) }
     pub fn authorize_url(&self, fallback: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
-        if crate::server_access::same_server(&self.base,url) { self.authorize(self.http.get(url)) } else { fallback }
+        if crate::server_access::same_server(&self.base,url) {
+            let request = self.authorize(self.http.get(url));
+            match crate::account::cached_access(&self.base) {
+                Some(token) => request.bearer_auth(token),
+                None => request,
+            }
+        } else { fallback }
     }
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let request = if let Some(token) = crate::account::cached_access(&self.base) {
-            request.bearer_auth(token)
-        } else { request };
+        // Account authorization is owned by member_request/authed. Appending
+        // it here as well creates duplicate Authorization headers (HTTP 400).
         if let Some(token) = &self.bearer {
             let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("invalid"));
             value.set_sensitive(true);
@@ -409,7 +414,7 @@ impl ServerClient {
     }
 
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<Session> {
-        Self::json_of(self.post("/v1/account/token/refresh").json(&RefreshRequest { refresh_token: refresh_token.into() })).await
+        Self::json_of(self.post("/v1/account/token/refresh").timeout(Duration::from_secs(10)).json(&RefreshRequest { refresh_token: refresh_token.into() })).await
     }
 
     pub async fn handle_check(&self, handle: &str) -> Result<HandleCheck> {
@@ -552,6 +557,25 @@ mod account_tests {
 #[cfg(test)]
 mod access_tests {
     use super::*;
+    #[test]
+    fn signed_in_requests_have_exactly_one_authorization_header() {
+        let _env = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = "https://header-regression.invalid";
+        crate::account::with_test_access(base, "test-token", || {
+            let duplicate = reqwest::Client::new().get(base).bearer_auth("test-token")
+                .bearer_auth("test-token").build().unwrap();
+            assert_eq!(duplicate.headers().get_all(reqwest::header::AUTHORIZATION).iter().count(), 2);
+            let c = ServerClient::new(base, reqwest::Client::new(), "install".into());
+            let account = c.authed(reqwest::Method::GET, "/v1/devices", "test-token").build().unwrap();
+            let search = futures::executor::block_on(c.member_request(c.get("/v1/search"))).build().unwrap();
+            let media_url = format!("{base}/v1/audio/youtube/test");
+            let media = c.authorize_url(reqwest::Client::new().get(&media_url), &media_url).build().unwrap();
+            for request in [account, search, media] {
+                assert_eq!(request.headers().get_all(reqwest::header::AUTHORIZATION).iter().count(), 1);
+                assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer test-token");
+            }
+        });
+    }
     #[test]
     fn credentials_are_scoped_independent_and_sensitive() {
         let c = ServerClient::new("https://private.example",reqwest::Client::new(),"install".into()).with_bearer(Some("secret-server-bearer-with-at-least-32-characters".into())).unwrap();

@@ -193,7 +193,7 @@ pub fn control(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
         .items_center()
         .gap(px(10.0))
         .child(dot)
-        .when(ui.status.is_some() && st.update_error.is_some() && !ui.checking && !ui.installing, |d| d.child(
+        .when(ui.status.is_some() && (st.update_error.is_some() || ui.error.is_some()) && !ui.checking && !ui.installing, |d| d.child(
             crate::ui::widgets::button("ytdlp-recheck",t("ytdlp.recheck")).on_click(cx.listener(|this,_,_,cx| { this.ytdlp.checked_at=None; this.ensure_ytdlp_status(cx); cx.notify(); }))
         ))
         .when(show_button, |d| {

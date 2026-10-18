@@ -40,6 +40,20 @@ fn session() -> &'static Mutex<Option<Live>> {
     S.get_or_init(|| Mutex::new(load_stored().map(|stored| Live { stored, access: None })))
 }
 
+#[cfg(test)]
+pub(crate) fn with_test_access<T>(base: &str, token: &str, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Live>);
+    impl Drop for Restore {
+        fn drop(&mut self) { *session().lock().unwrap() = self.0.take(); }
+    }
+    let stored = Stored { server: base.into(), device_id: "header-test".into(),
+        account: Account { id: "header-test".into(), handle: "header_test".into(), device_limit: 5, created_at: 0, has_password: false } };
+    let _restore = Restore(session().lock().unwrap().replace(Live {
+        stored, access: Some((token.into(), Instant::now() + Duration::from_secs(60))),
+    }));
+    f()
+}
+
 fn sync_state() -> &'static Mutex<Option<SyncState>> {
     static S: OnceLock<Mutex<Option<SyncState>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(None))
@@ -240,7 +254,9 @@ const SIGNED_OUT: &str = "signed out";
 /// Only disclose account credentials to their bound HTTPS server (or loopback).
 pub(crate) async fn optional_access(client: &ServerClient) -> Option<String> {
     if !crate::server_access::secure_base(client.base_url()) { return None; }
-    access_token(client, false).await.ok()
+    // Metadata must not queue behind a slow account refresh. Account calls
+    // refresh the session independently; anonymous metadata remains usable.
+    cached_access(client.base_url())
 }
 
 pub(crate) fn cached_access(base: &str) -> Option<String> {
@@ -261,7 +277,11 @@ pub fn media_access(url: &str) -> Option<String> {
 async fn access_token(client: &ServerClient, force: bool) -> Result<String> {
     // Concurrent metadata/cover requests must not race rotating refresh tokens.
     static REFRESH: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    let _refresh = REFRESH.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+    if !force {
+        if let Some(token) = cached_access(client.base_url()) { return Ok(token); }
+    }
+    let _refresh = tokio::time::timeout(Duration::from_secs(15), REFRESH.get_or_init(|| tokio::sync::Mutex::new(())).lock())
+        .await.map_err(|_| anyhow!("Account refresh is taking too long. Please try again."))?;
     let (device_id, cached) = {
         let g = session().lock().unwrap();
         let live = g.as_ref().ok_or_else(|| anyhow!(SIGNED_OUT))?;
@@ -275,10 +295,12 @@ async fn access_token(client: &ServerClient, force: bool) -> Result<String> {
             return Ok(tok);
         }
     }
-    let refresh = get_refresh(&device_id).ok_or_else(|| anyhow!(SIGNED_OUT))?;
+    let refresh = tokio::task::spawn_blocking(move || get_refresh(&device_id)).await?
+        .ok_or_else(|| anyhow!(SIGNED_OUT))?;
     match client.refresh_session(&refresh).await {
         Ok(s) => {
-            adopt(client.base_url(), &s);
+            let (base, fresh) = (client.base_url().to_string(), s.clone());
+            tokio::task::spawn_blocking(move || adopt(&base, &fresh)).await?;
             Ok(s.access_token)
         }
         Err(e) if matches!(server_error(&e), Some((401, _))) => {

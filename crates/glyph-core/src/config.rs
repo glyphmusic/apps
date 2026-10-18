@@ -47,6 +47,8 @@ pub struct ApiKeys {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
+    /// Where YouTube audio is resolved; kept local to this device.
+    pub youtube_mode: YouTubeMode,
     pub enabled: Vec<ProviderId>,
     /// Full-source priority for the resolver.
     pub priority: Vec<ProviderId>,
@@ -56,6 +58,14 @@ pub struct ProvidersConfig {
     /// PATH, else the copy installed from settings (data dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ytdlp_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum YouTubeMode {
+    Local,
+    #[default]
+    Server,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -228,6 +238,7 @@ impl Default for ProvidersConfig {
             priority: vec![YouTube, Audius, Jamendo, SoundCloud],
             youtube_daily_searches: 90,
             ytdlp_path: None,
+            youtube_mode: YouTubeMode::Server,
         }
     }
 }
@@ -432,6 +443,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn youtube_mode_defaults_to_server_and_persists_local_choice() {
+        assert_eq!(Config::from_toml("").unwrap().providers.youtube_mode, YouTubeMode::Server);
+        let mut config = Config::default();
+        config.providers.youtube_mode = YouTubeMode::Local;
+        let encoded = toml::to_string(&config).unwrap();
+        assert_eq!(Config::from_toml(&encoded).unwrap().providers.youtube_mode, YouTubeMode::Local);
+    }
 
     #[test]
     fn empty_server_means_public_and_off_means_direct() {

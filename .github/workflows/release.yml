@@ -55,6 +55,18 @@ jobs:
           fi
           ASSET="$NAME.${{ matrix.ext }}"
           if command -v sha256sum >/dev/null; then sha256sum "$ASSET" > "$ASSET.sha256"; else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DBinaryPath=$PWD\target\${{ matrix.target }}\release\glyph.exe" packaging/windows/glyph.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $asset = Get-Item "dist/glyph-$version-windows-x64-setup.exe"
+          $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText($asset.FullName + '.sha256', "$hash  $($asset.Name)`n")
       - uses: softprops/action-gh-release@v2
         with:
           # v1.2.0-beta.1 & co. are pre-releases: only the pre-release channel sees them.
@@ -65,6 +77,7 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*.sha256
+            dist/*-setup.exe
 
   publish:
     needs: build

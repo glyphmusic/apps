@@ -189,6 +189,8 @@ fn decode_thread(
     ctl: Arc<DecodeCtl>,
 ) -> Result<(), String> {
     let mut format = open_format(url, mime)?;
+    let started = std::time::Instant::now();
+    tracing::info!(track_id = id, local = !url.starts_with("http"), "playback: decoder format opened");
     let track = format
         .tracks()
         .iter()
@@ -280,6 +282,7 @@ fn decode_thread(
         frames_sent += frames;
 
         if !announced {
+            tracing::info!(track_id = id, elapsed_ms = started.elapsed().as_millis() as u64, "playback: first audio packet decoded");
             announced = true;
             let _ = tx.send(chunk);
             let opened = Opened {

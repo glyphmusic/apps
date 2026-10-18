@@ -2466,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "glyph"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-audio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "flume 0.11.1",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
