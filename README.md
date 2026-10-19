@@ -97,3 +97,22 @@ The `fast` profile is for local tests with release-level optimization but withou
 ### Automatic build retention
 
 Dev launch/check and the watcher run `scripts/clean-builds.ps1` automatically. The watcher retries once a minute when idle. Cleanup never invokes Cargo and defers while any compiler is running. It removes the obsolete `target/ui` tree, inactive profiles unused for 24 hours, old duplicate Cargo executables, and all but five timing reports. The selected profile, running apps and current dependency/incremental caches are retained. For direct Cargo commands, the repository agent rules require the same cleanup afterward with `-KeepProfile debug`, `fast` or `release`. `-Plan` previews the candidates and `-WhatIf` exercises the deletion plan without removing anything. Paths outside this checkout's target directory and linked directories are rejected.
+
+### Download concurrency and source enforcement
+
+`config.toml` controls offline download admission across all lists:
+
+```toml
+[audio]
+download_parallelism = 5 # maximum, clamped to 1..10
+download_adaptive = true # slow: 1; unknown/standard: up to 3; fast: configured maximum
+```
+
+There are no UI controls for these two limits. Data saver caps admission at one.
+Network changes affect new transfers; running downloads finish normally.
+
+In Playback > Sources, **Use YouTube only** requires the selected Local or Server
+method for new lookups. The server receives `youtube_only = true`, searches a
+bounded set of variants with extra time, and does not fall back to previews or
+other providers when no match is found. The corresponding TOML key is
+`providers.youtube_only`; `providers.youtube_mode` selects `"local"` or `"server"`.

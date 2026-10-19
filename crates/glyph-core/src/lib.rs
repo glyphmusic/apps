@@ -283,6 +283,7 @@ pub struct Backend {
     warm: WarmCache,
     /// Running downloads by song key, for the progress ring.
     dl_progress: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<downloads::Progress>>>>,
+    download_queue: Arc<downloads::DownloadQueue>,
     rt: Option<tokio::runtime::Runtime>,
 }
 
@@ -357,7 +358,7 @@ impl Inner {
     /// own video id, a cached mapping, the id other users shared through the
     /// server (`hint`), else a search for "Artist - Title" — a sure search
     /// hit is shared back so the next user skips the search.
-    async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+    async fn local_youtube_match(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
         if !self.local_youtube_on() { return None; }
         let yt = self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
         let as_video = |id: &str| {
@@ -395,6 +396,12 @@ impl Inner {
             }
             (best.track, confidence)
         };
+        Some((matched, confidence))
+    }
+
+    async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+        let (matched, confidence) = self.local_youtube_match(t, hint).await?;
+        let yt = self.providers.youtube.as_ref()?;
         match yt.local_source(&matched.id).await {
             Ok(source) => {
                 // Keep the wanted song's metadata when it was a direct id hit.
@@ -449,7 +456,7 @@ impl Inner {
     async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
         if self.config.providers.youtube_mode == config::YouTubeMode::Local
             && self.config.providers.enabled.contains(&ProviderId::YouTube)
-            && (t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
+            && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
         {
             return self.local_youtube(t, None).await.map(Some)
                 .ok_or_else(|| anyhow!("Local YouTube playback failed. Check yt-dlp in Settings > Playback > Sources."));
@@ -458,10 +465,13 @@ impl Inner {
             let local_yt = self.local_youtube_on();
             let priority = self.resolver.priority();
             let rank = |p: ProviderId| priority.iter().position(|x| *x == p).unwrap_or(usize::MAX);
-            match server.resolve(t, &priority).await {
+            match server.resolve_with_mode(t, &priority, self.config.providers.youtube_only).await {
                 Ok(resp) => {
                     let hint = resp.youtube_hint.as_deref();
                     if let Some(source) = resp.source.clone() {
+                        if self.config.providers.youtube_only && (source.provider() != ProviderId::YouTube || matches!(source, PlaybackSource::Preview { .. })) {
+                            return Err(anyhow!("Song not found on YouTube."));
+                        }
                         let matched = resp.matched.unwrap_or_else(|| t.clone());
                         if local_yt && source.provider() == ProviderId::YouTube {
                             return Ok(self.local_youtube(&matched, hint).await);
@@ -481,6 +491,7 @@ impl Inner {
                     if local_yt {
                         return Ok(self.local_youtube(t, hint).await);
                     }
+                    if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
                     return Ok(None);
                 }
                 Err(e) => {
@@ -493,6 +504,9 @@ impl Inner {
                     return Err(e);
                 }
             }
+        }
+        if self.config.providers.youtube_only {
+            return self.local_youtube(t, None).await.map(Some).ok_or_else(|| anyhow!("Song not found on YouTube."));
         }
         if let Some(r) = self.resolver.resolve_known(t).await {
             return Ok(Some(r));
@@ -509,14 +523,23 @@ impl Inner {
     /// First source that offers a download: the song's own ids, then the
     /// full source the resolver matched it to.
     async fn download_url(&self, t: &Track) -> Result<Option<(ProviderId, String)>> {
-        if self.config.providers.youtube_mode == config::YouTubeMode::Local && t.source == ProviderId::YouTube {
-            return Ok(self.download_at(ProviderId::YouTube, t).await.map(|url| (ProviderId::YouTube, url)));
+        if self.config.providers.youtube_mode == config::YouTubeMode::Local
+            && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube)) {
+            if let Some((matched, _)) = self.local_youtube_match(t, None).await {
+                return Ok(self.download_at(ProviderId::YouTube, &matched).await.map(|url| (ProviderId::YouTube, url)));
+            }
+            return Err(anyhow!("Local YouTube download failed. Check yt-dlp in Settings > Playback > Sources."));
         }
         if let Some(server) = &self.server {
-            if let Some(hit) = server.download_url(t).await.unwrap_or_else(|e| {
-                tracing::debug!("server download lookup failed, going direct: {e}");
-                None
-            }) {
+            let lookup = match server.download_url_with_priority(t, &self.resolver.priority(), self.config.providers.youtube_only).await {
+                Ok(hit) => hit,
+                Err(e) if self.config.providers.youtube_mode == config::YouTubeMode::Server => return Err(e),
+                Err(e) => { tracing::debug!("server download lookup failed: {e}"); None }
+            };
+            if let Some(hit) = lookup {
+                if self.config.providers.youtube_only && hit.0 != ProviderId::YouTube {
+                    return Err(anyhow!("Song not found on YouTube."));
+                }
                 // The server picks the normal Archive file; another quality
                 // needs the item's file list.
                 if hit.0 == ProviderId::Archive && downloads::job_quality() != config::AudioQuality::Standard {
@@ -524,14 +547,20 @@ impl Inner {
                         return Ok(Some((ProviderId::Archive, u)));
                     }
                 }
+                if hit.0 == ProviderId::YouTube {
+                    let quality = match downloads::job_quality() { config::AudioQuality::Low => "low", config::AudioQuality::High => "high", _ => "standard" };
+                    return Ok(Some((hit.0, format!("{}?quality={quality}", hit.1))));
+                }
                 return Ok(Some(hit));
             }
+            if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
             // Same path as playback: YouTube through the local yt-dlp.
             if let Some(Resolved { source: PlaybackSource::Stream { provider, url, .. }, .. }) = self.local_youtube(t, None).await {
                 return Ok(Some((provider, url)));
             }
             return Ok(None);
         }
+        if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
         const DL: [ProviderId; 4] = [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive, ProviderId::YouTube];
         for p in DL {
             if provider::id_at(p, t).is_some() {
@@ -603,7 +632,10 @@ impl Backend {
         let inner = rt.spawn(Inner::build(config, None)).await.map_err(|e| anyhow!("backend start failed: {e}"))??;
         let downloads = Arc::new(downloads::Downloads::load(storage::downloads_dir()));
         let imports = Arc::new(downloads::Downloads::load(storage::imports_dir()));
+        let download_queue = Arc::new(downloads::DownloadQueue::default());
+        download_queue.configure(if inner.config.storage.data_saver { 1 } else { inner.config.audio.download_parallelism }, inner.config.audio.download_adaptive);
         Ok(Self {
+            download_queue,
             inner: std::sync::RwLock::new(Arc::new(inner)),
             downloads,
             imports,
@@ -649,6 +681,7 @@ impl Backend {
         old.resolver.cache().flush();
         let cooldowns = old.cooldowns.clone();
         let inner = self.spawn(Inner::build(config, Some(cooldowns))).await??;
+        self.download_queue.configure(if inner.config.storage.data_saver { 1 } else { inner.config.audio.download_parallelism }, inner.config.audio.download_adaptive);
         *self.inner.write().unwrap() = Arc::new(inner);
         self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
         Ok(())
@@ -925,8 +958,10 @@ impl Backend {
         let job = downloads::Job { progress: Arc::default(), quality: inner.config.audio.download_quality.effective() };
         let key = dedupe::track_key(&track);
         self.dl_progress.lock().unwrap().insert(key.clone(), job.progress.clone());
+        let queue = self.download_queue.clone();
         let res = self
             .spawn(downloads::run_job(job, async move {
+                let _permit = queue.acquire().await;
                 let Some((provider, url)) = inner.download_url(&track).await? else { return Ok(None) };
                 // YouTube songs already sit in the audio cache: copy the file.
                 let local = std::path::Path::new(&url);

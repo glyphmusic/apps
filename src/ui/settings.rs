@@ -1257,6 +1257,10 @@ fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     ], cx, "youtube-mode");
     let top = rows(vec![
         row(t("ytdlp.mode"), Some(t("ytdlp.mode.hint")), youtube_mode),
+        row(t("ytdlp.only"), Some(t("ytdlp.only.hint")),
+            switch("youtube-only", app.config.providers.youtube_only).on_click(cx.listener(|this, _, _, cx| {
+                this.set_youtube_only(!this.config.providers.youtube_only, cx);
+            }))),
         row(
             t("settings.sources.fallback"),
             Some(t("settings.sources.fallback.hint")),

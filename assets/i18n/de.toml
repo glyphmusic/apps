@@ -679,6 +679,8 @@
 "settings.visuals.music_reactivity" = "Musikreaktion"
 "sp.appearance.music_reactivity.desc" = "Wie stark der Hintergrund auf Musik reagiert."
 
+"ytdlp.only" = "Nur YouTube verwenden"
+"ytdlp.only.hint" = "Verbindlich über die gewählte Methode suchen. Ohne Treffer gibt es keine andere Quelle oder Vorschau."
 "ytdlp.mode" = "YouTube-Wiedergabe"
 "ytdlp.mode.local" = "Lokal"
 "ytdlp.mode.server" = "Server"

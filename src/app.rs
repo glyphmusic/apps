@@ -1568,6 +1568,17 @@ impl Glyph {
         self.schedule_sync(cx);
     }
 
+    pub fn set_youtube_only(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.config.providers.youtube_only = enabled;
+        if enabled && !self.config.providers.enabled.contains(&ProviderId::YouTube) {
+            self.config.providers.enabled.push(ProviderId::YouTube);
+        }
+        self.preloaded = None;
+        self.save_config(cx);
+        self.push_config_to_backend(cx);
+        cx.notify();
+    }
+
     pub fn set_youtube_mode(&mut self, mode: glyph_core::config::YouTubeMode, cx: &mut Context<Self>) {
         self.config.providers.youtube_mode = mode;
         self.preloaded = None;
@@ -3088,7 +3099,7 @@ impl Glyph {
         DlView::None
     }
 
-    /// Downloads the songs one after another; songs no source offers for
+    /// Downloads songs through the shared bounded queue; songs no source offers for
     /// download are skipped and counted in the closing toast.
     pub fn download_tracks(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
         self.download_tracks_with(tracks, false, cx);
@@ -3104,7 +3115,8 @@ impl Glyph {
             cx.notify();
             return;
         };
-        let todo: Vec<Track> = tracks.into_iter().filter(|tr| !self.is_downloaded(tr) && !self.is_downloading(tr)).collect();
+        let mut seen = HashSet::new();
+        let todo: Vec<Track> = tracks.into_iter().filter(|tr| !self.is_downloaded(tr) && !self.is_downloading(tr) && seen.insert(track_key(tr))).collect();
         if todo.is_empty() {
             if !auto {
                 self.toast_info(t("toast.dl_already"));
@@ -3127,8 +3139,13 @@ impl Glyph {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
-            for tr in todo {
-                let saved = match b.download(&tr).await {
+            use futures::StreamExt;
+            let mut pending = futures::stream::iter(todo).map(|tr| {
+                let b = b.clone();
+                async move { let result = b.download(&tr).await; (tr, result) }
+            }).buffer_unordered(10);
+            while let Some((tr, result)) = pending.next().await {
+                let saved = match result {
                     Ok(Some(_)) => {
                         ok += 1;
                         true

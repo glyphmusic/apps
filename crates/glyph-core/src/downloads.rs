@@ -3,7 +3,7 @@
 //! Only songs whose source allows downloading are saved: Jamendo tracks with
 //! `audiodownload_allowed`, Audius tracks the artist marked downloadable, and
 //! Creative-Commons / public-domain items on the Internet Archive, and YouTube
-//! audio when the local yt-dlp is set up (same URL as playback, see
+//! audio through the configured local extractor or server/companion streaming path (see
 //! [`crate::ytdlp`]). Everything else (Spotify, Deezer previews, SoundCloud
 //! embeds) is never downloaded.
 //!
@@ -28,6 +28,54 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Shared admission for all download batches. Existing transfers finish when
+/// the limit falls; only admission of new transfers is delayed.
+#[derive(Default)]
+pub struct DownloadQueue {
+    active: std::sync::atomic::AtomicUsize,
+    maximum: std::sync::atomic::AtomicUsize,
+    adaptive: std::sync::atomic::AtomicBool,
+    changed: tokio::sync::Notify,
+}
+
+pub fn parallelism(maximum: usize, adaptive: bool, class: glyph_protocol::network::Class) -> usize {
+    let maximum = maximum.clamp(1, 10);
+    if !adaptive { return maximum; }
+    maximum.min(match class {
+        glyph_protocol::network::Class::Slow => 1,
+        glyph_protocol::network::Class::Standard => 3,
+        glyph_protocol::network::Class::Fast => 10,
+    })
+}
+
+impl DownloadQueue {
+    pub fn configure(&self, maximum: usize, adaptive: bool) {
+        self.maximum.store(maximum.clamp(1, 10), Ordering::SeqCst);
+        self.adaptive.store(adaptive, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+
+    pub async fn acquire(self: &Arc<Self>) -> DownloadPermit {
+        loop {
+            let changed = self.changed.notified();
+            let limit = parallelism(self.maximum.load(Ordering::SeqCst), self.adaptive.load(Ordering::SeqCst), glyph_protocol::network::class());
+            if self.active.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < limit).then_some(n + 1)).is_ok() {
+                return DownloadPermit(self.clone());
+            }
+            // Network estimates can change without a download completing.
+            tokio::select! { _ = changed => {}, _ = tokio::time::sleep(Duration::from_millis(250)) => {} }
+        }
+    }
+}
+
+pub struct DownloadPermit(Arc<DownloadQueue>);
+impl Drop for DownloadPermit {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        self.0.changed.notify_waiters();
+    }
+}
 
 /// Bytes fetched so far of one download.
 #[derive(Debug, Default)]
@@ -305,9 +353,14 @@ impl Downloads {
             bail!("unusable source file");
         }
         std::fs::create_dir_all(&self.dir)?;
-        let name = self.free_name(t, ext);
+        let (name, part, reservation) = self.reserve_name(t, ext)?;
+        drop(reservation);
+        if let Err(e) = std::fs::copy(src, &part) {
+            let _ = std::fs::remove_file(&part);
+            return Err(e.into());
+        }
         let path = self.dir.join(&name);
-        std::fs::copy(src, &path)?;
+        std::fs::rename(&part, &path)?;
         let entry = Entry { track: t.clone(), file: name, provider, bytes: len, ts: now(),
             revision: Revision { sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality(), ..Default::default() } };
         self.map.lock().unwrap().insert(track_key(t), entry);
@@ -333,15 +386,15 @@ impl Downloads {
         }
         let mime = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let ext = extension(&mime, resp.url().path());
-        let name = self.free_name(t, ext);
-        let part = self.dir.join(format!("{name}.part"));
-        let mut out = std::fs::File::create(&part)?;
+        let (name, part, mut out) = self.reserve_name(t, ext)?;
         let mut bytes = 0u64;
         let started = std::time::Instant::now();
+        let transfer = glyph_protocol::network::Transfer::start();
         let mut body = resp.bytes_stream();
         let res: Result<()> = async {
             while let Some(chunk) = body.next().await {
                 let chunk = chunk?;
+                transfer.progress();
                 bytes += chunk.len() as u64;
                 if bytes > MAX_BYTES {
                     bail!("file too large");
@@ -370,6 +423,19 @@ impl Downloads {
         self.map.lock().unwrap().insert(track_key(t), entry);
         self.save();
         Ok(path)
+    }
+
+    fn reserve_name(&self, t: &Track, ext: &str) -> Result<(String, PathBuf, std::fs::File)> {
+        let _lock = self.index_io.lock().unwrap();
+        loop {
+            let name = self.free_name(t, ext);
+            let part = self.dir.join(format!("{name}.part"));
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
+                Ok(file) => return Ok((name, part, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// "Artist - Title.ext", numbered if taken by another song.
@@ -438,6 +504,44 @@ fn sanitize(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_parallelism_respects_config_and_network() {
+        use glyph_protocol::network::Class::*;
+        assert_eq!(super::parallelism(5, true, Slow), 1);
+        assert_eq!(super::parallelism(5, true, Standard), 3);
+        assert_eq!(super::parallelism(5, true, Fast), 5);
+        assert_eq!(super::parallelism(5, false, Slow), 5);
+        assert_eq!(super::parallelism(999, false, Fast), 10);
+        assert_eq!(super::parallelism(0, false, Fast), 1);
+    }
+
+    #[tokio::test]
+    async fn download_queue_is_shared_and_reconfiguration_does_not_cancel_transfers() {
+        let queue = std::sync::Arc::new(super::DownloadQueue::default());
+        queue.configure(2, false);
+        let first = queue.acquire().await;
+        let second = queue.acquire().await;
+        let mut waiting = tokio::spawn({ let queue = queue.clone(); async move { queue.acquire().await } });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await.is_err());
+        queue.configure(1, false);
+        drop(first);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await.is_err());
+        drop(second);
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await.unwrap().unwrap();
+        drop(permit);
+    }
+
+    #[test]
+    fn simultaneous_file_reservations_do_not_share_a_part_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = super::Downloads::load(dir.path().to_path_buf());
+        let track = crate::dedupe::test_track(glyph_protocol::ProviderId::YouTube, "test", "Song", "Band", Some(200));
+        let first = downloads.reserve_name(&track, "m4a").unwrap();
+        let second = downloads.reserve_name(&track, "m4a").unwrap();
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
     use super::*;
 
     fn track(title: &str) -> Track {

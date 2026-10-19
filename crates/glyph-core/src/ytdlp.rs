@@ -698,6 +698,8 @@ fn is_forbidden(e: &anyhow::Error) -> bool {
 }
 
 async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64) -> Result<(Option<u64>, Vec<u8>)> {
+    let started = std::time::Instant::now();
+    let transfer = glyph_protocol::network::Transfer::start();
     let mut req = http.get(&a.url).header(reqwest::header::RANGE, format!("bytes={from}-{to}")).timeout(Duration::from_secs(30));
     for (k, v) in &a.headers {
         req = req.header(k.as_str(), v.as_str());
@@ -713,7 +715,14 @@ async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64) -
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.rsplit('/').next())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let body = resp.bytes().await?.to_vec();
+    let mut chunks = resp.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk?;
+        transfer.progress();
+        body.extend_from_slice(&chunk);
+    }
+    glyph_protocol::network::observe(body.len() as u64, started.elapsed());
     if status == 200 && from > 0 {
         bail!("server ignored the Range request");
     }

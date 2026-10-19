@@ -190,6 +190,9 @@ pub struct ResolveRequest {
     /// (Audius → Jamendo → SoundCloud → YouTube).
     #[serde(default)]
     pub priority: Vec<ProviderId>,
+    /// Require YouTube, with an extended but bounded search and no preview fallback.
+    #[serde(default)]
+    pub youtube_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

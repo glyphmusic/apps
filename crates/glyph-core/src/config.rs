@@ -49,6 +49,7 @@ pub struct ApiKeys {
 pub struct ProvidersConfig {
     /// Where YouTube audio is resolved; kept local to this device.
     pub youtube_mode: YouTubeMode,
+    pub youtube_only: bool,
     pub enabled: Vec<ProviderId>,
     /// Full-source priority for the resolver.
     pub priority: Vec<ProviderId>,
@@ -137,6 +138,10 @@ pub struct AudioConfig {
     pub quality: AudioQuality,
     /// Quality of offline downloads (High = lossless where the source has it).
     pub download_quality: AudioQuality,
+    /// Upper bound across all offline download batches (1..=10).
+    pub download_parallelism: usize,
+    /// Reduce simultaneous downloads on slow or unmeasured connections.
+    pub download_adaptive: bool,
     /// Overall loudness target.
     pub level: VolumeLevel,
     /// Level every song to the same loudness (no jumps between songs).
@@ -163,6 +168,8 @@ impl Default for AudioConfig {
             crossfade_s: 0,
             quality: AudioQuality::default(),
             download_quality: AudioQuality::default(),
+            download_parallelism: 5,
+            download_adaptive: true,
             level: VolumeLevel::Normal,
             normalize: true,
             hide_explicit: false,
@@ -239,6 +246,7 @@ impl Default for ProvidersConfig {
             youtube_daily_searches: 90,
             ytdlp_path: None,
             youtube_mode: YouTubeMode::Server,
+            youtube_only: false,
         }
     }
 }
@@ -443,6 +451,18 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_queue_settings_are_toml_only_and_backwards_compatible() {
+        let old = Config::from_toml("").unwrap();
+        assert_eq!(old.audio.download_parallelism, 5);
+        assert!(old.audio.download_adaptive);
+        assert!(!old.providers.youtube_only);
+        let edited = Config::from_toml("[audio]\ndownload_parallelism = 7\ndownload_adaptive = false\n[providers]\nyoutube_only = true\n").unwrap();
+        assert_eq!(edited.audio.download_parallelism, 7);
+        assert!(!edited.audio.download_adaptive);
+        assert!(edited.providers.youtube_only);
+    }
 
     #[test]
     fn youtube_mode_defaults_to_server_and_persists_local_choice() {

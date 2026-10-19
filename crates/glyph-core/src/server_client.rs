@@ -225,7 +225,11 @@ impl ServerClient {
 
     /// `POST /v1/resolve`.
     pub async fn resolve(&self, track: &Track, priority: &[ProviderId]) -> Result<ResolveResponse> {
-        let body = ResolveRequest { track: track.clone(), priority: priority.to_vec() };
+        self.resolve_with_mode(track, priority, false).await
+    }
+
+    pub async fn resolve_with_mode(&self, track: &Track, priority: &[ProviderId], youtube_only: bool) -> Result<ResolveResponse> {
+        let body = ResolveRequest { youtube_only, track: track.clone(), priority: priority.to_vec() };
         let resp = Self::check(self.member_request(self.post("/v1/resolve")).await.json(&body).send().await?).await?;
         let mut resolved: ResolveResponse = resp.json().await?;
         if let Some(PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. }) = resolved.source.as_mut() {
@@ -261,7 +265,12 @@ impl ServerClient {
     }
 
     pub async fn download_url(&self, track: &Track) -> Result<Option<(ProviderId, String)>> {
-        let resp = Self::check(self.member_request(self.post("/v1/download")).await.json(track).send().await?).await?;
+        self.download_url_with_priority(track, &[], false).await
+    }
+
+    pub async fn download_url_with_priority(&self, track: &Track, priority: &[ProviderId], youtube_only: bool) -> Result<Option<(ProviderId, String)>> {
+        let body = ResolveRequest { youtube_only, track: track.clone(), priority: priority.to_vec() };
+        let resp = Self::check(self.member_request(self.post("/v1/download")).await.json(&body).send().await?).await?;
         let value: Option<(ProviderId, String)> = {
             let v: serde_json::Value = resp.json().await?;
             if v.is_null() { None } else { Some((serde_json::from_value(v["provider"].clone())?, v["url"].as_str().context("missing download URL")?.into())) }

@@ -679,6 +679,8 @@
 "settings.visuals.music_reactivity" = "Реакция на музыку"
 "sp.appearance.music_reactivity.desc" = "Насколько сильно фон реагирует на музыку."
 
+"ytdlp.only" = "Только YouTube"
+"ytdlp.only.hint" = "Искать только выбранным способом YouTube. Без совпадений не использовать другие источники или превью."
 "ytdlp.mode" = "Воспроизведение YouTube"
 "ytdlp.mode.local" = "Локально"
 "ytdlp.mode.server" = "Сервер"

@@ -42,6 +42,11 @@ priority = ["audius", "jamendo", "soundcloud", "youtube"]
 # Cap on YouTube search.list calls per day (each = 100 quota units).
 youtube_daily_searches = 90
 
+# "server" uses the companion through the API; "local" uses this computer.
+youtube_mode = "server"
+# Require YouTube for playback/download resolution, with no other source/preview.
+youtube_only = false
+
 [visuals]
 # Glow / ASCII intensity, 0.0 .. 1.0
 intensity = 0.8
@@ -56,3 +61,9 @@ check_on_start = true
 auto_install = false
 # "stable" or "prerelease"
 channel = "stable"
+
+[audio]
+# Shared maximum across all download batches (1..10); configured only here.
+download_parallelism = 5
+# Slow: 1; unknown/standard: up to 3; fast: configured maximum.
+download_adaptive = true
