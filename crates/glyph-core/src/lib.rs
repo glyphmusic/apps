@@ -40,7 +40,7 @@ pub mod updater;
 pub mod ytdlp;
 
 pub use config::Config;
-pub use library::{FollowedArtist, Library, ListKey, Playlist, SearchItem};
+pub use library::{FollowedArtist, Library, ListKey, Playlist, RecentItem, SearchItem};
 pub use lyrics::Lyrics;
 pub use queue::{Queue, RepeatMode};
 pub use updater::{UpdateInfo, UpdateStatus};
@@ -607,7 +607,9 @@ impl Inner {
                     // The wire type carries no match score.
                     found = r.map(|r| Lyrics::from_response(&r, 1.0));
                 }
-                Err(e) => return Err(e),
+                // A missing/busy lyrics provider must not break the song view:
+                // the local LRCLIB lookup below still has a chance.
+                Err(e) => tracing::info!("server lyrics unavailable, falling back: {e:#}"),
             }
         }
         if !server_answered {
@@ -1073,6 +1075,25 @@ impl Backend {
         self.spawn(async move { artist::lookup_via(&inner.http, &name, &lang, inner.server.as_ref()).await }).await?
     }
 
+    /// Whether radio can actually deliver something. With a server the single
+    /// source of truth is its `/v1/similar` (a wrong or missing Last.fm key
+    /// leaves it empty, and the UI greys the switch out); without one the app's
+    /// own providers answer.
+    pub async fn radio_available(&self) -> anyhow::Result<bool> {
+        let inner = self.cur();
+        if inner.server.is_none() {
+            // Own Last.fm key or the Deezer related-artist fallback.
+            return Ok(true);
+        }
+        self.spawn(async move {
+            let Some(server) = &inner.server else { return true };
+            // Canonical, always-known track: an empty answer means the server
+            // side of radio is not configured.
+            matches!(server.similar("Daft Punk", "Get Lucky").await, Ok(r) if !r.tracks.is_empty())
+        })
+        .await
+    }
+
     /// Radio: similar tracks (Last.fm track.getSimilar), not yet resolved.
     pub async fn similar(&self, track: &Track) -> anyhow::Result<Vec<Track>> {
         let (inner, track) = (self.cur(), track.clone());
@@ -1098,6 +1119,27 @@ impl Backend {
                 None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
             };
             d.related_tracks(&track).await
+        })
+        .await?
+    }
+
+    /// Artists similar to `artist`: the app's own Last.fm key first, then
+    /// Deezer's related artists (needs no key). Empty when nothing is known.
+    pub async fn similar_artists(&self, artist: &str) -> anyhow::Result<Vec<String>> {
+        let (inner, artist) = (self.cur(), artist.to_string());
+        self.spawn(async move {
+            if let Some(lf) = &inner.providers.lastfm {
+                match lf.similar_artists(&artist).await {
+                    Ok(v) if !v.is_empty() => return Ok(v),
+                    Ok(_) => {}
+                    Err(e) => tracing::info!("Last.fm similar artists failed, falling back: {e:#}"),
+                }
+            }
+            let d = match &inner.providers.deezer {
+                Some(d) => d.clone(),
+                None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
+            };
+            d.related_artists(&artist).await
         })
         .await?
     }

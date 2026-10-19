@@ -14,11 +14,11 @@ use glyph_audio::{
     Status,
 };
 use glyph_core::{
-    flume_like, Backend, BackendMode, Config, Library, Lyrics, Queue, RepeatMode, UpdateInfo,
+    flume_like, Backend, BackendMode, Config, Library, Lyrics, Queue, RecentItem, RepeatMode, UpdateInfo,
     UpdateStatus,
 };
 use glyph_protocol::{ProviderId, SearchEvent, Track};
-use gpui::{App, AppContext, Context, Entity, FocusHandle, Subscription, Task, Window};
+use gpui::{App, AppContext, Context, Entity, FocusHandle, SharedString, Subscription, Task, Window};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,6 +44,9 @@ pub enum View {
     Profile,
     /// One Home section on its own ("Show all"): `Glyph::section`.
     Section,
+    /// All releases of one artist ("Show all" of the artist's albums):
+    /// `Glyph::open_artist_releases`.
+    Releases,
 }
 
 /// Which song list the list view shows.
@@ -136,6 +139,9 @@ pub struct ArtistPage {
     pub info_loading: bool,
     /// Fans + verified badge.
     pub stats: Option<glyph_core::catalog::ArtistStats>,
+    /// Artists similar to this one (Last.fm, else Deezer); empty = none known.
+    pub similar: Vec<String>,
+    pub similar_loading: bool,
     pub show_all: bool,
     pub about_open: bool,
     _tasks: Vec<Task<()>>,
@@ -285,6 +291,9 @@ pub struct Glyph {
     album_task: Option<Task<()>>,
     /// Recently played keys last put into the taskbar / dock menu.
     dock_keys: Vec<String>,
+    /// Set while playback starts from an artist's page: the artist is logged
+    /// to "recently played" (instead of only the song) by `start_track`.
+    pending_recent_artist: Option<(String, Option<Track>)>,
     /// Songs being downloaded right now (`track_key`).
     pub downloading: HashSet<String>,
     /// When songs finished downloading (`track_key`), for the check animation.
@@ -387,6 +396,10 @@ pub struct Glyph {
     /// Song of an own playlist being dragged: (from, slot it would land in).
     pub list_drop: Option<(usize, usize)>,
     pub radio: bool,
+    /// Does radio really work? `None` = not checked yet (switch stays usable).
+    /// The server's `/v1/similar` needs a working Last.fm key; without one the
+    /// switch is greyed out and explains itself on hover.
+    pub radio_ok: Option<bool>,
     pub mini_on_top: bool,
     /// The open mini player window, if any.
     pub mini_window: Option<gpui::AnyWindowHandle>,
@@ -700,6 +713,7 @@ impl Glyph {
             album_task: None,
             // Read straight from disk: the async config load comes too late for the first frame.
             dock_keys: Vec::new(),
+            pending_recent_artist: None,
             downloading: HashSet::new(),
             download_done: Default::default(),
             album_meta: Default::default(),
@@ -764,6 +778,7 @@ impl Glyph {
             queue_drop: None,
             list_drop: None,
             radio: true,
+            radio_ok: None,
             mini_on_top: true,
             mini_window: None,
             mini_shown: false,
@@ -1034,6 +1049,9 @@ impl Glyph {
                 self.backend = Some(b);
                 glyph_core::cover::set_data_saver(self.config.storage.data_saver);
                 self.load_feeds(cx);
+                // The server may not have a working Last.fm key: check once so
+                // the radio switch can be honest about it.
+                self.probe_radio(cx);
                 // Misses recorded without a backend are not real misses.
                 self.covers.retain(|_, v| v.is_some());
                 self.ascii_covers.clear();
@@ -1045,6 +1063,8 @@ impl Glyph {
             Err(e) => {
                 tracing::warn!("backend offline: {e}");
                 self.backend_state = BackendState::Offline(e);
+                // Unknown instead of "broken": the switch stays usable.
+                self.radio_ok = None;
             }
         }
         cx.notify();
@@ -1659,7 +1679,7 @@ impl Glyph {
                 View::NowPlaying => Preset::Sonnenaufgang,
                 View::Settings => Preset::Horizont,
                 View::List => Preset::Horizont,
-                View::Artist | View::Profile => Preset::Sonnenaufgang,
+                View::Artist | View::Profile | View::Releases => Preset::Sonnenaufgang,
                 View::Section => Preset::Strahl,
             };
             self.glow.update(cx, |g, _| g.set_preset(preset));
@@ -1949,7 +1969,7 @@ impl Glyph {
         if !self.library.search_items.is_empty() {
             (true, self.library.search_items.iter().take(8).cloned().collect())
         } else {
-            (false, self.library.recent.iter().take(8).map(|t| glyph_core::SearchItem::Song { track: t.clone() }).collect())
+            (false, self.library.recent_tracks().take(8).map(|t| glyph_core::SearchItem::Song { track: t.clone() }).collect())
         }
     }
 
@@ -1988,9 +2008,19 @@ impl Glyph {
         if self.allowed(tr) {
             return false;
         }
+        self.pending_recent_artist = None;
         self.toast_info(t("toast.explicit_blocked").to_string());
         cx.notify();
         true
+    }
+
+    /// The open artist page, when playback starts from it: the artist is
+    /// remembered in "recently played" alongside the song.
+    fn artist_recent_context(&self, track: &Track) -> Option<(String, Option<Track>)> {
+        (self.view == View::Artist)
+            .then(|| self.open_artist.clone())
+            .flatten()
+            .map(|name| (name, Some(track.clone())))
     }
 
     /// Replace the queue with `tracks` and start at `index`. With "Hide
@@ -2017,6 +2047,7 @@ impl Glyph {
         if let Some(l) = self.playing_from.clone() {
             self.touch_list(&l, 0.5);
         }
+        self.pending_recent_artist = self.artist_recent_context(&track);
         self.play_track(track, cx);
     }
 
@@ -2045,8 +2076,12 @@ impl Glyph {
             // until the new one has loaded.
             self.with_player(|p| p.pause());
         }
+        let artist_ctx = self.pending_recent_artist.take();
         if self.library_ok && guard(|| self.library.push_recent(track.clone())).is_some() {
             self.library.record_play(&track);
+            if let Some((name, art)) = artist_ctx {
+                guard(|| self.library.push_recent_artist(&name, art));
+            }
             self.save_library_activity();
             self.profile_recent_changed(cx);
         }
@@ -2180,7 +2215,7 @@ impl Glyph {
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         if self.current.is_none() {
-            let recent = self.library.recent.clone();
+            let recent: Vec<Track> = self.library.recent_tracks().cloned().collect();
             if !recent.is_empty() {
                 self.play_list(recent, 0, cx);
             }
@@ -2366,6 +2401,26 @@ impl Glyph {
             self.preloaded = None;
             self.with_player(|p| p.drop_next());
         }
+    }
+
+    /// Asks the backend once whether radio can really deliver similar songs.
+    /// A server without a (valid) Last.fm key answers `/v1/similar` with an
+    /// empty list; the switch is then greyed out with a hover explanation.
+    pub fn probe_radio(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.radio_ok = None;
+            return;
+        };
+        self.radio_ok = None;
+        cx.spawn(async move |this, cx| {
+            let ok = guard_async(b.radio_available()).await.unwrap_or(false);
+            this.update(cx, |s, cx| {
+                s.radio_ok = Some(ok);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Queue finished: continue with similar tracks (Last.fm getSimilar).
@@ -2775,7 +2830,7 @@ impl Glyph {
     pub fn list_tracks(&self, l: &ListRef) -> Vec<Track> {
         match l {
             ListRef::Liked => self.library.liked.clone(),
-            ListRef::Recent => self.library.recent.clone(),
+            ListRef::Recent => self.library.recent_tracks().cloned().collect(),
             ListRef::User(id) => self.library.playlist(id).map(|p| p.tracks.clone()).unwrap_or_default(),
             ListRef::Album { tracks, .. } => tracks.clone(),
             ListRef::ArtistLiked(name) => self.liked_by(name),
@@ -2975,7 +3030,7 @@ impl Glyph {
         // Seeds: one song for each of the user's top artists, then liked songs.
         let taste = self.taste();
         let mut seeds: Vec<Track> = Vec::new();
-        let pool: Vec<Track> = self.library.liked.iter().chain(self.library.recent.iter()).cloned().collect();
+        let pool: Vec<Track> = self.library.liked.iter().chain(self.library.recent_tracks()).cloned().collect();
         for a in taste.top_artists(4) {
             if let Some(t) = pool.iter().find(|t| glyph_core::taste::credited(&t.artist).contains(&a)) {
                 if !seeds.iter().any(|s| s.id == t.id && s.source == t.source) {
@@ -3012,7 +3067,7 @@ impl Glyph {
             }
             this.update(cx, |s, cx| {
                 let taste = s.taste();
-                let recent: HashSet<String> = s.library.recent.iter().take(30).map(glyph_core::dedupe::track_key).collect();
+                let recent: HashSet<String> = s.library.recent_tracks().take(30).map(glyph_core::dedupe::track_key).collect();
                 let mut v: Vec<(Track, f32)> = found
                     .into_iter()
                     .filter(|(t, _)| s.allowed(t) && !taste.is_hidden(&t.artist) && !taste.is_liked(t) && !recent.contains(&glyph_core::dedupe::track_key(t)))
@@ -3097,6 +3152,40 @@ impl Glyph {
             return DlView::Done(age);
         }
         DlView::None
+    }
+
+    /// Tooltip of a list's download button: how many of its songs are saved.
+    pub fn download_tip(&self, tracks: &[Track]) -> SharedString {
+        let total = tracks.len();
+        if total == 0 {
+            return t("tip.download");
+        }
+        let saved = tracks.iter().filter(|t| self.is_downloaded(t)).count();
+        if tracks.iter().any(|t| self.is_downloading(t)) {
+            return tf("tip.dl_busy", &[("done", &saved), ("total", &total)]);
+        }
+        if saved == 0 {
+            t("tip.download")
+        } else {
+            tf("tip.dl_saved", &[("done", &saved), ("total", &total)])
+        }
+    }
+
+    /// Tooltip of one song's download badge: the phase and, while bytes flow,
+    /// how far it is. `None` for songs that are neither saved nor downloading
+    /// (their row shows no badge).
+    pub fn download_tip_one(&self, track: &Track) -> Option<SharedString> {
+        if self.is_downloading(track) {
+            return Some(match self.backend.as_ref().and_then(|b| b.download_progress(track)) {
+                Some(Some(f)) if f < 0.995 => {
+                    let pct = (f.clamp(0.0, 1.0) * 100.0).round() as i32;
+                    tf("tip.dl_song_busy", &[("pct", &pct)])
+                }
+                Some(Some(_)) => t("tip.dl_song_finish"),
+                _ => t("tip.dl_song_prepare"),
+            });
+        }
+        self.is_downloaded(track).then(|| t("tip.dl_song_done"))
     }
 
     /// Downloads songs through the shared bounded queue; songs no source offers for
@@ -3478,6 +3567,22 @@ impl Glyph {
         cx.notify();
     }
 
+    /// "Show all" of an artist's releases: all albums on their own page.
+    pub fn open_artist_releases(&mut self, name: &str, cx: &mut Context<Self>) {
+        if name.is_empty() || (self.view == View::Releases && self.open_artist.as_deref() == Some(name)) {
+            return;
+        }
+        self.push_route();
+        self.view = View::Releases;
+        self.selected_row = None;
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        self.open_artist = Some(name.to_string());
+        self.open_list = None;
+        self.ctx_menu = None;
+        self.load_artist(name.to_string(), cx);
+        cx.notify();
+    }
+
     fn load_artist(&mut self, name: String, cx: &mut Context<Self>) {
         if self.artists.contains_key(&name) {
             return;
@@ -3553,6 +3658,23 @@ impl Glyph {
                 .ok();
             })
         };
+        let similar = {
+            let (name, b) = (name.clone(), b.clone());
+            cx.spawn(async move |this, cx| {
+                let r = guard_async(b.similar_artists(&name)).await;
+                this.update(cx, |s, cx| {
+                    if let Some(p) = s.artists.get_mut(&name) {
+                        p.similar_loading = false;
+                        if let Ok(v) = r {
+                            // The artist itself is never its own suggestion.
+                            p.similar = v.into_iter().filter(|n| !n.eq_ignore_ascii_case(&name)).collect();
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
         let info = {
             let (name, lang) = (name.clone(), self.lang.code());
             cx.spawn(async move |this, cx| {
@@ -3578,9 +3700,11 @@ impl Glyph {
                 info: None,
                 info_loading: true,
                 stats: None,
+                similar: Vec::new(),
+                similar_loading: true,
                 show_all: false,
                 about_open: false,
-                _tasks: vec![songs, info, stats],
+                _tasks: vec![songs, info, stats, similar],
             },
         );
     }
@@ -3635,10 +3759,34 @@ impl Glyph {
 
     /// Plays the `i`-th recently played song (taskbar jump list / dock menu).
     pub fn play_recent(&mut self, i: usize, cx: &mut Context<Self>) {
-        let list = self.library.recent.clone();
+        let list: Vec<Track> = self.library.recent_tracks().cloned().collect();
         if i < list.len() {
             self.play_list(list, i, cx);
         }
+    }
+
+    /// Plays (or opens) the `i`-th entry of "recently played": a song starts
+    /// the list at its song, an artist opens their page.
+    pub fn play_recent_item(&mut self, i: usize, cx: &mut Context<Self>) {
+        match self.library.recent.get(i).cloned() {
+            Some(RecentItem::Artist { name, .. }) => self.open_artist(&name, cx),
+            Some(RecentItem::Song { track }) => {
+                let list: Vec<Track> = self.library.recent_tracks().cloned().collect();
+                let key = crate::app::track_key(&track);
+                let song = list.iter().position(|t| crate::app::track_key(t) == key).unwrap_or(0);
+                self.play_list(list, song, cx);
+            }
+            None => {}
+        }
+    }
+
+    /// "Remove from recently played" for one song (artists are left alone).
+    pub fn remove_recent_track(&mut self, track: &Track, cx: &mut Context<Self>) {
+        if guard(|| self.library.remove_recent_song(track)).is_none() {
+            return;
+        }
+        self.save_library(cx);
+        cx.notify();
     }
 
     /// Jump list / dock entry `n`: 0..=4 recently played, 5 play/pause,
@@ -3659,7 +3807,7 @@ impl Glyph {
         if !self.library_ok {
             return;
         }
-        let keys: Vec<String> = self.library.recent.iter().take(5).map(track_key).collect();
+        let keys: Vec<String> = self.library.recent_tracks().take(5).map(track_key).collect();
         if keys == self.dock_keys {
             return;
         }
@@ -3670,8 +3818,7 @@ impl Glyph {
             use crate::jumplist::{update, Entry};
             let recent = self
                 .library
-                .recent
-                .iter()
+                .recent_tracks()
                 .take(5)
                 .enumerate()
                 .map(|(i, tr)| Entry { label: format!("{} · {}", tr.title, tr.artist), action: i })
@@ -3693,7 +3840,7 @@ impl Glyph {
     fn set_platform_dock_menu(&mut self, cx: &mut Context<Self>) {
         use crate::ui::{NextTrack, PlayRecent0, PlayRecent1, PlayRecent2, PlayRecent3, PlayRecent4, PrevTrack, TogglePlay};
         let mut items: Vec<gpui::MenuItem> = Vec::new();
-        for (i, tr) in self.library.recent.iter().take(5).enumerate() {
+        for (i, tr) in self.library.recent_tracks().take(5).enumerate() {
             let name = format!("{} · {}", tr.title, tr.artist);
             items.push(match i {
                 0 => gpui::MenuItem::action(name, PlayRecent0),
@@ -3721,6 +3868,7 @@ impl Glyph {
             self.queue.set(tracks, i);
             self.queue.set_shuffle(true);
         });
+        self.pending_recent_artist = self.artist_recent_context(&track);
         self.play_track(track, cx);
     }
 
@@ -3859,8 +4007,10 @@ impl Glyph {
                 }
             }
             ListRef::Recent => {
-                if i < self.library.recent.len() {
-                    self.library.recent.remove(i);
+                // The row index counts songs, so map it back to its entry.
+                let tr = self.library.recent_tracks().nth(i).cloned();
+                if let Some(tr) = tr {
+                    self.library.remove_recent_song(&tr);
                     self.save_library(cx);
                 }
             }

@@ -163,6 +163,36 @@ impl Deezer {
         Ok(out)
     }
 
+    /// Artists Deezer lists as related to `artist` (needs no key).
+    pub async fn related_artists(&self, artist: &str) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Related {
+            #[serde(default)]
+            data: Vec<DArtist>,
+        }
+        let id = self.artist_id(artist).await?;
+        let v = self.get(&format!("{API}/artist/{id}/related"), &[("limit", "20")]).await?;
+        let rel: Related = serde_json::from_value(v)?;
+        Ok(rel.data.into_iter().map(|a| a.name).filter(|n| !n.trim().is_empty()).collect())
+    }
+
+    /// Deezer id of an artist, looked up by name (accent-insensitive).
+    async fn artist_id(&self, artist: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Hits {
+            #[serde(default)]
+            data: Vec<DArtist>,
+        }
+        let v = self.get(&format!("{API}/search/artist"), &[("q", artist.trim()), ("limit", "5")]).await?;
+        let l: Hits = serde_json::from_value(v)?;
+        let want = crate::dedupe::normalize_artist(artist);
+        l.data
+            .into_iter()
+            .find(|a| crate::dedupe::normalize_artist(&a.name) == want)
+            .and_then(|a| a.id)
+            .ok_or_else(|| ProviderError::NotFound.into())
+    }
+
     /// Popular right now (Deezer's public chart).
     pub async fn chart(&self, limit: usize) -> Result<Vec<Track>> {
         let n = limit.clamp(1, 100).to_string();

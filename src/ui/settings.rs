@@ -1199,11 +1199,17 @@ fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         ),
         row(
             t("sp.radio"),
-            Some(t("sp.radio.desc")),
-            switch("radio", app.radio).on_click(cx.listener(|this, _, _, cx| {
-                this.radio = !this.radio;
-                cx.notify();
-            })),
+            // Without a working Last.fm key on the server the switch says so
+            // instead of silently doing nothing.
+            Some(if app.radio_ok == Some(false) { t("radio.off") } else { t("sp.radio.desc") }),
+            if app.radio_ok == Some(false) {
+                with_tip(switch("radio", app.radio).opacity(0.4), Some(t("radio.off")))
+            } else {
+                switch("radio", app.radio).on_click(cx.listener(|this, _, _, cx| {
+                    this.radio = !this.radio;
+                    cx.notify();
+                }))
+            },
         ),
     ]);
 

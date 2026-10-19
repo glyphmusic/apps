@@ -89,6 +89,68 @@ impl SearchItem {
     }
 }
 
+/// One entry of "recently played": a song, or an artist whose page started
+/// playback (so Home can show the artist next to the songs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecentItem {
+    Song { track: Track },
+    Artist {
+        name: String,
+        /// A song of theirs, for the picture until the artist page has a photo.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        track: Option<Track>,
+    },
+}
+
+impl RecentItem {
+    /// The song behind this entry (an artist's first song as its picture).
+    pub fn track(&self) -> Option<&Track> {
+        match self {
+            RecentItem::Song { track } => Some(track),
+            RecentItem::Artist { track, .. } => track.as_ref(),
+        }
+    }
+
+    pub fn artist_name(&self) -> Option<&str> {
+        match self {
+            RecentItem::Artist { name, .. } => Some(name),
+            RecentItem::Song { .. } => None,
+        }
+    }
+
+    fn same(&self, other: &RecentItem) -> bool {
+        match (self, other) {
+            (RecentItem::Song { track: a }, RecentItem::Song { track: b }) => same_entry(a, b),
+            (RecentItem::Artist { name: a, .. }, RecentItem::Artist { name: b, .. }) => a.eq_ignore_ascii_case(b.trim()),
+            _ => false,
+        }
+    }
+}
+
+/// "Recently played" before it held artists was a plain list of songs; keep
+/// reading those files (an entry with a `kind` is the new tagged form).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RecentItemCompat {
+    Item(RecentItem),
+    Song(Track),
+}
+
+fn deserialize_recent<'de, D>(deserializer: D) -> Result<Vec<RecentItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<RecentItemCompat>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|r| match r {
+            RecentItemCompat::Item(i) => i,
+            RecentItemCompat::Song(track) => RecentItem::Song { track },
+        })
+        .collect())
+}
+
 /// An artist the user follows (shown in the library and on Home).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FollowedArtist {
@@ -121,7 +183,8 @@ pub struct Library {
     /// Per-device activity; excluded from account sync. Capped at 500 songs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub song_activity: BTreeMap<String, SongActivity>,
-    pub recent: Vec<Track>,
+    #[serde(default, deserialize_with = "deserialize_recent")]
+    pub recent: Vec<RecentItem>,
     pub playlists: Vec<Playlist>,
     /// Lyrics offsets in ms, keyed by normalised `title|artist`.
     #[serde(default)]
@@ -173,8 +236,8 @@ pub struct Library {
 pub struct LibraryActivity {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub song_activity: BTreeMap<String, SongActivity>,
-    #[serde(default)]
-    pub recent: Vec<Track>,
+    #[serde(default, deserialize_with = "deserialize_recent")]
+    pub recent: Vec<RecentItem>,
     #[serde(default)]
     pub recent_lists: Vec<ListKey>,
     #[serde(default)]
@@ -390,11 +453,41 @@ impl Library {
         }
     }
 
+    /// Songs in "recently played", newest first (artists are skipped).
+    pub fn recent_tracks(&self) -> impl Iterator<Item = &Track> + '_ {
+        self.recent.iter().filter_map(|i| match i {
+            RecentItem::Song { track } => Some(track),
+            RecentItem::Artist { .. } => None,
+        })
+    }
+
     /// Push to front, dedupe, cap at 50.
     pub fn push_recent(&mut self, track: Track) {
-        self.recent.retain(|t| !same_entry(t, &track));
-        self.recent.insert(0, track);
+        self.push_recent_item(RecentItem::Song { track });
+    }
+
+    /// Remember that playback started from an artist's page, so the artist
+    /// shows in "recently played" next to the songs.
+    pub fn push_recent_artist(&mut self, name: &str, track: Option<Track>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.push_recent_item(RecentItem::Artist { name: name.to_string(), track });
+    }
+
+    fn push_recent_item(&mut self, item: RecentItem) {
+        self.recent.retain(|i| !i.same(&item));
+        self.recent.insert(0, item);
         self.recent.truncate(RECENT_LIMIT);
+    }
+
+    /// Removes the song from "recently played" (the artist entry stays).
+    pub fn remove_recent_song(&mut self, track: &Track) {
+        self.recent.retain(|i| match i {
+            RecentItem::Song { track: t } => !same_entry(t, track),
+            RecentItem::Artist { .. } => true,
+        });
     }
 
     /// Remember a song picked from search: front, deduped, capped.
@@ -656,7 +749,7 @@ mod tests {
         for _ in 0..5 { lib.record_listen(&favorite,now-86400); }
         lib.record_listen(&latest,now);
         assert_eq!(lib.active_tracks(2,now),vec![favorite.clone(),latest.clone()]);
-        assert_eq!(lib.recent,vec![latest.clone(),favorite.clone()]);
+        assert_eq!(lib.recent_tracks().cloned().collect::<Vec<_>>(),vec![latest.clone(),favorite.clone()]);
         let hot = tr("hot","New favorite");
         for _ in 0..3 { lib.record_listen(&hot,now+28*86400); }
         assert_eq!(lib.active_tracks(1,now+28*86400),vec![hot]);
@@ -759,11 +852,38 @@ mod tests {
             lib.push_recent(tr(&i.to_string(), &format!("Song {i}")));
         }
         assert_eq!(lib.recent.len(), 50);
-        assert_eq!(lib.recent[0].id, "59");
+        assert_eq!(lib.recent[0].track().unwrap().id, "59");
         lib.push_recent(tr("30", "Song 30"));
         assert_eq!(lib.recent.len(), 50);
-        assert_eq!(lib.recent[0].id, "30");
-        assert_eq!(lib.recent.iter().filter(|t| t.id == "30").count(), 1);
+        assert_eq!(lib.recent[0].track().unwrap().id, "30");
+        assert_eq!(lib.recent_tracks().filter(|t| t.id == "30").count(), 1);
+    }
+
+    #[test]
+    fn recent_keeps_artists_and_migrates_plain_songs() {
+        let mut lib = Library::default();
+        let first = tr("1", "One");
+        lib.push_recent(first.clone());
+        lib.push_recent_artist("Daft Punk", Some(first.clone()));
+        assert!(matches!(lib.recent[0], RecentItem::Artist { .. }));
+        assert_eq!(lib.recent.len(), 2);
+        assert_eq!(lib.recent_tracks().count(), 1);
+        // Playing a song from the artist again moves the artist back to front.
+        lib.push_recent(tr("2", "Two"));
+        lib.push_recent_artist("daft punk", Some(first.clone()));
+        assert_eq!(lib.recent.len(), 3);
+        assert_eq!(lib.recent[0].artist_name(), Some("daft punk"));
+        lib.remove_recent_song(&first);
+        assert_eq!(lib.recent_tracks().count(), 1);
+
+        // Older files stored plain tracks, without a `kind`.
+        let legacy = serde_json::json!({ "liked": [], "recent": [first], "playlists": [] });
+        let decoded: Library = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.recent_tracks().cloned().collect::<Vec<_>>(), vec![tr("1", "One")]);
+        // The new form survives a round trip.
+        let encoded = serde_json::to_value(&lib).unwrap();
+        let decoded: Library = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.recent, lib.recent);
     }
 
     #[test]
@@ -830,7 +950,7 @@ mod tests {
 
         let loaded = Library::load_from(&path).unwrap();
         assert!(loaded.is_liked(&liked));
-        assert_eq!(loaded.recent, vec![played]);
+        assert_eq!(loaded.recent_tracks().cloned().collect::<Vec<_>>(), vec![played]);
         assert_eq!(loaded.artist_plays.get("band"), Some(&1));
 
         loaded.save_to(&path).unwrap();

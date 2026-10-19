@@ -2,12 +2,13 @@
 //! directly on the background; only individual cards are flat surfaces.
 
 use crate::app::{Glyph, ListRef, SearchFilter};
-use crate::ui::lists::{artist_link, list_cover, with_list_menu, with_menu};
+use crate::ui::lists::{artist_link, list_cover, with_artist_menu, with_list_menu, with_menu};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::widgets::*;
+use glyph_core::RecentItem;
 use glyph_protocol::Track;
-use gpui::{div, prelude::*, px, Context, Div, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Div, FontWeight, SharedString, Window};
 use std::rc::Rc;
 
 fn scroll_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
@@ -29,17 +30,18 @@ fn greeting() -> gpui::SharedString {
 // ------------------------------------------------------------------ home
 
 pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
-    let recent: Vec<Track> = app.library.recent.iter().take(12).cloned().collect();
+    let recent: Vec<RecentItem> = app.library.recent.iter().take(12).cloned().collect();
     let cards = theme::on_panel(|| home_cards(app, cx));
+    let has_recent = !recent.is_empty();
     let row = if recent.is_empty() {
         ascii_state(ART_EMPTY, t("home.empty.title"), t("home.empty.sub")).into_any_element()
     } else {
-        cover_row(app, recent, "home-row", cx).into_any_element()
+        recent_row(app, recent, "home-row", cx).into_any_element()
     };
 
     let recs: Vec<Track> = app.recs.iter().filter(|t| app.allowed(t)).cloned().collect();
     let trending: Vec<Track> = app.trending.iter().filter(|t| app.allowed(t)).cloned().collect();
-    let (recent_all, recs_all, trend_all) = (app.library.recent.clone(), recs.clone(), trending.clone());
+    let (recs_all, trend_all) = (recs.clone(), trending.clone());
     let recs_row = (!recs.is_empty()).then(|| cover_row_with(app, recs, "home-recs", false, cx));
     let trend_row = (!trending.is_empty()).then(|| cover_row_with(app, trending, "home-trend", false, cx));
 
@@ -50,7 +52,7 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
             .gap(px(24.0))
             .child(heading(greeting()))
             .child(cards)
-            .child(section(section_head("disc-3", t("home.recent"), (!recent_all.is_empty()).then_some(More::Recent), cx), row))
+            .child(section(section_head("disc-3", t("home.recent"), has_recent.then_some(More::Recent), cx), row))
             .when_some(recs_row, |d, r| d.child(section(section_head("heart", t("home.recs"), Some(More::Songs("home-recs-all", recs_all)), cx), r)))
             .when_some(trend_row, |d, r| d.child(section(section_head("headphones", t("home.trending"), Some(More::Songs("home-trend-all", trend_all)), cx), r))),
     )
@@ -90,9 +92,34 @@ fn section_head(icon_name: &str, title: SharedString, more: Option<More>, cx: &m
 pub fn section_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let (title, tracks) = app.section.clone().unwrap_or_default();
     let back = crate::ui::lists::back_button(app, cx);
+    // One of these songs is on: the button pauses / resumes it.
+    let here = app.current.as_ref().is_some_and(|c| {
+        let k = crate::app::track_key(c);
+        tracks.iter().any(|t| crate::app::track_key(t) == k)
+    });
+    let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
+    let t_play = tracks.clone();
+    let play = (!tracks.is_empty()).then(|| {
+        crate::ui::lists::round_play("section-play", playing, loading, 44.0).on_click(cx.listener(move |this, _, _, cx| {
+            if here {
+                this.toggle_play(cx)
+            } else {
+                this.play_list(t_play.clone(), 0, cx)
+            }
+        }))
+    });
     scroll_area("section-scroll")
         .track_scroll(&app.main_scroll)
-        .child(div().flex().flex_col().gap(px(16.0)).children(back).child(heading(title)).child(track_list(app, tracks, "section-row", cx)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .children(back)
+                // Round play button on the left of the heading, like Spotify.
+                .child(div().flex().items_center().gap(px(14.0)).children(play).child(heading(title)))
+                .child(track_list(app, tracks, "section-row", cx)),
+        )
 }
 
 thread_local! {
@@ -220,11 +247,6 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         .child(div().grid().grid_cols(cols as u16).gap(px(HOME_CARD_GAP)).w_full().max_w(px(max_w)).children(cards))
 }
 
-/// Horizontal row of square covers (176 px) with title / artist below.
-fn cover_row(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
-    cover_row_with(app, tracks, prefix, true, cx)
-}
-
 /// Row of big covers; `recent`: the menu offers "Remove from recently played".
 fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, recent: bool, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
     let list = Rc::new(tracks);
@@ -259,6 +281,81 @@ fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, rec
         .mr(px(-32.0))
         .pr(px(32.0))
         .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
+}
+
+/// "Recently played" row: songs and artists (a round picture, opening the
+/// artist page) side by side, newest first.
+fn recent_row(app: &mut Glyph, items: Vec<RecentItem>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    let list = Rc::new(items);
+    let cards: Vec<AnyElement> = (0..list.len())
+        .map(|i| match list[i].clone() {
+            RecentItem::Song { track } => {
+                let tr = track.clone();
+                let art = cover(app, &tr, 176.0, 8.0, cx);
+                let artist = artist_link((prefix, 10_000 + i), &tr.artist, cx);
+                let el = div()
+                    .id((prefix, i))
+                    .flex_none()
+                    .w(px(192.0))
+                    .p(px(8.0))
+                    .rounded(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .cursor_pointer()
+                    .relative()
+                    .child(hover_fill(format!("{prefix}-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.05), 10.0))
+                    .on_click(cx.listener(move |this, _, _, cx| this.play_recent_item(i, cx)))
+                    .child(art)
+                    .child(song_title(tr.title.clone(), tr.explicit).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
+                    .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist));
+                with_menu(el, tr, Some((ListRef::Recent, 0)), cx).into_any_element()
+            }
+            RecentItem::Artist { name, track } => {
+                let art: AnyElement = match track.as_ref() {
+                    Some(tr) => cover(app, tr, 176.0, 88.0, cx).into_any_element(),
+                    None => div()
+                        .flex_none()
+                        .size(px(176.0))
+                        .rounded_full()
+                        .bg(theme::card())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("user-round", 56.0, gpui::hsla(0.0, 0.0, 1.0, 0.55)))
+                        .into_any_element(),
+                };
+                let n = name.clone();
+                with_artist_menu(
+                    div()
+                        .id((prefix, i))
+                        .flex_none()
+                        .w(px(192.0))
+                        .p(px(8.0))
+                        .rounded(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .cursor_pointer()
+                        .relative()
+                        .child(hover_fill(format!("{prefix}-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.05), 10.0))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n, cx)))
+                        .child(art)
+                        .child(div().truncate().pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(name.clone()))
+                        .child(div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("search.kind.artist"))),
+                    name.clone(),
+                    cx,
+                )
+                .into_any_element()
+            }
+        })
+        .collect();
+    let h = handle_for(prefix);
+    div().id(prefix).track_scroll(&h).flex().gap(px(4.0)).ml(px(-8.0))
+        // Rows run to the panel edge instead of stopping at the page padding.
+        .mr(px(-32.0))
+        .pr(px(32.0))
+        .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(cards)
 }
 
 // ------------------------------------------------------------------ search
@@ -734,11 +831,21 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .pb(px(16.0))
                 .border_t_1()
                 .border_color(theme::border_faint())
-                .child(toggle("q-radio", app.radio, t("queue.radio")).on_click(cx.listener(|this, _, _, cx| {
-                    this.radio = !this.radio;
-                    cx.notify();
-                }))),
+                .child(radio_toggle(app, cx)),
         )
+}
+
+/// The queue's radio switch. Greyed out (with a hover explanation) when the
+/// server has no working Last.fm key, so the switch never lies about what it
+/// can do.
+fn radio_toggle(app: &Glyph, cx: &mut Context<Glyph>) -> impl IntoElement {
+    if app.radio_ok == Some(false) {
+        return toggle_unavailable("q-radio", app.radio, t("queue.radio"), t("radio.off"));
+    }
+    toggle("q-radio", app.radio, t("queue.radio")).on_click(cx.listener(|this, _, _, cx| {
+        this.radio = !this.radio;
+        cx.notify();
+    }))
 }
 
 // ------------------------------------------------------------------ add songs
@@ -755,7 +862,7 @@ pub fn add_songs_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>
     } else {
         match tab {
             1 => (app.library.liked.iter().take(100).cloned().collect(), false),
-            2 => (app.library.recent.clone(), false),
+            2 => (app.library.recent_tracks().cloned().collect(), false),
             _ => (a.sugg.clone(), a.sugg_loading),
         }
     };

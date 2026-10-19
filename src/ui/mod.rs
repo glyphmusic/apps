@@ -202,6 +202,7 @@ impl Render for Glyph {
             View::Artist => lists::artist_view(self, window, cx),
             View::Profile => profile::view(self, window, cx),
             View::Section => views::section_view(self, window, cx).into_any_element(),
+            View::Releases => lists::releases_view(self, window, cx).into_any_element(),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),

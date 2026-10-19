@@ -478,7 +478,7 @@ impl Glyph {
                     if !on || s.profile.recent_gen != gen {
                         return None;
                     }
-                    let tracks: Vec<Track> = s.library.recent.iter().take(RECENT_SHOWN).cloned().collect();
+                    let tracks: Vec<Track> = s.library.recent_tracks().take(RECENT_SHOWN).cloned().collect();
                     let keys: Vec<String> = tracks.iter().map(crate::app::track_key).collect();
                     if keys == s.profile.recent_sent {
                         return None;

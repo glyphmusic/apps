@@ -10,6 +10,7 @@ use crate::app::{Glyph, ListRef};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::widgets::*;
+use glyph_core::RecentItem;
 use glyph_protocol::Track;
 use gpui::{
     anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId, ExternalPaths,
@@ -296,6 +297,7 @@ pub fn song_row(
     // Hidden explicit song: shown dimmed, does not play.
     let blocked = !app.allowed(&tr);
     let dl_badge = crate::ui::widgets::download_badge(app.download_view(&tr), 14.0, "arrow-down");
+    let dl_tip = app.download_tip_one(&tr);
     let group: SharedString = format!("{prefix}-g-{i}").into();
     let art = cover(app, &tr, 40.0, 6.0, cx);
     let l2 = list.clone();
@@ -401,7 +403,20 @@ pub fn song_row(
                         .min_w_0()
                         .text_size(theme::text_sm())
                         .text_color(theme::text_dim())
-                        .children(dl_badge)
+                        .children(dl_badge.map(|b| {
+                            crate::ui::widgets::with_tip(
+                                div()
+                                    .id(format!("{prefix}-dl-{i}"))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(16.0))
+                                    .child(b),
+                                dl_tip,
+                            )
+                            .into_any_element()
+                        }))
                         .child(artist_link((prefix, i * 8 + 1), &tr.artist, cx)),
                 ),
         )
@@ -458,6 +473,57 @@ pub fn song_row(
                 .child(icon("ellipsis-vertical", 16.0, theme::text_dim())),
         );
     with_menu(row, tr, from_ctx, cx)
+}
+
+/// One "recently played" row that is an artist: round picture, name and a
+/// "Artist" label; click opens the artist page.
+fn recent_artist_row(app: &mut Glyph, i: usize, name: &str, track: Option<&Track>, cx: &mut Context<Glyph>) -> AnyElement {
+    let art: AnyElement = match track {
+        Some(tr) => cover(app, tr, 40.0, 20.0, cx).into_any_element(),
+        None => div()
+            .flex_none()
+            .size(px(40.0))
+            .rounded_full()
+            .bg(theme::card())
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("user-round", 18.0, white(0.5)))
+            .into_any_element(),
+    };
+    let n = name.to_string();
+    with_artist_menu(div().id(("list-artist-row", i)), name.to_string(), cx)
+        .flex()
+        .items_center()
+        .gap(px(14.0))
+        .h(px(56.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .relative()
+        .child(hover_fill(format!("list-artist-row-{i}"), white(0.05), 8.0))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n, cx)))
+        .child(
+            div()
+                .flex_none()
+                .w(px(26.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("user-round", 14.0, theme::text_faint())),
+        )
+        .child(art)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(div().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(name.to_string()))
+                .child(div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("search.kind.artist"))),
+        )
+        .into_any_element()
 }
 
 /// "Follow" / "Following" outline button for an artist.
@@ -527,11 +593,12 @@ fn round_icon_button(id: &'static str, name: &str, size: f32) -> Stateful<gpui::
         .child(icon(name, 16.0, white(0.9)))
 }
 
-/// Artist hero: big round white play button (pause while `playing`).
-fn hero_play(id: &'static str, playing: bool, loading: bool) -> Stateful<gpui::Div> {
+/// Round white play button (pause while `playing`); used in the artist hero
+/// and on the left of a "Show all" heading.
+pub(crate) fn round_play(id: &'static str, playing: bool, loading: bool, size: f32) -> Stateful<gpui::Div> {
     with_tip(div().id(id), tip_for(if playing { "pause" } else { "play" }))
         .flex_none()
-        .size(px(48.0))
+        .size(px(size))
         .rounded_full()
         .bg(gpui::white())
         .flex()
@@ -539,9 +606,9 @@ fn hero_play(id: &'static str, playing: bool, loading: bool) -> Stateful<gpui::D
         .justify_center()
         .cursor_pointer()
         .relative()
-        .child(hover_fill(id, black(0.1), 24.0))
+        .child(hover_fill(id, black(0.1), size / 2.0))
         // The triangle's weight sits left; nudge it to look centred.
-        .child(div().when(!playing && !loading, |d| d.pl(px(2.0))).child(play_glyph(loading, playing, 20.0, 48.0)))
+        .child(div().when(!playing && !loading, |d| d.pl(px(2.0))).child(play_glyph(loading, playing, size * 0.42, size)))
 }
 
 /// Artist hero: borderless icon action next to the play button; its hover
@@ -586,6 +653,11 @@ fn play_pill(id: impl Into<ElementId>, label: SharedString, glyph: AnyElement) -
 
 pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(l) = app.open_list.clone() else { return div().into_any_element() };
+    // One artist's liked songs read like a "Show all" page: no cover column,
+    // the play button sits next to the heading.
+    if let ListRef::ArtistLiked(name) = &l {
+        return liked_by_artist(app, name.clone(), cx);
+    }
     let tracks = app.list_tracks(&l);
     let title = app.list_title(&l);
     let art = list_cover(app, &l, 248.0, cx);
@@ -664,6 +736,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     let all_dl = has && tracks.iter().all(|tr| app.is_downloaded(tr));
     let is_liked_list = l == ListRef::Liked;
     let dl_view = if has { app.downloads_view(&tracks) } else { crate::ui::widgets::DlView::None };
+    let dl_tip = if has { app.download_tip(&tracks) } else { t("tip.download") };
     let t_dl = tracks.clone();
     let left = div()
         .flex_none()
@@ -752,7 +825,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     // Pink check when everything is saved (click removes), a
                     // filling ring around the arrow while downloads run.
                     let btn = match crate::ui::widgets::download_badge(dl_view, 20.0, "download") {
-                        Some(badge) => crate::ui::widgets::with_tip(div().id("list-download"), crate::ui::widgets::tip_for("download"))
+                        Some(badge) => crate::ui::widgets::with_tip(div().id("list-download"), Some(dl_tip.clone()))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -763,7 +836,10 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                             .hover(|s| s.bg(theme::hover()))
                             .active(|s| s.bg(theme::active()))
                             .child(badge),
-                        None => icon_button("list-download", "download", 16.0, theme::text_dim()),
+                        None => crate::ui::widgets::with_tip(
+                            crate::ui::widgets::icon_button_plain("list-download", "download", 16.0, theme::text_dim()),
+                            Some(dl_tip.clone()),
+                        ),
                     };
                     d.child(btn.on_click(cx.listener(move |this, _, _, cx| {
                         if is_liked_list {
@@ -814,7 +890,10 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 )),
         );
 
-    let right: AnyElement = if tracks.is_empty() {
+    // Recently played can hold artists without a single song; then the mixed
+    // rows still render below.
+    let empty = if matches!(l, ListRef::Recent) { app.library.recent.is_empty() } else { tracks.is_empty() };
+    let right: AnyElement = if empty {
         let (a, b) = match &l {
             ListRef::Liked | ListRef::ArtistLiked(_) => (t("library.liked.empty"), t("library.liked.empty.sub")),
             ListRef::Recent => (t("home.empty.title"), t("library.recent.empty.sub")),
@@ -827,7 +906,23 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         let list = Rc::new(tracks);
         let show_album = !matches!(l, ListRef::Album { .. });
         let scroll = app.main_scroll.clone();
-        let n = list.len();
+        // Recently played mixes songs and artists; the rows follow that order.
+        let recent = matches!(l, ListRef::Recent).then(|| {
+            let items = app.library.recent.clone();
+            let mut songs: Vec<Track> = Vec::new();
+            let mut song_at: Vec<usize> = Vec::with_capacity(items.len());
+            for it in &items {
+                match it {
+                    RecentItem::Song { track } => {
+                        song_at.push(songs.len());
+                        songs.push(track.clone());
+                    }
+                    RecentItem::Artist { .. } => song_at.push(usize::MAX),
+                }
+            }
+            (Rc::new(items), Rc::new(songs), Rc::new(song_at))
+        });
+        let n = recent.as_ref().map_or(list.len(), |(items, ..)| items.len());
         // Own playlists: songs are dragged into a new order; the rows in
         // between glide aside (same feel as the queue).
         let own = match &l {
@@ -839,6 +934,12 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         }
         let drop = app.list_drop.filter(|_| own.is_some());
         let rows = crate::ui::widgets::virtual_rows("list-row", n, LIST_PITCH, &scroll, |i| {
+            if let Some((items, songs, song_at)) = &recent {
+                if let RecentItem::Artist { name, track } = &items[i] {
+                    return recent_artist_row(app, i, name, track.as_ref(), cx);
+                }
+                return song_row(app, songs.clone(), song_at[i], "list-row", Some(l.clone()), show_album, cx).into_any_element();
+            }
             let row = song_row(app, list.clone(), i, "list-row", Some(l.clone()), show_album, cx);
             let Some(id) = own.clone() else { return row.into_any_element() };
             let art = app.cover_path(&list[i], cx);
@@ -926,6 +1027,77 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         .into_any_element()
 }
 
+/// "Liked songs" of one artist: back button, round play button left of the
+/// heading, then the songs — the shape of a "Show all" page (no cover column).
+fn liked_by_artist(app: &mut Glyph, name: String, cx: &mut Context<Glyph>) -> AnyElement {
+    let l = ListRef::ArtistLiked(name.clone());
+    let tracks = app.list_tracks(&l);
+    let back = back_button(app, cx);
+    // One of these songs is on: the button pauses / resumes it.
+    let here = app.current.as_ref().is_some_and(|c| {
+        let k = crate::app::track_key(c);
+        tracks.iter().any(|t| crate::app::track_key(t) == k)
+    });
+    let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
+    let t_play = tracks.clone();
+    let play = (!tracks.is_empty()).then(|| {
+        round_play("liked-play", playing, loading, 44.0).on_click(cx.listener(move |this, _, _, cx| {
+            if here {
+                this.toggle_play(cx)
+            } else {
+                this.play_list(t_play.clone(), 0, cx)
+            }
+        }))
+    });
+    let body: AnyElement = if tracks.is_empty() {
+        ascii_state(ART_EMPTY, t("library.liked.empty"), t("library.liked.empty.sub")).into_any_element()
+    } else {
+        let list = Rc::new(tracks.clone());
+        let scroll = app.main_scroll.clone();
+        let n = list.len();
+        crate::ui::widgets::virtual_rows("list-row", n, LIST_PITCH, &scroll, |i| {
+            song_row(app, list.clone(), i, "list-row", Some(l.clone()), true, cx).into_any_element()
+        })
+        .into_any_element()
+    };
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .px(px(32.0))
+        .pt(px(20.0))
+        .children(back.map(|b| div().flex_none().flex().child(b)))
+        // Heading and its info line sit close together (a tighter gap than the
+        // page's), so the artist / song count reads as part of the title.
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(div().flex().items_center().gap(px(14.0)).children(play).child(heading(t("library.liked"))))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(artist_link("liked-artist", &name, cx))
+                        .child(meta_line(&tracks, theme::text_faint())),
+                ),
+        )
+        .child(
+            div()
+                .id("artist-liked-scroll")
+                .track_scroll(&app.main_scroll)
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pb(px(20.0))
+                .child(body),
+        )
+        .into_any_element()
+}
+
 // ------------------------------------------------------------------ artist
 
 pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
@@ -934,6 +1106,8 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
         Some(p) => (p.tracks.clone(), p.loading, p.info.clone(), p.info_loading, p.show_all, p.about_open),
         None => (Vec::new(), true, None, true, false, false),
     };
+    // Artists like this one (Last.fm's artist.getSimilar, else Deezer).
+    let similar: Vec<String> = app.artists.get(&name).map(|p| p.similar.clone()).unwrap_or_default();
     // Hero: the artist photo (Wikipedia), else the top song's cover, as ASCII.
     // The cover waits for the info so it never flashes before the photo.
     let src = info
@@ -1118,7 +1292,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                                     c.artist.eq_ignore_ascii_case(&name) || tracks.iter().any(|t| glyph_core::dedupe::track_key(t) == k)
                                 });
                                 let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
-                                hero_play("artist-play", playing, loading).mr(px(6.0)).on_click(cx.listener(move |this, _, _, cx| {
+                                round_play("artist-play", playing, loading, 48.0).mr(px(6.0)).on_click(cx.listener(move |this, _, _, cx| {
                                     if here {
                                         this.toggle_play(cx)
                                     } else {
@@ -1218,42 +1392,50 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
             )
     });
 
-    // Albums, grouped from the songs found.
-    let mut albums: Vec<(String, Vec<Track>)> = Vec::new();
-    for tr in &tracks {
-        if let Some(a) = tr.album.clone().filter(|a| !a.trim().is_empty()) {
-            match albums.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&a)) {
-                Some((_, v)) => v.push(tr.clone()),
-                None => albums.push((a, vec![tr.clone()])),
-            }
-        }
-    }
+    // Releases, grouped from the songs found; the rest sits on the
+    // "Show all" page (one row here, like Spotify's discography).
+    let albums = artist_releases(&tracks);
+    let n_albums = albums.len();
     let album_cards: Vec<AnyElement> = albums
         .into_iter()
+        .take(ARTIST_ALBUM_ROW)
         .enumerate()
-        .map(|(i, (title, list))| {
-            let art = cover(app, &list[0], 160.0, 8.0, cx);
-            let label = app.album_label(&title, &name, list.len(), cx);
-            let l = ListRef::Album { title: title.clone(), artist: name.clone(), tracks: list };
-            let lm = l.clone();
-            with_list_menu(div().id(("album", i)), lm, cx)
-                .flex_none()
-                .w(px(176.0))
-                .p(px(8.0))
-                .rounded(px(10.0))
-                .relative()
-                .child(hover_fill(format!("album-{i}"), white(0.05), 10.0))
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
-                .child(art)
-                .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
-                .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(label.to_uppercase()))
-                .into_any_element()
-        })
+        .map(|(i, (title, list))| album_card(app, i, &name, title, list, 160.0, cx))
         .collect();
+
+    // Similar artists: chips that open their page. Sits at the very bottom of
+    // the page, so the popular songs and releases stay in view.
+    let similar_section = (!similar.is_empty()).then(|| {
+        let chips: Vec<AnyElement> = similar
+            .iter()
+            .map(|n| {
+                let nm = n.clone();
+                div()
+                    .id(SharedString::from(format!("artist-sim-{n}")))
+                    .flex_none()
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .rounded_full()
+                    .bg(white(0.06))
+                    .border_1()
+                    .border_color(white(0.1))
+                    .cursor_pointer()
+                    .text_size(theme::text_sm())
+                    .text_color(white(0.8))
+                    .hover(|s| s.bg(white(0.12)).text_color(gpui::white()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&nm, cx)))
+                    .child(n.clone())
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(section_title("user-round", t("artist.similar")))
+            .child(div().flex().flex_wrap().gap(px(8.0)).children(chips))
+            .into_any_element()
+    });
 
     let body = div()
         .flex()
@@ -1279,12 +1461,27 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                 .children(liked_card),
         )
         .when(!album_cards.is_empty(), |d| {
+            let nm = name.clone();
             d.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(12.0))
-                    .child(section_title("disc-3", t("artist.albums")))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(section_title("disc-3", t("artist.albums")))
+                            .child(div().flex_1())
+                            .when(n_albums > ARTIST_ALBUM_ROW, |d| {
+                                d.child(
+                                    text_button("artist-albums-all", t("artist.show_all"))
+                                        .text_size(theme::text_sm())
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .on_click(cx.listener(move |this, _, _, cx| this.open_artist_releases(&nm, cx))),
+                                )
+                            }),
+                    )
                     .child({
                         let h = crate::ui::widgets::handle_for("artist-albums");
                         div()
@@ -1300,8 +1497,90 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                             .children(album_cards)
                     }),
             )
-        });
+        })
+        .children(similar_section);
     div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
+}
+
+/// Releases in the artist page's row; the rest sits behind "Show all".
+const ARTIST_ALBUM_ROW: usize = 6;
+
+/// An artist's releases: the songs found, grouped by album name.
+fn artist_releases(tracks: &[Track]) -> Vec<(String, Vec<Track>)> {
+    let mut albums: Vec<(String, Vec<Track>)> = Vec::new();
+    for tr in tracks {
+        if let Some(a) = tr.album.clone().filter(|a| !a.trim().is_empty()) {
+            match albums.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&a)) {
+                Some((_, v)) => v.push(tr.clone()),
+                None => albums.push((a, vec![tr.clone()])),
+            }
+        }
+    }
+    albums
+}
+
+/// One release card (cover, title, "year · kind"); opens the album's list.
+fn album_card(app: &mut Glyph, i: usize, artist: &str, title: String, list: Vec<Track>, size: f32, cx: &mut Context<Glyph>) -> AnyElement {
+    let art = cover(app, &list[0], size, 8.0, cx);
+    let label = app.album_label(&title, artist, list.len(), cx);
+    let l = ListRef::Album { title: title.clone(), artist: artist.to_string(), tracks: list };
+    let lm = l.clone();
+    with_list_menu(div().id(("album", i)), lm, cx)
+        .flex_none()
+        .w(px(size + 16.0))
+        .p(px(8.0))
+        .rounded(px(10.0))
+        .relative()
+        .child(hover_fill(format!("album-{i}"), white(0.05), 10.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
+        .child(art)
+        .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
+        .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(label.to_uppercase()))
+        .into_any_element()
+}
+
+/// "Show all" of an artist's releases: every album (and single) on one page.
+pub fn releases_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+    let Some(name) = app.open_artist.clone() else { return div().into_any_element() };
+    let tracks = app.artists.get(&name).map(|p| p.tracks.clone()).unwrap_or_default();
+    let loading = app.artists.get(&name).is_none_or(|p| p.loading) && tracks.is_empty();
+    let albums = artist_releases(&tracks);
+    let back = back_button(app, cx);
+    let cards: Vec<AnyElement> = albums
+        .into_iter()
+        .enumerate()
+        .map(|(i, (title, list))| album_card(app, i, &name, title, list, 168.0, cx))
+        .collect();
+    let body: AnyElement = if cards.is_empty() {
+        if loading {
+            skeleton_artist_rows("releases", 2).into_any_element()
+        } else {
+            ascii_state(ART_EMPTY, t("artist.empty"), t("artist.empty.sub")).into_any_element()
+        }
+    } else {
+        div().flex().flex_wrap().gap(px(4.0)).ml(px(-8.0)).children(cards).into_any_element()
+    };
+    div()
+        .id("releases-scroll")
+        .track_scroll(&app.main_scroll)
+        .size_full()
+        .overflow_y_scroll()
+        .px(px(32.0))
+        .py(px(20.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .children(back)
+                .child(heading(format!("{} · {}", name, t("artist.albums"))))
+                .child(body),
+        )
+        .into_any_element()
 }
 
 // ------------------------------------------------------------------ library
@@ -1929,11 +2208,15 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         );
         if let Some((l, i)) = m.from.clone().filter(|(l, _)| matches!(l, ListRef::User(_) | ListRef::Recent)) {
             let label = if l == ListRef::Recent { t("ctx.remove_recent") } else { t("ctx.remove") };
+            let recent_track = (l == ListRef::Recent).then(|| tr.clone());
             body.push(
                 danger_item("ctx-remove".into(), "circle-minus", label, cx)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.begin_ctx_close();
-                        this.remove_from_list(&l, i, cx)
+                        match &recent_track {
+                            Some(track) => this.remove_recent_track(track, cx),
+                            None => this.remove_from_list(&l, i, cx),
+                        }
                     }))
                     .into_any_element(),
             );

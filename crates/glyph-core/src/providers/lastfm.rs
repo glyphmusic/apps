@@ -84,6 +84,27 @@ pub fn parse_similar(json: &str) -> Result<Vec<Track>> {
     Ok(track_list(&v["similartracks"]["track"]).iter().filter_map(convert).collect())
 }
 
+/// Artist entries are either a list or (for a single hit) one object/string.
+fn artist_names(v: &Value) -> Vec<String> {
+    fn one(x: &Value) -> Option<String> {
+        let s = match x {
+            Value::Object(o) => o.get("name").or_else(|| o.get("#text")).and_then(Value::as_str).map(str::to_string),
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        };
+        s.filter(|n| !n.trim().is_empty())
+    }
+    match v {
+        Value::Array(a) => a.iter().filter_map(one).collect(),
+        _ => one(v).into_iter().collect(),
+    }
+}
+
+pub fn parse_similar_artists(json: &str) -> Result<Vec<String>> {
+    let v: Value = serde_json::from_str(json)?;
+    Ok(artist_names(&v["similarartists"]["artist"]))
+}
+
 pub fn parse_loved(json: &str) -> Result<(Vec<Track>, u32)> {
     let v: Value = serde_json::from_str(json)?;
     let pages = v["lovedtracks"]["@attr"]["totalPages"]
@@ -123,6 +144,14 @@ impl LastFm {
             .call("track.getsimilar", &[("artist", artist), ("track", title), ("limit", "30"), ("autocorrect", "1")])
             .await?;
         Ok(track_list(&v["similartracks"]["track"]).iter().filter_map(convert).collect())
+    }
+
+    /// Artists like `artist` (artist page's "similar artists").
+    pub async fn similar_artists(&self, artist: &str) -> Result<Vec<String>> {
+        let v = self
+            .call("artist.getsimilar", &[("artist", artist), ("limit", "20"), ("autocorrect", "1")])
+            .await?;
+        Ok(artist_names(&v["similarartists"]["artist"]))
     }
 
     /// Loved tracks of a public profile (up to 2000).
@@ -196,6 +225,18 @@ mod tests {
         assert_eq!(t[0].artist, "Adele");
         assert_eq!(t[0].duration_ms, Some(215_000));
         assert_eq!(split_id(&t[0].id), Some(("Adele", "Hello")));
+    }
+
+    #[test]
+    fn parses_similar_artists_list_and_single() {
+        let json = r#"{"similarartists":{"artist":[
+          {"name":"Justice","url":"x"},{"name":"Breakbot"},{"name":"  "}]}}"#;
+        let a = parse_similar_artists(json).unwrap();
+        assert_eq!(a, vec!["Justice".to_string(), "Breakbot".to_string()]);
+        // A single hit is an object, not a list.
+        let one = r#"{"similarartists":{"artist":{"name":"Solo"}}}"#;
+        assert_eq!(parse_similar_artists(one).unwrap(), vec!["Solo".to_string()]);
+        assert!(parse_similar_artists("{}").unwrap().is_empty());
     }
 
     #[test]

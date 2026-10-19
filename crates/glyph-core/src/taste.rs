@@ -48,7 +48,7 @@ impl Taste {
         for f in &lib.followed {
             add(&f.name, 6.0);
         }
-        for (i, t) in lib.recent.iter().enumerate() {
+        for (i, t) in lib.recent_tracks().enumerate() {
             add(&t.artist, 1.5 * 0.96f32.powi(i as i32));
         }
         for (a, n) in &lib.artist_plays {
@@ -291,8 +291,8 @@ mod tests {
     #[test]
     fn skips_and_hidden_lower_weight() {
         let mut lib = Library::default();
-        lib.recent.push(tr("A", "Skipped"));
-        lib.recent.push(tr("B", "Kept"));
+        lib.push_recent(tr("A", "Skipped"));
+        lib.push_recent(tr("B", "Kept"));
         lib.artist_skips.insert("skipped".into(), 8);
         lib.hidden_artists.push("Gone".into());
         lib.liked.push(tr("C", "Gone"));

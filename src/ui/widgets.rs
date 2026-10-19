@@ -211,7 +211,13 @@ fn tip_anchor(label: SharedString) -> gpui::Canvas<gpui::Hitbox> {
                     });
                     Some(wait)
                 } else {
-                    if !hovered && mine {
+                    if hovered {
+                        // Keep the open tooltip's text fresh: download progress
+                        // changes underneath it while hovering.
+                        if let Some(n) = w.tip_now.as_mut().filter(|n| n.bounds == bounds) {
+                            n.label = label.clone();
+                        }
+                    } else if mine {
                         if w.tip_now.as_ref().is_some_and(TipNow::shown) {
                             w.tip_last = Some(std::time::Instant::now());
                         }
@@ -727,12 +733,23 @@ pub fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> 
 }
 
 pub fn toggle(id: impl Into<ElementId>, on: bool, label: impl Into<SharedString>) -> Stateful<Div> {
-    div()
+    toggle_state(id.into(), on, label.into(), true, None)
+}
+
+/// Toggle that cannot be used right now: switch and label are dimmed, the
+/// pointer cursor is gone, and `tip` explains why on hover.
+pub fn toggle_unavailable(id: impl Into<ElementId>, on: bool, label: impl Into<SharedString>, tip: SharedString) -> Stateful<Div> {
+    toggle_state(id.into(), on, label.into(), false, Some(tip))
+}
+
+fn toggle_state(id: ElementId, on: bool, label: SharedString, enabled: bool, tip: Option<SharedString>) -> Stateful<Div> {
+    let el = div()
         .id(id)
         .flex()
         .items_center()
         .gap(px(10.0))
-        .cursor_pointer()
+        .when(enabled, |d| d.cursor_pointer())
+        .when(!enabled, |d| d.opacity(0.4).text_color(theme::text_faint()))
         .text_size(theme::text_sm())
         .child(
             div()
@@ -751,7 +768,11 @@ pub fn toggle(id: impl Into<ElementId>, on: bool, label: impl Into<SharedString>
                         .bg(if on { gpui::black() } else { theme::text_dim() }),
                 ),
         )
-        .child(label.into())
+        .child(label);
+    match tip {
+        Some(t) => with_tip(el, Some(t)),
+        None => el,
+    }
 }
 
 /// ASCII source badge `[AU]` (mono accent).
