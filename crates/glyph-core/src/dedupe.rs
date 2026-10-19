@@ -44,7 +44,7 @@ fn strip_brackets(s: &str) -> String {
     out
 }
 
-fn squash(s: &str) -> String {
+pub(crate) fn squash(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.to_lowercase().chars() {
         fold(c, &mut out);
@@ -91,19 +91,65 @@ pub fn normalize_title(s: &str) -> String {
     squash(&cut_feat(&base))
 }
 
-/// Normalises the *primary* artist (first of "A feat. B", "A & B", "A, B", ...).
+/// Separators between a primary artist and featured / collaborating artists.
+pub const PRIMARY_ARTIST_SEPS: [&str; 11] = [
+    ",", " feat.", " feat ", " ft.", " ft ", " & ", " x ", " X ", " × ", " / ", " и ",
+];
+
+/// Separators between all credited artists on a track.
+pub const CREDITED_ARTIST_SEPS: [&str; 14] = [
+    ",", " feat.", " feat ", " ft.", " ft ", " & ", " x ", " X ", " × ", " / ", " with ", " vs. ", " vs ", " и ",
+];
+
+/// First artist of a combined credit ("A, B", "A feat. B", "A & B", "A и B") for
+/// opening an artist page when the full credit is not a single artist.
+pub fn primary_artist(raw: &str) -> String {
+    let mut s = raw;
+    for sep in PRIMARY_ARTIST_SEPS {
+        if let Some((a, _)) = s.split_once(sep) {
+            s = a;
+        }
+    }
+    s.trim().to_string()
+}
+
+/// `true` when `name` is the artist of `track_artist` or one of the artists in
+/// a combined credit ("A, B", "A feat. B", "A & B", "A и B", ...).
+pub fn by_artist(track_artist: &str, name: &str) -> bool {
+    let n = name.trim();
+    if n.is_empty() {
+        return false;
+    }
+    if track_artist.trim().eq_ignore_ascii_case(n) {
+        return true;
+    }
+    let n_lower = n.to_lowercase();
+    if track_artist.trim().to_lowercase() == n_lower {
+        return true;
+    }
+    let mut parts = vec![track_artist];
+    for sep in CREDITED_ARTIST_SEPS {
+        parts = parts.into_iter().flat_map(|p| p.split(sep)).collect();
+    }
+    parts.into_iter().any(|p| {
+        let p = p.trim();
+        p.eq_ignore_ascii_case(n) || p.to_lowercase() == n_lower
+    })
+}
+
+/// Normalises the *primary* artist (first of "A feat. B", "A & B", "A, B", "A и B", ...).
 pub fn normalize_artist(s: &str) -> String {
     let mut a = strip_brackets(s);
     a = a.replace(" - Topic", "").replace(" - topic", "");
     a = cut_feat(&a);
-    let lower = a.to_ascii_lowercase();
+    let lower = a.to_lowercase();
     let mut cut = lower.len();
-    for pat in [",", ";", " & ", " and ", " x ", " × ", " / ", " vs ", " vs. "] {
+    for pat in [",", ";", " & ", " and ", " x ", " × ", " / ", " vs ", " vs. ", " и "] {
         if let Some(i) = lower.find(pat) {
             cut = cut.min(i);
         }
     }
-    let primary = &a[..floor_boundary(&a, cut)];
+    let primary = &lower[..floor_boundary(&lower, cut)];
     let n = squash(primary);
     n.strip_prefix("the ").map(str::to_string).unwrap_or(n)
 }
@@ -161,11 +207,72 @@ pub fn same_song(a: &Track, b: &Track) -> bool {
             return true;
         }
     }
+    if !durations_match(a.duration_ms, b.duration_ms) {
+        return false;
+    }
     let (ta, tb) = (normalize_title(&a.title), normalize_title(&b.title));
     !ta.is_empty()
         && ta == tb
         && normalize_artist(&a.artist) == normalize_artist(&b.artist)
-        && durations_match(a.duration_ms, b.duration_ms)
+}
+
+/// Pre-normalised lookup table for `same_entry` checks in O(1) amortised time.
+#[derive(Debug, Default, Clone)]
+pub struct TrackIndex {
+    by_id: std::collections::HashSet<(glyph_protocol::ProviderId, String)>,
+    by_isrc: std::collections::HashSet<String>,
+    by_key: HashMap<String, Vec<Option<u64>>>,
+}
+
+impl TrackIndex {
+    pub fn from_tracks(tracks: &[Track]) -> Self {
+        let mut idx = Self {
+            by_id: std::collections::HashSet::with_capacity(tracks.len() * 2),
+            by_isrc: std::collections::HashSet::new(),
+            by_key: HashMap::with_capacity(tracks.len()),
+        };
+        for t in tracks {
+            idx.insert(t);
+        }
+        idx
+    }
+
+    pub fn insert(&mut self, t: &Track) {
+        self.by_id.insert((t.source, t.id.clone()));
+        for (&p, id) in &t.external_ids {
+            self.by_id.insert((p, id.clone()));
+        }
+        if let Some(isrc) = t.isrc.as_ref().filter(|s| !s.is_empty()) {
+            self.by_isrc.insert(isrc.to_ascii_uppercase());
+        }
+        let title = normalize_title(&t.title);
+        if !title.is_empty() {
+            let key = format!("{title}|{}", normalize_artist(&t.artist));
+            self.by_key.entry(key).or_default().push(t.duration_ms);
+        }
+    }
+
+    pub fn contains(&self, t: &Track) -> bool {
+        if self.by_id.contains(&(t.source, t.id.clone())) {
+            return true;
+        }
+        if t.external_ids.iter().any(|(&p, id)| self.by_id.contains(&(p, id.clone()))) {
+            return true;
+        }
+        if let Some(isrc) = t.isrc.as_ref().filter(|s| !s.is_empty()) {
+            if self.by_isrc.contains(&isrc.to_ascii_uppercase()) {
+                return true;
+            }
+        }
+        let title = normalize_title(&t.title);
+        if title.is_empty() {
+            return false;
+        }
+        let key = format!("{title}|{}", normalize_artist(&t.artist));
+        self.by_key
+            .get(&key)
+            .is_some_and(|durs| durs.iter().any(|&d| durations_match(d, t.duration_ms)))
+    }
 }
 
 /// Merges `incoming` into `into` (same song): records the other source id and
@@ -299,6 +406,11 @@ mod tests {
         assert_eq!(normalize_artist("Daft Punk - Topic"), "daft punk");
         assert_eq!(normalize_artist("Artist A feat. B"), "artist a");
         assert_eq!(normalize_artist("A & B"), "a");
+        assert_eq!(normalize_artist("Баста и Гуф"), "баста");
+        assert_eq!(primary_artist("Баста и Гуф"), "Баста");
+        assert!(by_artist("Баста и Гуф", "Гуф"));
+        assert!(by_artist("Баста и Гуф", "гуф"));
+        assert!(!by_artist("Кино", "К"));
     }
 
     #[test]

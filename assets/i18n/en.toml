@@ -5,6 +5,7 @@
 
 "common.n_songs" = "{n} songs"
 "common.play" = "Play"
+"common.pause" = "Pause"
 
 "home.greeting" = "Welcome back"
 "home.recent" = "Recently played"
@@ -212,6 +213,7 @@
 "sp.storage.downloads" = "Downloads"
 "sp.storage.lyrics" = "Lyrics"
 "sp.storage.catalog" = "Catalog & search"
+"sp.storage.streams" = "Audio stream cache"
 "sp.storage.usage" = "Storage usage"
 "sp.storage.limit" = "Cache size limit"
 "sp.storage.saver" = "Data saver"

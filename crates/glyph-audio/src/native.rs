@@ -43,14 +43,45 @@ pub struct Chunk {
     pub samples: Vec<f32>,
 }
 
+fn sample_reaper() -> &'static Sender<Vec<f32>> {
+    static REAPER: std::sync::OnceLock<Sender<Vec<f32>>> = std::sync::OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (tx, rx) = flume::unbounded::<Vec<f32>>();
+        std::thread::Builder::new()
+            .name("glyph-audio-reaper".into())
+            .spawn(move || while let Ok(b) = rx.recv() { drop(b); })
+            .expect("start audio buffer reaper");
+        tx
+    })
+}
+
 /// Control block shared between engine and decode thread.
-#[derive(Default)]
 pub struct DecodeCtl {
     pub stop: AtomicBool,
     pub gen: AtomicU64,
     pub seek: Mutex<Option<f64>>,
     /// Decode thread has exited (EOF or error); seeks need a reload.
     pub done: AtomicBool,
+    /// Recycled sample buffers returned from the real-time audio callback so
+    /// heap deallocation and per-packet allocation are avoided during playback.
+    recycle_tx: Sender<Vec<f32>>,
+    recycle_rx: Receiver<Vec<f32>>,
+}
+
+impl Default for DecodeCtl {
+    fn default() -> Self {
+        // Initialize on the engine thread, never lazily inside the audio callback.
+        sample_reaper();
+        let (recycle_tx, recycle_rx) = flume::bounded(CHUNK_CAP * 2);
+        Self {
+            stop: AtomicBool::new(false),
+            gen: AtomicU64::new(0),
+            seek: Mutex::new(None),
+            done: AtomicBool::new(false),
+            recycle_tx,
+            recycle_rx,
+        }
+    }
 }
 
 impl DecodeCtl {
@@ -58,6 +89,22 @@ impl DecodeCtl {
         // Bump generation first so chunks decoded before the seek are dropped.
         self.gen.fetch_add(1, Ordering::SeqCst);
         *self.seek.lock().unwrap() = Some(secs);
+    }
+
+    /// Returns a buffer from the real-time audio thread without freeing it there.
+    pub fn recycle(&self, mut buf: Vec<f32>) {
+        if buf.capacity() == 0 {
+            return;
+        }
+        buf.clear();
+        if let Err(TrySendError::Full(buf) | TrySendError::Disconnected(buf)) = self.recycle_tx.try_send(buf) {
+            let _ = sample_reaper().try_send(buf);
+        }
+    }
+
+    /// Takes a recycled buffer for the next decoded packet, if available.
+    pub fn take_recycled(&self) -> Vec<f32> {
+        self.recycle_rx.try_recv().unwrap_or_default()
     }
 }
 
@@ -334,7 +381,8 @@ fn decode_thread(
         sb.copy_interleaved_ref(decoded);
         rate_hz = spec.rate;
         let ch = spec.channels.count().max(1);
-        let samples = sb.samples().to_vec();
+        let mut samples = ctl.take_recycled();
+        samples.extend_from_slice(sb.samples());
         let frames = (samples.len() / ch) as u64;
         let chunk = Chunk { gen, start_frame: frames_sent, samples };
         frames_sent += frames;
@@ -448,13 +496,21 @@ impl TrackSource {
     }
 }
 
+impl Drop for TrackSource {
+    fn drop(&mut self) {
+        self.ctl.recycle(std::mem::take(&mut self.cur));
+        self.ctl.recycle(std::mem::take(&mut self.tap_local));
+    }
+}
+
 impl Iterator for TrackSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
         let requested = self.ctl.gen.load(Ordering::SeqCst);
         if requested != self.gen {
-            self.cur.clear();
+            let old = std::mem::take(&mut self.cur);
+            self.ctl.recycle(old);
             self.idx = 0;
             self.silence_remaining = 0;
             self.gen = requested;
@@ -475,11 +531,18 @@ impl Iterator for TrackSource {
             let gen = self.ctl.gen.load(Ordering::SeqCst);
             loop {
                 match self.rx.try_recv() {
-                    Ok(c) if c.gen < gen => continue,
+                    Ok(c) if c.gen < gen => {
+                        self.ctl.recycle(c.samples);
+                        continue;
+                    }
                     Ok(c) => {
-                        if c.samples.is_empty() { continue; }
+                        if c.samples.is_empty() {
+                            self.ctl.recycle(c.samples);
+                            continue;
+                        }
                         self.starving = false;
-                        self.cur = c.samples;
+                        let old = std::mem::replace(&mut self.cur, c.samples);
+                        self.ctl.recycle(old);
                         self.idx = 0;
                         self.base_frame = c.start_frame;
                         self.gen = c.gen;

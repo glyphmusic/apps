@@ -9,6 +9,27 @@ use std::time::Duration;
 mod range_cache;
 pub use range_cache::set_cache_dir;
 
+/// Shared bounded worker pool for audio prefetch and prewarm jobs so chunk
+/// boundaries never pay OS thread creation/teardown overhead during playback.
+fn spawn_bg(job: impl FnOnce() + Send + 'static) -> bool {
+    static POOL: std::sync::OnceLock<flume::Sender<Box<dyn FnOnce() + Send>>> = std::sync::OnceLock::new();
+    let tx = POOL.get_or_init(|| {
+        let (tx, rx) = flume::bounded::<Box<dyn FnOnce() + Send>>(32);
+        for i in 0..4 {
+            let rx = rx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("glyph-audio-bg-{i}"))
+                .spawn(move || {
+                    while let Ok(task) = rx.recv() {
+                        task();
+                    }
+                });
+        }
+        tx
+    });
+    tx.try_send(Box::new(job)).is_ok()
+}
+
 /// Speculation is bounded independently of playback and never queues work.
 /// The same persistent range cache serves the subsequent foreground open.
 pub fn prewarm(url: String) {
@@ -27,7 +48,7 @@ pub fn prewarm(url: String) {
     if seen.len() >= 64 { seen.clear(); }
     seen.insert(url.clone(), Instant::now());
     drop(seen);
-    if std::thread::Builder::new().name("glyph-audio-warm".into()).spawn(move || {
+    if !spawn_bg(move || {
         struct Active;
         impl Drop for Active { fn drop(&mut self) { ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); } }
         let _active = Active;
@@ -35,7 +56,7 @@ pub fn prewarm(url: String) {
             source.prefetch_enabled = false;
             let _ = io::copy(&mut source.take(64 * 1024), &mut io::sink());
         }
-    }).is_err() { ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+    }) { ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
 }
 
 static SERVER_ACCESS: std::sync::RwLock<Option<(String,String)>> = std::sync::RwLock::new(None);
@@ -275,10 +296,11 @@ impl HttpSource {
             prefetch_enabled: true,
         };
         let (tx, rx) = flume::bounded(1);
-        if std::thread::Builder::new().name("glyph-audio-prefetch".into()).spawn(move || {
+        if spawn_bg(move || {
+            if tx.is_disconnected() { return; }
             let result = worker.fetch(at, false).map(|()| worker.buf);
             let _ = tx.send(result);
-        }).is_ok() { self.ahead = Some((at, rx)); }
+        }) { self.ahead = Some((at, rx)); }
     }
 
     fn read_initial(&mut self, requested: usize) -> io::Result<()> {

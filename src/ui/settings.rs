@@ -1513,7 +1513,7 @@ fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     rows(items)
 }
 
-const STORAGE_COLORS: [u32; 4] = [0x22c3e6, 0xa970ff, 0xff5fa2, 0xf2b84b];
+const STORAGE_COLORS: [u32; 5] = [0x22c3e6, 0xa970ff, 0xff5fa2, 0xf2b84b, 0x3ddc97];
 const LIMITS_MB: [u64; 7] = [250, 1024, 2048, 3072, 5120, 10240, 0];
 
 fn limit_label(mb: u64) -> SharedString {
@@ -1530,6 +1530,7 @@ fn storage_label(k: StorageKind) -> SharedString {
         StorageKind::Downloads => t("sp.storage.downloads"),
         StorageKind::Lyrics => t("sp.storage.lyrics"),
         StorageKind::Catalog => t("sp.storage.catalog"),
+        StorageKind::AudioRanges => t("sp.storage.streams"),
     }
 }
 

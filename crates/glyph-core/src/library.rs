@@ -1,12 +1,28 @@
 //! Local library: liked songs, recently played (last 50), playlists, per-song
 //! lyrics offsets. Persisted as JSON in the app data dir. Never leaves the device.
 
-use crate::dedupe::{same_song, track_key};
+use crate::dedupe::{same_song, track_key, TrackIndex};
 use crate::paths;
 use glyph_protocol::Track;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+#[derive(Debug, Default)]
+struct LikedCache(Mutex<Option<(usize, TrackIndex)>>);
+
+impl Clone for LikedCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for LikedCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
 
 /// Max entries in "recently played".
 pub const RECENT_LIMIT: usize = 50;
@@ -145,6 +161,39 @@ pub struct Library {
     /// Songs skipped within 30 s per artist (normalised name).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artist_skips: BTreeMap<String, u32>,
+    /// Transient lookup index for `liked` so `is_liked` is O(1) during UI rendering.
+    #[serde(skip)]
+    liked_cache: LikedCache,
+}
+
+/// Lightweight local activity snapshot persisted separately on high-frequency
+/// playback and navigation events so the full library (`liked`, `playlists`,
+/// `saved_albums`, etc.) is not cloned and pretty-printed on every listen.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LibraryActivity {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub song_activity: BTreeMap<String, SongActivity>,
+    #[serde(default)]
+    pub recent: Vec<Track>,
+    #[serde(default)]
+    pub recent_lists: Vec<ListKey>,
+    #[serde(default)]
+    pub list_activity: BTreeMap<String, (f64, u64)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artist_plays: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artist_skips: BTreeMap<String, u32>,
+}
+
+impl LibraryActivity {
+    pub fn save(&self) -> anyhow::Result<()> {
+        self.save_to(&Library::activity_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(self)?;
+        paths::write_atomic(path, &bytes)
+    }
 }
 
 /// Max entries in the search history.
@@ -155,29 +204,63 @@ impl Library {
         paths::data_dir().join("library.json")
     }
 
+    pub fn activity_path() -> PathBuf {
+        Self::activity_path_for(&Self::path())
+    }
+
+    pub fn activity_path_for(path: &Path) -> PathBuf {
+        path.with_extension("activity.json")
+    }
+
+    pub fn activity_snapshot(&self) -> LibraryActivity {
+        LibraryActivity {
+            song_activity: self.song_activity.clone(),
+            recent: self.recent.clone(),
+            recent_lists: self.recent_lists.clone(),
+            list_activity: self.list_activity.clone(),
+            artist_plays: self.artist_plays.clone(),
+            artist_skips: self.artist_skips.clone(),
+        }
+    }
+
+    pub fn apply_activity(&mut self, act: LibraryActivity) {
+        self.song_activity = act.song_activity;
+        self.recent = act.recent;
+        self.recent_lists = act.recent_lists;
+        self.list_activity = act.list_activity;
+        self.artist_plays = act.artist_plays;
+        self.artist_skips = act.artist_skips;
+    }
+
     /// Missing file = empty library. A corrupt file is kept as `library.json.bak`.
     pub fn load() -> anyhow::Result<Self> {
         Self::load_from(&Self::path())
     }
 
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
-        match std::fs::read(path) {
+        let mut lib = match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<Library>(&bytes) {
                 Ok(mut lib) => {
                     // Older files only had songs in the search history.
                     if lib.search_items.is_empty() && !lib.search_history.is_empty() {
                         lib.search_items = lib.search_history.drain(..).map(|track| SearchItem::Song { track }).collect();
                     }
-                    Ok(lib)
+                    lib
                 }
                 Err(e) => {
                     let _ = std::fs::copy(path, path.with_extension("json.bak"));
-                    Err(anyhow::anyhow!("library file is corrupt (backup kept): {e}"))
+                    return Err(anyhow::anyhow!("library file is corrupt (backup kept): {e}"));
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.into()),
+        };
+        if let Ok(act_bytes) = std::fs::read(Self::activity_path_for(path)) {
+            if let Ok(act) = serde_json::from_slice::<LibraryActivity>(&act_bytes) {
+                lib.apply_activity(act);
+            }
         }
+        Ok(lib)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -185,11 +268,41 @@ impl Library {
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        paths::write_json(path, self)
+        paths::write_json(path, self)?;
+        let _ = std::fs::remove_file(Self::activity_path_for(path));
+        Ok(())
+    }
+
+    pub fn save_activity(&self) -> anyhow::Result<()> {
+        self.save_activity_to(&Self::path())
+    }
+
+    pub fn save_activity_to(&self, path: &Path) -> anyhow::Result<()> {
+        self.activity_snapshot().save_to(&Self::activity_path_for(path))
     }
 
     pub fn is_liked(&self, track: &Track) -> bool {
+        if self.liked.len() <= 4 {
+            return self.liked.iter().any(|t| same_entry(t, track));
+        }
+        let len = self.liked.len();
+        if let Ok(mut guard) = self.liked_cache.0.lock() {
+            let idx = match guard.as_mut() {
+                Some((n, idx)) if *n == len => idx,
+                _ => {
+                    let built = TrackIndex::from_tracks(&self.liked);
+                    *guard = Some((len, built));
+                    &mut guard.as_mut().unwrap().1
+                }
+            };
+            return idx.contains(track);
+        }
         self.liked.iter().any(|t| same_entry(t, track))
+    }
+
+    /// Call after changing liked-track metadata in place (e.g. remote sync).
+    pub(crate) fn invalidate_liked_index(&mut self) {
+        *self.liked_cache.0.get_mut().unwrap() = None;
     }
 
     pub fn toggle_like(&mut self, track: &Track) {
@@ -197,6 +310,9 @@ impl Library {
             self.liked.remove(i);
         } else {
             self.liked.insert(0, track.clone());
+        }
+        if let Ok(mut g) = self.liked_cache.0.lock() {
+            *g = None;
         }
     }
 
@@ -237,6 +353,9 @@ impl Library {
     /// Own playlists by recent listening to their songs (most active first);
     /// playlists with no recent activity are left out.
     pub fn active_playlists(&self, now: u64) -> Vec<String> {
+        if self.song_activity.is_empty() {
+            return Vec::new();
+        }
         let mut ranked: Vec<(f64, &str)> = self
             .playlists
             .iter()
@@ -463,9 +582,11 @@ impl Library {
             }
         };
         let p = &mut self.playlists[idx];
+        let mut seen = TrackIndex::from_tracks(&p.tracks);
         let mut added = 0;
         for t in tracks {
-            if !p.tracks.iter().any(|x| same_entry(x, &t)) {
+            if !seen.contains(&t) {
+                seen.insert(&t);
                 p.tracks.push(t);
                 added += 1;
             }
@@ -475,11 +596,18 @@ impl Library {
 
     /// Adds imported tracks to Liked Songs (no duplicates). Returns how many were added.
     pub fn like_all(&mut self, tracks: Vec<Track>) -> usize {
+        let mut seen = TrackIndex::from_tracks(&self.liked);
         let mut added = 0;
         for t in tracks {
-            if !self.is_liked(&t) {
+            if !seen.contains(&t) {
+                seen.insert(&t);
                 self.liked.push(t);
                 added += 1;
+            }
+        }
+        if added > 0 {
+            if let Ok(mut g) = self.liked_cache.0.lock() {
+                *g = None;
             }
         }
         added
@@ -501,7 +629,7 @@ impl Library {
 }
 
 /// Same library entry: same provider id, or the same song by title/artist/duration.
-fn same_entry(a: &Track, b: &Track) -> bool {
+pub(crate) fn same_entry(a: &Track, b: &Track) -> bool {
     (a.source == b.source && a.id == b.id)
         || a.external_ids.get(&b.source).map(|id| id == &b.id).unwrap_or(false)
         || b.external_ids.get(&a.source).map(|id| id == &a.id).unwrap_or(false)
@@ -682,5 +810,30 @@ mod tests {
         std::fs::write(&path, b"{ nope").unwrap();
         assert!(Library::load_from(&path).is_err());
         assert!(path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn activity_sidecar_overlays_and_cleans_up_on_full_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let mut lib = Library::default();
+        let liked = tr("1", "Liked");
+        let played = tr("2", "Played");
+        lib.toggle_like(&liked);
+        lib.save_to(&path).unwrap();
+
+        lib.push_recent(played.clone());
+        lib.record_play(&played);
+        lib.record_listen(&played, 1000);
+        lib.save_activity_to(&path).unwrap();
+        assert!(Library::activity_path_for(&path).exists());
+
+        let loaded = Library::load_from(&path).unwrap();
+        assert!(loaded.is_liked(&liked));
+        assert_eq!(loaded.recent, vec![played]);
+        assert_eq!(loaded.artist_plays.get("band"), Some(&1));
+
+        loaded.save_to(&path).unwrap();
+        assert!(!Library::activity_path_for(&path).exists());
     }
 }

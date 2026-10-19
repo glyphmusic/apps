@@ -5,3 +5,5 @@ config.toml
 .env
 .env.*
 *.log
+*.err
+__pycache__/

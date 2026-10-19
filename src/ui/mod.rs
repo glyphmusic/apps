@@ -37,6 +37,10 @@ actions!(
         FocusSearch,
         ToggleLyrics,
         ToggleQueue,
+        ListUp,
+        ListDown,
+        ListActivate,
+        ListRemove,
         Nav1,
         Nav2,
         Nav3,
@@ -68,6 +72,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", TogglePlay, Some(MAIN)),
         KeyBinding::new("left", SeekBack, Some(MAIN)),
         KeyBinding::new("right", SeekForward, Some(MAIN)),
+        KeyBinding::new("up", ListUp, Some(MAIN)),
+        KeyBinding::new("down", ListDown, Some(MAIN)),
+        KeyBinding::new("enter", ListActivate, Some(MAIN)),
+        KeyBinding::new("delete", ListRemove, Some(MAIN)),
+        KeyBinding::new("backspace", ListRemove, Some(MAIN)),
         KeyBinding::new("secondary-left", PrevTrack, Some("Glyph")),
         KeyBinding::new("secondary-right", NextTrack, Some("Glyph")),
         KeyBinding::new("secondary-k", FocusSearch, None),
@@ -161,7 +170,10 @@ thread_local! {
 
 impl Render for Glyph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        widgets::set_viewport_h(f32::from(window.viewport_size().height));
+        for im in self.stale_heroes.drain(..) {
+            let _ = window.drop_image(im);
+        }
+        widgets::begin_window_frame(window);
         // Window title = the song, so the taskbar / dock preview shows it.
         let title = match &self.current {
             Some(t) => format!("{} - {}", t.artist, t.title),
@@ -170,7 +182,6 @@ impl Render for Glyph {
         if WINDOW_TITLE.with(|w| w.replace(title.clone())) != title {
             window.set_window_title(&title);
         }
-        widgets::begin_wheel_frames();
         if widgets::step_smooth_scroll() {
             window.request_animation_frame();
         }
@@ -320,6 +331,10 @@ impl Render for Glyph {
             }))
             .on_action(cx.listener(|this, _: &NextTrack, _, cx| this.next(false, cx)))
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.previous(cx)))
+            .on_action(cx.listener(|this, _: &ListUp, window, cx| this.select_row_step(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &ListDown, window, cx| this.select_row_step(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ListActivate, _, cx| this.activate_selected_row(cx)))
+            .on_action(cx.listener(|this, _: &ListRemove, _, cx| this.remove_selected_row(cx)))
             // Taskbar jump list / dock menu: recently played.
             .on_action(cx.listener(|this, _: &PlayRecent0, _, cx| this.play_recent(0, cx)))
             .on_action(cx.listener(|this, _: &Nav1, w, cx| this.nav_slot(1, w, cx)))

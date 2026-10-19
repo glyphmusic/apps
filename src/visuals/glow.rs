@@ -97,8 +97,8 @@ struct FrameOut {
 struct Worker {
     noise: OpenSimplex,
     samples: Vec<(f32, Rgb)>,
-    ascii: Vec<u8>,
     lum: Vec<f32>,
+    zone_buf: Vec<f32>,
 }
 
 impl Worker {
@@ -147,7 +147,7 @@ impl Worker {
                 glow[o + 2] = u8c(shade.0);
                 glow[o + 3] = 255;
                 self.samples.push((b, c));
-                self.lum.push(shade.luma());
+                self.lum.push(shade.luma() * 1.12);
             }
         }
         let glow = image::RgbaImage::from_raw(iw as u32, ih as u32, glow).expect("glow size");
@@ -166,16 +166,16 @@ impl Worker {
             let (x0, y0, x1, y1) = zone_rect(z);
             let (cx0, cy0) = ((x0 / GLOW_PITCH) as usize, (y0 / GLOW_PITCH) as usize);
             let (cx1, cy1) = (((x1 / GLOW_PITCH) as usize).min(iw), ((y1 / GLOW_PITCH) as usize).min(ih));
-            let mut v: Vec<f32> = Vec::new();
+            self.zone_buf.clear();
             for y in cy0..cy1 {
                 for x in cx0..cx1 {
-                    v.push(self.lum[y * iw + x] * 1.12);
+                    self.zone_buf.push(self.lum[y * iw + x]);
                 }
             }
-            if !v.is_empty() {
-                let k = ((v.len() as f32 * 0.9) as usize).min(v.len() - 1);
-                v.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
-                zones[zi] = v[k];
+            if !self.zone_buf.is_empty() {
+                let k = ((self.zone_buf.len() as f32 * 0.9) as usize).min(self.zone_buf.len() - 1);
+                self.zone_buf.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+                zones[zi] = self.zone_buf[k];
             }
         }
 
@@ -183,9 +183,7 @@ impl Worker {
         let ascii = j.ascii.then(|| {
             let sw = (j.w * j.scale).round().max(1.0) as usize;
             let sh_ = (j.h * j.scale).round().max(1.0) as usize;
-            self.ascii.clear();
-            self.ascii.resize(sw * sh_ * 4, 0);
-            let buf = &mut self.ascii;
+            let mut buf = vec![0u8; sw * sh_ * 4];
             let p = j.scale.round().max(1.0) as usize; // font pixel size
             let cols = (j.w / CELL_W) as usize;
             let rows = (j.h / CELL_H) as usize + 1;
@@ -276,7 +274,7 @@ impl Worker {
                     }
                 }
             }
-            image::RgbaImage::from_raw(sw as u32, sh_ as u32, buf.clone()).expect("ascii size")
+            image::RgbaImage::from_raw(sw as u32, sh_ as u32, buf).expect("ascii size")
         });
 
         // Displayed luminance (glow + the ASCII layer's share) for per-element ink.
@@ -284,7 +282,7 @@ impl Worker {
             w: iw,
             h: ih,
             pitch: GLOW_PITCH,
-            data: self.lum.iter().map(|l| l * 1.12).collect(),
+            data: self.lum.clone(),
         });
         FrameOut { glow, ascii, zones, lum, ms: t0.elapsed().as_secs_f32() * 1000.0, scroll: j.scroll }
     }
@@ -320,7 +318,6 @@ pub struct GlowView {
     /// Last size change (resize in progress → hold the frame).
     moved_at: Instant,
     window_size: Size<Pixels>,
-    window_origin: gpui::Point<Pixels>,
     view_size: Size<Pixels>,
     scale: f32,
     frame_no: u64,
@@ -350,8 +347,8 @@ impl GlowView {
                 let mut w = Worker {
                     noise: OpenSimplex::new(0x61_79_70_68),
                     samples: Vec::new(),
-                    ascii: Vec::new(),
                     lum: Vec::new(),
+                    zone_buf: Vec::new(),
                 };
                 while let Ok(job) = job_rx.recv() {
                     if out_tx.send(w.run(&job)).is_err() {
@@ -385,9 +382,8 @@ impl GlowView {
         // it there made the first frames after the drag hitch.
         cx.observe_window_bounds(window, |v, window, _| {
             let b = window.bounds();
-            if b.size != v.window_size || b.origin != v.window_origin {
+            if b.size != v.window_size {
                 v.window_size = b.size;
-                v.window_origin = b.origin;
                 v.moved_at = Instant::now();
             }
         })
@@ -417,7 +413,6 @@ impl GlowView {
             active: true,
             moved_at: now - Duration::from_secs(10),
             window_size: window.bounds().size,
-            window_origin: window.bounds().origin,
             view_size: size(px(0.0), px(0.0)),
             scale: window.scale_factor(),
             frame_no: 0,

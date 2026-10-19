@@ -1150,6 +1150,13 @@ impl Backend {
     pub fn flush(&self) {
         self.cur().resolver.cache().flush();
     }
+
+    /// Clears in-memory catalog caches after `StorageKind::Catalog` was cleared on disk.
+    pub fn clear_catalog_caches(&self) {
+        self.cur().resolver.cache().clear();
+        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
 
 impl Drop for Backend {

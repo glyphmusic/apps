@@ -118,6 +118,7 @@ fn no_frame(hwnd: usize) {
 
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        begin_window_frame(window);
         let (big, shown) = {
             let g = self.app.read(cx);
             (g.mini_big, g.mini_shown)
@@ -126,7 +127,7 @@ impl Render for MiniPlayer {
         if !shown {
             return div().size_full();
         }
-        let body = if big { self.card(window, cx) } else { self.bar(window, cx) };
+        let body = theme::on_panel(|| if big { self.card(window, cx) } else { self.bar(window, cx) });
         div().size_full().child(body).children(tooltip_layer(window))
     }
 }

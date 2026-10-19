@@ -304,6 +304,7 @@ pub fn song_row(
     let from_menu = from_ctx.clone();
     let t_hover = tr.clone();
     let hk = hover_k(&group);
+    let selected = matches!(prefix, "list-row" | "artist-row") && app.selected_row == Some(i);
     let show_album = show_album && ROW_W.with(|m| m.borrow().get(prefix).copied()).is_none_or(|w| w >= ALBUM_COL_MIN_ROW);
     let row = div()
         .id((prefix, i))
@@ -316,6 +317,7 @@ pub fn song_row(
         .rounded(px(8.0))
         .cursor_pointer()
         .when(blocked, |d| d.opacity(0.4))
+        .when(selected, |d| d.bg(white(0.08)).border_1().border_color(white(0.16)))
         .relative()
         .child(hover_fill(group.clone(), white(0.05), 8.0))
         .when(i == 0, |d| {
@@ -335,7 +337,10 @@ pub fn song_row(
                 .inset_0(),
             )
         })
-        .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l2).clone(), i, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.selected_row = Some(i);
+            this.play_list((*l2).clone(), i, cx);
+        }))
         .child(
             div()
                 .flex_none()
@@ -555,7 +560,8 @@ fn hero_icon(id: &'static str, name: &str) -> Stateful<gpui::Div> {
         .child(icon(name, 18.0, white(0.85)))
 }
 
-fn play_pill(id: impl Into<ElementId>, label: SharedString) -> Stateful<gpui::Div> {
+/// White pill; `glyph` is the play / pause / loading mark.
+fn play_pill(id: impl Into<ElementId>, label: SharedString, glyph: AnyElement) -> Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_none()
@@ -572,7 +578,7 @@ fn play_pill(id: impl Into<ElementId>, label: SharedString) -> Stateful<gpui::Di
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(gpui::black())
         .hover(|s| s.opacity(0.88))
-        .child(icon("play", 14.0, gpui::black()))
+        .child(glyph)
         .child(label)
 }
 
@@ -716,7 +722,23 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 div()
                     .flex()
                     .gap(px(8.0))
-                    .child(play_pill("list-play", t("list.play_all")).flex_1().on_click(cx.listener(move |this, _, _, cx| this.play_list(t_play.clone(), 0, cx))))
+                    .child({
+                        // Playing from this list: the pill pauses / resumes it.
+                        let here = app.playing_from.as_ref() == Some(&l)
+                            && app.current.as_ref().is_some_and(|c| {
+                                let k = crate::app::track_key(c);
+                                tracks.iter().any(|t| crate::app::track_key(t) == k)
+                            });
+                        let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
+                        let label = if playing { t("common.pause") } else { t("list.play_all") };
+                        play_pill("list-play", label, play_glyph(loading, playing, 14.0, 36.0)).flex_1().on_click(cx.listener(move |this, _, _, cx| {
+                            if here {
+                                this.toggle_play(cx)
+                            } else {
+                                this.play_list(t_play.clone(), 0, cx)
+                            }
+                        }))
+                    })
                     .child(round_icon_button("list-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx)))),
             )
         })

@@ -33,8 +33,69 @@ pub fn track_id(t: &Track) -> String {
 }
 
 fn hash(v: &Value) -> String {
+    if let Some(obj) = v.as_object() {
+        if obj.contains_key("base") {
+            let mut clean = obj.clone();
+            clean.remove("base");
+            let d = Sha256::digest(Value::Object(clean).to_string().as_bytes());
+            return d[..12].iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
     let d = Sha256::digest(v.to_string().as_bytes());
     d[..12].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn playlist_track_ids(v: &Value) -> Vec<String> {
+    serde_json::from_value::<Vec<Track>>(v["tracks"].clone())
+        .unwrap_or_default()
+        .iter()
+        .map(track_id)
+        .collect()
+}
+
+fn merge_playlist_tracks(
+    local_base: Option<&[String]>,
+    remote_base: Option<&[String]>,
+    local: &[Track],
+    remote: Vec<Track>,
+) -> Vec<Track> {
+    let local_ids: Vec<String> = local.iter().map(track_id).collect();
+    let remote_ids: Vec<String> = remote.iter().map(track_id).collect();
+    if local_ids == remote_ids {
+        return remote;
+    }
+    if local_base.is_some_and(|lb| lb == local_ids.as_slice())
+        && remote_base.is_none_or(|rb| rb == local_ids.as_slice())
+    {
+        return remote;
+    }
+    let remote_set: BTreeSet<&str> = remote_ids.iter().map(String::as_str).collect();
+    let local_set: BTreeSet<&str> = local_ids.iter().map(String::as_str).collect();
+    let remote_removed: BTreeSet<&str> = remote_base
+        .unwrap_or(&[])
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !remote_set.contains(*id))
+        .collect();
+    let local_removed: BTreeSet<&str> = local_base
+        .unwrap_or(&[])
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !local_set.contains(*id))
+        .collect();
+    let mut out: Vec<Track> = remote
+        .into_iter()
+        .filter(|t| !local_removed.contains(track_id(t).as_str()))
+        .collect();
+    for t in local {
+        let id = track_id(t);
+        if !remote_removed.contains(id.as_str())
+            && !out.iter().any(|x| track_id(x) == id || crate::library::same_entry(x, t))
+        {
+            out.push(t.clone());
+        }
+    }
+    out
 }
 
 fn sha_hex(bytes: &[u8]) -> String {
@@ -146,6 +207,10 @@ pub struct SyncState {
     /// `kind \u{1f} key` -> value hash (`-` = deleted).
     #[serde(default)]
     pub known: BTreeMap<String, String>,
+    /// Last agreed track ids (`track_id`) per playlist id, for 3-way merging
+    /// concurrent playlist edits.
+    #[serde(default)]
+    pub known_playlists: BTreeMap<String, Vec<String>>,
     /// Songs another device downloaded that this one has not fetched yet.
     #[serde(default)]
     pub pending_downloads: BTreeMap<String, Track>,
@@ -206,7 +271,15 @@ impl SyncState {
         let map = snap.map();
         for (key, v) in &snap.items {
             if self.known.get(&joined(key)).map(String::as_str) != Some(hash(v).as_str()) {
-                out.push(SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(v.clone()), updated_at: now, deleted: false, rev: 0 });
+                let mut value = v.clone();
+                if key.0 == kind::PLAYLIST {
+                    if let Some(base) = self.known_playlists.get(&key.1) {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert("base".into(), serde_json::to_value(base).unwrap_or_default());
+                        }
+                    }
+                }
+                out.push(SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(value), updated_at: now, deleted: false, rev: 0 });
             }
         }
         for (j, h) in &self.known {
@@ -226,24 +299,48 @@ impl SyncState {
                 _ => DELETED.into(),
             };
             self.known.insert(joined(&(i.kind.clone(), i.key.clone())), h);
+            if i.kind == kind::PLAYLIST {
+                match (&i.value, i.deleted) {
+                    (Some(v), false) => {
+                        self.known_playlists.insert(i.key.clone(), playlist_track_ids(v));
+                    }
+                    _ => {
+                        self.known_playlists.remove(&i.key);
+                    }
+                }
+            }
         }
     }
 
     /// Record `value` (None = deleted) as agreed with the server for `key`.
     pub fn agree(&mut self, key: &Key, value: Option<&Value>) {
         self.known.insert(joined(key), value.map(hash).unwrap_or_else(|| DELETED.into()));
+        if key.0 == kind::PLAYLIST {
+            match value {
+                Some(v) => {
+                    self.known_playlists.insert(key.1.clone(), playlist_track_ids(v));
+                }
+                None => {
+                    self.known_playlists.remove(&key.1);
+                }
+            }
+        }
     }
 
     /// Forget the agreement for `key`, so a missing local item is not pushed
     /// as a deletion.
     pub fn forget(&mut self, key: &Key) {
         self.known.remove(&joined(key));
+        if key.0 == kind::PLAYLIST {
+            self.known_playlists.remove(&key.1);
+        }
     }
 
     /// Start over (server reset or a different account): keep nothing agreed.
     pub fn reset(&mut self) {
         self.last_rev = 0;
         self.known.clear();
+        self.known_playlists.clear();
         self.uploaded_covers.clear();
     }
 }
@@ -266,6 +363,7 @@ fn from<T: serde::de::DeserializeOwned>(v: &Option<Value>) -> Option<T> {
 pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downloaded: &[Track]) -> Applied {
     let mut out = Applied::default();
     let mut touched: Vec<Key> = Vec::new();
+    let mut unpushed_playlists: BTreeMap<Key, (String, Vec<String>)> = BTreeMap::new();
     // Auto-download switches go last: their playlist may arrive in the
     // same batch.
     let (switches, items): (Vec<&SyncItem>, Vec<&SyncItem>) = items.iter().partition(|i| i.kind == kind::AUTO_DOWNLOAD);
@@ -273,6 +371,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
         let gone = i.deleted || i.value.is_none();
         match i.kind.as_str() {
             kind::LIKED => {
+                lib.invalidate_liked_index();
                 let pos = lib.liked.iter().position(|t| track_id(t) == i.key);
                 match (gone, pos, from::<Track>(&i.value)) {
                     (true, Some(p), _) => {
@@ -286,16 +385,35 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
             kind::PLAYLIST => {
                 let pos = lib.playlists.iter().position(|p| p.id == i.key);
                 if gone {
+                    state.known_playlists.remove(&i.key);
                     let Some(p) = pos else { continue };
                     lib.playlists.remove(p);
                 } else {
                     let Some(v) = i.value.as_ref() else { continue };
                     let cover = v["cover"].as_str().and_then(synced_cover).map(|p| p.display().to_string());
                     let old_cover = pos.and_then(|p| lib.playlists[p].cover.clone());
+                    let remote_tracks: Vec<Track> = serde_json::from_value(v["tracks"].clone()).unwrap_or_default();
+                    let remote_ids: Vec<String> = remote_tracks.iter().map(track_id).collect();
+                    let remote_base: Option<Vec<String>> = v.get("base").and_then(|b| serde_json::from_value(b.clone()).ok());
+                    let tracks = match pos {
+                        Some(p) => merge_playlist_tracks(
+                            state.known_playlists.get(&i.key).map(Vec::as_slice),
+                            remote_base.as_deref(),
+                            &lib.playlists[p].tracks,
+                            remote_tracks,
+                        ),
+                        None => remote_tracks,
+                    };
+                    let merged_ids: Vec<String> = tracks.iter().map(track_id).collect();
+                    if merged_ids != remote_ids {
+                        unpushed_playlists.insert((i.kind.clone(), i.key.clone()), (hash(v), remote_ids));
+                    } else {
+                        state.known_playlists.insert(i.key.clone(), remote_ids);
+                    }
                     let pl = Playlist {
                         id: i.key.clone(),
                         name: v["name"].as_str().unwrap_or("Playlist").to_string(),
-                        tracks: serde_json::from_value(v["tracks"].clone()).unwrap_or_default(),
+                        tracks,
                         origin: v["origin"].as_str().map(str::to_string),
                         // A picture not fetched yet keeps the old one.
                         cover: if v.get("cover").is_some() { cover.or(old_cover) } else { None },
@@ -390,12 +508,18 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
         out.library_changed = true;
         touched.push((i.kind.clone(), i.key.clone()));
     }
-    // What the library now holds for those keys is the new agreement.
+    // What the library now holds for those keys is the new agreement, except
+    // playlists where local and remote tracks were merged and still need a push.
     let after = snapshot(lib, &state.wanted_downloads(downloaded));
     let map = after.map();
     for key in touched {
-        let h = map.get(&key).map(|v| hash(v)).unwrap_or_else(|| DELETED.into());
-        state.known.insert(joined(&key), h);
+        if let Some((remote_hash, remote_ids)) = unpushed_playlists.remove(&key) {
+            state.known.insert(joined(&key), remote_hash);
+            state.known_playlists.insert(key.1, remote_ids);
+        } else {
+            let h = map.get(&key).map(|v| hash(v)).unwrap_or_else(|| DELETED.into());
+            state.known.insert(joined(&key), h);
+        }
     }
     out
 }
@@ -429,6 +553,23 @@ pub fn chunks(items: Vec<SyncItem>, max_items: usize, max_bytes: usize) -> Vec<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synced_metadata_invalidates_liked_lookup_without_length_change() {
+        let mut lib = lib_with(&["One", "Two", "Three", "Four", "Five"]);
+        let mut remote = lib.liked[0].clone();
+        let mut alias = remote.clone();
+        alias.source = ProviderId::YouTube;
+        alias.id = "new-youtube-id".into();
+        alias.title = "Different metadata".into();
+        assert!(!lib.is_liked(&alias));
+        remote.external_ids.insert(alias.source, alias.id.clone());
+        let item = SyncItem { kind: kind::LIKED.into(), key: track_id(&remote),
+            value: Some(serde_json::to_value(remote).unwrap()), updated_at: 1, deleted: false, rev: 1 };
+        apply(&mut lib, &mut SyncState::default(), &[item], &[]);
+        assert_eq!(lib.liked.len(), 5);
+        assert!(lib.is_liked(&alias));
+    }
 
     fn test_track(title: &str, artist: &str) -> Track {
         crate::dedupe::test_track(ProviderId::Audius, &title.to_lowercase(), title, artist, Some(200))
@@ -570,5 +711,34 @@ mod tests {
         assert_eq!(c.iter().map(Vec::len).collect::<Vec<_>>(), vec![4, 4, 2]);
         let c = chunks((0..10).map(it).collect(), 100, 300);
         assert!(c.len() >= 4 && c.iter().all(|v| !v.is_empty()));
+    }
+
+    #[test]
+    fn concurrent_playlist_edits_merge_without_losing_tracks() {
+        let mut srv = Server::default();
+        let (mut a, mut sa) = (Library::default(), SyncState::default());
+        let (mut b, mut sb) = (Library::default(), SyncState::default());
+
+        a.create_playlist("Shared").tracks.push(test_track("Base", "Artist"));
+        round(&mut srv, &mut a, &mut sa, 10);
+        round(&mut srv, &mut b, &mut sb, 11);
+
+        // Concurrently, A adds Track X and B adds Track Y to the same playlist.
+        a.playlists[0].tracks.push(test_track("TrackX", "Artist"));
+        b.playlists[0].tracks.push(test_track("TrackY", "Artist"));
+
+        round(&mut srv, &mut a, &mut sa, 20);
+        round(&mut srv, &mut b, &mut sb, 21);
+        // A pulls B's update and merges TrackX + TrackY, then pushes the merged list.
+        round(&mut srv, &mut a, &mut sa, 22);
+        round(&mut srv, &mut a, &mut sa, 23);
+        round(&mut srv, &mut b, &mut sb, 24);
+
+        let a_titles: Vec<&str> = a.playlists[0].tracks.iter().map(|t| t.title.as_str()).collect();
+        let b_titles: Vec<&str> = b.playlists[0].tracks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(a_titles, vec!["Base", "TrackY", "TrackX"]);
+        assert_eq!(b_titles, vec!["Base", "TrackY", "TrackX"]);
+        assert!(sa.changes(&snapshot(&a, &[]), 25).is_empty());
+        assert!(sb.changes(&snapshot(&b, &[]), 25).is_empty());
     }
 }

@@ -99,6 +99,12 @@ impl MappingCache {
         self.len() == 0
     }
 
+    /// Clears all in-memory mappings without writing to disk.
+    pub fn clear(&self) {
+        self.map.lock().unwrap().clear();
+        self.unsaved.store(0, Ordering::Relaxed);
+    }
+
     /// Writes the cache to disk if there are unsaved changes.
     pub fn flush(&self) {
         if self.unsaved.swap(0, Ordering::Relaxed) == 0 {
@@ -110,6 +116,12 @@ impl MappingCache {
                 tracing::warn!("could not save resolver cache: {e}");
             }
         }
+    }
+}
+
+impl Drop for MappingCache {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 

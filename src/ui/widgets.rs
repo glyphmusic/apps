@@ -37,7 +37,6 @@ const TIP_WARM_S: f32 = 0.8;
 const TIP_BG: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.12, a: 0.98 };
 
 struct TipNow {
-    win: gpui::WindowId,
     label: SharedString,
     /// The button, in window coordinates.
     bounds: gpui::Bounds<gpui::Pixels>,
@@ -53,21 +52,138 @@ impl TipNow {
     }
 }
 
+/// Per-window interactive UI state so multiple windows (`Glyph` main window and
+/// `MiniPlayer`) never collide on tooltips, hover fades, bar drags, or scroll targets.
+struct WindowUiState {
+    tip_now: Option<TipNow>,
+    tip_last: Option<std::time::Instant>,
+    mouse_out: bool,
+    hovers: std::collections::HashMap<SharedString, (bool, std::time::Instant, f32)>,
+    bar_drag: Option<(&'static str, f32)>,
+    bar_hover: Option<&'static str>,
+    bar_hover_at: f32,
+    viewport_h: f32,
+    smooth: Option<(gpui::ScrollHandle, f32, f32)>,
+    smooth_at: Option<std::time::Instant>,
+    wheel_frames: Vec<(gpui::Bounds<gpui::Pixels>, bool)>,
+    last_wheel: Option<(gpui::Bounds<gpui::Pixels>, std::time::Instant)>,
+    scroll_drag: Option<(gpui::ScrollHandle, f32, f32)>,
+    scroll_seen: std::collections::HashMap<(i32, i32), (f32, Option<std::time::Instant>, bool)>,
+    vlist_top: std::collections::HashMap<&'static str, f32>,
+}
+
+impl Default for WindowUiState {
+    fn default() -> Self {
+        Self {
+            tip_now: None,
+            tip_last: None,
+            mouse_out: false,
+            hovers: Default::default(),
+            bar_drag: None,
+            bar_hover: None,
+            bar_hover_at: 0.0,
+            viewport_h: 900.0,
+            smooth: None,
+            smooth_at: None,
+            wheel_frames: Vec::new(),
+            last_wheel: None,
+            scroll_drag: None,
+            scroll_seen: Default::default(),
+            vlist_top: Default::default(),
+        }
+    }
+}
+
+struct UiRuntime {
+    windows: std::collections::HashMap<gpui::WindowId, WindowUiState>,
+    current_win: Option<gpui::WindowId>,
+    fallback_win: WindowUiState,
+    ascii_fx: bool,
+    skeleton_seen: bool,
+    t0: std::time::Instant,
+    shimmer_glyphs: std::collections::HashMap<(u8, u32), gpui::ShapedLine>,
+    last_toggle: Option<(SharedString, std::time::Instant)>,
+    pressed: std::collections::HashMap<&'static str, std::time::Instant>,
+    reveals: std::collections::HashMap<String, std::time::Instant>,
+    handles: std::collections::HashMap<String, gpui::ScrollHandle>,
+    drag_shift: std::collections::HashMap<
+        &'static str,
+        (std::collections::HashMap<usize, (f32, std::time::Instant)>, Option<std::time::Instant>),
+    >,
+}
+
+impl Default for UiRuntime {
+    fn default() -> Self {
+        Self {
+            windows: Default::default(),
+            current_win: None,
+            fallback_win: WindowUiState::default(),
+            ascii_fx: true,
+            skeleton_seen: false,
+            t0: std::time::Instant::now(),
+            shimmer_glyphs: Default::default(),
+            last_toggle: None,
+            pressed: Default::default(),
+            reveals: Default::default(),
+            handles: Default::default(),
+            drag_shift: Default::default(),
+        }
+    }
+}
+
+impl UiRuntime {
+    fn win(&self, id: gpui::WindowId) -> Option<&WindowUiState> {
+        self.windows.get(&id)
+    }
+
+    fn win_mut(&mut self, id: gpui::WindowId) -> &mut WindowUiState {
+        self.windows.entry(id).or_default()
+    }
+
+    fn cur_win(&self) -> &WindowUiState {
+        self.current_win.and_then(|id| self.windows.get(&id)).unwrap_or(&self.fallback_win)
+    }
+
+    fn cur_win_mut(&mut self) -> &mut WindowUiState {
+        if let Some(id) = self.current_win {
+            self.windows.entry(id).or_default()
+        } else {
+            &mut self.fallback_win
+        }
+    }
+}
+
 thread_local! {
-    static TIP_NOW: std::cell::RefCell<Option<TipNow>> = const { std::cell::RefCell::new(None) };
-    /// When the last tooltip closed (tooltips stay "warm" for a moment).
-    static TIP_LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static UI_RT: std::cell::RefCell<UiRuntime> = std::cell::RefCell::new(UiRuntime::default());
+}
+
+/// Selects `window` as the active window for the current render pass and resets
+/// its per-frame wheel target list and viewport height.
+pub fn begin_window_frame(window: &Window) {
+    let id = window.window_handle().window_id();
+    let vh = f32::from(window.viewport_size().height);
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        rt.current_win = Some(id);
+        let w = rt.win_mut(id);
+        w.viewport_h = vh;
+        w.wheel_frames.clear();
+    });
 }
 
 /// A tooltip is open or one closed a moment ago: the next opens at once.
 pub fn tips_warm() -> bool {
-    TIP_NOW.with(|t| t.borrow().as_ref().is_some_and(TipNow::shown))
-        || TIP_LAST.with(|c| c.get().is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S))
+    UI_RT.with(|rt| {
+        let w = rt.borrow();
+        let w = w.cur_win();
+        w.tip_now.as_ref().is_some_and(TipNow::shown)
+            || w.tip_last.is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S)
+    })
 }
 
 /// A tooltip just closed (also the sidebar's own ones).
 pub fn tip_closed() {
-    TIP_LAST.with(|c| c.set(Some(std::time::Instant::now())));
+    UI_RT.with(|rt| rt.borrow_mut().cur_win_mut().tip_last = Some(std::time::Instant::now()));
 }
 
 /// Tracks hovering of a button with a tooltip (an invisible layer over it).
@@ -77,26 +193,34 @@ fn tip_anchor(label: SharedString) -> gpui::Canvas<gpui::Hitbox> {
         move |bounds, hitbox, window, cx| {
             let win = window.window_handle().window_id();
             let view = window.current_view();
-            let hovered = hitbox.is_hovered(window) && !MOUSE_OUT.with(|o| o.borrow().contains(&win));
-            let start = TIP_NOW.with(|t| {
-                let mut t = t.borrow_mut();
-                let mine = t.as_ref().is_some_and(|n| n.win == win && n.bounds == bounds);
-                if hovered && !mine {
-                    let warm = t.as_ref().is_some_and(TipNow::shown)
-                        || TIP_LAST.with(|c| c.get().is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S));
+            let (hovered, start) = UI_RT.with(|rt| {
+                let mut rt = rt.borrow_mut();
+                let w = rt.win_mut(win);
+                let hovered = hitbox.is_hovered(window) && !w.mouse_out;
+                let mine = w.tip_now.as_ref().is_some_and(|n| n.bounds == bounds);
+                let start = if hovered && !mine {
+                    let warm = w.tip_now.as_ref().is_some_and(TipNow::shown)
+                        || w.tip_last.is_some_and(|at| at.elapsed().as_secs_f32() < TIP_WARM_S);
                     let wait = if warm { Duration::ZERO } else { TIP_DELAY };
-                    *t = Some(TipNow { win, label: label.clone(), bounds, since: std::time::Instant::now(), wait, dismissed: false });
+                    w.tip_now = Some(TipNow {
+                        label: label.clone(),
+                        bounds,
+                        since: std::time::Instant::now(),
+                        wait,
+                        dismissed: false,
+                    });
                     Some(wait)
                 } else {
                     if !hovered && mine {
-                        if t.as_ref().is_some_and(TipNow::shown) {
-                            tip_closed();
+                        if w.tip_now.as_ref().is_some_and(TipNow::shown) {
+                            w.tip_last = Some(std::time::Instant::now());
                         }
-                        *t = None;
+                        w.tip_now = None;
                         window.request_animation_frame();
                     }
                     None
-                }
+                };
+                (hovered, start)
             });
             // Show it once the wait is over.
             if let Some(wait) = start {
@@ -115,22 +239,22 @@ fn tip_anchor(label: SharedString) -> gpui::Canvas<gpui::Hitbox> {
                 if phase != gpui::DispatchPhase::Capture {
                     return;
                 }
-                let back = MOUSE_OUT.with(|o| o.borrow_mut().remove(&win));
+                let back = UI_RT.with(|rt| std::mem::replace(&mut rt.borrow_mut().win_mut(win).mouse_out, false));
                 if back || hitbox.is_hovered(window) != hovered {
                     cx.notify(view);
                 }
             });
             window.on_mouse_event(move |_: &gpui::MouseExitEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Capture && hovered {
-                    MOUSE_OUT.with(|o| o.borrow_mut().insert(win));
+                    UI_RT.with(|rt| rt.borrow_mut().win_mut(win).mouse_out = true);
                     cx.notify(view);
                 }
             });
             // A click hides it (until the mouse comes back).
             window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Capture && hovered {
-                    TIP_NOW.with(|t| {
-                        if let Some(n) = t.borrow_mut().as_mut().filter(|n| n.win == win && n.bounds == bounds) {
+                    UI_RT.with(|rt| {
+                        if let Some(n) = rt.borrow_mut().win_mut(win).tip_now.as_mut().filter(|n| n.bounds == bounds) {
                             n.dismissed = true;
                         }
                     });
@@ -183,9 +307,9 @@ pub fn tip_box(label: SharedString) -> Div {
 /// The open tooltip of this window, if any: add it on top of the window.
 pub fn tooltip_layer(window: &mut Window) -> Option<AnyElement> {
     let win = window.window_handle().window_id();
-    let (label, bounds, k) = TIP_NOW.with(|t| {
-        let t = t.borrow();
-        let n = t.as_ref().filter(|n| n.win == win && n.shown())?;
+    let (label, bounds, k) = UI_RT.with(|rt| {
+        let rt = rt.borrow();
+        let n = rt.win(win)?.tip_now.as_ref().filter(|n| n.shown())?;
         let k = ((n.since.elapsed().as_secs_f32() - n.wait.as_secs_f32()) / 0.12).clamp(0.0, 1.0);
         Some((n.label.clone(), n.bounds, k))
     })?;
@@ -262,15 +386,10 @@ pub fn icon_button_plain(id: impl Into<ElementId>, name: &str, size: f32, color:
 // line-only icons (shuffle, repeat) get a small dot underneath instead.
 // Off = outline icon, dimmed. Clicking pops the icon briefly.
 
-thread_local! {
-    static LAST_TOGGLE: std::cell::RefCell<Option<(SharedString, std::time::Instant)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 /// Call from a toggle's click handler so its icon plays the pop animation.
 pub fn mark_toggled(key: impl Into<SharedString>) {
     let key = key.into();
-    LAST_TOGGLE.with(|l| *l.borrow_mut() = Some((key, std::time::Instant::now())));
+    UI_RT.with(|rt| rt.borrow_mut().last_toggle = Some((key, std::time::Instant::now())));
 }
 
 fn has_fill(name: &str) -> bool {
@@ -284,8 +403,9 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
     let fill = on && has_fill(name);
     let icon_name = if fill { format!("{name}-fill") } else { name.to_string() };
     let color = if on { accent.unwrap_or_else(theme::text) } else { theme::text_dim() };
-    let popping = LAST_TOGGLE.with(|l| {
-        l.borrow()
+    let popping = UI_RT.with(|rt| {
+        rt.borrow()
+            .last_toggle
             .as_ref()
             .is_some_and(|(k, at)| *k == id && at.elapsed() < Duration::from_millis(400))
     });
@@ -338,7 +458,12 @@ pub fn toggle_button(id: impl Into<SharedString>, name: &str, size: f32, on: boo
 fn heart_burst(id: &SharedString, size: f32, color: Hsla) -> Option<AnyElement> {
     const N: usize = 8;
     const MS: u64 = 600;
-    let fresh = LAST_TOGGLE.with(|l| l.borrow().as_ref().is_some_and(|(k, at)| k == id && at.elapsed() < Duration::from_millis(MS)));
+    let fresh = UI_RT.with(|rt| {
+        rt.borrow()
+            .last_toggle
+            .as_ref()
+            .is_some_and(|(k, at)| k == id && at.elapsed() < Duration::from_millis(MS))
+    });
     if !fresh {
         return None;
     }
@@ -378,14 +503,6 @@ fn heart_burst(id: &SharedString, size: f32, color: Hsla) -> Option<AnyElement> 
 // the mouse arrives and out when it leaves. [`hover_k`] gives the same level
 // to things that appear on hover (action buttons, the cover's Edit overlay).
 
-thread_local! {
-    /// Windows the mouse has left (their hit test can still name the last box).
-    static MOUSE_OUT: std::cell::RefCell<std::collections::HashSet<gpui::WindowId>> = std::cell::RefCell::new(Default::default());
-    /// Per key: hovered, when that last changed, level at that moment.
-    static HOVERS: std::cell::RefCell<std::collections::HashMap<SharedString, (bool, std::time::Instant, f32)>> =
-        std::cell::RefCell::new(Default::default());
-}
-
 const HOVER_IN_S: f32 = 0.12;
 const HOVER_OUT_S: f32 = 0.24;
 
@@ -398,9 +515,10 @@ fn hover_level(on: bool, at: std::time::Instant, from: f32) -> f32 {
 
 /// Notes the hover state of `key` this frame; returns its level and whether
 /// it is still fading.
-fn hover_track(key: &SharedString, hovered: bool, instant: bool) -> (f32, bool) {
-    HOVERS.with(|h| {
-        let mut m = h.borrow_mut();
+fn hover_track(win: gpui::WindowId, key: &SharedString, hovered: bool, instant: bool) -> (f32, bool) {
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let m = &mut rt.win_mut(win).hovers;
         if m.len() > 2000 {
             m.retain(|_, &mut (on, at, from)| on || hover_level(on, at, from) > 0.0);
         }
@@ -419,7 +537,13 @@ fn hover_track(key: &SharedString, hovered: bool, instant: bool) -> (f32, bool) 
 
 /// Hover level 0..1 of the box whose [`hover_fill`] has `key`.
 pub fn hover_k(key: &str) -> f32 {
-    HOVERS.with(|h| h.borrow().get(key).map_or(0.0, |&(on, at, from)| hover_level(on, at, from)))
+    UI_RT.with(|rt| {
+        rt.borrow()
+            .cur_win()
+            .hovers
+            .get(key)
+            .map_or(0.0, |&(on, at, from)| hover_level(on, at, from))
+    })
 }
 
 /// Straight blend from `a` to `b` (`k` 0..1), for colours that fade with hover.
@@ -438,8 +562,8 @@ pub fn hover_fill(key: impl Into<SharedString>, color: Hsla, radius: f32) -> gpu
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |bounds, hitbox, window, cx| {
             let win = window.window_handle().window_id();
-            let hovered = hitbox.is_hovered(window) && !MOUSE_OUT.with(|o| o.borrow().contains(&win));
-            let (k, moving) = hover_track(&key, hovered, cx.reduce_motion());
+            let hovered = hitbox.is_hovered(window) && !UI_RT.with(|rt| rt.borrow().win(win).is_some_and(|w| w.mouse_out));
+            let (k, moving) = hover_track(win, &key, hovered, cx.reduce_motion());
             if k > 0.0 && color.a > 0.0 {
                 window.paint_quad(gpui::quad(
                     bounds,
@@ -459,7 +583,11 @@ pub fn hover_fill(key: impl Into<SharedString>, color: Hsla, radius: f32) -> gpu
                 if phase != gpui::DispatchPhase::Capture {
                     return;
                 }
-                let back = MOUSE_OUT.with(|o| o.borrow_mut().remove(&win));
+                let back = UI_RT.with(|rt| {
+                    let mut rt = rt.borrow_mut();
+                    let w = rt.win_mut(win);
+                    std::mem::replace(&mut w.mouse_out, false)
+                });
                 if back || hitbox.is_hovered(window) != hovered {
                     cx.notify(view);
                 }
@@ -467,7 +595,7 @@ pub fn hover_fill(key: impl Into<SharedString>, color: Hsla, radius: f32) -> gpu
             // Leaving the window: let the box fade out.
             window.on_mouse_event(move |_: &gpui::MouseExitEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Capture && hovered {
-                    MOUSE_OUT.with(|o| o.borrow_mut().insert(win));
+                    UI_RT.with(|rt| rt.borrow_mut().win_mut(win).mouse_out = true);
                     cx.notify(view);
                 }
             });
@@ -675,18 +803,13 @@ pub fn fmt_ms(ms: Option<u64>) -> String {
         .unwrap_or_else(|| "-:--".into())
 }
 
-/// Thin flat bar (white fill on grey track, 4 px), clickable in segments.
-thread_local! {
-    /// Bar being dragged: (bar id, current fraction).
-    static BAR_DRAG: std::cell::Cell<Option<(&'static str, f32)>> = const { std::cell::Cell::new(None) };
-    /// Bar under the mouse (shows the knob) and the mouse fraction on it.
-    static BAR_HOVER: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
-    static BAR_HOVER_AT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
-}
-
 /// Fraction under the mouse on bar `id`, while the mouse is over it.
 pub fn bar_hover(id: &str) -> Option<f32> {
-    (BAR_HOVER.with(|h| h.get()) == Some(id)).then(|| BAR_HOVER_AT.with(|h| h.get()).clamp(0.0, 1.0))
+    UI_RT.with(|rt| {
+        let w = rt.borrow();
+        let w = w.cur_win();
+        (w.bar_hover == Some(id)).then(|| w.bar_hover_at.clamp(0.0, 1.0))
+    })
 }
 
 /// Formats a bar fraction for the little label above it ("1:23", "64%").
@@ -702,9 +825,18 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
         gpui::canvas(
             |_, _, _| (),
             move |bounds, _, window, app_cx| {
-                let drag = BAR_DRAG.with(|d| d.get()).filter(|(d, _)| *d == id);
+                let win = window.window_handle().window_id();
+                let (drag, bar_hover, bar_hover_at) = UI_RT.with(|rt| {
+                    let rt = rt.borrow();
+                    let w = rt.win(win);
+                    (
+                        w.and_then(|w| w.bar_drag).filter(|(d, _)| *d == id),
+                        w.and_then(|w| w.bar_hover),
+                        w.map_or(0.0, |w| w.bar_hover_at),
+                    )
+                });
                 let shown = drag.map(|(_, f)| f).unwrap_or(frac).clamp(0.0, 1.0);
-                let hot = drag.is_some() || BAR_HOVER.with(|h| h.get()) == Some(id);
+                let hot = drag.is_some() || bar_hover == Some(id);
                 let x0 = f32::from(bounds.origin.x);
                 let w = f32::from(bounds.size.width);
                 let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
@@ -726,7 +858,7 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
                 }
                 // Value above the bar: where you drag to, or where the mouse points.
                 if let Some(fmt) = label.as_ref().filter(|_| hot) {
-                    let at = drag.map(|(_, f)| f).unwrap_or_else(|| BAR_HOVER_AT.with(|h| h.get())).clamp(0.0, 1.0);
+                    let at = drag.map(|(_, f)| f).unwrap_or(bar_hover_at).clamp(0.0, 1.0);
                     let text: SharedString = fmt(at).into();
                     let run = gpui::TextRun {
                         len: text.len(),
@@ -754,7 +886,7 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
                         return;
                     }
                     let f = frac_at(f32::from(e.position.x));
-                    BAR_DRAG.with(|d| d.set(Some((id, f))));
+                    UI_RT.with(|rt| rt.borrow_mut().win_mut(win).bar_drag = Some((id, f)));
                     if live {
                         p1(f, window, cx);
                     }
@@ -763,22 +895,29 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
                 });
                 window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, window, cx| {
                     let over = hit.contains(&e.position);
-                    let was = BAR_HOVER.with(|h| h.get()) == Some(id);
-                    if over {
-                        BAR_HOVER_AT.with(|h| h.set(frac_at(f32::from(e.position.x))));
+                    let (was, dragging) = UI_RT.with(|rt| {
+                        let mut rt = rt.borrow_mut();
+                        let w = rt.win_mut(win);
+                        let was = w.bar_hover == Some(id);
+                        if over {
+                            w.bar_hover_at = frac_at(f32::from(e.position.x));
+                        }
+                        if over != was {
+                            w.bar_hover = if over { Some(id) } else { None };
+                        }
+                        let dragging = w.bar_drag.is_some_and(|(d, _)| d == id);
+                        (was, dragging)
+                    });
+                    if over || over != was {
                         v2.update(cx, |_, cx| cx.notify()).ok();
                     }
-                    if over != was {
-                        BAR_HOVER.with(|h| h.set(if over { Some(id) } else { None }));
-                        v2.update(cx, |_, cx| cx.notify()).ok();
-                    }
-                    if BAR_DRAG.with(|d| d.get()).is_some_and(|(d, _)| d == id) {
+                    if dragging {
                         if e.pressed_button != Some(gpui::MouseButton::Left) {
-                            BAR_DRAG.with(|d| d.set(None));
+                            UI_RT.with(|rt| rt.borrow_mut().win_mut(win).bar_drag = None);
                             return;
                         }
                         let f = frac_at(f32::from(e.position.x));
-                        BAR_DRAG.with(|d| d.set(Some((id, f))));
+                        UI_RT.with(|rt| rt.borrow_mut().win_mut(win).bar_drag = Some((id, f)));
                         if live {
                             p2(f, window, cx);
                         }
@@ -786,9 +925,17 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
                     }
                 });
                 window.on_mouse_event(move |e: &gpui::MouseUpEvent, _, window, cx| {
-                    if let Some((d, _)) = BAR_DRAG.with(|d| d.get()).filter(|(d, _)| *d == id) {
-                        let _ = d;
-                        BAR_DRAG.with(|d| d.set(None));
+                    let released = UI_RT.with(|rt| {
+                        let mut rt = rt.borrow_mut();
+                        let w = rt.win_mut(win);
+                        if w.bar_drag.is_some_and(|(d, _)| d == id) {
+                            w.bar_drag = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if released {
                         p3(frac_at(f32::from(e.position.x)), window, cx);
                         v3.update(cx, |_, cx| cx.notify()).ok();
                     }
@@ -956,40 +1103,26 @@ fn cover_inner(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx: &mut Cont
 // sweeping across it. It is drawn from the clock at render time, so the app
 // keeps re-rendering while any skeleton is on screen (see `take_skeleton_seen`).
 
-thread_local! {
-    /// Settings -> Appearance -> ASCII effects (set every frame).
-    static ASCII_FX: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-}
-
 pub fn set_ascii_effects(on: bool) {
-    ASCII_FX.with(|c| c.set(on));
+    UI_RT.with(|rt| rt.borrow_mut().ascii_fx = on);
 }
 
 /// ASCII reveal and shimmer are on.
 pub fn ascii_effects() -> bool {
-    ASCII_FX.with(|c| c.get())
-}
-
-thread_local! {
-    static SKELETON_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static SKELETON_T0: std::time::Instant = std::time::Instant::now();
+    UI_RT.with(|rt| rt.borrow().ascii_fx)
 }
 
 /// True if a skeleton was rendered since the last call (the app then keeps
 /// animating).
 pub fn take_skeleton_seen() -> bool {
-    SKELETON_SEEN.with(|c| c.replace(false))
+    UI_RT.with(|rt| std::mem::replace(&mut rt.borrow_mut().skeleton_seen, false))
+}
+
+fn elapsed_t0_secs() -> f32 {
+    UI_RT.with(|rt| rt.borrow().t0.elapsed().as_secs_f32())
 }
 
 const SHIMMER_RAMP: &[u8] = b" .:-=+*#";
-
-
-thread_local! {
-    /// Shaped shimmer glyphs per (character, font size): shaped once, then
-    /// only painted. Rebuilding the shimmer as text every frame re-shaped
-    /// thousands of characters per frame (typing and scrolling lagged).
-    static SHIMMER_GLYPHS: std::cell::RefCell<std::collections::HashMap<(u8, u32), gpui::ShapedLine>> = std::cell::RefCell::new(Default::default());
-}
 
 fn shimmer_block(cols: usize, rows: usize, fs: f32, seed: u32, radius: f32) -> Div {
     let _ = cols;
@@ -1002,16 +1135,21 @@ fn shimmer_block(cols: usize, rows: usize, fs: f32, seed: u32, radius: f32) -> D
         .overflow_hidden()
         .rounded(px(radius))
         .bg(gpui::hsla(0.0, 0.0, 1.0, 0.03))
-        .child(canvas(|_, _, _| (), move |bounds, _, window, cx| paint_shimmer(bounds, rows, fs, seed, window, cx)).size_full())
+        .child(canvas(|_, _, _| (), move |bounds, _, window, cx| paint_shimmer(bounds, rows, fs, seed, radius, window, cx)).size_full())
 }
 
 /// Paints the shimmer field into `bounds`, vertically centred.
-fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed: u32, window: &mut Window, cx: &mut gpui::App) {
-    SKELETON_SEEN.with(|c| c.set(true));
+fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed: u32, radius: f32, window: &mut Window, cx: &mut gpui::App) {
     let key_fs = (fs * 10.0).round() as u32;
-    let glyphs: Vec<Option<gpui::ShapedLine>> = SHIMMER_GLYPHS.with(|g| {
-        let mut g = g.borrow_mut();
-        SHIMMER_RAMP
+    let (glyphs, t) = UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        rt.skeleton_seen = true;
+        let t = rt.t0.elapsed().as_secs_f32();
+        let g = &mut rt.shimmer_glyphs;
+        if g.len() > 512 {
+            g.clear();
+        }
+        let glyphs: Vec<Option<gpui::ShapedLine>> = SHIMMER_RAMP
             .iter()
             .map(|&b| {
                 (b != b' ').then(|| {
@@ -1034,7 +1172,8 @@ fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed:
                         .clone()
                 })
             })
-            .collect()
+            .collect();
+        (glyphs, t)
     });
     let cw = glyphs.iter().flatten().next().map(|l| f32::from(l.width)).filter(|w| *w > 0.5).unwrap_or(fs * 0.6);
     let lh = fs * 1.05;
@@ -1043,8 +1182,8 @@ fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed:
     let cols = (w / cw).ceil().max(1.0) as usize;
     let rows = rows.min(((h / lh).floor() as usize).max(1));
     let ox = f32::from(bounds.origin.x);
+    let r = radius.min(w / 2.0).min(h / 2.0);
     let oy = f32::from(bounds.origin.y) + ((h - rows as f32 * lh) / 2.0).max(0.0);
-    let t = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
     let period = (cols as f32 + 40.0) / 60.0;
     let x0 = ((t % period) / period) * (cols as f32 + 40.0) - 20.0;
     // Only the visible part of the window is worth painting.
@@ -1060,6 +1199,16 @@ fn paint_shimmer(bounds: gpui::Bounds<gpui::Pixels>, rows: usize, fs: f32, seed:
             let px_ = ox + x as f32 * cw;
             if px_ + cw < vx0 || px_ > vx1 {
                 continue;
+            }
+            // GPUI clips children rectangularly: drop glyphs outside the rounded
+            // corners so round skeletons (artist pictures) stay round.
+            if r > 0.5 {
+                let (cx_, cy_) = (px_ + cw / 2.0, py + lh / 2.0);
+                let qx = (cx_ - ox - w / 2.0).abs() - (w / 2.0 - r);
+                let qy = (cy_ - f32::from(bounds.origin.y) - h / 2.0).abs() - (h / 2.0 - r);
+                if qx > 0.0 && qy > 0.0 && qx * qx + qy * qy > r * r {
+                    continue;
+                }
             }
             let d = (x as f32 + y as f32 * 1.6) - x0;
             let band = (-(d * d) / 18.0).exp();
@@ -1120,17 +1269,13 @@ pub fn skeleton_rows(prefix: &str, n: usize) -> Div {
     }))
 }
 
-thread_local! {
-    static VIEWPORT_H: std::cell::Cell<f32> = const { std::cell::Cell::new(900.0) };
-}
-
 /// Window height (logical px) of the frame being drawn.
 pub fn viewport_h() -> f32 {
-    VIEWPORT_H.with(|v| v.get())
+    UI_RT.with(|rt| rt.borrow().cur_win().viewport_h)
 }
 
 pub fn set_viewport_h(h: f32) {
-    VIEWPORT_H.with(|v| v.set(h));
+    UI_RT.with(|rt| rt.borrow_mut().cur_win_mut().viewport_h = h);
 }
 
 /// Small "E" box in front of explicit song titles.
@@ -1163,7 +1308,7 @@ pub fn song_title(title: impl Into<SharedString>, explicit: bool) -> Div {
 
 /// Opacity for something in progress (downloads): a soft 1.5 s pulse.
 pub fn pulse() -> f32 {
-    let t = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    let t = elapsed_t0_secs();
     0.35 + 0.65 * (0.5 + 0.5 * (t * std::f32::consts::TAU / 1.5).sin())
 }
 
@@ -1190,7 +1335,7 @@ pub enum DlView {
 /// Ring of `size` px: a faint track plus the done part. `alpha` fades both.
 pub fn progress_ring(size: f32, stroke: f32, fraction: Option<f32>, alpha: f32) -> gpui::Canvas<()> {
     use std::f32::consts::{FRAC_PI_2, TAU};
-    let spin = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    let spin = elapsed_t0_secs();
     canvas(|_, _, _| (), move |bounds, _, window, _| {
         let c = bounds.center();
         let r = size / 2.0 - stroke / 2.0;
@@ -1227,7 +1372,7 @@ pub fn play_glyph(loading: bool, playing: bool, size: f32, button: f32) -> AnyEl
         return icon(if playing { "pause" } else { "play" }, size, gpui::black()).into_any_element();
     }
     use std::f32::consts::{FRAC_PI_2, TAU};
-    let spin = SKELETON_T0.with(|t0| t0.elapsed().as_secs_f32());
+    let spin = elapsed_t0_secs();
     let ring = button * 0.56;
     let stroke = (button / 16.0).max(2.0);
     canvas(|_, _, _| (), move |bounds, _, window, _| {
@@ -1313,10 +1458,6 @@ pub fn skeleton_artist_rows(prefix: &str, n: usize) -> Div {
 // into the real letters from left to right, and pictures start under an ASCII
 // shimmer that fades out. Keys remember when something was first shown.
 
-thread_local! {
-    static REVEALS: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>> = std::cell::RefCell::new(Default::default());
-}
-
 const DECODE_RAMP: &[char] = &['#', '%', '&', '*', '+', '=', '-', ':', '.', '@', '$', '0', 'X'];
 
 /// Progress 0..1 of the reveal for `key`, `dur` seconds long (starts the
@@ -1325,8 +1466,9 @@ pub fn reveal_k(key: &str, dur: f32) -> f32 {
     if !ascii_effects() {
         return 1.0;
     }
-    REVEALS.with(|r| {
-        let mut m = r.borrow_mut();
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let m = &mut rt.reveals;
         if m.len() > 4000 {
             m.retain(|_, at| at.elapsed().as_secs() < 120);
         }
@@ -1337,12 +1479,14 @@ pub fn reveal_k(key: &str, dur: f32) -> f32 {
 
 /// Something is still revealing (the app keeps re-rendering).
 pub fn reveal_active() -> bool {
-    REVEALS.with(|r| r.borrow().values().any(|at| at.elapsed().as_secs_f32() < 1.0))
+    UI_RT.with(|rt| rt.borrow().reveals.values().any(|at| at.elapsed().as_secs_f32() < 1.0))
 }
 
 /// Starts the reveal under `key` over (a label that just changed).
 pub fn reveal_restart(key: &str) {
-    REVEALS.with(|r| r.borrow_mut().insert(key.to_string(), std::time::Instant::now()));
+    UI_RT.with(|rt| {
+        rt.borrow_mut().reveals.insert(key.to_string(), std::time::Instant::now());
+    });
 }
 
 /// Like [`reveal_k`], but only a reveal started with [`reveal_restart`]
@@ -1351,12 +1495,12 @@ pub fn reveal_peek(key: &str, dur: f32) -> f32 {
     if !ascii_effects() {
         return 1.0;
     }
-    REVEALS.with(|r| r.borrow().get(key).map_or(1.0, |at| (at.elapsed().as_secs_f32() / dur.max(0.01)).min(1.0)))
+    UI_RT.with(|rt| rt.borrow().reveals.get(key).map_or(1.0, |at| (at.elapsed().as_secs_f32() / dur.max(0.01)).min(1.0)))
 }
 
 /// Forget reveals under `prefix` (e.g. a new search starts over).
 pub fn reset_reveals(prefix: &str) {
-    REVEALS.with(|r| r.borrow_mut().retain(|k, _| !k.starts_with(prefix)));
+    UI_RT.with(|rt| rt.borrow_mut().reveals.retain(|k, _| !k.starts_with(prefix)));
 }
 
 /// `text` part-way decoded: the first `k` share is real, the rest flickers
@@ -1367,7 +1511,7 @@ pub fn decode(text: &str, k: f32) -> String {
     }
     let n = text.chars().count();
     let done = (k.max(0.0) * n as f32) as usize;
-    let tick = SKELETON_T0.with(|t0| (t0.elapsed().as_secs_f32() * 12.0) as u32);
+    let tick = (elapsed_t0_secs() * 12.0) as u32;
     text.chars()
         .enumerate()
         .map(|(i, c)| {
@@ -1437,6 +1581,7 @@ pub fn track_row(
 
     let t_menu = t.clone();
     let t_hover = t.clone();
+    let selected = matches!(id_prefix, "search-row" | "section-row") && app.selected_row == Some(i);
     div()
         .id((id_prefix, i))
         // Resting on a YouTube song starts yt-dlp early (see ui::ytdlp).
@@ -1456,9 +1601,17 @@ pub fn track_row(
         .rounded(px(8.0))
         .cursor_pointer()
         .when(blocked, |d| d.opacity(0.4))
+        .when(selected, |d| {
+            d.bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                .border_1()
+                .border_color(gpui::hsla(0.0, 0.0, 1.0, 0.16))
+        })
         .relative()
         .child(hover_fill(group.clone(), theme::card(), 8.0))
-        .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l2).clone(), i, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.selected_row = Some(i);
+            this.play_list((*l2).clone(), i, cx);
+        }))
         .child(art)
         .child(
             div()
@@ -1615,84 +1768,94 @@ pub fn fade_edges_split(el: impl IntoElement, top: (Hsla, f32), bottom: (Hsla, f
 
 // ---- scrollbar ------------------------------------------------------------
 
-thread_local! {
-    /// Smooth wheel scrolling in progress: (handle, target offset y).
-    /// Smooth scroll in progress: (handle, target offset x, target offset y).
-    static SMOOTH: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
-    /// Scroll frames that take the wheel, in paint order (inner ones later).
-    static WHEEL_FRAMES: std::cell::RefCell<Vec<(gpui::Bounds<gpui::Pixels>, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// The frame the wheel moved last and when.
-    static LAST_WHEEL: std::cell::Cell<Option<(gpui::Bounds<gpui::Pixels>, std::time::Instant)>> = const { std::cell::Cell::new(None) };
-    /// Scroll handles for frames that have none of their own (dropdowns, rows).
-    static HANDLES: std::cell::RefCell<std::collections::HashMap<String, gpui::ScrollHandle>> = std::cell::RefCell::new(Default::default());
-    static SMOOTH_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+fn step_window_smooth(w: &mut WindowUiState, now: std::time::Instant) -> bool {
+    let Some((h, tx, ty)) = w.smooth.as_ref() else {
+        w.smooth_at = None;
+        return false;
+    };
+    let (tx, ty) = (*tx, *ty);
+    // Exponential ease by real frame time (vsync-paced, no fixed step).
+    let dt = w
+        .smooth_at
+        .replace(now)
+        .map(|t| now.duration_since(t).as_secs_f32())
+        .unwrap_or(1.0 / 60.0)
+        .clamp(0.001, 0.05);
+    let k = 1.0 - (-dt / 0.07).exp();
+    let (cx_, cy_) = (f32::from(h.offset().x), f32::from(h.offset().y));
+    let (nx, ny) = (cx_ + (tx - cx_) * k, cy_ + (ty - cy_) * k);
+    if (tx - nx).abs() < 0.5 && (ty - ny).abs() < 0.5 {
+        h.set_offset(gpui::point(px(tx), px(ty)));
+        w.smooth = None;
+        w.smooth_at = None;
+    } else {
+        h.set_offset(gpui::point(px(nx), px(ny)));
+    }
+    true
 }
 
 /// One animation step of smooth wheel scrolling; true while it still moves.
 /// Called from the app's 16 ms poll.
 pub fn step_smooth_scroll() -> bool {
-    SMOOTH.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some((h, tx, ty)) = s.as_ref() else {
-            SMOOTH_AT.with(|a| a.set(None));
-            return false;
-        };
-        let (tx, ty) = (*tx, *ty);
-        // Exponential ease by real frame time (vsync-paced, no fixed step).
-        let now = std::time::Instant::now();
-        let dt = SMOOTH_AT.with(|a| a.replace(Some(now))).map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(1.0 / 60.0).clamp(0.001, 0.05);
-        let k = 1.0 - (-dt / 0.07).exp();
-        let (cx_, cy_) = (f32::from(h.offset().x), f32::from(h.offset().y));
-        let (nx, ny) = (cx_ + (tx - cx_) * k, cy_ + (ty - cy_) * k);
-        if (tx - nx).abs() < 0.5 && (ty - ny).abs() < 0.5 {
-            h.set_offset(gpui::point(px(tx), px(ty)));
-            *s = None;
-            SMOOTH_AT.with(|a| a.set(None));
-        } else {
-            h.set_offset(gpui::point(px(nx), px(ny)));
+    let now = std::time::Instant::now();
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let mut any = step_window_smooth(&mut rt.fallback_win, now);
+        for w in rt.windows.values_mut() {
+            any |= step_window_smooth(w, now);
         }
-        true
+        any
     })
-}
-
-thread_local! {
-    /// Thumb being dragged: (scroll handle, mouse y at grab, scroll y at grab).
-    static SCROLL_DRAG: std::cell::RefCell<Option<(gpui::ScrollHandle, f32, f32)>> = const { std::cell::RefCell::new(None) };
-    /// Per scrollbar (keyed by its position): last offset seen, when it last
-    /// moved or was hovered, and whether the mouse is over it.
-    static SCROLL_SEEN: std::cell::RefCell<std::collections::HashMap<(i32, i32), (f32, Option<std::time::Instant>, bool)>> = Default::default();
 }
 
 /// Starts a new frame's list of wheel targets (called at the top of render).
 pub fn begin_wheel_frames() {
-    WHEEL_FRAMES.with(|f| f.borrow_mut().clear());
+    UI_RT.with(|rt| rt.borrow_mut().cur_win_mut().wheel_frames.clear());
 }
 
-fn register_wheel(bounds: gpui::Bounds<gpui::Pixels>, horizontal: bool) -> usize {
-    WHEEL_FRAMES.with(|f| {
-        let mut f = f.borrow_mut();
+fn register_wheel(win: gpui::WindowId, bounds: gpui::Bounds<gpui::Pixels>, horizontal: bool) -> usize {
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let f = &mut rt.win_mut(win).wheel_frames;
         f.push((bounds, horizontal));
         f.len() - 1
     })
 }
 
 /// The innermost (last painted) frame under the mouse for that axis.
-fn topmost_wheel(pos: gpui::Point<gpui::Pixels>, horizontal: bool) -> Option<usize> {
-    WHEEL_FRAMES.with(|f| f.borrow().iter().rposition(|(b, h)| *h == horizontal && b.contains(&pos)))
+fn topmost_wheel(win: gpui::WindowId, pos: gpui::Point<gpui::Pixels>, horizontal: bool) -> Option<usize> {
+    UI_RT.with(|rt| {
+        rt.borrow()
+            .win(win)
+            .and_then(|w| w.wheel_frames.iter().rposition(|(b, h)| *h == horizontal && b.contains(&pos)))
+    })
 }
 
 /// The wheel moved the frame of `handle` within `within`.
 pub fn wheeled_recently(handle: &gpui::ScrollHandle, within: std::time::Duration) -> bool {
-    LAST_WHEEL.with(|l| l.get()).is_some_and(|(b, at)| b == handle.bounds() && at.elapsed() < within)
+    let hb = handle.bounds();
+    UI_RT.with(|rt| {
+        let rt = rt.borrow();
+        rt.windows
+            .values()
+            .chain(std::iter::once(&rt.fallback_win))
+            .any(|w| w.last_wheel.is_some_and(|(b, at)| b == hb && at.elapsed() < within))
+    })
 }
 
 /// A shared scroll handle for a frame that has none of its own.
 pub fn handle_for(key: &str) -> gpui::ScrollHandle {
-    HANDLES.with(|h| h.borrow_mut().entry(key.to_string()).or_default().clone())
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        if rt.handles.len() > 512 && !rt.handles.contains_key(key) {
+            rt.handles.clear();
+        }
+        rt.handles.entry(key.to_string()).or_default().clone()
+    })
 }
 
 /// One wheel notch: glide the frame there. `false` if it cannot move that way.
-fn wheel_step(hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: bool) -> bool {
+fn wheel_step(win: gpui::WindowId, hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: bool) -> bool {
     let gpui::ScrollDelta::Lines(lines) = e.delta else { return false };
     // Shift turns the wheel sideways for horizontal rows.
     let d = if horizontal { if lines.x != 0.0 { lines.x } else if e.modifiers.shift { lines.y } else { 0.0 } } else { lines.y };
@@ -1704,12 +1867,19 @@ fn wheel_step(hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: b
     if (horizontal && mx <= 0.0) || (!horizontal && my <= 0.0) {
         return false;
     }
-    let (bx, by) = SMOOTH
-        .with(|s| s.borrow().as_ref().filter(|(h, _, _)| h.bounds() == hs.bounds()).map(|(_, x, y)| (*x, *y)))
-        .unwrap_or_else(|| (f32::from(hs.offset().x), f32::from(hs.offset().y)));
-    let (tx, ty) = if horizontal { ((bx + d * 56.0).clamp(-mx, 0.0), by) } else { (bx, (by + d * 56.0).clamp(-my, 0.0)) };
-    SMOOTH.with(|s| *s.borrow_mut() = Some((hs.clone(), tx, ty)));
-    LAST_WHEEL.with(|l| l.set(Some((hs.bounds(), std::time::Instant::now()))));
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let w = rt.win_mut(win);
+        let (bx, by) = w
+            .smooth
+            .as_ref()
+            .filter(|(h, _, _)| h.bounds() == hs.bounds())
+            .map(|(_, x, y)| (*x, *y))
+            .unwrap_or_else(|| (f32::from(hs.offset().x), f32::from(hs.offset().y)));
+        let (tx, ty) = if horizontal { ((bx + d * 56.0).clamp(-mx, 0.0), by) } else { (bx, (by + d * 56.0).clamp(-my, 0.0)) };
+        w.smooth = Some((hs.clone(), tx, ty));
+        w.last_wheel = Some((hs.bounds(), std::time::Instant::now()));
+    });
     true
 }
 
@@ -1721,16 +1891,17 @@ pub fn smooth_wheel(handle: &gpui::ScrollHandle, horizontal: bool, cx: &mut Cont
     gpui::canvas(
         |_, _, _| (),
         move |_, _, window, _| {
-            let idx = register_wheel(handle.bounds(), horizontal);
+            let win = window.window_handle().window_id();
+            let idx = register_wheel(win, handle.bounds(), horizontal);
             let (hs, vs) = (handle.clone(), view.clone());
             window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
                 if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
                     return;
                 }
-                if topmost_wheel(e.position, horizontal) != Some(idx) {
+                if topmost_wheel(win, e.position, horizontal) != Some(idx) {
                     return;
                 }
-                if wheel_step(&hs, e, horizontal) {
+                if wheel_step(win, &hs, e, horizontal) {
                     cx.stop_propagation();
                     vs.update(cx, |_, cx| cx.notify()).ok();
                 }
@@ -1771,6 +1942,7 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
             gpui::canvas(
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
+                    let win = window.window_handle().window_id();
                     let max = f32::from(handle.max_offset().y);
                     // A page shorter than the one before can be left scrolled
                     // past its end (nothing to scroll back with): clamp it.
@@ -1806,16 +1978,16 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                     if smooth {
                         let hs = handle.clone();
                         let vs = view.clone();
-                        let idx = register_wheel(handle.bounds(), false);
+                        let idx = register_wheel(win, handle.bounds(), false);
                         window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
                             if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
                                 return;
                             }
                             // An inner frame or a menu on top takes the wheel.
-                            if topmost_wheel(e.position, false) != Some(idx) || overlay_open(&vs, cx) {
+                            if topmost_wheel(win, e.position, false) != Some(idx) || overlay_open(&vs, cx) {
                                 return;
                             }
-                            if wheel_step(&hs, e, false) {
+                            if wheel_step(win, &hs, e, false) {
                                 cx.stop_propagation();
                                 vs.update(cx, |_, cx| cx.notify()).ok();
                             }
@@ -1826,20 +1998,26 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                     let thumb_h = (track_h * view_h / (view_h + max)).clamp(28.0, track_h);
                     let y = (-f32::from(handle.offset().y)).clamp(0.0, max);
                     let top = f32::from(bounds.origin.y) + (track_h - thumb_h) * (y / max);
-                    let dragging = SCROLL_DRAG.with(|d| d.borrow().as_ref().is_some_and(|(h, _, _)| h.bounds() == handle.bounds()));
                     // Shown while scrolling, dragging or hovered; fades out
                     // after a second of stillness.
                     let key = (f32::from(bounds.origin.x) as i32, f32::from(bounds.origin.y) as i32);
                     let hot = bounds.dilate(px(4.0)).contains(&window.mouse_position());
-                    let idle = SCROLL_SEEN.with(|m| {
-                        let mut m = m.borrow_mut();
-                        let e = m.entry(key).or_insert((y, None, false));
+                    let hb = handle.bounds();
+                    let (dragging, idle) = UI_RT.with(|rt| {
+                        let mut rt = rt.borrow_mut();
+                        let w = rt.win_mut(win);
+                        let dragging = w.scroll_drag.as_ref().is_some_and(|(h, _, _)| h.bounds() == hb);
+                        if w.scroll_seen.len() > 256 && !w.scroll_seen.contains_key(&key) {
+                            w.scroll_seen.clear();
+                        }
+                        let e = w.scroll_seen.entry(key).or_insert((y, None, false));
                         if (e.0 - y).abs() > 0.5 || dragging || hot {
                             e.1 = Some(std::time::Instant::now());
                         }
                         e.0 = y;
                         e.2 = hot;
-                        e.1.map_or(f32::MAX, |t| t.elapsed().as_secs_f32())
+                        let idle = e.1.map_or(f32::MAX, |t| t.elapsed().as_secs_f32());
+                        (dragging, idle)
                     });
                     const HOLD: f32 = 0.9;
                     const FADE: f32 = 0.35;
@@ -1872,17 +2050,17 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                             start = ((my - f32::from(bounds.origin.y) - thumb_h / 2.0) * per_px).clamp(0.0, max);
                             h1.set_offset(gpui::point(px(0.0), px(-start)));
                         }
-                        SCROLL_DRAG.with(|d| *d.borrow_mut() = Some((h1.clone(), my, start)));
+                        UI_RT.with(|rt| rt.borrow_mut().win_mut(win).scroll_drag = Some((h1.clone(), my, start)));
                         cx.stop_propagation();
                         v1.update(cx, |_, cx| cx.notify()).ok();
                     });
                     window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
-                        let Some((h, grab_y, grab_scroll)) = SCROLL_DRAG.with(|d| d.borrow().clone()) else { return };
+                        let Some((h, grab_y, grab_scroll)) = UI_RT.with(|rt| rt.borrow().win(win).and_then(|w| w.scroll_drag.clone())) else { return };
                         if h.bounds() != h2.bounds() {
                             return;
                         }
                         if e.pressed_button != Some(gpui::MouseButton::Left) {
-                            SCROLL_DRAG.with(|d| *d.borrow_mut() = None);
+                            UI_RT.with(|rt| rt.borrow_mut().win_mut(win).scroll_drag = None);
                             v2.update(cx, |_, cx| cx.notify()).ok();
                             return;
                         }
@@ -1891,12 +2069,12 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                         v2.update(cx, |_, cx| cx.notify()).ok();
                     });
                     window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, _| {
-                        SCROLL_DRAG.with(|d| *d.borrow_mut() = None);
+                        UI_RT.with(|rt| rt.borrow_mut().win_mut(win).scroll_drag = None);
                     });
                     let v3 = view.clone();
                     window.on_mouse_event(move |e: &gpui::MouseMoveEvent, _, _, cx| {
                         let over = bounds.dilate(px(4.0)).contains(&e.position);
-                        let was = SCROLL_SEEN.with(|m| m.borrow().get(&key).is_some_and(|s| s.2));
+                        let was = UI_RT.with(|rt| rt.borrow().win(win).and_then(|w| w.scroll_seen.get(&key)).is_some_and(|s| s.2));
                         if over != was {
                             v3.update(cx, |_, cx| cx.notify()).ok();
                         }
@@ -1908,9 +2086,22 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
         .into_any_element()
 }
 
-thread_local! {
-    /// Screen y of each virtual list's top edge, from the last frame.
-    static VLIST_TOP: std::cell::RefCell<std::collections::HashMap<&'static str, f32>> = Default::default();
+/// Scroll to a measured list row, including headers and the actual row pitch.
+pub fn scroll_row_into_view(window: &Window, key: &'static str, row: usize, pitch: f32, scroll: &gpui::ScrollHandle) {
+    let win = window.window_handle().window_id();
+    let top = UI_RT.with(|rt| rt.borrow().win(win).and_then(|w| w.vlist_top.get(key).copied()));
+    let Some(top) = top else { return };
+    let viewport = scroll.bounds();
+    let row_top = top + row as f32 * pitch;
+    let row_bottom = row_top + pitch;
+    let delta = if row_top < f32::from(viewport.top()) {
+        f32::from(viewport.top()) - row_top
+    } else if row_bottom > f32::from(viewport.bottom()) {
+        f32::from(viewport.bottom()) - row_bottom
+    } else { return };
+    let mut offset = scroll.offset();
+    offset.y = px((f32::from(offset.y) + delta).clamp(-f32::from(scroll.max_offset().y).max(0.0), 0.0));
+    scroll.set_offset(offset);
 }
 
 /// A long list of fixed-height rows inside the page scroll frame `scroll`:
@@ -1925,7 +2116,7 @@ pub fn virtual_rows(
 ) -> Div {
     const OVERSCAN: usize = 8;
     let vp = scroll.bounds();
-    let top = VLIST_TOP.with(|m| m.borrow().get(key).copied());
+    let top = UI_RT.with(|rt| rt.borrow().cur_win().vlist_top.get(key).copied());
     let (first, last) = match top {
         Some(top) if f32::from(vp.size.height) > 0.0 => {
             let a = ((f32::from(vp.top()) - top) / pitch).floor().max(0.0) as usize;
@@ -1942,7 +2133,12 @@ pub fn virtual_rows(
         .flex_col()
         .child(
             gpui::canvas(
-                move |bounds, _, _| VLIST_TOP.with(|m| m.borrow_mut().insert(key, f32::from(bounds.origin.y))),
+                move |bounds, window, _| {
+                    let win = window.window_handle().window_id();
+                    UI_RT.with(|rt| {
+                        rt.borrow_mut().win_mut(win).vlist_top.insert(key, f32::from(bounds.origin.y));
+                    });
+                },
                 |_, _, _, _| {},
             )
             .absolute()
@@ -1955,18 +2151,13 @@ pub fn virtual_rows(
         .child(div().flex_none().h(px((n - last) as f32 * pitch)))
 }
 
-thread_local! {
-    /// Drag-to-reorder lists: eased shift of each row (by list key), and when
-    /// a row last moved.
-    static DRAG_SHIFT: std::cell::RefCell<std::collections::HashMap<&'static str, (std::collections::HashMap<usize, (f32, std::time::Instant)>, Option<std::time::Instant>)>> = Default::default();
-}
-
 /// Vertical shift of row `i` of list `key` while row `from` is dragged to
 /// slot `to` (`drag`): the rows in between glide one `pitch` aside to make
 /// room, easing there instead of jumping. `None` (no drag) snaps back.
 pub fn drag_shift(key: &'static str, i: usize, drag: Option<(usize, usize)>, pitch: f32) -> f32 {
-    DRAG_SHIFT.with(|m| {
-        let mut m = m.borrow_mut();
+    UI_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let m = &mut rt.drag_shift;
         let Some((from, to)) = drag else {
             m.remove(key);
             return 0.0;
@@ -1995,27 +2186,29 @@ pub fn drag_shift(key: &'static str, i: usize, drag: Option<(usize, usize)>, pit
 
 /// A reorder animation still has distance to go (keeps frames coming).
 pub fn drag_shift_running() -> bool {
-    DRAG_SHIFT.with(|m| m.borrow().values().any(|(_, t)| t.is_some_and(|t| t.elapsed().as_secs_f32() < 0.2)))
-}
-
-thread_local! {
-    /// Last press of the transport buttons, for the little "pop" when clicked.
-    static PRESSED: std::cell::RefCell<std::collections::HashMap<&'static str, std::time::Instant>> = Default::default();
+    UI_RT.with(|rt| rt.borrow().drag_shift.values().any(|(_, t)| t.is_some_and(|t| t.elapsed().as_secs_f32() < 0.2)))
 }
 
 const PRESS_SECS: f32 = 0.22;
 
 /// Marks a button as just pressed.
 pub fn press(id: &'static str) {
-    PRESSED.with(|m| m.borrow_mut().insert(id, std::time::Instant::now()));
+    UI_RT.with(|rt| {
+        rt.borrow_mut().pressed.insert(id, std::time::Instant::now());
+    });
 }
 
 /// 1 right after a press, easing back to 0.
 pub fn press_k(id: &'static str) -> f32 {
-    PRESSED.with(|m| m.borrow().get(id).map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / PRESS_SECS).clamp(0.0, 1.0).powi(2)))
+    UI_RT.with(|rt| {
+        rt.borrow()
+            .pressed
+            .get(id)
+            .map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / PRESS_SECS).clamp(0.0, 1.0).powi(2))
+    })
 }
 
 /// A press animation is still running (keeps frames coming).
 pub fn press_running() -> bool {
-    PRESSED.with(|m| m.borrow().values().any(|t| t.elapsed().as_secs_f32() < PRESS_SECS))
+    UI_RT.with(|rt| rt.borrow().pressed.values().any(|t| t.elapsed().as_secs_f32() < PRESS_SECS))
 }

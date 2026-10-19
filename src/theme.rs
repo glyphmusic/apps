@@ -52,9 +52,40 @@ pub fn theme_by_id(id: &str) -> &'static Theme {
     THEMES.iter().find(|t| t.id == id).unwrap_or(&THEMES[0])
 }
 
+#[derive(Default)]
+struct Scope {
+    bounds: Option<Bounds<Pixels>>,
+    ink: f32,
+}
+
+struct ThemeRuntime {
+    accent: Hsla,
+    base: Hsla,
+    zone: Option<usize>,
+    ink: [f32; 3],
+    scope: Option<u64>,
+    scopes: HashMap<u64, Scope>,
+    grid: Option<Arc<LumGrid>>,
+    last_ease: Option<Instant>,
+}
+
+impl Default for ThemeRuntime {
+    fn default() -> Self {
+        Self {
+            accent: gpui::rgb(0xff5fd2).into(),
+            base: gpui::rgb(0x030303).into(),
+            zone: None,
+            ink: [0.0; 3],
+            scope: None,
+            scopes: HashMap::new(),
+            grid: None,
+            last_ease: None,
+        }
+    }
+}
+
 thread_local! {
-    static ACCENT: std::cell::Cell<Hsla> = std::cell::Cell::new(gpui::rgb(0xff5fd2).into());
-    static BASE: std::cell::Cell<Hsla> = std::cell::Cell::new(gpui::rgb(0x030303).into());
+    static THEME_RT: std::cell::RefCell<ThemeRuntime> = std::cell::RefCell::new(ThemeRuntime::default());
 }
 
 /// The theme's glow colours as a palette for the background.
@@ -65,13 +96,16 @@ pub fn glow_palette(id: &str) -> Option<crate::visuals::Palette> {
 /// Makes `id` the current theme (set before each frame).
 pub fn set_theme(id: &str) {
     let t = theme_by_id(id);
-    ACCENT.with(|c| c.set(gpui::rgb(t.accent).into()));
-    BASE.with(|c| c.set(gpui::rgb(t.base).into()));
+    THEME_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        rt.accent = gpui::rgb(t.accent).into();
+        rt.base = gpui::rgb(t.base).into();
+    });
 }
 
 /// Window background (the theme's near-black base).
 pub fn bg() -> Hsla {
-    BASE.with(|c| c.get())
+    THEME_RT.with(|rt| rt.borrow().base)
 }
 /// Floating panel fill: black at 68 %.
 pub fn panel() -> Hsla {
@@ -108,36 +142,38 @@ pub fn active() -> Hsla {
 // (0 = light text, 1 = dark text) and sets it here before building each zone.
 // Text on flat panels/cards uses zone `None` and always stays light.
 
-thread_local! {
-    static ZONE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    static INK: std::cell::Cell<[f32; 3]> = const { std::cell::Cell::new([0.0; 3]) };
-}
-
 pub fn set_ink(ink: [f32; 3]) {
-    INK.with(|c| c.set(ink));
+    THEME_RT.with(|rt| rt.borrow_mut().ink = ink);
 }
 
 /// `Some(zone index)` for text on the background, `None` on panels.
 pub fn set_zone(zone: Option<usize>) {
-    ZONE.with(|c| c.set(zone));
+    THEME_RT.with(|rt| rt.borrow_mut().zone = zone);
 }
 
 /// Runs `f` with panel ink (light text), restoring the previous zone/scope.
 pub fn on_panel<R>(f: impl FnOnce() -> R) -> R {
-    let prev = ZONE.with(|c| c.replace(None));
-    let prev_scope = SCOPE.with(|c| c.replace(None));
+    let (prev_zone, prev_scope) = THEME_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        (rt.zone.take(), rt.scope.take())
+    });
     let r = f();
-    ZONE.with(|c| c.set(prev));
-    SCOPE.with(|c| c.set(prev_scope));
+    THEME_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        rt.zone = prev_zone;
+        rt.scope = prev_scope;
+    });
     r
 }
 
 fn ink() -> f32 {
-    if let Some(k) = SCOPE.with(|c| c.get()) {
-        return SCOPES.with(|s| s.borrow().get(&k).map(|e| e.ink).unwrap_or(0.0));
-    }
-    let z = ZONE.with(|c| c.get());
-    z.map(|i| INK.with(|c| c.get())[i.min(2)]).unwrap_or(0.0)
+    THEME_RT.with(|rt| {
+        let rt = rt.borrow();
+        if let Some(k) = rt.scope {
+            return rt.scopes.get(&k).map(|e| e.ink).unwrap_or(0.0);
+        }
+        rt.zone.map(|i| rt.ink[i.min(2)]).unwrap_or(0.0)
+    })
 }
 
 // ---- per-element adaptive ink --------------------------------------------
@@ -177,38 +213,32 @@ impl LumGrid {
     }
 }
 
-#[derive(Default)]
-struct Scope {
-    bounds: Option<Bounds<Pixels>>,
-    ink: f32,
-}
-
-thread_local! {
-    static SCOPE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-    static SCOPES: std::cell::RefCell<HashMap<u64, Scope>> = std::cell::RefCell::new(HashMap::new());
-    static GRID: std::cell::RefCell<Option<Arc<LumGrid>>> = const { std::cell::RefCell::new(None) };
-    static LAST_EASE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
-}
-
 /// Wraps `build()` so every theme text colour inside it adapts to the
 /// background under the element. `key` must be stable across frames.
 pub fn adaptive(key: impl Hash, build: impl FnOnce() -> AnyElement) -> AnyElement {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
     let k = h.finish();
-    SCOPES.with(|s| {
-        s.borrow_mut().entry(k).or_default();
+    let prev = THEME_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        if rt.scopes.len() > 1024 && !rt.scopes.contains_key(&k) {
+            rt.scopes.retain(|_, s| s.bounds.is_some());
+            if rt.scopes.len() > 1024 {
+                rt.scopes.clear();
+            }
+        }
+        rt.scopes.entry(k).or_default();
+        rt.scope.replace(k)
     });
-    let prev = SCOPE.with(|c| c.replace(Some(k)));
     let el = build();
-    SCOPE.with(|c| c.set(prev));
+    THEME_RT.with(|rt| rt.borrow_mut().scope = prev);
     div()
         .relative()
         .child(
             canvas(
                 move |bounds, _, _| {
-                    SCOPES.with(|s| {
-                        if let Some(e) = s.borrow_mut().get_mut(&k) {
+                    THEME_RT.with(|rt| {
+                        if let Some(e) = rt.borrow_mut().scopes.get_mut(&k) {
                             e.bounds = Some(bounds);
                         }
                     })
@@ -223,33 +253,32 @@ pub fn adaptive(key: impl Hash, build: impl FnOnce() -> AnyElement) -> AnyElemen
 }
 
 pub fn set_lum_grid(grid: Option<Arc<LumGrid>>) {
-    GRID.with(|g| *g.borrow_mut() = grid);
+    THEME_RT.with(|rt| rt.borrow_mut().grid = grid);
 }
 
 /// Eases every adaptive element's ink (~300 ms). Returns true while anything
 /// still changes, so the caller re-renders.
 pub fn update_inks() -> bool {
     let now = Instant::now();
-    let dt = LAST_EASE
-        .with(|c| c.replace(Some(now)))
-        .map(|t| (now - t).as_secs_f32().min(0.1))
-        .unwrap_or(0.016);
-    let step = dt / 0.3;
-    GRID.with(|g| {
-        let g = g.borrow();
-        let Some(grid) = g.as_ref() else { return false };
-        SCOPES.with(|s| {
-            let mut changed = false;
-            for e in s.borrow_mut().values_mut() {
-                let Some(lum) = e.bounds.and_then(|b| grid.sample(b)) else { continue };
-                let target = ink_for(lum);
-                if (e.ink - target).abs() > 0.001 {
-                    e.ink = if target > e.ink { (e.ink + step).min(target) } else { (e.ink - step).max(target) };
-                    changed = true;
-                }
+    THEME_RT.with(|rt| {
+        let mut rt = rt.borrow_mut();
+        let dt = rt
+            .last_ease
+            .replace(now)
+            .map(|t| (now - t).as_secs_f32().min(0.1))
+            .unwrap_or(0.016);
+        let step = dt / 0.3;
+        let Some(grid) = rt.grid.clone() else { return false };
+        let mut changed = false;
+        for e in rt.scopes.values_mut() {
+            let Some(lum) = e.bounds.and_then(|b| grid.sample(b)) else { continue };
+            let target = ink_for(lum);
+            if (e.ink - target).abs() > 0.001 {
+                e.ink = if target > e.ink { (e.ink + step).min(target) } else { (e.ink - step).max(target) };
+                changed = true;
             }
-            changed
-        })
+        }
+        changed
     })
 }
 
@@ -308,7 +337,7 @@ pub fn text_lg() -> Pixels {
 
 /// The accent colour of the theme (Glyph pink by default).
 pub fn pink() -> Hsla {
-    ACCENT.with(|c| c.get())
+    THEME_RT.with(|rt| rt.borrow().accent)
 }
 
 /// Dark tile in the accent's hue (Liked Songs, Downloads covers).

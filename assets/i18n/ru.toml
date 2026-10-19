@@ -5,6 +5,7 @@
 
 "common.n_songs" = "Песен: {n}"
 "common.play" = "Слушать"
+"common.pause" = "Пауза"
 
 "home.greeting" = "С возвращением"
 "home.recent" = "Недавно прослушанные"
@@ -212,6 +213,7 @@
 "sp.storage.downloads" = "Загрузки"
 "sp.storage.lyrics" = "Тексты"
 "sp.storage.catalog" = "Каталог и поиск"
+"sp.storage.streams" = "Кэш аудиопотоков"
 "sp.storage.usage" = "Использование"
 "sp.storage.limit" = "Лимит кэша"
 "sp.storage.saver" = "Экономия трафика"

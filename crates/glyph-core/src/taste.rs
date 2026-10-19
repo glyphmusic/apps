@@ -24,7 +24,7 @@ pub struct Taste {
 /// Every credited artist of "A, B feat. C" (normalised).
 pub fn credited(credit: &str) -> Vec<String> {
     let mut s = credit.to_lowercase();
-    for sep in [" feat. ", " feat ", " ft. ", " ft ", " featuring ", " & ", " x ", " with ", ";", "/"] {
+    for sep in [" feat. ", " feat ", " ft. ", " ft ", " featuring ", " & ", " x ", " × ", " with ", " vs. ", " vs ", " и ", ";", "/"] {
         s = s.replace(sep, ",");
     }
     s.split(',').map(normalize_artist).filter(|a| !a.is_empty()).collect()
@@ -149,6 +149,45 @@ pub fn matches_phrases(t: &Track, phrases: &[String]) -> bool {
 /// Words that mark a version the user rarely wants unless they typed it.
 const ODD_VERSIONS: [&str; 9] = ["karaoke", "instrumental", "8d", "nightcore", "sped up", "slowed", "cover", "tribute", "remake"];
 
+/// Folded words without punctuation ("Beyoncé - Halo" -> beyonce halo).
+fn words(s: &str) -> Vec<String> {
+    crate::dedupe::squash(s).split_whitespace().map(str::to_string).collect()
+}
+
+/// Joiners people type between title and artist ("Song by Artist").
+const JOINERS: [&str; 8] = ["by", "von", "feat", "ft", "featuring", "x", "and", "und"];
+
+/// Song and artist typed together, in any order or with joiners: "believer
+/// imagine dragons", "Imagine Dragons - Believer", "believer von imagine dragons".
+/// Rewards both being present and punishes query words the track lacks, so the
+/// wrong artist's song with the same title drops below the right one.
+fn title_artist_match(t: &Track, q: &str) -> f32 {
+    let qw = words(q);
+    if qw.len() < 2 {
+        return 0.0;
+    }
+    let all_in_query = |ws: &[String]| !ws.is_empty() && ws.iter().all(|w| qw.contains(w));
+    let core_title = words(&normalize_title(&t.title));
+    let full_title = words(&t.title);
+    let credits: Vec<String> = credited(&t.artist).iter().flat_map(|a| words(a)).collect();
+    // Any one credited artist is enough ("A feat. B" found by typing A).
+    // YouTube uploads often read "Artist - Title" under a channel name: then
+    // both halves of the title typed count as title plus artist.
+    let halves: Vec<&str> = t.title.split(" - ").collect();
+    let artist_typed = credited(&t.artist).iter().any(|a| all_in_query(&words(a)))
+        || (halves.len() == 2 && halves.iter().all(|h| all_in_query(&words(&normalize_title(h)))));
+    let mut s = 0.0;
+    if all_in_query(&core_title) && artist_typed {
+        s += 4.0;
+    }
+    let album = t.album.as_deref().map(words).unwrap_or_default();
+    let missing = qw
+        .iter()
+        .filter(|w| !JOINERS.contains(&w.as_str()) && !full_title.contains(w) && !credits.contains(w) && !album.contains(w))
+        .count();
+    s - (missing as f32 * 0.6).min(2.4)
+}
+
 /// Rank of `t` for `query` (higher first): text match, odd versions, taste.
 pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
     let q = squash(query);
@@ -165,13 +204,10 @@ pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
         }
         if artist == q {
             s += 2.5;
-        } else if artist.contains(&q) || q.contains(&artist) {
+        } else if !artist.is_empty() && (artist.contains(&q) || q.contains(&artist)) {
             s += 1.0;
         }
-        // "artist title" typed together.
-        if !artist.is_empty() && q.contains(&artist) && q.contains(&title) {
-            s += 2.0;
-        }
+        s += title_artist_match(t, &q);
     }
     for w in ODD_VERSIONS {
         if title.contains(w) && !q.contains(w) {
@@ -229,6 +265,27 @@ mod tests {
         let c = score(&tr("Hello (Karaoke)", "Other"), "hello", &taste);
         assert!(a > b && b > c);
         assert_eq!(taste.top_artists(1), vec!["liked band".to_string()]);
+    }
+
+    #[test]
+    fn title_plus_artist_picks_the_right_song() {
+        let taste = Taste::default();
+        let right = tr("Believer", "Imagine Dragons");
+        let cover = tr("Believer", "Some Cover Band");
+        let other = tr("Thunder", "Imagine Dragons");
+        for q in ["believer imagine dragons", "imagine dragons believer", "Believer - Imagine Dragons", "believer von imagine dragons", "believer by imagine dragons"] {
+            let r = score(&right, q, &taste);
+            assert!(r > score(&cover, q, &taste), "{q}");
+            assert!(r > score(&other, q, &taste), "{q}");
+        }
+        // Featured artists, accents and channel uploads still match.
+        assert!(score(&tr("Halo", "Beyoncé"), "halo beyonce", &taste) > score(&tr("Halo", "Other"), "halo beyonce", &taste));
+        let upload = tr("Imagine Dragons - Believer (Official Music Video)", "ImagineDragonsVEVO");
+        assert!(score(&upload, "imagine dragons believer", &taste) > score(&cover, "imagine dragons believer", &taste));
+        let feat = tr("Stay", "Justin Bieber feat. The Kid LAROI");
+        assert!(score(&feat, "stay justin bieber", &taste) > score(&tr("Stay", "Rihanna"), "stay justin bieber", &taste));
+        // A title alone ranks as before.
+        assert!(score(&right, "believer", &taste) > score(&other, "believer", &taste));
     }
 
     #[test]

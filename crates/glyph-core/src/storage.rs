@@ -17,10 +17,18 @@ pub enum StorageKind {
     Lyrics,
     /// Resolver mappings, search and quota caches.
     Catalog,
+    /// HTTP range chunks and local stream cache (`audio-ranges`, `streams`).
+    AudioRanges,
 }
 
 impl StorageKind {
-    pub const ALL: [StorageKind; 4] = [Self::Covers, Self::Downloads, Self::Lyrics, Self::Catalog];
+    pub const ALL: [StorageKind; 5] = [
+        Self::Covers,
+        Self::Downloads,
+        Self::Lyrics,
+        Self::Catalog,
+        Self::AudioRanges,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,6 +37,7 @@ pub struct StorageStats {
     pub downloads: u64,
     pub lyrics: u64,
     pub catalog: u64,
+    pub audio_ranges: u64,
 }
 
 impl StorageStats {
@@ -38,10 +47,11 @@ impl StorageStats {
             StorageKind::Downloads => self.downloads,
             StorageKind::Lyrics => self.lyrics,
             StorageKind::Catalog => self.catalog,
+            StorageKind::AudioRanges => self.audio_ranges,
         }
     }
     pub fn total(&self) -> u64 {
-        self.covers + self.downloads + self.lyrics + self.catalog
+        self.covers + self.downloads + self.lyrics + self.catalog + self.audio_ranges
     }
 }
 
@@ -61,6 +71,14 @@ pub fn imports_dir() -> PathBuf {
 
 pub fn lyrics_dir() -> PathBuf {
     paths::data_dir().join("lyrics")
+}
+
+pub fn audio_ranges_dir() -> PathBuf {
+    paths::cache_dir().join("audio-ranges")
+}
+
+pub fn streams_dir() -> PathBuf {
+    paths::cache_dir().join("streams")
 }
 
 /// Catalogue cache files (resolver mappings, YouTube quota bookkeeping).
@@ -85,6 +103,7 @@ pub fn stats() -> StorageStats {
         downloads: dir_size(&downloads_dir()),
         lyrics: dir_size(&lyrics_dir()),
         catalog: catalog_files().iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum(),
+        audio_ranges: dir_size(&audio_ranges_dir()) + dir_size(&streams_dir()),
     }
 }
 
@@ -107,6 +126,10 @@ pub fn clear(kind: StorageKind) -> anyhow::Result<()> {
                 let _ = std::fs::remove_file(f);
             }
             Ok(())
+        }
+        StorageKind::AudioRanges => {
+            remove_dir(audio_ranges_dir())?;
+            remove_dir(streams_dir())
         }
     }
 }
