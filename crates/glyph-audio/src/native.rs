@@ -305,7 +305,9 @@ fn decode_thread(
     let track_id = track.id;
     let time_base = track.codec_params.time_base;
     let duration = match (track.codec_params.n_frames, time_base) {
-        (Some(n), Some(tb)) => {
+        // Fragmented MP4 starts with an empty sample table (duration zero).
+        // Treat that as unknown so the engine retains the track metadata.
+        (Some(n), Some(tb)) if n > 0 => {
             let t = tb.calc_time(n);
             Some(Duration::from_secs_f64(t.seconds as f64 + t.frac))
         }

@@ -153,6 +153,9 @@ impl PlaybackSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    /// This server requires a signed-in account for API/media access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub account_required: bool,
     /// Optional server access gate; older servers are public.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub server_auth_required: bool,
@@ -662,7 +665,7 @@ mod account_tests {
     #[test]
     fn old_health_without_account_fields_parses() {
         let h: HealthResponse = serde_json::from_str(r#"{"server_version":"1","protocol_version":1,"providers":[]}"#).unwrap();
-        assert!(!h.accounts && !h.covers);
+        assert!(!h.accounts && !h.covers && !h.account_required);
         let s = serde_json::to_string(&h).unwrap();
         assert!(!s.contains("accounts"));
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 - 2026-10-19
+
+- Support streamed fragmented MP4 audio without replacing track metadata with a zero duration.
+- Recognize the optional account-only API policy advertised by Glyph Server 0.3.0.
+
+
 ## 0.2.5 - 2026-10-19
 
 - Show artists in "Recently played": playing from an artist's page adds the artist next to the songs, on Home and in the list.
