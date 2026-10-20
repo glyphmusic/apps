@@ -17,7 +17,7 @@ pub struct SoundCloud {
 }
 
 #[derive(Debug, Deserialize)]
-struct SCTrack {
+pub(crate) struct SCTrack {
     #[serde(deserialize_with = "de_flex_string")]
     id: String,
     #[serde(default)]
@@ -54,10 +54,31 @@ struct Publisher {
     isrc: Option<String>,
 }
 
-fn convert(t: SCTrack) -> Option<Track> {
-    if t.streamable == Some(false) || t.access.as_deref().map(|a| a != "playable").unwrap_or(false) {
+pub(crate) fn convert(t: SCTrack) -> Option<Track> {
+    if !playable(&t) {
         return None;
     }
+    Some(convert_meta(t))
+}
+
+fn playable(t: &SCTrack) -> bool {
+    !(t.streamable == Some(false) || t.access.as_deref().map(|a| a != "playable").unwrap_or(false))
+}
+
+/// Any track for import: playable ones keep SoundCloud as their source (the
+/// embed plays them), the rest are metadata only (`MusicBrainz`, like files)
+/// and get matched elsewhere.
+pub(crate) fn convert_import(t: SCTrack) -> Track {
+    let ok = playable(&t);
+    let mut track = convert_meta(t);
+    if !ok {
+        track.id = format!("sc:{}", track.id);
+        track.source = ProviderId::MusicBrainz;
+    }
+    track
+}
+
+fn convert_meta(t: SCTrack) -> Track {
     let artist = t
         .publisher_metadata
         .as_ref()
@@ -69,7 +90,7 @@ fn convert(t: SCTrack) -> Option<Track> {
         .isrc
         .or_else(|| t.publisher_metadata.and_then(|p| p.isrc))
         .filter(|s| !s.is_empty());
-    Some(Track {
+    Track {
         id: t.id,
         source: ProviderId::SoundCloud,
         title: t.title,
@@ -82,7 +103,7 @@ fn convert(t: SCTrack) -> Option<Track> {
         permalink: t.permalink_url,
         external_ids: Default::default(),
         explicit: false,
-    })
+    }
 }
 
 pub fn parse_search(json: &str) -> Result<Vec<Track>> {
@@ -93,6 +114,104 @@ pub fn parse_search(json: &str) -> Result<Vec<Track>> {
 impl SoundCloud {
     pub fn new(http: reqwest::Client, client_id: String) -> Self {
         Self { http, client_id }
+    }
+
+    /// What a `soundcloud.com/...` link points to (`GET /resolve`): a track,
+    /// a playlist (set) or a user.
+    pub async fn resolve_url(&self, url: &str) -> Result<serde_json::Value> {
+        let req = self.http.get(format!("{BASE}/resolve")).query(&[("url", url), ("client_id", self.client_id.as_str())]);
+        send_json(req).await
+    }
+
+    /// GET of an API path (or a `next_href`) with the app's client id.
+    pub(crate) async fn get(&self, path_or_url: &str, query: &[(&str, &str)]) -> Result<serde_json::Value> {
+        let url = if path_or_url.starts_with("http") { path_or_url.to_string() } else { format!("{BASE}{path_or_url}") };
+        let mut req = self.http.get(url).query(query);
+        if !path_or_url.contains("client_id=") {
+            req = req.query(&[("client_id", self.client_id.as_str())]);
+        }
+        send_json(req).await
+    }
+
+    /// Every item of a paged list (`linked_partitioning`, 200 per page, at
+    /// most `max` items). Plain arrays (older endpoints) work too.
+    pub(crate) async fn paged(&self, path: &str, max: usize) -> Result<Vec<serde_json::Value>> {
+        let mut out = Vec::new();
+        let mut next: Option<String> = None;
+        for _ in 0..50 {
+            let v = match &next {
+                Some(n) => self.get(n, &[]).await?,
+                None => self.get(path, &[("linked_partitioning", "true"), ("limit", "200")]).await?,
+            };
+            match v {
+                serde_json::Value::Array(items) => {
+                    out.extend(items);
+                    break;
+                }
+                v => {
+                    if let Some(items) = v["collection"].as_array() {
+                        out.extend(items.iter().cloned());
+                    }
+                    next = v["next_href"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+                }
+            }
+            if next.is_none() || out.len() >= max {
+                break;
+            }
+        }
+        out.truncate(max);
+        Ok(out)
+    }
+
+    /// Songs of a list endpoint (likes return `{track: ...}` wrappers on some
+    /// endpoints, plain tracks on others).
+    pub(crate) async fn tracks_of(&self, path: &str) -> Result<Vec<Track>> {
+        let items = self.paged(path, 10_000).await?;
+        Ok(items
+            .into_iter()
+            .filter_map(|v| {
+                let v = if v.get("track").is_some_and(|t| t.is_object()) { v["track"].clone() } else { v };
+                serde_json::from_value::<SCTrack>(v).ok()
+            })
+            .filter(|t| !t.title.is_empty())
+            .map(convert_import)
+            .collect())
+    }
+
+    /// The song list a soundcloud.com link stands for: a set, a user's likes
+    /// (`/<user>/likes`), a user's own tracks (`/<user>` or `/<user>/tracks`)
+    /// or one track. Returns (name, songs).
+    pub async fn list_from_link(&self, url: &str) -> Result<(String, Vec<Track>)> {
+        let parsed = reqwest::Url::parse(url)?;
+        let segs: Vec<String> = parsed.path_segments().map(|s| s.filter(|x| !x.is_empty()).map(str::to_string).collect()).unwrap_or_default();
+        let likes = segs.get(1).is_some_and(|s| s == "likes");
+        let user_tracks = segs.len() == 1 || segs.get(1).is_some_and(|s| s == "tracks");
+        // For likes / tracks pages resolve the profile itself.
+        let target = if likes || user_tracks { format!("https://soundcloud.com/{}", segs.first().cloned().unwrap_or_default()) } else { url.to_string() };
+        let v = self.resolve_url(&target).await?;
+        let id = v["id"].as_i64().map(|n| n.to_string()).or_else(|| v["id"].as_str().map(str::to_string)).unwrap_or_default();
+        let kind = v["kind"].as_str().unwrap_or("").to_string();
+        match kind.as_str() {
+            "track" => {
+                let t: SCTrack = serde_json::from_value(v)?;
+                let t = convert_import(t);
+                Ok((t.title.clone(), vec![t]))
+            }
+            "playlist" => {
+                let name = v["title"].as_str().unwrap_or("SoundCloud set").to_string();
+                let tracks = self.tracks_of(&format!("/playlists/{id}/tracks")).await?;
+                Ok((name, tracks))
+            }
+            "user" => {
+                let user = v["username"].as_str().unwrap_or("SoundCloud").to_string();
+                if likes {
+                    Ok((format!("{user} · likes"), self.tracks_of(&format!("/users/{id}/likes/tracks")).await?))
+                } else {
+                    Ok((format!("{user} · tracks"), self.tracks_of(&format!("/users/{id}/tracks")).await?))
+                }
+            }
+            other => Err(ProviderError::Other(format!("unsupported SoundCloud link ({other})")).into()),
+        }
     }
 }
 

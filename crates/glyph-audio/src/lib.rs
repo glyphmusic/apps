@@ -45,6 +45,7 @@ pub mod eq;
 pub mod loudness;
 mod media_keys;
 mod native;
+pub mod spatial;
 pub mod spectrum;
 
 pub use media_keys::MediaKeys;
@@ -229,6 +230,12 @@ impl PlayerController {
     /// Loudness target and per-song levelling (native playback).
     pub fn set_loudness(&self, level: loudness::Level, normalize: bool) {
         loudness::set(level, normalize);
+    }
+
+    /// Mono, stereo or spatial (multichannel / binaural) rendering (native
+    /// playback, applies live).
+    pub fn set_channel_mode(&self, mode: spatial::Mode) {
+        spatial::set_mode(mode);
     }
 
     /// Names of the audio outputs (for the settings list).

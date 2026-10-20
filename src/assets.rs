@@ -21,6 +21,10 @@ icons!(
     "info", "check", "database", "server", "headphones", "book-open", "life-buoy", "github", "external-link", "palette", "folder-open", "circle-check",
     "ellipsis-vertical", "arrow-left", "history", "user-round", "circle-minus", "pencil", "eye", "eye-off",
     "arrow-down-to-line", "pin", "pin-fill", "circle-plus", "image-plus", "image", "maximize-2", "grip-horizontal",
+    "panel-bottom", "rotate-ccw", "rotate-cw", "speaker", "circle", "audio-lines", "orbit", "arrow-right",
+    "chart-column", "sparkles", "mic-vocal", "languages", "bot", "activity", "file-text", "globe", "radio", "cast",
+    "monitor-speaker", "clock", "trophy", "calendar", "flame", "text-search", "badge-check", "ellipsis", "sliders-horizontal",
+    "arrow-right-left", "airplay", "tv", "monitor",
 );
 
 pub struct Assets;

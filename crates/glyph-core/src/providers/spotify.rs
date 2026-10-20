@@ -109,16 +109,16 @@ struct SearchResp {
 }
 
 #[derive(Debug, Deserialize)]
-struct Page<T> {
+pub(crate) struct Page<T> {
     #[serde(default = "Vec::new")]
-    items: Vec<T>,
+    pub items: Vec<T>,
     #[serde(default)]
-    next: Option<String>,
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaylistItem {
-    track: Option<STrack>,
+pub(crate) struct PlaylistItem {
+    pub track: Option<STrack>,
 }
 
 pub fn parse_search(json: &str) -> Result<Vec<Track>> {
@@ -154,7 +154,7 @@ impl Spotify {
         Ok(t.access_token)
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
+    pub(crate) async fn get<T: serde::de::DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
         let token = self.token().await?;
         let req = self.http.get(url).bearer_auth(token).query(query);
         send_json(req).await
@@ -183,6 +183,77 @@ impl Spotify {
             }
         }
         Ok(out)
+    }
+}
+
+/// Album songs come without album name and pictures; fill them in.
+pub(crate) fn album_tracks_from(v: &serde_json::Value) -> Vec<Track> {
+    let name = v["name"].as_str().map(str::to_string);
+    let cover = v["images"].as_array().and_then(|imgs| {
+        imgs.iter()
+            .min_by_key(|i| i["width"].as_u64().unwrap_or(640).abs_diff(640))
+            .and_then(|i| i["url"].as_str())
+            .map(str::to_string)
+    });
+    v["tracks"]["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| serde_json::from_value::<STrack>(i.clone()).ok())
+                .filter_map(convert)
+                .map(|mut t| {
+                    t.album = t.album.or_else(|| name.clone());
+                    t.cover_url = t.cover_url.or_else(|| cover.clone());
+                    t
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Spotify {
+    /// Name and songs of an album (first 50 come inline, the rest paged).
+    pub async fn album(&self, id: &str) -> Result<(String, String, Vec<Track>)> {
+        let v: serde_json::Value = self.get(&format!("{API}/albums/{id}"), &[]).await?;
+        let name = v["name"].as_str().unwrap_or("Spotify album").to_string();
+        let artist = v["artists"][0]["name"].as_str().unwrap_or("").to_string();
+        let mut tracks = album_tracks_from(&v);
+        let mut next = v["tracks"]["next"].as_str().map(str::to_string);
+        let mut guard = 0;
+        while let Some(url) = next.take() {
+            guard += 1;
+            if guard > 20 {
+                break;
+            }
+            let page: serde_json::Value = self.get(&url, &[]).await?;
+            let wrapped = serde_json::json!({ "name": v["name"], "images": v["images"], "tracks": page });
+            tracks.extend(album_tracks_from(&wrapped));
+            next = page["next"].as_str().map(str::to_string);
+        }
+        Ok((name, artist, tracks))
+    }
+
+    /// Up to 50 songs by id in one request.
+    pub async fn tracks_by_ids(&self, ids: &[&str]) -> Result<Vec<Track>> {
+        let joined = ids.join(",");
+        let v: serde_json::Value = self.get(&format!("{API}/tracks"), &[("ids", joined.as_str())]).await?;
+        Ok(v["tracks"]
+            .as_array()
+            .map(|l| l.iter().filter_map(|t| serde_json::from_value::<STrack>(t.clone()).ok()).filter_map(convert).collect())
+            .unwrap_or_default())
+    }
+
+    /// An artist's name and top songs.
+    pub async fn artist_top(&self, id: &str) -> Result<(String, Vec<Track>)> {
+        let a: serde_json::Value = self.get(&format!("{API}/artists/{id}"), &[]).await?;
+        let name = a["name"].as_str().unwrap_or("Spotify artist").to_string();
+        let v: serde_json::Value = self.get(&format!("{API}/artists/{id}/top-tracks"), &[("market", "US")]).await?;
+        let tracks = v["tracks"]
+            .as_array()
+            .map(|l| l.iter().filter_map(|t| serde_json::from_value::<STrack>(t.clone()).ok()).filter_map(convert).collect())
+            .unwrap_or_default();
+        Ok((name, tracks))
     }
 }
 

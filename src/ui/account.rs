@@ -7,7 +7,7 @@ use crate::guard::guard_res;
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::input::TextInput;
-use crate::ui::settings::{input_box, row, rows, section_label, segmented, white};
+use crate::ui::settings::{input_box, row, row_status, rows, section_label, segmented, white};
 use crate::ui::widgets::*;
 use glyph_core::account::{is_signed_out, Stored};
 use glyph_protocol::{AccountPatch, DevicesResponse, LoginPollResponse, LoginStartResponse};
@@ -828,7 +828,7 @@ fn keys_row(app: &Glyph, acc: &Stored, cx: &mut Context<Glyph>) -> AnyElement {
     let label = t("account.keys");
     let dim = |s: SharedString| div().text_size(px(13.0)).text_color(white(0.55)).child(s);
     if !acc.account.has_password {
-        return row(label, Some(t("account.keys.need_password")), dim(t("account.keys.off"))).into_any_element();
+        return row_status(label, Some(t("account.keys.need_password")), dim(t("account.keys.off"))).into_any_element();
     }
     if app.account.vault_ok {
         return row(label, Some(t("account.keys.desc")), div().text_size(px(13.0)).text_color(white(0.85)).child(t("account.keys.on"))).into_any_element();
@@ -912,7 +912,7 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
                         .on_click(cx.listener(move |this, _, _, cx| this.account_remove_device(id.clone(), cx)))
                         .into_any_element()
                 };
-                row(dev.name.clone(), Some(desc), control)
+                row_status(dev.name.clone(), Some(desc), control)
             })
             .collect(),
     };

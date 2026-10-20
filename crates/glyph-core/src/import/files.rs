@@ -107,6 +107,9 @@ fn find_col(header: &[String], names: &[&str]) -> Option<usize> {
     })
 }
 
+/// Label of a Google Takeout playlist (video ids that still need titles).
+pub const TAKEOUT_LABEL: &str = "youtube/takeout";
+
 pub fn parse_csv(text: &str, name: &str) -> anyhow::Result<ParsedList> {
     let first_line = text.lines().next().unwrap_or("");
     let delim = [',', ';', '\t']
@@ -122,6 +125,30 @@ pub fn parse_csv(text: &str, name: &str) -> anyhow::Result<ParsedList> {
     let dur_s = find_col(header, &["duration", "duration (s)", "length"]);
     let isrc = find_col(header, &["isrc"]);
     let uri = find_col(header, &["track uri", "spotify uri", "uri", "spotify id"]);
+    // Google Takeout (YouTube / YouTube Music playlists): only video ids;
+    // `fetch_list` fills in titles.
+    if let (None, Some(vid)) = (title, find_col(header, &["video id", "video-id", "videoid"])) {
+        let tracks = rows
+            .iter()
+            .skip(1)
+            .filter_map(|row| row.get(vid).map(|s| s.trim().to_string()))
+            .filter(|id| crate::ytdlp::valid_video_id(id))
+            .map(|id| Track {
+                permalink: Some(format!("https://www.youtube.com/watch?v={id}")),
+                id,
+                source: ProviderId::YouTube,
+                title: String::new(),
+                artist: String::new(),
+                album: None,
+                duration_ms: None,
+                cover_url: None,
+                isrc: None,
+                external_ids: Default::default(),
+                explicit: false,
+            })
+            .collect();
+        return Ok(ParsedList { name: name.to_string(), label: TAKEOUT_LABEL.into(), tracks });
+    }
     let title = title.ok_or_else(|| anyhow::anyhow!("CSV has no track name column"))?;
 
     let get = |row: &Vec<String>, c: Option<usize>| c.and_then(|i| row.get(i)).map(|s| s.trim().to_string());
@@ -302,6 +329,15 @@ pub fn parse_xspf(text: &str, name: &str) -> ParsedList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_google_takeout() {
+        let csv = "Video ID,Playlist Video Creation Timestamp\ndQw4w9WgXcQ,2024-01-01T00:00:00+00:00\nbad,2024\n";
+        let l = parse_csv(csv, "Liked music").unwrap();
+        assert_eq!(l.label, TAKEOUT_LABEL);
+        assert_eq!(l.tracks.len(), 1);
+        assert_eq!((l.tracks[0].id.as_str(), l.tracks[0].source), ("dQw4w9WgXcQ", ProviderId::YouTube));
+    }
 
     #[test]
     fn csv_exportify() {

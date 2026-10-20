@@ -6,14 +6,18 @@
 
 pub mod account;
 pub mod chrome;
+pub mod connect;
+pub mod controls;
 pub mod input;
 pub mod lists;
+pub mod migrate;
 pub mod mini;
 pub mod now_playing;
 pub mod player_bar;
 pub mod profile;
 pub mod settings;
 pub mod splash;
+pub mod stats;
 pub mod toasts;
 pub mod transfer;
 pub mod views;
@@ -164,24 +168,14 @@ impl Render for Shell {
     }
 }
 
-thread_local! {
-    static WINDOW_TITLE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
 impl Render for Glyph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for im in self.stale_heroes.drain(..) {
             let _ = window.drop_image(im);
         }
         widgets::begin_window_frame(window);
-        // Window title = the song, so the taskbar / dock preview shows it.
-        let title = match &self.current {
-            Some(t) => format!("{} - {}", t.artist, t.title),
-            None => "Glyph".to_string(),
-        };
-        if WINDOW_TITLE.with(|w| w.replace(title.clone())) != title {
-            window.set_window_title(&title);
-        }
+        // The window title follows the song from `Glyph::poll` (also while
+        // the window is in the background and nothing renders).
         if widgets::step_smooth_scroll() {
             window.request_animation_frame();
         }
@@ -203,6 +197,8 @@ impl Render for Glyph {
             View::Profile => profile::view(self, window, cx),
             View::Section => views::section_view(self, window, cx).into_any_element(),
             View::Releases => lists::releases_view(self, window, cx).into_any_element(),
+            View::Similar => lists::similar_view(self, window, cx).into_any_element(),
+            View::Stats => stats::view(self, window, cx),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),
@@ -220,6 +216,7 @@ impl Render for Glyph {
         };
         let main_bar = (self.view != View::NowPlaying).then(|| widgets::scrollbar(&self.main_scroll, !self.settings_open, cx));
         if self.show_queue {
+            self.show_devices = false;
             if let Some(a) = self.add_songs.as_mut() {
                 a.open = false;
             }
@@ -232,7 +229,10 @@ impl Render for Glyph {
             }
         }
         let add_open = self.add_songs.as_ref().is_some_and(|a| a.open);
-        let right_open = self.show_queue || add_open;
+        if add_open {
+            self.show_devices = false;
+        }
+        let right_open = self.show_queue || add_open || self.show_devices;
         // The page reaches into the window margin on the right so its
         // scrollbar sits there, next to the content instead of over it.
         let main_panel = div()
@@ -253,9 +253,15 @@ impl Render for Glyph {
         if qk <= 0.001 && !add_open {
             self.add_songs = None;
         }
-        let show_add = add_open || (!self.show_queue && self.add_songs.is_some());
+        let show_add = add_open || (!self.show_queue && !self.show_devices && self.add_songs.is_some());
         let queue = (qk > 0.001).then(|| {
-            let inner = if show_add { views::add_songs_panel(self, window, cx).into_any_element() } else { views::queue_panel(self, window, cx).into_any_element() };
+            let inner = if show_add {
+                views::add_songs_panel(self, window, cx).into_any_element()
+            } else if self.show_devices {
+                connect::panel(self, window, cx).into_any_element()
+            } else {
+                views::queue_panel(self, window, cx).into_any_element()
+            };
             div()
                 .flex_none()
                 .h_full()
@@ -295,6 +301,7 @@ impl Render for Glyph {
         let sk = self.settings_k();
         let modal = (sk > 0.0).then(|| div().absolute().inset_0().opacity(sk).child(settings::modal(self, window, cx)));
         let menu = lists::ctx_menu(self, window, cx);
+        let control_menu = controls::control_menu(self, window, cx);
         if self.splash.as_ref().is_some_and(|s| !s.active()) {
             self.splash = None;
         }
@@ -313,6 +320,7 @@ impl Render for Glyph {
                 .child(s.element())
         });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
+        let approval = controls::mcp_approval(self, cx);
         let crop = self.profile.crop.is_some().then(|| crate::ui::profile::crop_dialog(self, cx));
         let dim = sk > 0.0;
         let dim_a = 1.0 - 0.92 * sk;
@@ -368,6 +376,8 @@ impl Render for Glyph {
             .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
                 if this.name_dialog.is_some() {
                     this.close_name_dialog(cx);
+                } else if this.control_menu.is_some() {
+                    this.close_control_menu(cx);
                 } else if this.ctx_menu.is_some() {
                     this.close_ctx(cx);
                 } else if this.open_select.is_some() {
@@ -417,12 +427,16 @@ impl Render for Glyph {
                     // Side panels keep their gap to the bar.
                     .child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar))
                     .child(main_panel)
-                    .children(queue.map(|q| div().flex_none().h_full().pb(px(theme::GAP * shown)).child(q))),
+                    // Always one gap above the bottom: the player bar's when it
+                    // is there, the window edge's when it is not (Now Playing).
+                    .children(queue.map(|q| div().flex_none().h_full().pb(px(theme::GAP)).child(q))),
             )
             .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(dim_a)).child(b)))
             .children(modal)
             .children(menu)
+            .children(control_menu)
             .children(dialog)
+            .children(approval)
             .children(crop)
             .children(splash)
             .children(toasts)

@@ -37,7 +37,7 @@ impl AlbumKind {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "album" => Some(AlbumKind::Album),
             "ep" => Some(AlbumKind::Ep),

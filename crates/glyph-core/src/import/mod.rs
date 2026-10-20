@@ -1,9 +1,14 @@
-//! Import & migration: public playlist links (Spotify, Deezer, YouTube,
-//! Last.fm profiles) via the server or directly, and files (CSV, Spotify JSON
-//! export, M3U/M3U8, XSPF). Matching is ISRC-first (handled by the resolver),
-//! results are bucketed into sure / unsure / not found.
+//! Import & migration: public links (Spotify, Deezer, YouTube, SoundCloud,
+//! Apple Music, Bandcamp, Last.fm profiles, short links) via the server or
+//! directly, files (CSV, Spotify JSON export, M3U/M3U8, XSPF), and whole
+//! libraries from a connected account (`accounts`). Matching is ISRC-first
+//! (handled by the resolver), results are bucketed into sure / unsure / not
+//! found.
 
+pub mod accounts;
 pub mod files;
+pub mod keyless;
+pub mod links;
 pub mod local;
 
 use crate::providers::Providers;
@@ -20,28 +25,63 @@ use std::future::Future;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteSource {
     SpotifyPlaylist(String),
+    SpotifyAlbum(String),
+    /// An artist's top songs.
+    SpotifyArtist(String),
+    SpotifyTrack(String),
     DeezerPlaylist(String),
     DeezerUser(String),
+    DeezerAlbum(String),
+    DeezerArtist(String),
+    DeezerTrack(String),
     YouTubePlaylist(String),
     LastFmLoved(String),
+    /// Any soundcloud.com link (set, likes, a user's tracks, one track),
+    /// normalised to `https://soundcloud.com/<path>`.
+    SoundCloud(String),
+    /// Public playlist or album page on music.apple.com.
+    AppleMusic(String),
+    /// Album or track page on <artist>.bandcamp.com.
+    Bandcamp(String),
+    /// deezer.page.link, on.soundcloud.com, spotify.link: followed first.
+    ShortLink(String),
 }
 
 impl RemoteSource {
     pub fn label(&self) -> &'static str {
         match self {
             Self::SpotifyPlaylist(_) => "spotify/playlist",
+            Self::SpotifyAlbum(_) => "spotify/album",
+            Self::SpotifyArtist(_) => "spotify/artist",
+            Self::SpotifyTrack(_) => "spotify/track",
             Self::DeezerPlaylist(_) => "deezer/playlist",
             Self::DeezerUser(_) => "deezer/favorites",
+            Self::DeezerAlbum(_) => "deezer/album",
+            Self::DeezerArtist(_) => "deezer/artist",
+            Self::DeezerTrack(_) => "deezer/track",
             Self::YouTubePlaylist(_) => "youtube/playlist",
             Self::LastFmLoved(_) => "lastfm/loved",
+            Self::SoundCloud(_) => "soundcloud",
+            Self::AppleMusic(_) => "apple/playlist",
+            Self::Bandcamp(_) => "bandcamp/album",
+            Self::ShortLink(_) => "link",
         }
     }
 
-    /// All remote imports are handled by the server's `/v1/import/spotify`.
+    /// The link types the server's `/v1/import/spotify` reads; the others are
+    /// always read by the app itself.
     pub fn server_capable(&self) -> bool {
-        true
+        matches!(
+            self,
+            Self::SpotifyPlaylist(_) | Self::DeezerPlaylist(_) | Self::DeezerUser(_) | Self::YouTubePlaylist(_) | Self::LastFmLoved(_)
+        )
     }
 }
+
+/// soundcloud.com paths that are pages of the site, not music.
+const SOUNDCLOUD_RESERVED: [&str; 14] = [
+    "discover", "search", "you", "stream", "upload", "settings", "messages", "notifications", "charts", "pages", "mobile", "imprint", "terms-of-use", "pro",
+];
 
 fn is_id(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -50,26 +90,57 @@ fn is_id(s: &str) -> bool {
 /// Recognises playlist URLs (used by the search bar to detect pasted links).
 pub fn parse_url(input: &str) -> Option<RemoteSource> {
     let input = input.trim();
-    if let Some(id) = input.strip_prefix("spotify:playlist:") {
-        return is_id(id).then(|| RemoteSource::SpotifyPlaylist(id.to_string()));
+    let uris: [(&str, fn(String) -> RemoteSource); 4] = [
+        ("spotify:playlist:", RemoteSource::SpotifyPlaylist),
+        ("spotify:album:", RemoteSource::SpotifyAlbum),
+        ("spotify:artist:", RemoteSource::SpotifyArtist),
+        ("spotify:track:", RemoteSource::SpotifyTrack),
+    ];
+    for (prefix, make) in uris {
+        if let Some(id) = input.strip_prefix(prefix) {
+            return is_id(id).then(|| make(id.to_string()));
+        }
     }
     let url = reqwest::Url::parse(input).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
     let host = url.host_str()?.trim_start_matches("www.").to_lowercase();
     let segs: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
     let after = |name: &str| segs.iter().position(|s| *s == name).and_then(|i| segs.get(i + 1)).copied();
+    let digits = |id: &&str| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit());
+    if links::short_link_targets(&host).is_some() {
+        return (!segs.is_empty()).then(|| RemoteSource::ShortLink(input.to_string()));
+    }
+    if host.ends_with(".bandcamp.com") && segs.len() >= 2 && matches!(segs[0], "album" | "track") {
+        return Some(RemoteSource::Bandcamp(format!("https://{host}/{}/{}", segs[0], segs[1])));
+    }
     match host.as_str() {
         "open.spotify.com" | "play.spotify.com" => {
-            after("playlist").filter(|id| is_id(id)).map(|id| RemoteSource::SpotifyPlaylist(id.to_string()))
+            let pick = |kind: &str, make: fn(String) -> RemoteSource| after(kind).filter(|id| is_id(id)).map(|id| make(id.to_string()));
+            pick("playlist", RemoteSource::SpotifyPlaylist)
+                .or_else(|| pick("album", RemoteSource::SpotifyAlbum))
+                .or_else(|| pick("artist", RemoteSource::SpotifyArtist))
+                .or_else(|| pick("track", RemoteSource::SpotifyTrack))
         }
-        "deezer.com" | "deezer.page.link" => {
-            if let Some(id) = after("playlist").filter(|id| id.chars().all(|c| c.is_ascii_digit())) {
-                Some(RemoteSource::DeezerPlaylist(id.to_string()))
-            } else {
-                after("profile")
-                    .or_else(|| after("user"))
-                    .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
-                    .map(|id| RemoteSource::DeezerUser(id.to_string()))
+        "deezer.com" => {
+            let pick = |kind: &str, make: fn(String) -> RemoteSource| after(kind).filter(digits).map(|id| make(id.to_string()));
+            pick("playlist", RemoteSource::DeezerPlaylist)
+                .or_else(|| pick("album", RemoteSource::DeezerAlbum))
+                .or_else(|| pick("artist", RemoteSource::DeezerArtist))
+                .or_else(|| pick("track", RemoteSource::DeezerTrack))
+                .or_else(|| pick("profile", RemoteSource::DeezerUser))
+                .or_else(|| pick("user", RemoteSource::DeezerUser))
+        }
+        "soundcloud.com" | "m.soundcloud.com" => {
+            let first = segs.first()?;
+            if SOUNDCLOUD_RESERVED.contains(first) {
+                return None;
             }
+            Some(RemoteSource::SoundCloud(format!("https://soundcloud.com/{}", segs.join("/"))))
+        }
+        "music.apple.com" | "itunes.apple.com" => {
+            segs.iter().any(|s| *s == "playlist" || *s == "album").then(|| RemoteSource::AppleMusic(input.to_string()))
         }
         "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtu.be" => url
             .query_pairs()
@@ -106,25 +177,68 @@ pub async fn fetch_list(
     input: &crate::ImportInput,
     providers: &Providers,
     server: Option<&ServerClient>,
+    http: &reqwest::Client,
+    keys: &crate::config::ApiKeys,
 ) -> Result<(ParsedList, Option<String>)> {
     match input {
         crate::ImportInput::File(path) => {
             let path = path.clone();
-            let list = tokio::task::spawn_blocking(move || files::parse_file(&path)).await??;
+            let mut list = tokio::task::spawn_blocking(move || files::parse_file(&path)).await??;
+            if list.label == files::TAKEOUT_LABEL {
+                list.tracks = keyless::fill_takeout(http, list.tracks).await;
+            }
             Ok((list, None))
         }
         crate::ImportInput::Url(url) => {
-            let url = url.trim().to_string();
-            let src = parse_url(&url).ok_or_else(|| anyhow!("not a supported playlist link: {url}"))?;
-            if let Some(server) = server {
-                let r = server.import(&url).await?;
-                let label = src.label().to_string();
-                return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url)));
+            let mut url = url.trim().to_string();
+            let mut src = parse_url(&url).ok_or_else(|| anyhow!("not a supported playlist link: {url}"))?;
+            if matches!(src, RemoteSource::ShortLink(_)) {
+                url = links::expand_short_link(http, &url).await?;
+                src = parse_url(&url)
+                    .filter(|s| !matches!(s, RemoteSource::ShortLink(_)))
+                    .ok_or_else(|| anyhow!("the short link leads to something Glyph cannot import: {url}"))?;
             }
-            let list = fetch_direct(&src, providers).await?;
-            Ok((list, Some(url)))
+            let label = src.label().to_string();
+            if let Some(found) = links::fetch(&src, providers, http, keys).await {
+                let (name, tracks) = found?;
+                return Ok((ParsedList { name, label, tracks }, Some(url)));
+            }
+            // The server first (its keys), then the app's own keys, then the
+            // ways that need no key at all.
+            let sc_on_server = matches!(src, RemoteSource::SoundCloud(_));
+            let mut first_err = None;
+            if let (Some(server), true) = (server, src.server_capable() || sc_on_server) {
+                match server.import(&url).await {
+                    Ok(r) if !r.tracks.is_empty() => return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url))),
+                    Ok(_) => {}
+                    Err(e) => first_err = Some(e),
+                }
+            }
+            if sc_on_server {
+                return Err(first_err.unwrap_or_else(|| anyhow!("SoundCloud links need the Glyph server or a SoundCloud client id")));
+            }
+            match fetch_direct(&src, providers).await {
+                Ok(list) if !list.tracks.is_empty() => Ok((list, Some(url))),
+                direct => match keyless_list(&src, http).await {
+                    Some(Ok((name, tracks))) => Ok((ParsedList { name, label, tracks }, Some(url))),
+                    Some(Err(e)) => Err(first_err.unwrap_or(e)),
+                    None => match direct {
+                        Ok(list) => Ok((list, Some(url))),
+                        Err(e) => Err(first_err.unwrap_or(e)),
+                    },
+                },
+            }
         }
     }
+}
+
+/// Playlists read without any key (Spotify embed page, YouTube web page).
+async fn keyless_list(src: &RemoteSource, http: &reqwest::Client) -> Option<Result<(String, Vec<Track>)>> {
+    Some(match src {
+        RemoteSource::SpotifyPlaylist(id) => keyless::spotify_embed(http, "playlist", id).await,
+        RemoteSource::YouTubePlaylist(id) => keyless::youtube_playlist(http, id).await,
+        _ => return None,
+    })
 }
 
 async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
@@ -150,6 +264,7 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
             let lf = p.lastfm.as_ref().ok_or_else(|| anyhow!("Last.fm API key missing (config.toml or GLYPH_LASTFM_KEY)"))?;
             (format!("{user} · loved tracks"), lf.loved_tracks(user).await?)
         }
+        other => return Err(anyhow!("{} links are read elsewhere", other.label())),
     };
     Ok(ParsedList { name, label, tracks })
 }
@@ -175,6 +290,7 @@ where
         unsure: vec![],
         not_found: vec![],
         origin,
+        ordered: Vec::with_capacity(total),
     };
     let mut stream = futures::stream::iter(list.tracks.into_iter().map(|t| {
         let fut = resolve(t.clone());
@@ -185,6 +301,7 @@ where
     while let Some((original, resolved)) = stream.next().await {
         done += 1;
         let m = ImportMatch { original, resolved };
+        result.ordered.push(m.to_track());
         match bucket_of(&m.resolved) {
             Bucket::Sure => result.sure.push(m),
             Bucket::Unsure => result.unsure.push(m),
@@ -246,6 +363,38 @@ mod tests {
         assert_eq!(parse_url("daft punk"), None);
     }
 
+    #[test]
+    fn recognises_more_links() {
+        use RemoteSource::*;
+        assert_eq!(parse_url("https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa?si=1"), Some(SpotifyAlbum("4m2880jivSbbyEGAKfITCa".into())));
+        assert_eq!(parse_url("https://open.spotify.com/intl-de/artist/4tZwfgrHOc3mvqYlEYSvVi"), Some(SpotifyArtist("4tZwfgrHOc3mvqYlEYSvVi".into())));
+        assert_eq!(parse_url("https://open.spotify.com/track/2Foc5Q5nqNiosCNqttzHof"), Some(SpotifyTrack("2Foc5Q5nqNiosCNqttzHof".into())));
+        assert_eq!(parse_url("spotify:album:abc"), Some(SpotifyAlbum("abc".into())));
+        assert_eq!(parse_url("https://www.deezer.com/de/album/6575789"), Some(DeezerAlbum("6575789".into())));
+        assert_eq!(parse_url("https://www.deezer.com/artist/27"), Some(DeezerArtist("27".into())));
+        assert_eq!(parse_url("https://www.deezer.com/track/3135556"), Some(DeezerTrack("3135556".into())));
+        assert_eq!(
+            parse_url("https://soundcloud.com/odesza/sets/a-moment-apart?si=x"),
+            Some(SoundCloud("https://soundcloud.com/odesza/sets/a-moment-apart".into()))
+        );
+        assert_eq!(parse_url("https://m.soundcloud.com/odesza/likes"), Some(SoundCloud("https://soundcloud.com/odesza/likes".into())));
+        assert_eq!(parse_url("https://soundcloud.com/discover"), None);
+        assert_eq!(parse_url("https://on.soundcloud.com/AbC12"), Some(ShortLink("https://on.soundcloud.com/AbC12".into())));
+        assert_eq!(parse_url("https://deezer.page.link/xyz"), Some(ShortLink("https://deezer.page.link/xyz".into())));
+        assert_eq!(parse_url("https://bit.ly/xyz"), None);
+        assert!(matches!(parse_url("https://music.apple.com/us/playlist/todays-hits/pl.f4d106fed2bd41149aaacabb233eb5eb"), Some(AppleMusic(_))));
+        assert!(matches!(parse_url("https://music.apple.com/us/album/random-access-memories/617154241"), Some(AppleMusic(_))));
+        assert_eq!(parse_url("https://music.apple.com/us/artist/daft-punk/5468295"), None);
+        assert_eq!(
+            parse_url("https://c418.bandcamp.com/album/minecraft-volume-alpha?from=x"),
+            Some(Bandcamp("https://c418.bandcamp.com/album/minecraft-volume-alpha".into()))
+        );
+        assert_eq!(parse_url("https://c418.bandcamp.com/"), None);
+        assert_eq!(parse_url("ftp://open.spotify.com/playlist/abc"), None);
+        assert!(SpotifyPlaylist("x".into()).server_capable());
+        assert!(!SoundCloud("x".into()).server_capable());
+    }
+
     fn resolved(conf: f32, preview: bool) -> Option<Resolved> {
         Some(Resolved {
             track: test_track(ProviderId::Audius, "a", "t", "a", None),
@@ -278,6 +427,7 @@ mod tests {
             unsure: vec![],
             not_found: vec![ImportMatch { original: test_track(ProviderId::Spotify, "1", "a", "b", None), resolved: None }; 3],
             origin: None,
+            ordered: vec![],
         };
         assert_eq!(summary(&r), "matched: 139/142 (97%)");
     }
@@ -300,6 +450,8 @@ mod tests {
         })
         .await;
         assert_eq!((res.sure.len(), res.unsure.len(), res.not_found.len()), (2, 1, 3));
+        let order: Vec<&str> = res.ordered.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(order, ["t0", "t1", "t2", "t3", "t4", "t5"]);
         assert_eq!(res.sure[0].original.id, "0");
         assert_eq!(res.origin.as_deref(), Some("o"));
         let mut last = None;

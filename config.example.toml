@@ -6,7 +6,7 @@
 # Every key is optional. Environment variables override the file:
 #   GLYPH_SERVER_URL, GLYPH_YOUTUBE_KEY, GLYPH_JAMENDO_CLIENT_ID,
 #   GLYPH_SOUNDCLOUD_CLIENT_ID, GLYPH_SPOTIFY_CLIENT_ID,
-#   GLYPH_SPOTIFY_CLIENT_SECRET, GLYPH_LASTFM_KEY
+#   GLYPH_SPOTIFY_CLIENT_SECRET, GLYPH_LASTFM_KEY, GLYPH_DISCORD_CLIENT_ID
 # Keys set through env vars are never written back to this file.
 # Providers without a key are skipped (Audius, Internet Archive, Deezer,
 # MusicBrainz and LRCLIB need no key).
@@ -67,3 +67,11 @@ channel = "stable"
 download_parallelism = 5
 # Slow: 1; unknown/standard: up to 3; fast: configured maximum.
 download_adaptive = true
+
+[integrations]
+# Show the song playing in Glyph in your Discord profile (Rich Presence).
+# Off by default; also switchable in Settings > Integrations.
+discord_presence = false
+# Discord application ID from the Developer Portal (https://discord.com/developers/applications).
+# Empty = the ID built into this build, when it ships one.
+# discord_client_id = ""

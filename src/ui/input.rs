@@ -36,6 +36,9 @@ pub struct TextInput {
     pub value: String,
     pub masked: bool,
     pub placeholder: SharedString,
+    /// Longest value in characters (`None` = no limit); typing and pasting
+    /// stop there.
+    pub max_chars: Option<usize>,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -60,6 +63,7 @@ impl TextInput {
             value: String::new(),
             masked: false,
             placeholder: placeholder.into(),
+            max_chars: None,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -73,8 +77,25 @@ impl TextInput {
         self.masked = true;
         self
     }
+    pub fn max_chars(mut self, n: usize) -> Self {
+        self.max_chars = Some(n);
+        self
+    }
+    /// `new_text` cut so that replacing `range` keeps the value within `max_chars`.
+    fn fit<'a>(&self, range: &Range<usize>, new_text: &'a str) -> &'a str {
+        let Some(max) = self.max_chars else { return new_text };
+        let kept = self.value[..range.start].chars().count() + self.value[range.end..].chars().count();
+        let room = max.saturating_sub(kept);
+        match new_text.char_indices().nth(room) {
+            Some((b, _)) => &new_text[..b],
+            None => new_text,
+        }
+    }
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
         self.value = value.into();
+        if let Some((b, _)) = self.max_chars.and_then(|m| self.value.char_indices().nth(m)) {
+            self.value.truncate(b);
+        }
         self.selected_range = self.value.len()..self.value.len();
         self.marked_range = None;
         self.last_layout = None;
@@ -420,6 +441,11 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let new_text = self.fit(&range, new_text);
+        if new_text.is_empty() && range.is_empty() && !clean_text.is_empty() {
+            window.play_system_bell();
+            return;
+        }
 
         self.value =
             (self.value[0..range.start].to_owned() + new_text + &self.value[range.end..]).into();
@@ -446,6 +472,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let new_text = self.fit(&range, new_text);
 
         self.value =
             (self.value[0..range.start].to_owned() + new_text + &self.value[range.end..]).into();

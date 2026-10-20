@@ -13,7 +13,7 @@
 //! Devices signed in without the password (passkey, pairing code, browser)
 //! keep the item locked until the password is entered once.
 
-use crate::config::{ApiKeys, AudioQuality, Config, UpdatesConfig, VisualsConfig, VolumeLevel};
+use crate::config::{ApiKeys, AudioQuality, Config, IntegrationsConfig, UpdatesConfig, VisualsConfig, VolumeLevel};
 use crate::sync::{Key, SyncState};
 use anyhow::{anyhow, Result};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -154,6 +154,7 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
         ),
         (setting("visuals"), json(&cfg.visuals)),
         (setting("updates"), json(&cfg.updates)),
+        (setting("integrations"), json(&cfg.integrations)),
         (
             setting("audio"),
             json(&Audio {
@@ -234,6 +235,10 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
             (kind::SETTING, "updates") => {
                 let Some(x) = parse::<UpdatesConfig>(v) else { continue };
                 cfg.updates = x;
+            }
+            (kind::SETTING, "integrations") => {
+                let Some(x) = parse::<IntegrationsConfig>(v) else { continue };
+                cfg.integrations = x;
             }
             (kind::SETTING, "audio") => {
                 let Some(x) = parse::<Audio>(v) else { continue };

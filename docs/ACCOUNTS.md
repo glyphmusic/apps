@@ -157,8 +157,9 @@ Wire format (`glyph-protocol`, all new fields optional so old clients ignore the
 
 `glyph-core/src/settings_sync.rs`. Settings sync as `setting` items, one per
 section (`general` language, `providers` enabled/priority/YouTube budget,
-`visuals`, `updates`, `audio` without the output device, `player` shuffle/
-repeat/queue), last writer wins per section. Device-bound and never synced:
+`visuals`, `updates`, `integrations` Discord presence, `audio` without the
+output device, `player` shuffle/repeat/queue), last writer wins per section.
+Device-bound and never synced:
 server address, yt-dlp path, cache size, output device, volume, mini player.
 A device pushes settings only after its first full pull (`SyncState::pulled_once`),
 so a fresh install does not overwrite the account's settings with defaults.

@@ -66,7 +66,7 @@ impl Providers {
         if on(ProviderId::YouTube) {
             // A local yt-dlp is enough on its own; the API key alone gives
             // search + the embed player.
-            let local = crate::ytdlp::YtDlp::locate(config.providers.ytdlp_path.as_deref());
+            let local = crate::ytdlp::YtDlp::with_extractor(config.providers.ytdlp_path.as_deref(), config.providers.extractor);
             if local.is_some() || keys.youtube.is_some() {
                 let yt = Arc::new(youtube::YouTube::new(
                     http.clone(),

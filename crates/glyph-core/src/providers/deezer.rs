@@ -13,7 +13,7 @@ pub struct Deezer {
 }
 
 #[derive(Debug, Deserialize)]
-struct DTrack {
+pub(crate) struct DTrack {
     #[serde(deserialize_with = "de_flex_string")]
     id: String,
     #[serde(default)]
@@ -57,14 +57,14 @@ struct DAlbum {
 }
 
 #[derive(Debug, Deserialize)]
-struct DList {
+pub(crate) struct DList {
     #[serde(default)]
-    data: Vec<DTrack>,
+    pub data: Vec<DTrack>,
     #[serde(default)]
-    next: Option<String>,
+    pub next: Option<String>,
 }
 
-fn convert(t: DTrack) -> Option<Track> {
+pub(crate) fn convert(t: DTrack) -> Option<Track> {
     if t.readable == Some(false) || t.title.is_empty() {
         return None;
     }
@@ -103,12 +103,132 @@ fn check_error(v: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// One release of an artist (album, EP, single, compilation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Release {
+    /// Deezer album id.
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub cover_url: Option<String>,
+    pub year: Option<u16>,
+    pub kind: crate::catalog::AlbumKind,
+}
+
+impl Release {
+    /// A stand-in song for the release's cover (cover cache, menus).
+    pub fn cover_track(&self) -> Track {
+        Track {
+            id: format!("album:{}", self.id),
+            source: ProviderId::Deezer,
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: Some(self.title.clone()),
+            duration_ms: None,
+            cover_url: self.cover_url.clone(),
+            isrc: None,
+            permalink: Some(format!("https://www.deezer.com/album/{}", self.id)),
+            external_ids: Default::default(),
+            explicit: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DArtistHit {
+    #[serde(deserialize_with = "de_flex_string")]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    nb_fan: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DRelease {
+    #[serde(deserialize_with = "de_flex_string")]
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    cover_xl: Option<String>,
+    #[serde(default)]
+    cover_big: Option<String>,
+    #[serde(default)]
+    release_date: Option<String>,
+    #[serde(default)]
+    record_type: Option<String>,
+}
+
 impl Deezer {
     pub fn new(http: reqwest::Client) -> Self {
         Self { http }
     }
 
-    async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<serde_json::Value> {
+    /// The Deezer artist for a name: exact (normalised) name, most fans.
+    pub async fn artist_id(&self, name: &str) -> Result<Option<String>> {
+        let v = self.get(&format!("{API}/search/artist"), &[("q", name), ("limit", "10")]).await?;
+        let hits: Vec<DArtistHit> = serde_json::from_value(v["data"].clone()).unwrap_or_default();
+        let want = crate::dedupe::normalize_artist(name);
+        Ok(hits.into_iter().filter(|a| crate::dedupe::normalize_artist(&a.name) == want).max_by_key(|a| a.nb_fan).map(|a| a.id))
+    }
+
+    /// Every release of an artist (the whole discography, not only what a
+    /// song search happens to find), newest first.
+    pub async fn artist_releases(&self, name: &str) -> Result<Vec<Release>> {
+        let Some(id) = self.artist_id(name).await? else { return Ok(Vec::new()) };
+        let mut out: Vec<Release> = Vec::new();
+        let mut index = 0usize;
+        // Paged by 100; four pages cover even very large catalogs.
+        for _ in 0..4 {
+            let idx = index.to_string();
+            let v = self.get(&format!("{API}/artist/{id}/albums"), &[("limit", "100"), ("index", idx.as_str())]).await?;
+            let page: Vec<DRelease> = serde_json::from_value(v["data"].clone()).unwrap_or_default();
+            let n = page.len();
+            for r in page {
+                if r.title.trim().is_empty() || out.iter().any(|o| o.id == r.id) {
+                    continue;
+                }
+                out.push(Release {
+                    id: r.id,
+                    title: r.title,
+                    artist: name.to_string(),
+                    cover_url: r.cover_xl.or(r.cover_big),
+                    year: r.release_date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()).filter(|y| *y > 1900),
+                    kind: r.record_type.as_deref().and_then(crate::catalog::AlbumKind::parse).unwrap_or(crate::catalog::AlbumKind::Album),
+                });
+            }
+            if n < 100 || v["next"].is_null() {
+                break;
+            }
+            index += 100;
+        }
+        // Same title twice (clean + explicit, deluxe re-issues under the same
+        // name): keep the newest.
+        out.sort_by(|a, b| b.year.cmp(&a.year));
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|r| seen.insert(r.title.to_lowercase()));
+        Ok(out)
+    }
+
+    /// The songs of a release, in order.
+    pub async fn album_tracks(&self, release: &Release) -> Result<Vec<Track>> {
+        let v = self.get(&format!("{API}/album/{}/tracks", release.id), &[("limit", "200")]).await?;
+        let list: Vec<DTrack> = serde_json::from_value(v["data"].clone()).unwrap_or_default();
+        Ok(list
+            .into_iter()
+            .filter_map(convert)
+            .map(|mut t| {
+                t.album = Some(release.title.clone());
+                if t.cover_url.is_none() {
+                    t.cover_url = release.cover_url.clone();
+                }
+                t
+            })
+            .collect())
+    }
+
+    pub(crate) async fn get(&self, url: &str, query: &[(&str, &str)]) -> Result<serde_json::Value> {
         let v: serde_json::Value = send_json(self.http.get(url).query(query)).await?;
         check_error(&v)?;
         Ok(v)
@@ -170,27 +290,10 @@ impl Deezer {
             #[serde(default)]
             data: Vec<DArtist>,
         }
-        let id = self.artist_id(artist).await?;
+        let id = self.artist_id(artist.trim()).await?.ok_or(ProviderError::NotFound)?;
         let v = self.get(&format!("{API}/artist/{id}/related"), &[("limit", "20")]).await?;
         let rel: Related = serde_json::from_value(v)?;
         Ok(rel.data.into_iter().map(|a| a.name).filter(|n| !n.trim().is_empty()).collect())
-    }
-
-    /// Deezer id of an artist, looked up by name (accent-insensitive).
-    async fn artist_id(&self, artist: &str) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Hits {
-            #[serde(default)]
-            data: Vec<DArtist>,
-        }
-        let v = self.get(&format!("{API}/search/artist"), &[("q", artist.trim()), ("limit", "5")]).await?;
-        let l: Hits = serde_json::from_value(v)?;
-        let want = crate::dedupe::normalize_artist(artist);
-        l.data
-            .into_iter()
-            .find(|a| crate::dedupe::normalize_artist(&a.name) == want)
-            .and_then(|a| a.id)
-            .ok_or_else(|| ProviderError::NotFound.into())
     }
 
     /// Popular right now (Deezer's public chart).
@@ -206,7 +309,7 @@ impl Deezer {
         Ok(serde_json::from_value(v)?)
     }
 
-    async fn paged(&self, first: String) -> Result<Vec<Track>> {
+    pub(crate) async fn paged(&self, first: String) -> Result<Vec<Track>> {
         let mut out = Vec::new();
         let mut url = first;
         let mut query: Vec<(&str, &str)> = vec![("limit", "100")];
@@ -230,6 +333,35 @@ impl Deezer {
         let name = v["title"].as_str().unwrap_or("Deezer playlist").to_string();
         let tracks = self.paged(format!("{API}/playlist/{id}/tracks")).await?;
         Ok((name, tracks))
+    }
+
+    /// Title, artist and songs of an album.
+    pub async fn album(&self, id: &str) -> Result<(String, String, Vec<Track>)> {
+        let v = self.get(&format!("{API}/album/{id}"), &[]).await?;
+        let release = Release {
+            id: id.to_string(),
+            title: v["title"].as_str().unwrap_or("Deezer album").to_string(),
+            artist: v["artist"]["name"].as_str().unwrap_or("").to_string(),
+            cover_url: v["cover_xl"].as_str().or(v["cover_big"].as_str()).map(str::to_string),
+            year: None,
+            kind: crate::catalog::AlbumKind::Album,
+        };
+        let tracks = self.album_tracks(&release).await?;
+        Ok((release.title, release.artist, tracks))
+    }
+
+    /// An artist's name and top songs.
+    pub async fn artist_top(&self, id: &str) -> Result<(String, Vec<Track>)> {
+        let v = self.get(&format!("{API}/artist/{id}"), &[]).await?;
+        let name = v["name"].as_str().unwrap_or("Deezer artist").to_string();
+        let top = self.get(&format!("{API}/artist/{id}/top"), &[("limit", "50")]).await?;
+        let list: Vec<DTrack> = serde_json::from_value(top["data"].clone()).unwrap_or_default();
+        Ok((name, list.into_iter().filter_map(convert).collect()))
+    }
+
+    /// One song by id.
+    pub async fn track_by_id(&self, id: &str) -> Result<Track> {
+        convert(self.fetch_track(id).await?).ok_or_else(|| ProviderError::NotFound.into())
     }
 
     /// Public favourites of a user id.

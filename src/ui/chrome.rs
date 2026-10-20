@@ -422,22 +422,54 @@ fn side_tooltip(label: SharedString, since: Option<std::time::Instant>) -> Optio
     )
 }
 
-/// Recently opened lists as small covers under the navigation (newest first).
+/// Recently used lists and artist pages as small covers under the
+/// navigation (pinned first, then most used). Right-click offers to hide one.
 fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyElement> {
-    let lists = app.recent_lists(5);
-    if lists.is_empty() {
+    use crate::app::SideItem;
+    let entries = app.sidebar_items(5);
+    if entries.is_empty() {
         return None;
     }
     let open = if app.view == View::List { app.open_list.clone() } else { None };
-    let items: Vec<_> = lists
+    let open_artist = if app.view == View::Artist { app.open_artist.clone() } else { None };
+    let items: Vec<_> = entries
         .into_iter()
         .enumerate()
-        .map(|(i, l)| {
-            let active = open.as_ref().is_some_and(|o| o.same(&l));
-            let art = crate::ui::lists::list_cover(app, &l, 36.0, cx);
-            let tip = side_tooltip(app.list_title(&l).into(), app.side_hover.filter(|(h, _)| *h == i).map(|(_, at)| at));
-            let lm = l.clone();
-            crate::ui::lists::with_list_menu(div().id(("side-list", i)), lm, cx)
+        .map(|(i, item)| {
+            let (active, art, label) = match &item {
+                SideItem::List(l) => (
+                    open.as_ref().is_some_and(|o| o.same(l)),
+                    crate::ui::lists::list_cover(app, l, 36.0, cx),
+                    app.list_title(l),
+                ),
+                SideItem::Artist { name, track } => {
+                    // Artists are round, like everywhere else.
+                    let art = match track {
+                        Some(tr) => crate::ui::widgets::cover(app, tr, 36.0, 18.0, cx).into_any_element(),
+                        None => div()
+                            .size(px(36.0))
+                            .rounded_full()
+                            .bg(theme::card())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("user-round", 16.0, theme::text_dim()))
+                            .into_any_element(),
+                    };
+                    (open_artist.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(name)), art, name.clone())
+                }
+            };
+            let tip = side_tooltip(label.into(), app.side_hover.filter(|(h, _)| *h == i).map(|(_, at)| at));
+            let menu_item = item.clone();
+            div()
+                .id(("side-list", i))
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_sidebar_ctx(menu_item.clone(), e.position, cx)
+                    }),
+                )
                 .relative()
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if *hovered {
@@ -458,7 +490,10 @@ fn recent_lists(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::AnyEle
                 .cursor_pointer()
                 .when(active, |d| d.bg(theme::active()))
                 .hover(|s| s.bg(theme::hover()))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_list(l.clone(), cx)))
+                .on_click(cx.listener(move |this, _, _, cx| match &item {
+                    SideItem::List(l) => this.open_list(l.clone(), cx),
+                    SideItem::Artist { name, .. } => this.open_artist(name, cx),
+                }))
                 .child(art)
                 .into_any_element()
         })

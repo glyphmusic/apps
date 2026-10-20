@@ -224,6 +224,15 @@ pub struct Library {
     /// Songs skipped within 30 s per artist (normalised name).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artist_skips: BTreeMap<String, u32>,
+    /// Artist pages opened lately, newest first (sidebar next to the lists).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_artists: Vec<FollowedArtist>,
+    /// Sidebar entries the user hid ([`Library::list_id`] / [`Library::artist_id`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sidebar_hidden: Vec<String>,
+    /// Opt-in listening statistics (empty while turned off).
+    #[serde(default, skip_serializing_if = "crate::stats::Stats::is_empty")]
+    pub stats: crate::stats::Stats,
     /// Transient lookup index for `liked` so `is_liked` is O(1) during UI rendering.
     #[serde(skip)]
     liked_cache: LikedCache,
@@ -246,6 +255,10 @@ pub struct LibraryActivity {
     pub artist_plays: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artist_skips: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_artists: Vec<FollowedArtist>,
+    #[serde(default, skip_serializing_if = "crate::stats::Stats::is_empty")]
+    pub stats: crate::stats::Stats,
 }
 
 impl LibraryActivity {
@@ -261,6 +274,20 @@ impl LibraryActivity {
 
 /// Max entries in the search history.
 pub const SEARCH_HISTORY_LIMIT: usize = 20;
+/// Longest playlist name in characters (longer ones are cut).
+pub const PLAYLIST_NAME_MAX: usize = 100;
+/// Artist pages remembered for the sidebar.
+const RECENT_ARTISTS_LIMIT: usize = 24;
+
+/// A playlist name as stored: trimmed, at most [`PLAYLIST_NAME_MAX`] characters.
+/// An album key without songs (nothing to play, not worth saving).
+fn tracks_empty(key: &ListKey) -> bool {
+    matches!(key, ListKey::Album { tracks, .. } if tracks.is_empty())
+}
+
+pub fn clean_playlist_name(name: &str) -> String {
+    name.trim().chars().take(PLAYLIST_NAME_MAX).collect::<String>().trim_end().to_string()
+}
 
 impl Library {
     pub fn path() -> PathBuf {
@@ -283,6 +310,8 @@ impl Library {
             list_activity: self.list_activity.clone(),
             artist_plays: self.artist_plays.clone(),
             artist_skips: self.artist_skips.clone(),
+            recent_artists: self.recent_artists.clone(),
+            stats: self.stats.clone(),
         }
     }
 
@@ -293,6 +322,12 @@ impl Library {
         self.list_activity = act.list_activity;
         self.artist_plays = act.artist_plays;
         self.artist_skips = act.artist_skips;
+        if !act.recent_artists.is_empty() {
+            self.recent_artists = act.recent_artists;
+        }
+        if !act.stats.is_empty() {
+            self.stats = act.stats;
+        }
     }
 
     /// Missing file = empty library. A corrupt file is kept as `library.json.bak`.
@@ -572,8 +607,13 @@ impl Library {
 
     /// Adds `amount` of use to a list (a song listened from it: 1, opening it: less).
     pub fn record_list_use(&mut self, key: &ListKey, amount: f64, now: u64) {
-        let id = Self::list_id(key);
-        let w = self.list_weight(key, now) + amount;
+        self.record_use(&Self::list_id(key), amount, now);
+    }
+
+    /// [`Library::record_list_use`] by sidebar id (lists and artist pages).
+    pub fn record_use(&mut self, id: &str, amount: f64, now: u64) {
+        let id = id.to_string();
+        let w = self.use_weight(&id, now) + amount;
         self.list_activity.insert(id, (w, now));
         if self.list_activity.len() > 200 {
             let mut v: Vec<_> = std::mem::take(&mut self.list_activity).into_iter().collect();
@@ -585,9 +625,47 @@ impl Library {
 
     /// Current use of a list, halving every two weeks without use.
     pub fn list_weight(&self, key: &ListKey, now: u64) -> f64 {
+        self.use_weight(&Self::list_id(key), now)
+    }
+
+    /// Current use by sidebar id, halving every two weeks without use.
+    pub fn use_weight(&self, id: &str, now: u64) -> f64 {
         self.list_activity
-            .get(&Self::list_id(key))
+            .get(id)
             .map_or(0.0, |(s, at)| s * (-((now.saturating_sub(*at)) as f64) / (14.0 * 86400.0)).exp2())
+    }
+
+    /// Sidebar id of an artist page.
+    pub fn artist_id(name: &str) -> String {
+        format!("artist:{}", name.trim().to_lowercase())
+    }
+
+    /// Remembers an opened artist page (sidebar): front, deduped, capped.
+    pub fn push_recent_artist_page(&mut self, name: &str, track: Option<Track>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let track = track.or_else(|| self.recent_artists.iter().find(|a| a.name.eq_ignore_ascii_case(name)).and_then(|a| a.track.clone()));
+        self.recent_artists.retain(|a| !a.name.eq_ignore_ascii_case(name));
+        self.recent_artists.insert(0, FollowedArtist { name: name.to_string(), track });
+        self.recent_artists.truncate(RECENT_ARTISTS_LIMIT);
+    }
+
+    pub fn is_sidebar_hidden(&self, id: &str) -> bool {
+        self.sidebar_hidden.iter().any(|h| h == id)
+    }
+
+    /// Hides a list / artist from the sidebar or shows it again. Returns
+    /// true when it is now hidden.
+    pub fn toggle_sidebar_hidden(&mut self, id: &str) -> bool {
+        if let Some(i) = self.sidebar_hidden.iter().position(|h| h == id) {
+            self.sidebar_hidden.remove(i);
+            false
+        } else {
+            self.sidebar_hidden.push(id.to_string());
+            true
+        }
     }
 
     pub fn push_recent_list(&mut self, key: ListKey) {
@@ -599,7 +677,7 @@ impl Library {
     pub fn create_playlist(&mut self, name: &str) -> &mut Playlist {
         self.playlists.push(Playlist {
             id: uuid::Uuid::new_v4().simple().to_string(),
-            name: name.trim().to_string(),
+            name: clean_playlist_name(name),
             tracks: vec![],
             origin: None,
             cover: None,
@@ -619,7 +697,7 @@ impl Library {
 
     pub fn rename_playlist(&mut self, id: &str, name: &str) {
         if let Some(p) = self.playlist_mut(id) {
-            p.name = name.trim().to_string();
+            p.name = clean_playlist_name(name);
         }
     }
 
@@ -685,6 +763,34 @@ impl Library {
             }
         }
         (&mut self.playlists[idx], added)
+    }
+
+    /// Saves imported albums after the ones already saved (same title +
+    /// artist is skipped). Returns how many were added.
+    pub fn save_albums(&mut self, albums: impl IntoIterator<Item = (String, String, Vec<Track>)>) -> usize {
+        let mut added = 0;
+        for (title, artist, tracks) in albums {
+            let key = ListKey::Album { title, artist, tracks };
+            if !tracks_empty(&key) && !self.is_saved(&key) {
+                self.saved_albums.push(key);
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Follows imported artists after the ones already followed (no
+    /// duplicates). Returns how many were added.
+    pub fn follow_all(&mut self, names: impl IntoIterator<Item = String>) -> usize {
+        let mut added = 0;
+        for name in names {
+            let name = name.trim();
+            if !name.is_empty() && !self.is_following(name) {
+                self.followed.push(FollowedArtist { name: name.to_string(), track: None });
+                added += 1;
+            }
+        }
+        added
     }
 
     /// Adds imported tracks to Liked Songs (no duplicates). Returns how many were added.
@@ -884,6 +990,23 @@ mod tests {
         let encoded = serde_json::to_value(&lib).unwrap();
         let decoded: Library = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.recent, lib.recent);
+    }
+
+    #[test]
+    fn imported_albums_and_artists() {
+        let mut lib = Library::default();
+        lib.toggle_follow("Daft Punk", None);
+        let n = lib.follow_all(vec!["daft punk".into(), "Air".into(), " ".into(), "Justice".into(), "Air".into()]);
+        assert_eq!(n, 2);
+        let names: Vec<&str> = lib.followed.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Daft Punk", "Air", "Justice"]);
+        let n = lib.save_albums(vec![
+            ("RAM".to_string(), "Daft Punk".to_string(), vec![tr("1", "a")]),
+            ("ram".to_string(), "daft punk".to_string(), vec![tr("2", "b")]),
+            ("Empty".to_string(), "X".to_string(), vec![]),
+        ]);
+        assert_eq!(n, 1);
+        assert_eq!(lib.saved_albums.len(), 1);
     }
 
     #[test]

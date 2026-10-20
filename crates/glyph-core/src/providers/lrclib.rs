@@ -62,8 +62,38 @@ impl LrcRecord {
             synced,
             plain: self.plain_lyrics.clone().filter(|s| !s.trim().is_empty()),
             instrumental: self.instrumental,
+            source_id: self.id.clone(),
         }
     }
+}
+
+/// Every plausible record for a song, best first (synced ones ahead on near
+/// ties), without duplicates of the same text.
+pub fn rank_candidates(records: Vec<LrcRecord>, title: &str, artist: &str, duration_ms: Option<u64>, max: usize) -> Vec<(LrcRecord, f32)> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_text = std::collections::HashSet::new();
+    let mut v: Vec<(LrcRecord, f32, f32)> = records
+        .into_iter()
+        .filter(|r| seen_ids.insert(r.id.clone()))
+        .filter(|r| r.synced_lyrics.as_deref().is_some_and(|s| !s.trim().is_empty()) || r.plain_lyrics.as_deref().is_some_and(|s| !s.trim().is_empty()))
+        .map(|r| {
+            let s = r.match_score(title, artist, duration_ms);
+            let synced = r.synced_lyrics.as_deref().is_some_and(|l| !l.trim().is_empty());
+            let rank = s + if synced { 0.03 } else { 0.0 };
+            (r, s, rank)
+        })
+        .filter(|(_, s, _)| *s >= 0.35)
+        .collect();
+    v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    v.into_iter()
+        .filter(|(r, _, _)| {
+            let text = r.synced_lyrics.as_deref().or(r.plain_lyrics.as_deref()).unwrap_or("");
+            let key: String = text.chars().filter(|c| c.is_alphanumeric()).take(400).collect::<String>().to_lowercase();
+            seen_text.insert(key)
+        })
+        .take(max)
+        .map(|(r, s, _)| (r, s))
+        .collect()
 }
 
 /// Picks the best record of a `/api/search` result (needs a minimum match,
@@ -104,6 +134,30 @@ impl LrcLib {
     async fn search_records(&self, title: &str, artist: &str) -> Result<Vec<LrcRecord>> {
         let q = [("track_name", title), ("artist_name", artist)];
         send_json(self.http.get(format!("{API}/search")).query(&q)).await
+    }
+
+    /// All versions LRCLIB has for a song (the user picks when the first
+    /// one is wrong): searched by title + artist and by free text.
+    pub async fn candidates(&self, title: &str, artist: &str, duration_ms: Option<u64>) -> Result<Vec<Lyrics>> {
+        let free = format!("{artist} {title}");
+        let (a, b) = futures::join!(
+            self.search_records(title, artist),
+            send_json::<Vec<LrcRecord>>(self.http.get(format!("{API}/search")).query(&[("q", free.as_str())])),
+        );
+        let mut all = Vec::new();
+        let mut err = None;
+        for r in [a, b] {
+            match r {
+                Ok(v) => all.extend(v),
+                Err(e) => err = Some(e),
+            }
+        }
+        if all.is_empty() {
+            if let Some(e) = err {
+                return Err(e);
+            }
+        }
+        Ok(rank_candidates(all, title, artist, duration_ms, 12).into_iter().map(|(r, s)| r.to_lyrics(s)).collect())
     }
 
     /// Looks up lyrics: `/api/get` first, `/api/search` as fallback.

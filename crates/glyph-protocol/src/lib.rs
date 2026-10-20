@@ -725,3 +725,166 @@ mod checksum_tests {
         assert_eq!(checksum_for_asset("bad  glyph.zip", "glyph.zip"), None);
     }
 }
+
+/// Model Context Protocol (MCP): AI assistants control the Glyph app.
+///
+/// The app serves MCP itself on `http://127.0.0.1:<port>/mcp` ("local"), or
+/// a signed-in app is reached through the Glyph server ("server"): the
+/// assistant talks to `<server>/mcp` with the user's MCP token, the server
+/// queues the tool call, the app picks it up (`GET /v1/mcp/pull`), runs it
+/// and posts the result (`POST /v1/mcp/result`). Both offer the same tools,
+/// defined here.
+pub mod mcp {
+    use serde::{Deserialize, Serialize};
+
+    /// MCP revision both ends speak (Streamable HTTP, JSON responses).
+    pub const PROTOCOL_VERSION: &str = "2025-06-18";
+    /// Longest wait for the app's answer to one tool call (ms).
+    pub const CALL_TIMEOUT_MS: u64 = 25_000;
+    /// How long one `pull` waits for a call before answering empty (ms).
+    pub const PULL_WAIT_MS: u64 = 20_000;
+
+    /// One queued tool call (server -> app).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Call {
+        pub id: String,
+        pub name: String,
+        #[serde(default)]
+        pub arguments: serde_json::Value,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct PullResponse {
+        #[serde(default)]
+        pub calls: Vec<Call>,
+        /// Assistants asking for access (OAuth sign-in on the server's page):
+        /// the app asks the user and answers with [`Decision`].
+        #[serde(default)]
+        pub approvals: Vec<Approval>,
+    }
+
+    /// An assistant asks to control Glyph; the same code shows on its sign-in page.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Approval {
+        pub id: String,
+        /// Name the assistant registered with (e.g. "Claude").
+        pub client: String,
+        pub code: String,
+    }
+
+    /// `POST /v1/mcp/approve`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Decision {
+        pub id: String,
+        pub allow: bool,
+    }
+
+    /// The app's answer to one call (app -> server). `result` is an MCP
+    /// `CallToolResult` (`content`, `structuredContent`, `isError`).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ResultRequest {
+        pub id: String,
+        pub result: serde_json::Value,
+    }
+
+    /// A fresh MCP token for the signed-in user (shown once; the server only
+    /// keeps its hash) and the endpoint to give the assistant.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct TokenResponse {
+        pub token: String,
+        pub url: String,
+    }
+
+    fn obj(props: serde_json::Value, required: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": props, "required": required })
+    }
+
+    fn tool(name: &str, description: &str, schema: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "name": name, "description": description, "inputSchema": schema })
+    }
+
+    /// Every tool the app offers, as MCP `tools/list` entries.
+    pub fn tools() -> Vec<serde_json::Value> {
+        use serde_json::json;
+        let none = || obj(json!({}), &[]);
+        let song = json!({ "type": "string", "description": "Song reference from search / queue / playlist results (`ref`)." });
+        let query = json!({ "type": "string", "description": "Free text, e.g. \"Daft Punk - One More Time\". Used when no ref is given." });
+        vec![
+            tool("now_playing", "What Glyph plays right now: song, position, volume, shuffle, repeat, queue length.", none()),
+            tool("play", "Resume playback.", none()),
+            tool("pause", "Pause playback.", none()),
+            tool("toggle_play", "Play / pause.", none()),
+            tool("next", "Skip to the next song.", none()),
+            tool("previous", "Back to the previous song.", none()),
+            tool("seek", "Jump to a position in the current song.", obj(json!({ "seconds": { "type": "number", "minimum": 0 } }), &["seconds"])),
+            tool("set_volume", "Set the volume (0-100).", obj(json!({ "volume": { "type": "number", "minimum": 0, "maximum": 100 } }), &["volume"])),
+            tool("set_shuffle", "Shuffle on / off; optionally smart (spreads artists) or random.", obj(json!({ "on": { "type": "boolean" }, "style": { "type": "string", "enum": ["smart", "random"] } }), &["on"])),
+            tool("set_repeat", "Repeat mode.", obj(json!({ "mode": { "type": "string", "enum": ["off", "all", "one"] } }), &["mode"])),
+            tool("search", "Search songs. Results carry a `ref` for the other tools.", obj(json!({ "query": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 50 } }), &["query"])),
+            tool("play_song", "Play a song now (by ref, or the best search hit for query).", obj(json!({ "ref": song, "query": query }), &[])),
+            tool("play_artist", "Play an artist's songs.", obj(json!({ "name": { "type": "string" }, "shuffle": { "type": "boolean" } }), &["name"])),
+            tool("queue_add", "Add a song to the queue (\"Up next\"); `next` puts it first.", obj(json!({ "ref": song, "query": query, "next": { "type": "boolean" } }), &[])),
+            tool("get_queue", "The current queue: songs queued by hand and what plays next from the list.", none()),
+            tool("list_playlists", "The user's playlists (id, name, song count).", none()),
+            tool("get_playlist", "Songs of a playlist (`liked` for Liked Songs).", obj(json!({ "id": { "type": "string" } }), &["id"])),
+            tool("play_playlist", "Play a playlist (`liked` for Liked Songs).", obj(json!({ "id": { "type": "string" }, "shuffle": { "type": "boolean" } }), &["id"])),
+            tool("create_playlist", "Create a playlist, optionally with songs.", obj(json!({ "name": { "type": "string", "maxLength": 100 }, "refs": { "type": "array", "items": song } }), &["name"])),
+            tool("rename_playlist", "Rename a playlist.", obj(json!({ "id": { "type": "string" }, "name": { "type": "string", "maxLength": 100 } }), &["id", "name"])),
+            tool("delete_playlist", "Delete a playlist.", obj(json!({ "id": { "type": "string" } }), &["id"])),
+            tool("add_to_playlist", "Add songs to a playlist.", obj(json!({ "id": { "type": "string" }, "refs": { "type": "array", "items": song } }), &["id", "refs"])),
+            tool("remove_from_playlist", "Remove the song at `index` (0-based) from a playlist.", obj(json!({ "id": { "type": "string" }, "index": { "type": "integer", "minimum": 0 } }), &["id", "index"])),
+            tool("like", "Like a song (the current one without ref).", obj(json!({ "ref": song }), &[])),
+            tool("unlike", "Remove a song from Liked Songs (the current one without ref).", obj(json!({ "ref": song }), &[])),
+            tool("get_lyrics", "Lyrics of the current song (plain text).", none()),
+            tool("listening_stats", "Listening statistics, if the user turned them on.", obj(json!({ "range": { "type": "string", "enum": ["month", "last_month", "year", "all"] } }), &[])),
+        ]
+    }
+
+    /// A text `CallToolResult` (with the data as structured content too).
+    pub fn text_result(value: &serde_json::Value, is_error: bool) -> serde_json::Value {
+        let text = match value {
+            serde_json::Value::String(s) => s.clone(),
+            v => serde_json::to_string_pretty(v).unwrap_or_default(),
+        };
+        let mut r = serde_json::json!({ "content": [{ "type": "text", "text": text }], "isError": is_error });
+        if value.is_object() {
+            r["structuredContent"] = value.clone();
+        }
+        r
+    }
+
+    /// Answers the protocol-level JSON-RPC methods; `None` for `tools/call`
+    /// (the caller runs the tool) and notifications (no answer).
+    pub fn handle_meta(method: &str, server_name: &str, version: &str) -> Option<Result<serde_json::Value, (i64, String)>> {
+        match method {
+            "initialize" => Some(Ok(serde_json::json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": { "name": server_name, "title": "Glyph", "version": version },
+                "instructions": "Controls the Glyph music app: playback, queue, search, playlists, likes, lyrics. Songs are passed between tools by their `ref`."
+            }))),
+            "ping" => Some(Ok(serde_json::json!({}))),
+            "tools/list" => Some(Ok(serde_json::json!({ "tools": tools() }))),
+            "tools/call" => None,
+            m if m.starts_with("notifications/") => None,
+            _ => Some(Err((-32601, format!("method not found: {method}")))),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn tools_are_named_uniquely_with_object_schemas() {
+            let tools = super::tools();
+            let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+            assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
+            names.sort();
+            let n = names.len();
+            names.dedup();
+            assert_eq!(names.len(), n);
+            assert!(super::handle_meta("tools/list", "glyph", "1").unwrap().is_ok());
+            assert!(super::handle_meta("tools/call", "glyph", "1").is_none());
+            assert!(super::handle_meta("nope", "glyph", "1").unwrap().is_err());
+        }
+    }
+}

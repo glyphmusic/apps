@@ -826,6 +826,37 @@ impl Backend {
     }
 }
 
+// ------------------------------------------------------------------ MCP relay
+
+impl Backend {
+    /// A new MCP token for AI assistants reaching this account's app
+    /// through the server.
+    pub async fn mcp_token(&self) -> Result<glyph_protocol::mcp::TokenResponse> {
+        self.profile_call(|c, t| async move { c.mcp_token(&t).await }).await
+    }
+
+    /// Waits (long poll) for tool calls queued on the server.
+    pub async fn mcp_pull(&self) -> Result<glyph_protocol::mcp::PullResponse> {
+        self.profile_call(|c, t| async move { c.mcp_pull(&t).await }).await
+    }
+
+    pub async fn mcp_approve(&self, d: glyph_protocol::mcp::Decision) -> Result<()> {
+        self.profile_call(move |c, t| {
+            let d = d.clone();
+            async move { c.mcp_approve(&t, &d).await }
+        })
+        .await
+    }
+
+    pub async fn mcp_result(&self, r: glyph_protocol::mcp::ResultRequest) -> Result<()> {
+        self.profile_call(move |c, t| {
+            let r = r.clone();
+            async move { c.mcp_result(&t, &r).await }
+        })
+        .await
+    }
+}
+
 // ------------------------------------------------------------------ profiles
 
 impl Backend {

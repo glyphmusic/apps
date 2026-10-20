@@ -5,10 +5,15 @@
 mod app;
 mod assets;
 mod config_ext;
+mod devices;
+mod discord;
 mod embed;
 mod i18n;
 mod instance;
 mod integrate;
+mod mcp;
+mod mcp_tools;
+mod mpd;
 #[cfg(windows)]
 mod jumplist;
 #[cfg(windows)]

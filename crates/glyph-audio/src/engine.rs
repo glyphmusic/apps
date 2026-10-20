@@ -447,7 +447,10 @@ impl Engine {
         };
         match opened {
             Ok(mut d) => {
-                tracing::info!(device = ?self.opened_device, default_buffer = self.use_default_buffer, "audio output opened");
+                let channels = d.config().channel_count().get();
+                tracing::info!(device = ?self.opened_device, channels, default_buffer = self.use_default_buffer, "audio output opened");
+                // Surround outputs can take multichannel songs as they are.
+                crate::spatial::set_device_channels(channels);
                 d.log_on_drop(false);
                 self.device = Some(d);
                 true

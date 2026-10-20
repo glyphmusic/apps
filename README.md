@@ -21,7 +21,7 @@ Server: [glyphmusic/server](https://github.com/glyphmusic/server) — the app us
 - **Explicit** "E" badges and an option to hide explicit songs.
 - **Accounts** (optional): an `@handle` account syncs library, playlists and settings across up to 5 or 10 devices.
 - **Windows** taskbar buttons (like / previous / play / next), in-app updater.
-- Languages: English, Deutsch, Русский.
+- Languages: English, Deutsch, Español, Français, Italiano, Polski, Português, Русский, Türkçe, Українська.
 
 ## Download
 

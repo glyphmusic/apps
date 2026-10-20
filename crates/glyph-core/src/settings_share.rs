@@ -2,8 +2,9 @@
 //! same JSON saved as a file.
 //!
 //! Carries the sections that also follow an account (see [`settings_sync`]):
-//! language, sources, appearance, updates, playback with the equalizer, and
-//! player modes, plus the user's own equalizer presets ([`crate::eq`] format).
+//! language, sources, appearance, updates, integrations, playback with the
+//! equalizer, and player modes, plus the user's own equalizer presets
+//! ([`crate::eq`] format).
 //! Never API keys, the server address or device-bound values
 //! (output device, paths, cache size, volume), so a file from someone else
 //! cannot point this app at their server or leak anyone's keys.

@@ -3,7 +3,8 @@
 //! shuffle/repeat/volume/mini/queue. Fixed light ink: it is a surface, not
 //! text on the background.
 
-use crate::app::{Glyph, View};
+use crate::app::{ControlMenu, Glyph, View};
+use crate::ui::controls::on_right_click;
 use crate::i18n::t;
 use crate::theme;
 use crate::ui::widgets::*;
@@ -232,12 +233,12 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .child(icon_button("prev", "skip-back", 17.0 - 4.0 * press_k("prev"), theme::text()).size(px(31.0)).on_click(cx.listener(|this, _, _, cx| {
                     press("prev");
                     this.previous(cx)
-                })))
+                })).on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Back, cx)))
                 .child(play_btn)
                 .child(icon_button("next", "skip-forward", 17.0 - 4.0 * press_k("next"), theme::text()).size(px(31.0)).on_click(cx.listener(|this, _, _, cx| {
                     press("next");
                     this.next(false, cx)
-                }))),
+                })).on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Forward, cx))),
         )
         .child(
             div()
@@ -300,13 +301,22 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .child(toggle_button("shuffle", "shuffle", 15.0, app.shuffle(), None).on_click(cx.listener(|this, _, _, cx| {
             mark_toggled("shuffle");
             this.toggle_shuffle(cx)
-        })))
+        })).on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Shuffle, cx)))
         .child(
             toggle_button("repeat", if repeat == RepeatMode::One { "repeat-1" } else { "repeat" }, 15.0, repeat != RepeatMode::Off, None)
                 .on_click(cx.listener(|this, _, _, cx| {
                     mark_toggled("repeat");
                     this.cycle_repeat(cx)
-                })),
+                }))
+                .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Repeat, cx)),
+        )
+        // Connect: where music plays (this computer or a network device);
+        // pink while it plays on another device.
+        .child(
+            toggle_button("devices", "monitor-speaker", 15.0, app.show_devices || app.remote_on(), app.remote_on().then(theme::pink)).on_click(cx.listener(|this, _, _, cx| {
+                mark_toggled("devices");
+                this.toggle_devices_panel(cx)
+            })),
         )
         .child({
             let folded = BAR_W.with(|w| w.get()) < VOL_FOLD_W;
@@ -315,7 +325,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
             let mute = if folded { icon_button_plain("mute", icon_name, 15.0, theme::text_dim()) } else { icon_button("mute", icon_name, 15.0, theme::text_dim()) }.on_click(cx.listener(|this, _, _, cx| {
                 this.toggle_mute();
                 cx.notify();
-            }));
+            })).on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Volume, cx));
             let vol_label = Some(Rc::new(|f: f32| format!("{:.0}%", f * 100.0)) as BarLabel);
             if folded {
                 // Hovering the button (or the open slider) shows the slider
@@ -372,7 +382,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_shown, None).on_click(cx.listener(|this, _, _, cx| {
             mark_toggled("mini");
             this.toggle_mini(cx)
-        })))
+        })).on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Mini, cx)))
         .child(
             toggle_button("queue", "list-music", 15.0, app.show_queue, None).on_click(cx.listener(|this, _, _, cx| {
                 mark_toggled("queue");

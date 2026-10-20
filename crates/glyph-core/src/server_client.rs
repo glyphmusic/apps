@@ -270,7 +270,21 @@ impl ServerClient {
 
     pub async fn download_url_with_priority(&self, track: &Track, priority: &[ProviderId], youtube_only: bool) -> Result<Option<(ProviderId, String)>> {
         let body = ResolveRequest { youtube_only, track: track.clone(), priority: priority.to_vec() };
-        let resp = Self::check(self.member_request(self.post("/v1/download")).await.json(&body).send().await?).await?;
+        // A cold server first has to find the song (search + companion), which
+        // can take longer than the client's normal 30 s; one retry covers a
+        // dropped connection or a busy moment.
+        let send = || async {
+            let req = self.member_request(self.post("/v1/download")).await.json(&body).timeout(std::time::Duration::from_secs(90));
+            Self::check(req.send().await?).await
+        };
+        let resp = match send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::info!("download lookup failed, retrying once: {e:#}");
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                send().await?
+            }
+        };
         let value: Option<(ProviderId, String)> = {
             let v: serde_json::Value = resp.json().await?;
             if v.is_null() { None } else { Some((serde_json::from_value(v["provider"].clone())?, v["url"].as_str().context("missing download URL")?.into())) }
@@ -372,6 +386,29 @@ impl ServerClient {
             .header(INSTALL_ID_HEADER, &self.install_id)
             .bearer_auth(token)
             .timeout(REQUEST_TIMEOUT)
+    }
+
+    /// `POST /v1/mcp/token`: a new MCP token for AI assistants (replaces the old one).
+    pub async fn mcp_token(&self, token: &str) -> Result<glyph_protocol::mcp::TokenResponse> {
+        Self::json_of(self.authed(reqwest::Method::POST, "/v1/mcp/token", token)).await
+    }
+
+    /// `GET /v1/mcp/pull`: tool calls waiting for this account (long poll).
+    pub async fn mcp_pull(&self, token: &str) -> Result<glyph_protocol::mcp::PullResponse> {
+        let wait = Duration::from_millis(glyph_protocol::mcp::PULL_WAIT_MS + 15_000);
+        Self::json_of(self.authed(reqwest::Method::GET, "/v1/mcp/pull", token).timeout(wait)).await
+    }
+
+    /// `POST /v1/mcp/approve`: the user's answer to an assistant asking for access.
+    pub async fn mcp_approve(&self, token: &str, d: &glyph_protocol::mcp::Decision) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, "/v1/mcp/approve", token).json(d).send().await?).await?;
+        Ok(())
+    }
+
+    /// `POST /v1/mcp/result`: the answer to one tool call.
+    pub async fn mcp_result(&self, token: &str, r: &glyph_protocol::mcp::ResultRequest) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, "/v1/mcp/result", token).json(r).send().await?).await?;
+        Ok(())
     }
 
     async fn json_of<T: serde::de::DeserializeOwned>(rb: reqwest::RequestBuilder) -> Result<T> {

@@ -17,6 +17,9 @@ pub struct Lyrics {
     pub plain: Option<String>,
     /// Instrumental track: nothing to show.
     pub instrumental: bool,
+    /// The provider's id of these lyrics (LRCLIB record), empty when unknown.
+    /// Tells alternatives apart.
+    pub source_id: String,
 }
 
 /// Fallback duration of the last line (no following timestamp).
@@ -102,7 +105,18 @@ impl Lyrics {
             synced: r.synced.clone(),
             plain: r.plain.clone(),
             instrumental: r.instrumental,
+            source_id: String::new(),
         }
+    }
+
+    /// Short text of the first lines (the version picker shows it).
+    pub fn preview(&self, n: usize) -> String {
+        let lines: Vec<String> = if self.synced.is_empty() {
+            self.plain.as_deref().unwrap_or("").lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+        } else {
+            self.synced.iter().map(|l| l.text.trim().to_string()).filter(|l| !l.is_empty()).collect()
+        };
+        lines.into_iter().take(n).collect::<Vec<_>>().join(" / ")
     }
 
     pub fn to_response(&self) -> LyricsResponse {
@@ -230,6 +244,7 @@ mod tests {
             synced: Lyrics::parse_lrc(src),
             plain: None,
             instrumental: false,
+            source_id: String::new(),
         }
     }
 

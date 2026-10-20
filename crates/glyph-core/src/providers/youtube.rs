@@ -421,7 +421,16 @@ impl MusicProvider for YouTube {
             }
         }
         if let Some(yt) = &self.local {
-            let out = yt.search(query, crate::ytdlp::SEARCH_RESULTS).await?;
+            // YouTube's own search endpoint answers in a few hundred ms; yt-dlp
+            // needs seconds to start. yt-dlp stays the fallback.
+            let out = match crate::ytnative::search(&self.http, query, crate::ytdlp::SEARCH_RESULTS).await {
+                Ok(out) => out,
+                Err(e) if yt.bin.is_some() => {
+                    tracing::info!("{e:#}; searching with yt-dlp");
+                    yt.search(query, crate::ytdlp::SEARCH_RESULTS).await?
+                }
+                Err(e) => return Err(e),
+            };
             let mut cache = self.cache.lock().unwrap();
             cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
             cache.insert(key, (Instant::now(), out.clone()));

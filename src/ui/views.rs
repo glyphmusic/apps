@@ -427,16 +427,49 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                                 cx.listener(move |this, _, w, cx| this.pick_search_artist(&n2, Some(tr2.clone()), w, cx))
                             })
                             .child(art)
-                            .child(div().flex_1().min_w_0().truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(shown))
+                            .child(crate::ui::lists::artist_name_badged(app, &name, shown, 15.0, cx).flex_1().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()))
                             .child(kind_chip(t("search.kind.artist")))
                             .child(follow)
                     })
                     .collect();
+                // Songs found through a line of their lyrics, with that line.
+                let hits = app.search.lyric_hits.clone();
+                let lyric_section = (!hits.is_empty()).then(|| {
+                    let list = Rc::new(hits.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .pb(px(10.0))
+                        .child(div().flex().items_center().gap(px(8.0)).pb(px(4.0)).child(icon("mic-vocal", 15.0, theme::text_dim())).child(div().text_size(theme::text_md()).font_weight(FontWeight::SEMIBOLD).child(t("search.lyrics.title"))))
+                        .children(hits.iter().enumerate().map(|(i, (_, line))| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(crate::ui::lists::song_row(app, list.clone(), i, "search-lyric-row", None, false, cx))
+                                .when(!line.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .pl(px(90.0))
+                                            .pb(px(6.0))
+                                            .mt(px(-6.0))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .text_size(theme::text_xs())
+                                            .text_color(theme::text_faint())
+                                            .child(kind_chip(t("search.lyrics.in")))
+                                            .child(div().truncate().italic().child(format!("\u{201e}{line}\u{201c}"))),
+                                    )
+                                })
+                        }))
+                });
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .children(artist_rows)
+                    .children(lyric_section)
                     .child(track_list(app, r, "search-row", cx))
                     .into_any_element()
             }
@@ -702,11 +735,51 @@ fn queue_label(text: String) -> Div {
     mono().px(px(16.0)).pt(px(4.0)).pb(px(8.0)).text_size(px(11.0)).text_color(theme::text_faint()).child(format!("[ {} ]", text.to_uppercase()))
 }
 
+/// Height of a section heading inside the queue's scroll area (drop slots
+/// are computed from it).
+const QUEUE_LABEL_H: f32 = 28.0;
+
+/// `[ LABEL ]` heading between the queue's sections, fixed height.
+fn queue_section(text: String) -> Div {
+    mono()
+        .flex_none()
+        .h(px(QUEUE_LABEL_H))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .text_size(px(11.0))
+        .text_color(theme::text_faint())
+        .child(div().truncate().child(format!("[ {} ]", text.to_uppercase())))
+}
+
+/// Upcoming index a drop at `y` (from the top of the list) lands on, with
+/// `manual` hand-queued songs under their own heading above the rest.
+fn queue_slot(y: f32, manual: usize, n: usize) -> usize {
+    let mut y = y;
+    if manual > 0 {
+        y -= QUEUE_LABEL_H;
+        let top = manual as f32 * QUEUE_ROW_H;
+        if y < top {
+            return ((y / QUEUE_ROW_H).floor().max(0.0) as usize).min(n.saturating_sub(1));
+        }
+        y -= top;
+        if manual < n {
+            y -= QUEUE_LABEL_H;
+        }
+        return (manual + (y / QUEUE_ROW_H).max(0.0).floor() as usize).min(n.saturating_sub(1));
+    }
+    if n > 0 {
+        y -= QUEUE_LABEL_H;
+    }
+    ((y / QUEUE_ROW_H).floor().max(0.0) as usize).min(n.saturating_sub(1))
+}
+
 pub const QUEUE_W: f32 = 320.0;
 
 pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     let up = app.upcoming();
     let n = up.len();
+    let manual = app.manual_queue_len().min(n);
     let current = app.current.clone();
     let now = current.map(|tr| {
         let art = cover(app, &tr, 44.0, 6.0, cx);
@@ -739,7 +812,21 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
     let gaps = queue_gaps(slots, drop.map(|(_, at)| at));
     let mut rows: Vec<gpui::AnyElement> = Vec::new();
     let mut slot = 0;
+    // Songs queued by hand ("Up next") come first under their own heading,
+    // then what plays on from the list ("Next from: …").
+    if manual > 0 {
+        rows.push(queue_section(tf("queue.next_n", &[("n", &manual)]).to_string()).into_any_element());
+    }
     for (i, tr) in up.into_iter().enumerate() {
+        if i == manual && n > manual {
+            let rest = n - manual;
+            let head = match app.queue_from.as_deref() {
+                Some(from) => tf("queue.from_n", &[("name", &from), ("n", &rest)]).to_string(),
+                None if manual > 0 => tf("queue.later_n", &[("n", &rest)]).to_string(),
+                None => tf("queue.next_n", &[("n", &rest)]).to_string(),
+            };
+            rows.push(queue_section(head).into_any_element());
+        }
         if drop.is_some_and(|(from, _)| from == i) {
             continue;
         }
@@ -751,16 +838,22 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         let group: SharedString = format!("q-g-{i}").into();
         let art = app.cover_path(&tr, cx);
         let drag = QueueDrag { from: i, track: tr.clone(), art: art.clone() };
+        let shown = if i < manual { i } else { i - manual };
         rows.push(
-            queue_row_inner(i, &tr, art, group.clone(), false)
+            queue_row_inner(shown, &tr, art, group.clone(), false)
                 .id(("q", i))
                 .rounded(px(8.0))
-                .cursor_grab()
+                .cursor_pointer()
                 .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
+                // A click plays this song and the queue goes on from it.
+                .on_click(cx.listener(move |this, _, _, cx| this.queue_jump(i, cx)))
                 .child(
                     div()
                         .opacity(hover_k(&group))
-                        .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.queue_remove(i, cx)))),
+                        .child(icon_button(("q-rm", i), "x", 14.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.queue_remove(i, cx)
+                        }))),
                 )
                 .into_any_element(),
         );
@@ -793,7 +886,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         )
         .when(has_now, |d| d.child(queue_label(t("queue.now").to_string())))
         .children(now)
-        .child(queue_label(if n > 0 { tf("queue.next_n", &[("n", &n)]).to_string() } else { t("queue.next").to_string() }))
+        .when(n == 0, |d| d.child(queue_label(t("queue.next").to_string())))
         .child(fade_edges(div()
                 .id("q-scroll")
                 .track_scroll(&app.queue_scroll)
@@ -809,7 +902,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .on_drag_move::<QueueDrag>(cx.listener(move |this, e: &gpui::DragMoveEvent<QueueDrag>, _, cx| {
                     let from = e.drag(cx).from;
                     let y = e.event.position.y - e.bounds.top() - this.queue_scroll.offset().y;
-                    let slot = ((f32::from(y) / QUEUE_ROW_H).floor().max(0.0) as usize).min(n.saturating_sub(1));
+                    let slot = queue_slot(f32::from(y), manual, n);
                     if this.queue_drop != Some((from, slot)) {
                         this.queue_drop = Some((from, slot));
                         cx.notify();

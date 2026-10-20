@@ -196,6 +196,10 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     for p in lib.playlists.iter().filter(|p| p.auto_download) {
         push(k(kind::AUTO_DOWNLOAD, p.id.clone()), serde_json::json!({ "on": true }));
     }
+    // Listening statistics (opt-in): this device's months.
+    for (key, v) in lib.stats.sync_items(&crate::server_client::install_id()) {
+        push(k(crate::stats::SYNC_KIND, key), v);
+    }
     s
 }
 
@@ -499,6 +503,19 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 } else if let Some(p) = lib.playlists.iter_mut().find(|p| p.id == i.key) {
                     p.auto_download = on;
                 } else {
+                    continue;
+                }
+            }
+            crate::stats::SYNC_KIND => {
+                let device = crate::server_client::install_id();
+                // This device's own months: what is here is newer.
+                if i.key.starts_with(&format!("{device}:")) {
+                    continue;
+                }
+                // Other devices' months are kept, never pushed back (they are
+                // not in our snapshot, so they count as agreed-absent).
+                if !lib.stats.apply_remote(&device, &i.key, if gone { None } else { i.value.as_ref() }) {
+                    touched.push((i.kind.clone(), i.key.clone()));
                     continue;
                 }
             }

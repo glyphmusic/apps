@@ -158,6 +158,52 @@ pub fn jamendo_format_url(url: &str, q: AudioQuality) -> Option<String> {
     url.contains("/download/track/").then(|| url.replacen("/mp32/", &format!("/{fmt}/"), 1)).filter(|u| u != url)
 }
 
+/// `true` for failures worth another try: timeouts, dropped connections and
+/// gateway errors (a server that had to prepare the file for too long).
+fn transient(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        if let Some(r) = c.downcast_ref::<reqwest::Error>() {
+            return r.is_timeout() || r.is_connect() || r.is_body() || r.is_request() || r.status().is_some_and(|s| s.is_server_error() || s.as_u16() == 429);
+        }
+        let m = c.to_string().to_lowercase();
+        m.contains("timed out") || m.contains("connection") || m.contains("reset")
+    })
+}
+
+/// [`Downloads::fetch`] with up to three tries. A server download that first
+/// converts to a smaller quality can hit the gateway's time limit on long
+/// songs; the second try then takes the original stream, which starts at once.
+pub async fn fetch_with_retry(
+    dl: &Downloads,
+    http: &reqwest::Client,
+    t: &Track,
+    provider: ProviderId,
+    url: &str,
+    server: Option<&crate::server_client::ServerClient>,
+) -> Result<PathBuf> {
+    let mut url = url.to_string();
+    let mut last = None;
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            report(|p| p.reset());
+            tokio::time::sleep(Duration::from_millis(1500 * u64::from(attempt))).await;
+        }
+        match dl.fetch(http, t, provider, &url, server).await {
+            Ok(p) => return Ok(p),
+            Err(e) if transient(&e) => {
+                tracing::info!(attempt, "download failed, trying again: {e:#}");
+                // Converted server streams: fall back to the original quality.
+                if url.contains("/v1/download/") && url.contains("quality=") && !url.contains("quality=high") {
+                    url = url.split('?').next().unwrap_or(&url).to_string() + "?quality=high";
+                }
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("download failed")))
+}
+
 /// Larger files are refused (an album rip in one file, a broken server).
 const MAX_BYTES: u64 = 500 * 1024 * 1024;
 const INDEX: &str = "index.json";

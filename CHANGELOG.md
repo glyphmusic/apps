@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0 - 2026-10-20
+
+- Transfer music (Settings > Transfer music, or Library > Transfer music), with no login and nothing to set up: Spotify liked songs and playlists come over by copying them in the Spotify app (Ctrl+A, Ctrl+C) and pressing Paste; YouTube Music by playlist link or a Google Takeout file; Deezer and SoundCloud from a public profile; Last.fm from the user name. Runs in the background, continues after a restart, and lists that come over twice only get their new songs. Pasting many links into search opens it too.
+- Links without keys: Spotify playlists, albums, artists and songs are read from Spotify's public embed page when neither the server nor the app has a Spotify key (up to 100 songs per list), YouTube playlists from YouTube's web endpoint without an API key.
+- New playlist: paste a link instead of typing songs. Spotify playlists, albums, artists and songs, Deezer playlists, albums, artists and profiles, SoundCloud sets, likes and tracks, YouTube playlists, public Apple Music playlists and albums, Bandcamp albums, Last.fm profiles and short links (on.soundcloud.com, deezer.page.link, spotify.link) work; pasting such a link into search does the same. Playlist files (CSV, Spotify export, M3U, XSPF) import from the same dialog.
+- Settings > Support > Docs opens the new documentation at docs.glyph.my.
+- Add Discord Rich Presence (Settings > Integrations, off by default): the current song, artist, album and cover appear in your Discord profile. A Discord application ID from the Developer Portal is needed unless this build ships one.
+- Queue: songs added with Play next / Add to queue form an "Up next" section that always plays first; the rest is labelled "Next from: <list>". Click any queued song to continue from there.
+- Shuffle styles (Settings > Playback, or right-click Shuffle): smart shuffle spreads artists and moves recently heard songs back; fully random is uniform.
+- Right-click menus on player controls: mini player card/bar, repeat mode, shuffle style, seek 10/30 s and restart on previous/next, output device, channel mode and MPD on volume.
+- Spatial audio: choose Mono, Stereo or Spatial; Spatial keeps surround (5.1/7.1) speaker positions and renders them for headphones with an HRTF head model.
+- Play on a Music Player Daemon (MPD) on another computer, with Glyph as remote.
+- Opt-in listening statistics (time, plays, skips, top artists and songs, hours and weekdays), synced across signed-in devices; turning them off deletes them.
+- Lyrics: the current line stays centred and moves smoothly with an eased colour sweep; pick another lyrics version (remembered per song) and adjust timing in a new options panel; redesigned view switch.
+- Search lyrics: results found only through their lyrics appear in an "In lyrics" section. Search waits until you stop typing.
+- AI assistants (MCP): a local MCP server (127.0.0.1, token) or access through the signed-in server with OAuth sign-in and in-app approval; 27 tools for playback, queue, search, playlists, likes and lyrics.
+- YouTube: choose r-dlp (built in, default) or yt-dlp; native InnerTube search and a YouTube ID hint to the server make finding sources much faster.
+- Server downloads retry transient failures and fall back to another quality instead of failing.
+- Artist pages list the full discography from Deezer; verified badges appear next to artist names; an animated equalizer marks the playing song.
+- Sidebar shows followed artists; right-click an entry to hide it. Playing an artist adds only the artist to Recently played.
+- Add-to-playlist flyouts stay on screen with a 5 px gap and say "No playlists yet" when empty; playlist names are limited to 100 characters and long titles wrap.
+- List pages scroll under the top bar; the info column of a playlist scrolls in small windows; the queue panel has bottom padding on the lyrics page.
+- The background animation drops to 10 fps while Glyph is not focused (switchable); the window title follows the playing song while the app is in the background.
+- New languages: Español, Français, Italiano, Polski, Português, Türkçe, Українська.
+
 ## 0.3.0 - 2026-10-19
 
 - Support streamed fragmented MP4 audio without replacing track metadata with a zero duration.

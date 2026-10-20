@@ -16,7 +16,8 @@ const OLD_SERVER_URL: &str = "https://glyph-server.glyphmusic.workers.dev";
 pub struct Config {
     /// Empty = the public Glyph server ([`DEFAULT_SERVER_URL`]); "off" = direct mode.
     pub server_url: String,
-    /// "" = system language; otherwise "en" | "de" | "ru".
+    /// "" = system language; otherwise a supported code ("en", "de", "ru",
+    /// "es", "fr", "pt", "it", "pl", "tr", "uk", "af").
     pub language: String,
     pub keys: ApiKeys,
     pub providers: ProvidersConfig,
@@ -24,8 +25,22 @@ pub struct Config {
     pub updates: UpdatesConfig,
     pub audio: AudioConfig,
     pub storage: StorageConfig,
+    /// Connections to other apps on this computer.
+    pub integrations: IntegrationsConfig,
     /// Player state kept across restarts (volume, shuffle, ...).
     pub player: PlayerPrefs,
+    /// How playback behaves (shuffle style).
+    pub playback: PlaybackConfig,
+    /// Opt-in listening statistics (listening time, top artists), synced
+    /// across the user's devices when signed in.
+    pub stats: StatsConfig,
+    /// Model Context Protocol server: lets AI assistants control Glyph.
+    pub mcp: McpConfig,
+    /// Play on an MPD (Music Player Daemon) server instead of this computer.
+    pub mpd: MpdConfig,
+    /// Speakers, TVs and players on the local network (Chromecast,
+    /// UPnP/DLNA, Sonos, MPD, AirPlay).
+    pub devices: DevicesConfig,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -59,6 +74,100 @@ pub struct ProvidersConfig {
     /// PATH, else the copy installed from settings (data dir).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ytdlp_path: Option<String>,
+    /// Which extractor plays YouTube on this computer.
+    pub extractor: Extractor,
+    /// r-dlp executable. `None` = `r-dlp` on PATH, else the copy installed
+    /// from settings (data dir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdlp_path: Option<String>,
+}
+
+/// Program that finds YouTube audio on this computer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Extractor {
+    /// yt-dlp (Python, the reference implementation).
+    #[default]
+    YtDlp,
+    /// r-dlp: Glyph's own extractor in Rust; starts much faster.
+    RDlp,
+}
+
+/// Shuffle style (Settings > Playback).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShuffleStyle {
+    /// Spreads artists out and keeps lately played songs for the end.
+    #[default]
+    Smart,
+    /// Every order equally likely.
+    Random,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackConfig {
+    pub shuffle: ShuffleStyle,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MpdConfig {
+    /// Songs play on MPD (Glyph is the remote).
+    pub enabled: bool,
+    /// `host[:port]` or `password@host[:port]`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub address: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevicesConfig {
+    /// Look for playback devices on the local network in the background.
+    pub discovery: bool,
+}
+
+impl Default for DevicesConfig {
+    fn default() -> Self {
+        Self { discovery: true }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatsConfig {
+    /// Off until the user turns it on.
+    pub enabled: bool,
+}
+
+/// Where AI assistants reach Glyph's MCP server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMode {
+    /// `http://127.0.0.1:<port>/mcp` on this computer.
+    #[default]
+    Local,
+    /// Through the Glyph server (signed in only): the server relays tool
+    /// calls to this app.
+    Server,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub mode: McpMode,
+    /// Local port (loopback only).
+    pub port: u16,
+    /// Bearer token clients must send (generated on first use).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self { enabled: false, mode: McpMode::Local, port: 39_571, token: String::new() }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +193,9 @@ pub struct VisualsConfig {
     /// Colour theme id (accent, background glow, base): see the app's
     /// `theme::THEMES`.
     pub theme: String,
+    /// Lower the background animation's frame rate while Glyph is not the
+    /// active window (saves power). Off: full rate all the time.
+    pub throttle_unfocused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,6 +260,8 @@ pub struct AudioConfig {
     pub normalize: bool,
     /// Leave out songs marked explicit.
     pub hide_explicit: bool,
+    /// Mono, stereo, or spatial (multichannel and binaural HRTF rendering).
+    pub channels: ChannelMode,
     /// Equalizer on, chosen preset (built-in key, `user:<name>`, or "custom"
     /// after manual changes) and the
     /// ten band gains in dB (32 Hz .. 16 kHz).
@@ -173,6 +287,7 @@ impl Default for AudioConfig {
             level: VolumeLevel::Normal,
             normalize: true,
             hide_explicit: false,
+            channels: ChannelMode::Stereo,
             eq_enabled: false,
             eq_preset: "flat".into(),
             eq_gains: vec![0.0; 10],
@@ -180,6 +295,21 @@ impl Default for AudioConfig {
             output_device: None,
         }
     }
+}
+
+/// How sound reaches the speakers / headphones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelMode {
+    /// Everything on both sides (one earbud, mono speakers).
+    Mono,
+    /// Normal two channels; multichannel files are mixed down.
+    #[default]
+    Stereo,
+    /// Spatial: multichannel files keep their speaker positions and are
+    /// rendered binaurally (HRTF) for headphones; stereo gets a wider,
+    /// out-of-head image.
+    Spatial,
 }
 
 /// Loud / Normal / Quiet (about -11 / -14 / -19 LUFS).
@@ -233,6 +363,24 @@ impl Default for StorageConfig {
     }
 }
 
+/// Optional hooks into other apps. Off unless the user turns them on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IntegrationsConfig {
+    /// Show the song Glyph is playing in the user's Discord profile
+    /// (Rich Presence). Off by default; the user decides who sees what.
+    pub discord_presence: bool,
+    /// Discord application ID whose name and assets the presence shows.
+    /// Empty = the ID built into the app (see `src/discord.rs`).
+    pub discord_client_id: String,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self { discord_presence: false, discord_client_id: String::new() }
+    }
+}
+
 impl Default for ProvidersConfig {
     fn default() -> Self {
         use ProviderId::*;
@@ -247,13 +395,15 @@ impl Default for ProvidersConfig {
             ytdlp_path: None,
             youtube_mode: YouTubeMode::Server,
             youtube_only: false,
+            extractor: Extractor::YtDlp,
+            rdlp_path: None,
         }
     }
 }
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into() }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true }
     }
 }
 
@@ -294,7 +444,7 @@ fn env(name: &str) -> Option<String> {
 
 impl Config {
     /// UI language: the configured one, or the system language when empty;
-    /// only "en" | "de" | "ru" are supported, anything else becomes "en".
+    /// unsupported languages become "en".
     pub fn resolved_language(&self) -> &'static str {
         let configured = self.language.trim();
         if configured.is_empty() {
@@ -316,6 +466,14 @@ impl Config {
         match prefix.as_str() {
             "de" => "de",
             "ru" => "ru",
+            "es" => "es",
+            "fr" => "fr",
+            "pt" => "pt",
+            "it" => "it",
+            "pl" => "pl",
+            "tr" => "tr",
+            "uk" => "uk",
+            "af" => "af",
             _ => "en",
         }
     }
@@ -465,6 +623,16 @@ mod tests {
     }
 
     #[test]
+    fn discord_presence_is_opt_in() {
+        let c = Config::default();
+        assert!(!c.integrations.discord_presence);
+        assert!(c.integrations.discord_client_id.is_empty());
+        let c = Config::from_toml("[integrations]\ndiscord_presence = true\ndiscord_client_id = \"123456789012345678\"\n").unwrap();
+        assert!(c.integrations.discord_presence);
+        assert_eq!(c.integrations.discord_client_id, "123456789012345678");
+    }
+
+    #[test]
     fn youtube_mode_defaults_to_server_and_persists_local_choice() {
         assert_eq!(Config::from_toml("").unwrap().providers.youtube_mode, YouTubeMode::Server);
         let mut config = Config::default();
@@ -534,14 +702,15 @@ youtube = \"abc\"").unwrap();
         let mut c = Config::default();
         assert_eq!(Config::language_from_locale(Some("de-DE")), "de");
         assert_eq!(Config::language_from_locale(Some("ru_RU.UTF-8")), "ru");
-        assert_eq!(Config::language_from_locale(Some("fr-FR")), "en");
+        assert_eq!(Config::language_from_locale(Some("fr-FR")), "fr");
+        assert_eq!(Config::language_from_locale(Some("ja-JP")), "en");
         assert_eq!(Config::language_from_locale(None), "en");
         c.language = "ru".into();
         assert_eq!(c.resolved_language(), "ru");
         c.language = "xx".into();
         assert_eq!(c.resolved_language(), "en");
         c.language = String::new();
-        assert!(["en", "de", "ru"].contains(&c.resolved_language()));
+        assert!(["en", "de", "ru", "es", "fr", "pt", "it", "pl", "tr", "uk", "af"].contains(&c.resolved_language()));
         assert_eq!(Config::from_toml("language = \"de\"").unwrap().language, "de");
     }
 

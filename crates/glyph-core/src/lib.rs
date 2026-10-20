@@ -22,6 +22,7 @@ pub mod eq;
 pub mod import;
 pub mod library;
 pub mod lyrics;
+pub mod lyricsearch;
 pub mod paths;
 pub mod profile_images;
 pub mod provider;
@@ -34,10 +35,12 @@ pub mod settings_share;
 pub mod settings_sync;
 pub mod share;
 pub mod sync;
+pub mod stats;
 pub mod storage;
 pub mod taste;
 pub mod updater;
 pub mod ytdlp;
+pub mod ytnative;
 
 pub use config::Config;
 pub use library::{FollowedArtist, Library, ListKey, Playlist, RecentItem, SearchItem};
@@ -59,6 +62,13 @@ use provider::Cooldowns;
 use providers::Providers;
 use resolver::Resolver;
 use server_client::{Compat, ServerClient};
+
+mod inner;
+
+/// 256 random bits as hex (tokens the user pastes into other apps).
+pub fn random_token() -> String {
+    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+}
 
 /// Where metadata requests go.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +101,13 @@ fn stream_cache_name(t: &Track) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     dedupe::track_key(t).hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// Which local file of a song was dropped as broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokenFile {
+    Download,
+    CachedStream,
 }
 
 /// The cached file of a song played lately (touched so it stays).
@@ -245,6 +262,9 @@ pub struct ImportResult {
     /// 0.5 ..< 0.85
     pub unsure: Vec<ImportMatch>,
     pub not_found: Vec<ImportMatch>,
+    /// Every song in the list's own order: found ones carry the id of their
+    /// source, the rest stay as metadata (found later, when played).
+    pub ordered: Vec<Track>,
 }
 
 impl ImportResult {
@@ -289,337 +309,6 @@ pub struct Backend {
 
 fn user_agent(config: &Config) -> String {
     format!("Glyph/{} (+https://github.com/{})", updater::current_version(), config.updates.repo)
-}
-
-impl Inner {
-    async fn build(config: Config, old_cooldowns: Option<Arc<Cooldowns>>) -> Result<Inner> {
-        let _ = std::fs::create_dir_all(paths::data_dir());
-        let http = reqwest::Client::builder()
-            .user_agent(user_agent(&config))
-            .connect_timeout(std::time::Duration::from_secs(8))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
-        let providers = Arc::new(Providers::build(&config, &http));
-        let cooldowns = old_cooldowns.unwrap_or_else(|| Arc::new(Cooldowns::new()));
-        let resolver = Arc::new(Resolver::new(
-            providers.clone(),
-            cooldowns.clone(),
-            config.providers.priority.clone(),
-            Some(paths::data_dir().join("resolver_cache.json")),
-        ));
-        let limit = match config.storage.cache_limit_mb {
-            0 => u64::MAX,
-            mb => mb * 1024 * 1024,
-        };
-        let covers = CoverCache::new(storage::covers_dir(), http.clone(), providers.clone()).with_max_bytes(limit);
-        let lyrics_cache = LyricsCache::new(paths::data_dir().join("lyrics"));
-
-        let mut mode = BackendMode::Direct;
-        let mut server = None;
-        let mut server_providers = None;
-        let url = server_client::normalize_base_url(config.effective_server_url());
-        if !url.is_empty() {
-            let key_url = url.clone();
-            let token = tokio::task::spawn_blocking(move || server_access::load(&key_url)).await.ok().flatten();
-            let client = ServerClient::new(&url, http.clone(), server_client::install_id()).with_bearer(token)?;
-            match client.check_compat().await {
-                Ok(Compat::Compatible(h)) => {
-                    server_providers = Some(h.providers);
-                    mode = BackendMode::Server { url, server_version: h.server_version };
-                    server = Some(client);
-                }
-                Ok(Compat::Incompatible(h)) => {
-                    tracing::warn!(
-                        server = h.protocol_version,
-                        ours = glyph_protocol::PROTOCOL_VERSION,
-                        "incompatible server"
-                    );
-                    return Err(anyhow!("incompatible server protocol {} (expected {})", h.protocol_version, glyph_protocol::PROTOCOL_VERSION));
-                }
-                Err(e) => {
-                    tracing::warn!("server {url} unreachable: {e}");
-                    server_providers = Some(vec![]);
-                    mode = BackendMode::Server { url, server_version: "offline".into() };
-                    server = Some(client);
-                },
-            }
-        }
-        let covers = covers.with_server(server.clone());
-        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, covers, lyrics_cache })
-    }
-
-    /// YouTube is enabled and yt-dlp runs on this machine.
-    fn local_youtube_on(&self) -> bool {
-        (self.config.providers.youtube_mode == config::YouTubeMode::Local || self.server.is_none())
-            && self.providers.youtube.as_ref().is_some_and(|y| y.local().is_some())
-    }
-
-    /// YouTube through the local yt-dlp (home IP, no bot check): the song's
-    /// own video id, a cached mapping, the id other users shared through the
-    /// server (`hint`), else a search for "Artist - Title" — a sure search
-    /// hit is shared back so the next user skips the search.
-    async fn local_youtube_match(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
-        if !self.local_youtube_on() { return None; }
-        let yt = self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
-        let as_video = |id: &str| {
-            let mut view = t.clone();
-            view.source = ProviderId::YouTube;
-            view.id = id.to_string();
-            view
-        };
-        let (matched, confidence) = if let Some(id) = provider::id_at(ProviderId::YouTube, t) {
-            (as_video(id), 1.0)
-        } else if let Some(hit) = self.resolver.cached_at(t, ProviderId::YouTube) {
-            hit
-        } else if let Some(id) = hint.filter(|id| ytdlp::valid_video_id(id)) {
-            (as_video(id), resolver::SURE_CONFIDENCE)
-        } else {
-            let query = format!("{} - {}", t.artist, t.title);
-            let cands = match provider::MusicProvider::search_candidates(yt.as_ref(), &query).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::info!("local YouTube search failed: {e:#}");
-                    return None;
-                }
-            };
-            let (best, confidence) = resolver::best_candidate(t, cands)?;
-            self.resolver.remember(t, &best.track, confidence);
-            if confidence >= resolver::SURE_CONFIDENCE {
-                if let Some(server) = self.server.clone() {
-                    let (want, id) = (t.clone(), best.track.id.clone());
-                    tokio::spawn(async move {
-                        if let Err(e) = server.report_youtube_hint(&want, &id).await {
-                            tracing::debug!("sharing the YouTube id failed: {e:#}");
-                        }
-                    });
-                }
-            }
-            (best.track, confidence)
-        };
-        Some((matched, confidence))
-    }
-
-    async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
-        let (matched, confidence) = self.local_youtube_match(t, hint).await?;
-        let yt = self.providers.youtube.as_ref()?;
-        match yt.local_source(&matched.id).await {
-            Ok(source) => {
-                // Keep the wanted song's metadata when it was a direct id hit.
-                let track = if confidence >= 1.0 && t.source != ProviderId::YouTube { t.clone() } else { matched };
-                Some(Resolved { track, source, confidence })
-            }
-            Err(e) => {
-                tracing::info!("local YouTube playback failed: {e:#}");
-                None
-            }
-        }
-    }
-
-    /// Warms the yt-dlp URL cache for songs that will play soon: songs whose
-    /// YouTube video is already known resolve together in one yt-dlp run,
-    /// the others go through the normal resolve (which caches what it finds).
-    async fn prefetch(&self, tracks: Vec<Track>) {
-        if self.server.is_some() {
-            for t in tracks { let _ = self.resolve(&t).await; }
-            return;
-        }
-        let Some(yt) = self.providers.youtube.as_ref().and_then(|y| y.local()) else { return };
-        let mut ids = Vec::new();
-        let mut rest = Vec::new();
-        for t in tracks {
-            // Only when YouTube is surely what plays (its own songs or an
-            // earlier YouTube match); anything else asks the resolver.
-            let known = if t.source == ProviderId::YouTube {
-                Some(t.id.clone())
-            } else {
-                self.resolver.cached_at(&t, ProviderId::YouTube).map(|(m, _)| m.id)
-            };
-            match known {
-                Some(id) => ids.push(id),
-                None => rest.push(t),
-            }
-        }
-        if let Err(e) = yt.resolve_many(&ids).await {
-            tracing::debug!("prefetch batch failed: {e:#}");
-        }
-        // The URLs are cached now; fetch the audio so the songs start at once.
-        for id in &ids {
-            if let Err(e) = yt.audio_file(&self.http, id).await {
-                tracing::debug!(video_id = %id, "prefetch download failed: {e:#}");
-            }
-        }
-        for t in rest {
-            let _ = self.resolve(&t).await;
-        }
-    }
-
-    async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
-        if self.config.providers.youtube_mode == config::YouTubeMode::Local
-            && self.config.providers.enabled.contains(&ProviderId::YouTube)
-            && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
-        {
-            return self.local_youtube(t, None).await.map(Some)
-                .ok_or_else(|| anyhow!("Local YouTube playback failed. Check yt-dlp in Settings > Playback > Sources."));
-        }
-        if let Some(server) = &self.server {
-            let local_yt = self.local_youtube_on();
-            let priority = self.resolver.priority();
-            let rank = |p: ProviderId| priority.iter().position(|x| *x == p).unwrap_or(usize::MAX);
-            match server.resolve_with_mode(t, &priority, self.config.providers.youtube_only).await {
-                Ok(resp) => {
-                    let hint = resp.youtube_hint.as_deref();
-                    if let Some(source) = resp.source.clone() {
-                        if self.config.providers.youtube_only && (source.provider() != ProviderId::YouTube || matches!(source, PlaybackSource::Preview { .. })) {
-                            return Err(anyhow!("Song not found on YouTube."));
-                        }
-                        let matched = resp.matched.unwrap_or_else(|| t.clone());
-                        if local_yt && source.provider() == ProviderId::YouTube {
-                            return Ok(self.local_youtube(&matched, hint).await);
-                        }
-                        // A full local source can outrank a short preview.
-                        let preview = matches!(source, PlaybackSource::Preview { .. });
-                        if local_yt && (preview || rank(ProviderId::YouTube) < rank(source.provider())) {
-                            if let Some(r) = self.local_youtube(t, hint).await {
-                                return Ok(Some(r));
-                            }
-                        }
-                        if !matches!(source, PlaybackSource::Preview { .. }) {
-                            self.resolver.remember(t, &matched, resp.confidence);
-                        }
-                        return Ok(Some(Resolved { track: matched, source, confidence: resp.confidence }));
-                    }
-                    if local_yt {
-                        return Ok(self.local_youtube(t, hint).await);
-                    }
-                    if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
-                    return Ok(None);
-                }
-                Err(e) => {
-                    // Server down: YouTube on this machine still works.
-                    if local_yt {
-                        if let Some(r) = self.local_youtube(t, None).await {
-                            return Ok(Some(r));
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        if self.config.providers.youtube_only {
-            return self.local_youtube(t, None).await.map(Some).ok_or_else(|| anyhow!("Song not found on YouTube."));
-        }
-        if let Some(r) = self.resolver.resolve_known(t).await {
-            return Ok(Some(r));
-        }
-        if let Some(r) = self.resolver.resolve_cached(t).await {
-            return Ok(Some(r));
-        }
-        if let Some(r) = self.resolver.resolve_by_search(t).await {
-            return Ok(Some(r));
-        }
-        Ok(self.resolver.resolve_preview(t).await)
-    }
-
-    /// First source that offers a download: the song's own ids, then the
-    /// full source the resolver matched it to.
-    async fn download_url(&self, t: &Track) -> Result<Option<(ProviderId, String)>> {
-        if self.config.providers.youtube_mode == config::YouTubeMode::Local
-            && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube)) {
-            if let Some((matched, _)) = self.local_youtube_match(t, None).await {
-                return Ok(self.download_at(ProviderId::YouTube, &matched).await.map(|url| (ProviderId::YouTube, url)));
-            }
-            return Err(anyhow!("Local YouTube download failed. Check yt-dlp in Settings > Playback > Sources."));
-        }
-        if let Some(server) = &self.server {
-            let lookup = match server.download_url_with_priority(t, &self.resolver.priority(), self.config.providers.youtube_only).await {
-                Ok(hit) => hit,
-                Err(e) if self.config.providers.youtube_mode == config::YouTubeMode::Server => return Err(e),
-                Err(e) => { tracing::debug!("server download lookup failed: {e}"); None }
-            };
-            if let Some(hit) = lookup {
-                if self.config.providers.youtube_only && hit.0 != ProviderId::YouTube {
-                    return Err(anyhow!("Song not found on YouTube."));
-                }
-                // The server picks the normal Archive file; another quality
-                // needs the item's file list.
-                if hit.0 == ProviderId::Archive && downloads::job_quality() != config::AudioQuality::Standard {
-                    if let Some(u) = self.download_at(ProviderId::Archive, t).await {
-                        return Ok(Some((ProviderId::Archive, u)));
-                    }
-                }
-                if hit.0 == ProviderId::YouTube {
-                    let quality = match downloads::job_quality() { config::AudioQuality::Low => "low", config::AudioQuality::High => "high", _ => "standard" };
-                    return Ok(Some((hit.0, format!("{}?quality={quality}", hit.1))));
-                }
-                return Ok(Some(hit));
-            }
-            if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
-            // Same path as playback: YouTube through the local yt-dlp.
-            if let Some(Resolved { source: PlaybackSource::Stream { provider, url, .. }, .. }) = self.local_youtube(t, None).await {
-                return Ok(Some((provider, url)));
-            }
-            return Ok(None);
-        }
-        if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
-        const DL: [ProviderId; 4] = [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive, ProviderId::YouTube];
-        for p in DL {
-            if provider::id_at(p, t).is_some() {
-                if let Some(u) = self.download_at(p, t).await {
-                    return Ok(Some((p, u)));
-                }
-            }
-        }
-        if let Some(r) = self.resolve(t).await? {
-            let p = r.source.provider();
-            if let PlaybackSource::Stream { provider: ProviderId::YouTube, url, .. } = &r.source {
-                return Ok(Some((ProviderId::YouTube, url.clone())));
-            }
-            if matches!(r.source, PlaybackSource::Stream { .. }) && DL.contains(&p) {
-                if let Some(u) = self.download_at(p, &r.track).await {
-                    return Ok(Some((p, u)));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    async fn download_at(&self, p: ProviderId, t: &Track) -> Option<String> {
-        match self.providers.get(p)?.download_url(t).await {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::info!(provider = ?p, "download lookup failed: {e}");
-                None
-            }
-        }
-    }
-
-    async fn lyrics(&self, t: &Track) -> Result<Option<Lyrics>> {
-        let key = lyrics::cache_key(t);
-        if let Some(hit) = self.lyrics_cache.get(&key) {
-            return Ok(hit);
-        }
-        let mut found: Option<Lyrics> = None;
-        let mut server_answered = false;
-        if let Some(server) = &self.server {
-            match server.lyrics(&t.title, &t.artist, t.album.as_deref(), t.duration_ms.map(|d| d / 1000)).await {
-                Ok(r) => {
-                    server_answered = true;
-                    // The wire type carries no match score.
-                    found = r.map(|r| Lyrics::from_response(&r, 1.0));
-                }
-                // A missing/busy lyrics provider must not break the song view:
-                // the local LRCLIB lookup below still has a chance.
-                Err(e) => tracing::info!("server lyrics unavailable, falling back: {e:#}"),
-            }
-        }
-        if !server_answered {
-            if let Some(l) = &self.providers.lrclib {
-                found = l.lookup(&t.title, &t.artist, t.album.as_deref(), t.duration_ms).await?;
-            }
-        }
-        self.lyrics_cache.put(&key, found.as_ref());
-        Ok(found)
-    }
 }
 
 impl Backend {
@@ -929,6 +618,32 @@ impl Backend {
         self.spawn(async move { catalog::artist_stats(&inner.http, &name).await }).await?
     }
 
+    /// An artist's whole discography (Deezer catalog), newest first.
+    pub async fn artist_releases(&self, name: &str) -> anyhow::Result<Vec<providers::deezer::Release>> {
+        let (inner, name) = (self.cur(), name.to_string());
+        self.spawn(async move {
+            let d = match &inner.providers.deezer {
+                Some(d) => d.clone(),
+                None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
+            };
+            d.artist_releases(&name).await
+        })
+        .await?
+    }
+
+    /// The songs of one release.
+    pub async fn release_tracks(&self, release: &providers::deezer::Release) -> anyhow::Result<Vec<Track>> {
+        let (inner, release) = (self.cur(), release.clone());
+        self.spawn(async move {
+            let d = match &inner.providers.deezer {
+                Some(d) => d.clone(),
+                None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
+            };
+            d.album_tracks(&release).await
+        })
+        .await?
+    }
+
     /// Release year + type (album, EP, single) of an album.
     pub async fn album_meta(&self, title: &str, artist: &str) -> anyhow::Result<Option<catalog::AlbumMeta>> {
         let (inner, title, artist) = (self.cur(), title.to_string(), artist.to_string());
@@ -984,7 +699,7 @@ impl Backend {
                         downloads::report(|p| p.reset());
                     }
                 }
-                dl.fetch(&inner.http, &track, provider, &url, inner.server.as_ref()).await.map(Some)
+                downloads::fetch_with_retry(&dl, &inner.http, &track, provider, &url, inner.server.as_ref()).await.map(Some)
             }))
             .await;
         self.dl_progress.lock().unwrap().remove(&key);
@@ -1059,6 +774,21 @@ impl Backend {
         self.downloads.remove(track)
     }
 
+    /// Drops the local file a song plays from after it failed to decode
+    /// (truncated or damaged): its download, else its copy in the cache of
+    /// songs played lately. Imported files are the user's own and stay.
+    /// `None`: the song has no such file.
+    pub fn forget_broken_file(&self, track: &Track) -> Option<BrokenFile> {
+        if self.downloads.local(track).is_some() {
+            return self.downloads.remove(track).then_some(BrokenFile::Download);
+        }
+        if self.imports.local(track).is_some() {
+            return None;
+        }
+        let p = stream_cached(track)?;
+        std::fs::remove_file(&p).ok().map(|_| BrokenFile::CachedStream)
+    }
+
     /// Re-reads the download index (after the folder was cleared).
     pub fn reload_downloads(&self) {
         self.downloads.reload();
@@ -1067,6 +797,38 @@ impl Backend {
     pub async fn lyrics(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
         let (inner, track) = (self.cur(), track.clone());
         self.spawn(async move { inner.lyrics(&track).await }).await?
+    }
+
+    /// Songs whose lyrics contain `query` (a remembered line), with the line.
+    pub async fn search_lyrics(&self, query: &str) -> anyhow::Result<Vec<lyricsearch::LyricHit>> {
+        let (inner, q) = (self.cur(), query.trim().to_string());
+        self.spawn(async move {
+            let d = match &inner.providers.deezer {
+                Some(d) => d.clone(),
+                None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
+            };
+            lyricsearch::search(&inner.http, &d, &q, 5).await
+        })
+        .await?
+    }
+
+    /// Other versions of a song's lyrics (LRCLIB), best match first, for when
+    /// the shown ones are wrong.
+    pub async fn lyrics_candidates(&self, track: &Track) -> anyhow::Result<Vec<Lyrics>> {
+        let (inner, track) = (self.cur(), track.clone());
+        self.spawn(async move {
+            let l = match &inner.providers.lrclib {
+                Some(l) => l.clone(),
+                None => Arc::new(providers::lrclib::LrcLib::new(inner.http.clone())),
+            };
+            l.candidates(&track.title, &track.artist, track.duration_ms).await
+        })
+        .await?
+    }
+
+    /// The user picked these lyrics for `track`: they stay its lyrics.
+    pub fn pin_lyrics(&self, track: &Track, lyrics: &Lyrics) {
+        self.cur().lyrics_cache.put(&lyrics::cache_key(track), Some(lyrics));
     }
 
     /// Bio + photo for the artist page (Wikipedia in `lang`, then English).
@@ -1165,7 +927,7 @@ impl Backend {
     ) -> anyhow::Result<ImportResult> {
         let inner = self.cur();
         self.spawn(async move {
-            let (list, origin) = import::fetch_list(&input, &inner.providers, inner.server.as_ref()).await?;
+            let (list, origin) = import::fetch_list(&input, &inner.providers, inner.server.as_ref(), &inner.http, &inner.config.keys).await?;
             let worker = inner.clone();
             let result = import::match_all(list, origin, progress, move |t| {
                 let inner = worker.clone();
@@ -1176,6 +938,112 @@ impl Backend {
             Ok(result)
         })
         .await?
+    }
+
+    /// The library of a connected service (`keys`: the app's current keys,
+    /// which may be newer than the backend's).
+    pub fn library_source(
+        &self,
+        service: import::accounts::Service,
+        login: import::accounts::Login,
+        keys: config::ApiKeys,
+    ) -> anyhow::Result<Arc<dyn import::accounts::LibrarySource>> {
+        let inner = self.cur();
+        let ctx = import::accounts::SourceCtx {
+            http: inner.http.clone(),
+            keys,
+            lastfm: inner.providers.lastfm.clone(),
+            deezer: inner.providers.deezer.clone(),
+            reader: Arc::new(InnerReader(inner.clone())),
+        };
+        import::accounts::source(service, login, ctx)
+    }
+
+    /// Song lists in pasted text (many links copied in Spotify & co.):
+    /// (single songs, lists). Used to tell a pasted link list from a search.
+    pub fn pasted_links(text: &str) -> (usize, usize) {
+        let p = import::keyless::parse_pasted(text);
+        (p.songs.len(), p.lists.len())
+    }
+
+    /// What the connected account holds (counts, playlists).
+    pub async fn library_overview(&self, src: Arc<dyn import::accounts::LibrarySource>) -> anyhow::Result<import::accounts::Overview> {
+        self.spawn(async move { src.overview().await }).await?
+    }
+
+    /// Moves the picked collections one after the other: reads each, matches
+    /// its songs (4 at a time, like a link import) and reports it as
+    /// `MigrationEvent::Done` for the app to save. `cancel` stops after the
+    /// current song; a cancelled collection is not reported as done.
+    pub async fn migrate(
+        &self,
+        src: Arc<dyn import::accounts::LibrarySource>,
+        collections: Vec<import::accounts::Collection>,
+        events: flume_like::Sender<import::accounts::MigrationEvent>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<()> {
+        use import::accounts::{Fetched, Kind, MigrationEvent as Ev, Migrated};
+        use std::sync::atomic::Ordering;
+        let inner = self.cur();
+        self.spawn(async move {
+            let total = collections.len();
+            let stopped = || cancel.load(Ordering::Relaxed);
+            for (index, c) in collections.into_iter().enumerate() {
+                if stopped() {
+                    let _ = events.send(Ev::Finished { cancelled: true });
+                    return;
+                }
+                let _ = events.send(Ev::Collection { index, total, collection: c.clone() });
+                let result = match src.fetch(&c).await {
+                    Err(e) => {
+                        let _ = events.send(Ev::Failed { collection: c, error: format!("{e:#}") });
+                        continue;
+                    }
+                    Ok(fetched @ (Fetched::Tracks(_) | Fetched::Named(..))) => {
+                        let (name, tracks) = match fetched {
+                            Fetched::Named(name, tracks) if c.name.trim().is_empty() => (name, tracks),
+                            Fetched::Named(_, tracks) | Fetched::Tracks(tracks) => (c.name.clone(), tracks),
+                            _ => unreachable!(),
+                        };
+                        let (ptx, mut prx) = flume_like::channel::<ImportProgress>();
+                        let fwd_events = events.clone();
+                        let fwd = tokio::spawn(async move {
+                            while let Some(p) = prx.recv().await {
+                                let _ = fwd_events.send(Ev::Progress { done: p.done, total: p.total });
+                            }
+                        });
+                        let kind = match c.kind {
+                            Kind::Liked => "liked",
+                            _ => "playlist",
+                        };
+                        let list = import::files::ParsedList { name, label: format!("{}/{kind}", src.service().key()), tracks };
+                        let (worker, flag) = (inner.clone(), cancel.clone());
+                        let res = import::match_all(list, c.origin.clone(), ptx, move |t| {
+                            let (inner, flag) = (worker.clone(), flag.clone());
+                            async move {
+                                if flag.load(Ordering::Relaxed) {
+                                    return None;
+                                }
+                                inner.resolve(&t).await.ok().flatten()
+                            }
+                        })
+                        .await;
+                        let _ = fwd.await;
+                        inner.resolver.cache().flush();
+                        if stopped() {
+                            let _ = events.send(Ev::Finished { cancelled: true });
+                            return;
+                        }
+                        Migrated::Tracks(res)
+                    }
+                    Ok(Fetched::Albums(a)) => Migrated::Albums(a),
+                    Ok(Fetched::Artists(a)) => Migrated::Artists(a),
+                };
+                let _ = events.send(Ev::Done { collection: c, result });
+            }
+            let _ = events.send(Ev::Finished { cancelled: false });
+        })
+        .await
     }
 
     /// Provider is currently skipped (error / exhausted quota, 10 min).
@@ -1236,6 +1104,23 @@ impl Backend {
     }
 }
 
+/// Reads links and files for the library move like a pasted link import.
+struct InnerReader(Arc<Inner>);
+
+#[async_trait::async_trait]
+impl import::accounts::LinkReader for InnerReader {
+    async fn list(&self, input: ImportInput) -> anyhow::Result<import::files::ParsedList> {
+        let i = &self.0;
+        Ok(import::fetch_list(&input, &i.providers, i.server.as_ref(), &i.http, &i.config.keys).await?.0)
+    }
+
+    async fn songs(&self, songs: Vec<import::keyless::SongLink>) -> Vec<Track> {
+        let i = &self.0;
+        let dz = i.providers.deezer.clone().unwrap_or_else(|| Arc::new(providers::deezer::Deezer::new(i.http.clone())));
+        import::keyless::read_songs(&songs, i.providers.spotify.as_ref(), &dz, &i.http).await
+    }
+}
+
 impl Drop for Backend {
     fn drop(&mut self) {
         self.cur().resolver.cache().flush();
@@ -1257,116 +1142,4 @@ pub mod flume_like {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn configured_server_handles_known_tracks_and_errors_without_direct_fallback() {
-        use std::io::{Read, Write};
-        let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
-        std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let track = Track {
-            id: "known".into(), source: ProviderId::Audius, title: "Song".into(), artist: "Artist".into(),
-            album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
-        };
-        let resolved = serde_json::json!({"matched":track,"source":{"kind":"stream","provider":"audius","url":"/v1/audio/audius/known"},"confidence":1.0}).to_string();
-        let fixture = std::thread::spawn(move || {
-            let mut targets = Vec::new();
-            let replies = [
-                (200, serde_json::json!({"server_version":"test","protocol_version":1,"providers":["audius","youtube"]}).to_string()),
-                (200, resolved),
-                (503, serde_json::json!({"code":"unavailable","message":"test outage"}).to_string()),
-            ];
-            for (status,body) in replies {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                let mut socket = loop {
-                    match listener.accept() {
-                        Ok((s,_)) => break s,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
-                        Err(e) => panic!("missing server request: {e}"),
-                    }
-                };
-                // The listener is non-blocking; accepted sockets inherit that on Windows.
-                socket.set_nonblocking(false).unwrap();
-                socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0;4096];
-                    let n = socket.read(&mut chunk).unwrap();
-                    if n == 0 { break; }
-                    request.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                        let len = headers.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
-                        if request.len() >= end + 4 + len { break; }
-                    }
-                }
-                targets.push(String::from_utf8_lossy(&request).lines().next().unwrap().to_string());
-                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
-            targets
-        });
-        let mut config = Config::default();
-        config.server_url = base.clone();
-        let backend = Backend::new(config).await.unwrap();
-        assert!(backend.active_providers().contains(&ProviderId::YouTube));
-        let result = backend.resolve(&track).await.unwrap().unwrap();
-        assert!(matches!(result.source, PlaybackSource::Stream { url, .. } if url == format!("{base}/v1/audio/audius/known")));
-        assert!(backend.resolve(&track).await.is_err(), "server errors must not use cached direct URLs");
-        assert_eq!(fixture.join().unwrap(), ["GET /v1/health HTTP/1.1", "POST /v1/resolve HTTP/1.1", "POST /v1/resolve HTTP/1.1"]);
-        // Even with a configured (now offline) server, saved audio wins before
-        // warm-cache lookups, resolver requests or network authentication.
-        let source = dir.path().join("saved.mp3");
-        std::fs::write(&source, b"saved audio").unwrap();
-        let saved = backend.downloads.store_copy(&track, ProviderId::Audius, &source).unwrap();
-        backend.warm(vec![track.clone()]);
-        for _ in 0..2 {
-            let result = backend.resolve(&track).await.unwrap().unwrap();
-            assert!(matches!(result.source, PlaybackSource::Stream { url, .. } if url == saved.to_string_lossy()));
-        }
-        std::env::remove_var("GLYPH_DATA_DIR");
-        std::env::remove_var("GLYPH_CACHE_DIR");
-    }
-
-    #[tokio::test]
-    async fn set_config_reevaluates_providers_priority_and_server() {
-        let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
-        std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
-
-        let mut direct = Config::default();
-        direct.server_url = "off".into();
-        let b = Backend::new(direct.clone()).await.unwrap();
-        assert_eq!(b.mode(), BackendMode::Direct);
-        assert_eq!(b.active_providers().contains(&ProviderId::YouTube), ytdlp::locate(None).is_some());
-        assert!(!b.active_providers().contains(&ProviderId::Jamendo));
-
-        let mut cfg = direct;
-        cfg.keys.youtube = Some("k".into());
-        cfg.keys.jamendo_client_id = Some("j".into());
-        cfg.providers.enabled.push(ProviderId::YouTube);
-        cfg.providers.priority = vec![ProviderId::YouTube, ProviderId::Audius];
-        cfg.language = "de".into();
-        b.provider_cooling_down(ProviderId::Audius);
-        b.set_config(cfg).await.unwrap();
-        let active = b.active_providers();
-        assert!(active.contains(&ProviderId::YouTube) && active.contains(&ProviderId::Jamendo));
-        assert_eq!(b.config().resolved_language(), "de");
-        assert_eq!(b.config().providers.priority[0], ProviderId::YouTube);
-
-        // Unreachable configured server stays in server mode; no silent direct traffic.
-        let mut cfg2 = Config::clone(&b.config());
-        cfg2.server_url = "http://127.0.0.1:9".into();
-        b.set_config(cfg2).await.unwrap();
-        assert!(matches!(b.mode(), BackendMode::Server { .. }));
-
-        std::env::remove_var("GLYPH_DATA_DIR");
-        std::env::remove_var("GLYPH_CACHE_DIR");
-    }
-}
+mod tests;

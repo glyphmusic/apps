@@ -137,6 +137,8 @@ pub struct Opened {
     pub rx: Receiver<Chunk>,
     pub rate: SampleRate,
     pub channels: ChannelCount,
+    /// symphonia channel bits (speaker positions); 0 = unknown.
+    pub layout: u32,
     pub duration: Option<Duration>,
     pub ctl: Arc<DecodeCtl>,
 }
@@ -397,6 +399,7 @@ fn decode_thread(
                 rx: rx.take().expect("announced once"),
                 rate: NonZeroU32::new(spec.rate.max(1)).unwrap(),
                 channels: NonZeroU16::new(ch as u16).unwrap(),
+                layout: spec.channels.bits(),
                 duration,
                 ctl: ctl.clone(),
             };
@@ -448,13 +451,27 @@ pub struct TrackSource {
     starving: bool,
     level: crate::loudness::Leveller,
     eq: crate::eq::Equalizer,
+    /// Mono / stereo / spatial rendering of each decoded frame.
+    render: crate::spatial::Renderer,
+    out_channels: ChannelCount,
+    /// One decoded frame and the rendered frame being handed out.
+    frame_in: Vec<f32>,
+    frame_out: Vec<f32>,
+    out_idx: usize,
 }
 
 impl TrackSource {
     pub fn new(opened: Opened, shared: Arc<TrackShared>, tap: Arc<Tap>) -> Self {
         let level = crate::loudness::Leveller::new(opened.rate.get(), opened.channels.get());
         let eq = crate::eq::Equalizer::new(opened.rate.get(), opened.channels.get());
+        let render = crate::spatial::Renderer::new(opened.rate.get(), opened.channels.get(), opened.layout);
+        let out_channels = NonZeroU16::new(render.out_channels()).unwrap_or(opened.channels);
         Self {
+            render,
+            out_channels,
+            frame_in: vec![0.0; opened.channels.get() as usize],
+            frame_out: vec![0.0; out_channels.get() as usize],
+            out_idx: usize::MAX,
             rx: opened.rx,
             cur: Vec::new(),
             idx: 0,
@@ -505,10 +522,41 @@ impl Drop for TrackSource {
     }
 }
 
+impl TrackSource {
+    /// Renders with `r` instead (tests: plain pass-through).
+    #[cfg(test)]
+    fn with_renderer(mut self, r: crate::spatial::Renderer) -> Self {
+        self.out_channels = NonZeroU16::new(r.out_channels()).unwrap();
+        self.frame_out = vec![0.0; r.out_channels() as usize];
+        self.render = r;
+        self
+    }
+}
+
 impl Iterator for TrackSource {
     type Item = f32;
 
+    /// Hands out the rendered frame sample by sample; decodes, filters and
+    /// renders the next frame when it is used up.
     fn next(&mut self) -> Option<f32> {
+        if self.out_idx < self.frame_out.len() {
+            let s = self.frame_out[self.out_idx];
+            self.out_idx += 1;
+            return Some(s);
+        }
+        for c in 0..self.frame_in.len() {
+            self.frame_in[c] = self.next_input()?;
+        }
+        self.render.process(&self.frame_in, &mut self.frame_out);
+        self.out_idx = 1;
+        Some(self.frame_out[0])
+    }
+}
+
+impl TrackSource {
+    /// Next decoded sample of the song's own channel layout (after the
+    /// equalizer and levelling).
+    fn next_input(&mut self) -> Option<f32> {
         let requested = self.ctl.gen.load(Ordering::SeqCst);
         if requested != self.gen {
             let old = std::mem::take(&mut self.cur);
@@ -597,7 +645,7 @@ impl Source for TrackSource {
         None
     }
     fn channels(&self) -> ChannelCount {
-        self.channels
+        self.out_channels
     }
     fn sample_rate(&self) -> SampleRate {
         self.rate
@@ -695,10 +743,11 @@ mod tests {
         let ctl = Arc::new(DecodeCtl::default());
         let shared = Arc::new(TrackShared::default());
         let opened = Opened { rx, rate: NonZeroU32::new(48_000).unwrap(),
-            channels: NonZeroU16::new(2).unwrap(), duration: None, ctl: ctl.clone() };
+            channels: NonZeroU16::new(2).unwrap(), layout: 0, duration: None, ctl: ctl.clone() };
         let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
         src.level = crate::loudness::Leveller::bypass();
         src.eq = crate::eq::Equalizer::bypass();
+        src = src.with_renderer(crate::spatial::Renderer::bypass(2));
         tx.send(Chunk { gen: 0, start_frame: 100, samples: vec![0.5; 4096] }).unwrap();
         assert_eq!(src.next(), Some(0.5));
         assert_eq!(src.next(), Some(0.5));
@@ -725,6 +774,7 @@ mod tests {
             rx,
             rate: NonZeroU32::new(48_000).unwrap(),
             channels: NonZeroU16::new(2).unwrap(),
+            layout: 0,
             duration: None,
             ctl,
         };
@@ -732,6 +782,7 @@ mod tests {
         let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
         src.level = crate::loudness::Leveller::bypass();
         src.eq = crate::eq::Equalizer::bypass();
+        src = src.with_renderer(crate::spatial::Renderer::bypass(2));
         let got: Vec<f32> = src.by_ref().collect();
         assert_eq!(got, vec![0.5, 0.25, 0.125, 0.0625]);
         assert!(shared.finished.load(Ordering::SeqCst));
@@ -744,11 +795,12 @@ mod tests {
         let (tx, rx) = flume::bounded::<Chunk>(4);
         let shared = Arc::new(TrackShared::default());
         let opened = Opened { rx, rate: NonZeroU32::new(48_000).unwrap(),
-            channels: NonZeroU16::new(2).unwrap(), duration: None,
+            channels: NonZeroU16::new(2).unwrap(), layout: 0, duration: None,
             ctl: Arc::new(DecodeCtl::default()) };
         let mut src = TrackSource::new(opened, shared.clone(), Arc::new(Tap::default()));
         src.level = crate::loudness::Leveller::bypass();
         src.eq = crate::eq::Equalizer::bypass();
+        src = src.with_renderer(crate::spatial::Renderer::bypass(2));
         assert_eq!(src.next(), Some(0.0)); // missing left channel
         tx.send(Chunk { gen: 0, start_frame: 0, samples: vec![0.75,-0.25] }).unwrap();
         assert_eq!(src.next(), Some(0.0)); // finish the silent stereo frame
@@ -764,10 +816,12 @@ mod tests {
             rx,
             rate: NonZeroU32::new(44_100).unwrap(),
             channels: NonZeroU16::new(1).unwrap(),
+            layout: 0,
             duration: None,
             ctl: Arc::new(DecodeCtl::default()),
         };
-        let mut src = TrackSource::new(opened, Arc::new(TrackShared::default()), Arc::new(Tap::default()));
+        let mut src = TrackSource::new(opened, Arc::new(TrackShared::default()), Arc::new(Tap::default()))
+            .with_renderer(crate::spatial::Renderer::bypass(1));
         assert_eq!(src.next(), Some(0.0));
         drop(tx);
         assert_eq!(src.next(), None);

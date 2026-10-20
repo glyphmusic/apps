@@ -9,7 +9,8 @@
 //!   drawn from a tiny pre-rasterised 5×7 bitmap font of the ramp characters
 //!   (no text shaping, no per-glyph draw calls). Refreshed at 15 fps.
 //!
-//! The field runs at 30 fps, 10 fps while the window is inactive, and pauses
+//! The field runs at 30 fps, 10 fps while the window is inactive (unless the
+//! user turned that off in Settings > Appearance), and pauses
 //! while the window is being moved or resized. The worker also reports the
 //! displayed luminance per UI zone so the text colour can adapt.
 
@@ -315,6 +316,8 @@ pub struct GlowView {
     /// compute until one of them changes.
     still_drawn: Option<(f32, f32, f32)>,
     active: bool,
+    /// Drop to 10 fps while another window is active.
+    throttle_inactive: bool,
     /// Last size change (resize in progress → hold the frame).
     moved_at: Instant,
     window_size: Size<Pixels>,
@@ -363,7 +366,7 @@ impl GlowView {
                 if v.tick() {
                     cx.notify();
                 }
-                if v.active { 33 } else { 100 }
+                if v.active || !v.throttle_inactive { 33 } else { 100 }
             }) {
                 Ok(ms) => ms,
                 Err(_) => break,
@@ -411,6 +414,7 @@ impl GlowView {
             motion_k: 1.0,
             still_drawn: None,
             active: true,
+            throttle_inactive: true,
             moved_at: now - Duration::from_secs(10),
             window_size: window.bounds().size,
             view_size: size(px(0.0), px(0.0)),
@@ -446,6 +450,11 @@ impl GlowView {
 
     pub fn set_intensity(&mut self, v: f32) {
         self.intensity = v.clamp(0.0, 1.0);
+    }
+
+    /// Lower frame rate while Glyph is not the active window.
+    pub fn set_throttle_inactive(&mut self, on: bool) {
+        self.throttle_inactive = on;
     }
     /// Colour theme glow colours (`None`: the presets' own).
     pub fn set_theme(&mut self, theme: Option<Palette>) {
