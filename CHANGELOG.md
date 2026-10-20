@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 - 2026-10-20
+
+- Settings and dialogs no longer cover the titlebar: the window can be dragged (and the window buttons used) while they are open, without closing them.
+- The AI assistant approval looks like the other dialogs.
+
 ## 0.4.0 - 2026-10-20
 
 - Transfer music (Settings > Transfer music, or Library > Transfer music), with no login and nothing to set up: Spotify liked songs and playlists come over by copying them in the Spotify app (Ctrl+A, Ctrl+C) and pressing Paste; YouTube Music by playlist link or a Google Takeout file; Deezer and SoundCloud from a public profile; Last.fm from the user name. Runs in the background, continues after a restart, and lists that come over twice only get their new songs. Pasting many links into search opens it too.

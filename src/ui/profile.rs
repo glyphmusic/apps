@@ -1076,16 +1076,12 @@ pub fn crop_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 ),
         );
     deferred(
-        div()
-            .id("crop-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.55))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.profile_crop_cancel(cx)))
-            .child(panel),
+        crate::ui::widgets::modal_layer(
+            0.55,
+            crate::ui::widgets::modal_backdrop("crop-backdrop", 0.55)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.profile_crop_cancel(cx)))
+                .child(panel),
+        ),
     )
     .with_priority(5)
     .into_any_element()

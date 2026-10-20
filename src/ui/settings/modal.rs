@@ -217,21 +217,13 @@ pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Contex
         .child(nav(app, cx))
         .child(content);
 
-    div()
-        .id("settings-backdrop")
-        .occlude()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 0.0, 0.30))
+    let backdrop = crate::ui::widgets::modal_backdrop("settings-backdrop", 0.30)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _, w, cx| {
             cx.stop_propagation();
             this.close_settings(w, cx);
         }))
-        .child(panel)
-        .into_any_element()
+        .child(panel);
+    crate::ui::widgets::modal_layer(0.30, backdrop).into_any_element()
 }

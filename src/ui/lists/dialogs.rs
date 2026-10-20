@@ -175,16 +175,12 @@ pub fn name_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 ),
         );
     deferred(
-        div()
-            .id("dialog-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(black(0.45))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_name_dialog(cx)))
-            .child(panel),
+        crate::ui::widgets::modal_layer(
+            0.45,
+            crate::ui::widgets::modal_backdrop("dialog-backdrop", 0.45)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_name_dialog(cx)))
+                .child(panel),
+        ),
     )
     .with_priority(4)
     .into_any_element()
@@ -292,16 +288,12 @@ pub(super) fn edit_dialog(app: &mut Glyph, id: String, cx: &mut Context<Glyph>) 
                 ),
         );
     deferred(
-        div()
-            .id("dialog-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(black(0.55))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_name_dialog(cx)))
-            .child(panel),
+        crate::ui::widgets::modal_layer(
+            0.55,
+            crate::ui::widgets::modal_backdrop("dialog-backdrop", 0.55)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_name_dialog(cx)))
+                .child(panel),
+        ),
     )
     .with_priority(4)
     .into_any_element()

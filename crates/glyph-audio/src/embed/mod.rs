@@ -69,6 +69,28 @@ pub enum EmbedEvent {
 /// `(session, event)` callback; sessions let us ignore events of an old video.
 pub type EventSink = Arc<dyn Fn(u64, EmbedEvent) + Send + Sync>;
 
+/// What an app-owned webview should do with the player page.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageRequest {
+    /// Load this loopback URL (same page and long-poll protocol as the browser tab).
+    Open(String),
+    Visible(bool),
+}
+
+pub type PageOpener = Arc<dyn Fn(PageRequest) + Send + Sync>;
+
+static PAGE_OPENER: std::sync::RwLock<Option<PageOpener>> = std::sync::RwLock::new(None);
+
+/// Mobile: the app shell shows the player page in its own WebView instead of
+/// the browser. The desktop app never sets this, so its behaviour is unchanged.
+pub fn set_page_opener(opener: PageOpener) {
+    *PAGE_OPENER.write().unwrap() = Some(opener);
+}
+
+fn page_opener() -> Option<PageOpener> {
+    PAGE_OPENER.read().unwrap().clone()
+}
+
 // ------------------------------------------------------------------ pure parts
 
 /// `"youtube"` / `"soundcloud"`, or `None` when the provider has no embed.
@@ -335,7 +357,8 @@ impl Transport for HostTransport {
     }
 }
 
-/// Opens the player page in the default browser (macOS, fallback).
+/// Opens the player page in the default browser (macOS, fallback), or in the
+/// app shell's webview when a [`PageOpener`] is set (mobile).
 pub struct BrowserTransport {
     srv: Arc<server::LocalServer>,
 }
@@ -350,7 +373,11 @@ impl Transport for BrowserTransport {
     fn eval(&self, js: String) {
         self.srv.push_script(js);
     }
-    fn set_visible(&self, _visible: bool) {}
+    fn set_visible(&self, visible: bool) {
+        if let Some(open) = page_opener() {
+            open(PageRequest::Visible(visible));
+        }
+    }
     fn set_options(&self, _options: MiniPlayerOptions) {}
     fn ensure_open(&self) -> bool {
         let alive = self.srv.poll_age().is_some_and(|a| a < Duration::from_secs(20));
@@ -358,13 +385,21 @@ impl Transport for BrowserTransport {
             return false;
         }
         self.srv.clear_queue();
-        if let Err(e) = webbrowser::open(&self.srv.page_url()) {
+        let url = self.srv.page_url();
+        if let Some(open) = page_opener() {
+            open(PageRequest::Open(url));
+            return true;
+        }
+        #[cfg(not(glyph_mobile))]
+        if let Err(e) = webbrowser::open(&url) {
             tracing::error!("cannot open the browser: {e}");
         }
+        #[cfg(glyph_mobile)]
+        tracing::error!("no page opener set; the embed player {url} cannot be shown");
         true
     }
     fn name(&self) -> &'static str {
-        "browser"
+        if page_opener().is_some() { "app-webview" } else { "browser" }
     }
 }
 

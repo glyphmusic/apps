@@ -4,7 +4,6 @@
 use crate::app::{track_key, Glyph};
 use crate::i18n::t;
 use crate::theme;
-use crate::visuals::{ascii, Palette};
 use glyph_protocol::{ProviderId, Track};
 use gpui::{canvas, 
     div, img, prelude::*, px, svg, AnimationExt, AnyElement, Context, Div, ElementId, FontWeight, Hsla, ObjectFit,
@@ -183,6 +182,36 @@ impl UiRuntime {
 
 thread_local! {
     static UI_RT: std::cell::RefCell<UiRuntime> = std::cell::RefCell::new(UiRuntime::default());
+}
+
+/// Click-catching backdrop of a modal. It starts below the titlebar, so the
+/// window can still be dragged (and the window buttons used) while it is open;
+/// put it in `modal_layer`, which dims the titlebar without catching clicks.
+pub fn modal_backdrop(id: impl Into<ElementId>, dim: f32) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .occlude()
+        .absolute()
+        .top(px(theme::TITLEBAR_H))
+        .left_0()
+        .right_0()
+        .bottom_0()
+        // Keeps the panel centered on the window, not below the titlebar.
+        .pb(px(theme::TITLEBAR_H))
+        .bg(gpui::hsla(0.0, 0.0, 0.0, dim))
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+/// Full-window modal layer: a dimmed titlebar that lets clicks through, and
+/// the `modal_backdrop` below it.
+pub fn modal_layer(dim: f32, backdrop: impl IntoElement) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .child(div().absolute().top_0().left_0().right_0().h(px(theme::TITLEBAR_H)).bg(gpui::hsla(0.0, 0.0, 0.0, dim)))
+        .child(backdrop)
 }
 
 /// Selects `window` as the active window for the current render pass and resets

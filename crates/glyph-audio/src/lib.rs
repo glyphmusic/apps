@@ -43,6 +43,11 @@ mod adaptive;
 pub mod http;
 pub mod eq;
 pub mod loudness;
+#[cfg(not(glyph_mobile))]
+mod media_keys;
+/// Android/iOS: media keys live in the app shell (MediaSession / MPRemoteCommandCenter).
+#[cfg(glyph_mobile)]
+#[path = "media_keys_mobile.rs"]
 mod media_keys;
 mod native;
 pub mod spatial;

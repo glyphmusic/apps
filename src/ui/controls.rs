@@ -44,33 +44,58 @@ pub fn on_right_click(kind: ControlMenu, cx: &mut Context<Glyph>) -> impl Fn(&Mo
 pub fn mcp_approval(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
     let a = app.mcp.approvals.first()?.clone();
     let (id1, id2) = (a.id.clone(), a.id.clone());
+    let id3 = a.id.clone();
+    // Same build as the playlist dialogs: big title with close, flat field
+    // for the code, flat buttons bottom right.
+    let code = div()
+        .h(px(64.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.0))
+        .bg(white(0.07))
+        .child(crate::ui::widgets::mono().text_size(px(26.0)).font_weight(gpui::FontWeight::BOLD).text_color(theme::pink()).child(a.code.clone()));
     let panel = div()
         .id("mcp-approval")
         .occlude()
-        .w(px(420.0))
-        .p(px(22.0))
+        .w(px(460.0))
+        .p(px(24.0))
         .rounded(px(12.0))
-        .bg(gpui::hsla(0.0, 0.0, 0.08, 0.99))
-        .border_1()
-        .border_color(white(0.1))
+        .bg(gpui::hsla(0.0, 0.0, 0.09, 0.99))
         .flex()
         .flex_col()
-        .gap(px(14.0))
+        .gap(px(18.0))
         .font_family(theme::FONT)
-        .child(div().flex().items_center().gap(px(10.0)).child(icon("bot", 20.0, theme::pink())).child(div().text_size(px(17.0)).font_weight(gpui::FontWeight::SEMIBOLD).child(crate::i18n::tf("mcp.approve.title", &[("client", &a.client)]))))
-        .child(div().text_size(px(13.5)).text_color(white(0.7)).child(t("mcp.approve.body")))
-        .child(div().flex().justify_center().py(px(6.0)).child(crate::ui::widgets::mono().text_size(px(26.0)).text_color(theme::pink()).child(a.code.clone())))
-        .child(div().text_size(px(12.5)).text_color(white(0.5)).child(t("mcp.approve.hint")))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()
                 .flex()
-                .justify_end()
+                .items_center()
+                .gap(px(10.0))
+                .child(icon("bot", 20.0, theme::pink()))
+                .child(div().flex_1().text_size(px(20.0)).font_weight(gpui::FontWeight::BOLD).text_color(white(0.95)).child(tf("mcp.approve.title", &[("client", &a.client)])))
+                .child(crate::ui::widgets::icon_button("mcp-close", "x", 18.0, white(0.6)).on_click(cx.listener(move |this, _, _, cx| this.answer_mcp_approval(&id3, false, cx)))),
+        )
+        .child(div().text_size(px(14.0)).text_color(white(0.7)).child(t("mcp.approve.body")))
+        .child(div().flex().flex_col().gap(px(8.0)).child(code).child(div().text_size(theme::text_sm()).text_color(white(0.45)).child(t("mcp.approve.hint"))))
+        .child(
+            div()
+                .flex()
+                .items_center()
                 .gap(px(8.0))
+                .child(div().flex_1())
                 .child(crate::ui::widgets::button("mcp-deny", t("mcp.approve.deny")).on_click(cx.listener(move |this, _, _, cx| this.answer_mcp_approval(&id1, false, cx))))
-                .child(crate::ui::widgets::primary_button("mcp-allow", t("mcp.approve.allow")).on_click(cx.listener(move |this, _, _, cx| this.answer_mcp_approval(&id2, true, cx)))),
+                .child(
+                    crate::ui::widgets::primary_button("mcp-allow", t("mcp.approve.allow"))
+                        .h(px(40.0))
+                        .px(px(24.0))
+                        .rounded(px(8.0))
+                        .on_click(cx.listener(move |this, _, _, cx| this.answer_mcp_approval(&id2, true, cx))),
+                ),
         );
+    // Clicking outside does not decline: the request stays until answered.
     Some(
-        deferred(div().id("mcp-approval-backdrop").absolute().inset_0().occlude().bg(gpui::hsla(0.0, 0.0, 0.0, 0.5)).flex().items_center().justify_center().child(panel))
+        deferred(crate::ui::widgets::modal_layer(0.55, crate::ui::widgets::modal_backdrop("mcp-approval-backdrop", 0.55).child(panel)))
             .with_priority(5)
             .into_any_element(),
     )

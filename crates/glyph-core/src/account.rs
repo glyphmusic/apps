@@ -71,6 +71,26 @@ fn load_stored() -> Option<Stored> {
 
 const KEYCHAIN_SERVICE: &str = "glyph";
 
+/// Secure storage of the host app (Android Keystore, iOS Keychain). When set,
+/// it is used before the OS keychain and the file fallback. The desktop app
+/// never sets it.
+pub trait SecretStore: Send + Sync {
+    fn get(&self, key: &str) -> Option<String>;
+    /// `false` when the value could not be stored (the file fallback is used then).
+    fn set(&self, key: &str, value: &str) -> bool;
+    fn delete(&self, key: &str);
+}
+
+static SECRET_STORE: std::sync::RwLock<Option<std::sync::Arc<dyn SecretStore>>> = std::sync::RwLock::new(None);
+
+pub fn set_secret_store(store: std::sync::Arc<dyn SecretStore>) {
+    *SECRET_STORE.write().unwrap() = Some(store);
+}
+
+fn secret_store() -> Option<std::sync::Arc<dyn SecretStore>> {
+    SECRET_STORE.read().unwrap().clone()
+}
+
 fn fallback_path(device_id: &str) -> PathBuf {
     paths::data_dir().join(format!("account_token_{device_id}"))
 }
@@ -81,6 +101,10 @@ fn entry(device_id: &str) -> Option<keyring::Entry> {
 }
 
 fn put_refresh(device_id: &str, token: &str) {
+    if secret_store().is_some_and(|s| s.set(&format!("account:{device_id}"), token)) {
+        let _ = std::fs::remove_file(fallback_path(device_id));
+        return;
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Some(e) = entry(device_id) {
         if e.set_password(token).is_ok() {
@@ -95,6 +119,9 @@ fn put_refresh(device_id: &str, token: &str) {
 }
 
 fn get_refresh(device_id: &str) -> Option<String> {
+    if let Some(t) = secret_store().and_then(|s| s.get(&format!("account:{device_id}"))) {
+        return Some(t);
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Some(t) = entry(device_id).and_then(|e| e.get_password().ok()) {
         return Some(t);
@@ -103,6 +130,9 @@ fn get_refresh(device_id: &str) -> Option<String> {
 }
 
 fn forget_refresh(device_id: &str) {
+    if let Some(s) = secret_store() {
+        s.delete(&format!("account:{device_id}"));
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Some(e) = entry(device_id) {
         let _ = e.delete_credential();
@@ -118,6 +148,10 @@ fn vault_fallback(account_id: &str) -> PathBuf {
 
 fn put_vault(account_id: &str, v: &Vault) {
     let text = b64(v.bytes());
+    if secret_store().is_some_and(|s| s.set(&format!("settings-key:{account_id}"), &text)) {
+        let _ = std::fs::remove_file(vault_fallback(account_id));
+        return;
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
         if e.set_password(&text).is_ok() {
@@ -131,6 +165,9 @@ fn put_vault(account_id: &str, v: &Vault) {
 }
 
 fn get_vault(account_id: &str) -> Option<Vault> {
+    if let Some(t) = secret_store().and_then(|s| s.get(&format!("settings-key:{account_id}"))) {
+        return unb64(&t).and_then(|b| Vault::from_bytes(&b));
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Some(t) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")).ok().and_then(|e| e.get_password().ok()) {
         return unb64(&t).and_then(|b| Vault::from_bytes(&b));
@@ -140,6 +177,9 @@ fn get_vault(account_id: &str) -> Option<Vault> {
 }
 
 fn forget_vault(account_id: &str) {
+    if let Some(s) = secret_store() {
+        s.delete(&format!("settings-key:{account_id}"));
+    }
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
         let _ = e.delete_credential();

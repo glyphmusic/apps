@@ -17,10 +17,14 @@ reqwest = { workspace = true, features = ["blocking"] }
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mkv"] }
 rustfft = "6"
+raw-window-handle = "0.6"
+
+# Desktop only: OS media keys, the embed webview and the browser fallback.
+# On Android/iOS the app shell owns MediaSession / WebView (see build.rs and
+# the `glyph_mobile` cfg).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 webbrowser = "1"
-
-raw-window-handle = "0.6"
 wry = "0.57"
 
 # CPAL only registers its WASAPI callback with Windows MMCSS when enabled.
