@@ -19,7 +19,8 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            // Sideloadable test builds until there is a real release key.
+            // Local builds use the debug key; CI re-signs release APKs with the
+            // Glyph release key (.github/workflows/android.yml).
             signingConfig signingConfigs.debug
         }
     }

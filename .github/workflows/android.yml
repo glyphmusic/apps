@@ -1,0 +1,91 @@
+# Android APK for a release tag: built, signed with the Glyph release key
+# (secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD) and attached
+# to that release. Called by release.yml; run by hand with `publish` to add
+# the APK to an existing release and refresh its SHA256SUMS.txt.
+name: Android
+
+on:
+  workflow_call:
+    inputs:
+      tag: { type: string, required: true }
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag, e.g. v0.5.0", type: string, required: true }
+      publish: { description: "Add to SHA256SUMS.txt and make the release public", type: boolean, default: true }
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      # The runner image ships the SDK; setup-android trips over preview licenses.
+      - name: NDK and cargo-ndk
+        run: |
+          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          cargo install cargo-ndk --locked
+      - name: Build
+        run: |
+          cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
+          cd mobile/android
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+      - name: Sign
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          [ -n "$KEYSTORE_BASE64" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 is not set"; exit 1; }
+          VERSION="${{ inputs.tag }}"; VERSION="${VERSION#v}"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/glyph-release.p12"
+          mkdir -p dist
+          APK="dist/glyph-$VERSION-android.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/glyph-release.p12" \
+            --ks-key-alias glyph-release --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+            --out "$APK" mobile/android/app/build/outputs/apk/release/app-release.apk
+          rm "$RUNNER_TEMP/glyph-release.p12"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256'
+          rm -f dist/*.idsig
+          cd dist && sha256sum "glyph-$VERSION-android.apk" > "glyph-$VERSION-android.apk.sha256"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ inputs.tag }}" dist/*.apk --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums-android
+          path: dist/*.sha256
+          if-no-files-found: error
+      - name: Publish the release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          # Hash every asset of the release, so the list is complete even when
+          # the release workflow never got to write it.
+          mkdir assets
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep -vx SHA256SUMS.txt             | while read -r name; do gh release download "$TAG" --pattern "$name" --dir assets; done
+          (cd assets && sha256sum *) | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+          gh release edit "$TAG" --draft=false --latest
