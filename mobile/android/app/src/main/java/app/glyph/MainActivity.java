@@ -204,9 +204,14 @@ public class MainActivity extends GameActivity {
         return text == null ? null : text.toString();
     }
 
-    /** Now playing from Rust: drives the background playback service. */
-    public void gpuiNowPlaying(String title, String artist, boolean playing, long positionMs, long durationMs) {
-        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, positionMs, durationMs));
+    /**
+     * Now playing from Rust: drives the background playback service. The
+     * cover is a cached image file ("" for none); liked: the song is in
+     * Liked Songs (the notification's add button shows a check).
+     */
+    public void gpuiNowPlaying(String title, String artist, boolean playing, long positionMs, long durationMs,
+                               String coverPath, boolean liked) {
+        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, positionMs, durationMs, coverPath, liked));
     }
 
     /** The link the app was opened with, once (null when there is none). */

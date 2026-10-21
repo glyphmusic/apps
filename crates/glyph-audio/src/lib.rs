@@ -351,6 +351,8 @@ pub enum MediaKeyEvent {
     Stop,
     SeekForward,
     SeekBackward,
+    /// Like / unlike the current song (the phone notification's add button).
+    Like,
 }
 
 #[cfg(test)]

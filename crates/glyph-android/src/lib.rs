@@ -39,24 +39,30 @@ fn android_main(app: AndroidApp) {
 
     // Background playback: now playing goes to MainActivity.gpuiNowPlaying,
     // which runs the media notification service (PlaybackService.java).
-    glyph_audio::media_keys::set_now_playing_sink(Box::new(|track, playing, pos| {
-        let (title, artist, dur) = match track {
+    // The cover file becomes the notification's artwork ("" for none), and
+    // `liked` the state of its add button.
+    glyph_audio::media_keys::set_now_playing_sink(Box::new(|now: &glyph_audio::media_keys::NowPlaying<'_>| {
+        let (title, artist, dur) = match now.track {
             Some(t) => (t.title.clone(), t.artist.clone(), t.duration_ms.unwrap_or(0)),
             None => (String::new(), String::new(), 0),
         };
+        let cover = now.cover.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         gpui_android::java::with_activity("now playing", |env, activity| {
             let title = env.new_string(&title)?;
             let artist = env.new_string(&artist)?;
+            let cover = env.new_string(&cover)?;
             env.call_method(
                 activity,
                 jni_str!("gpuiNowPlaying"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJJ)V"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJJLjava/lang/String;Z)V"),
                 &[
                     JValue::Object(&title),
                     JValue::Object(&artist),
-                    JValue::Bool(playing.into()),
-                    JValue::Long(pos.as_millis() as i64),
+                    JValue::Bool(now.playing.into()),
+                    JValue::Long(now.position.as_millis() as i64),
                     JValue::Long(dur as i64),
+                    JValue::Object(&cover),
+                    JValue::Bool(now.liked.into()),
                 ],
             )?;
             Ok(())
@@ -150,6 +156,7 @@ extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(_env: E
         3 => MediaKeyEvent::Next,
         4 => MediaKeyEvent::Previous,
         5 => MediaKeyEvent::Stop,
+        6 => MediaKeyEvent::Like,
         _ => return,
     };
     glyph_audio::media_keys::push_event(ev);

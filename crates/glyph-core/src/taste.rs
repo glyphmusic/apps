@@ -7,6 +7,10 @@
 //!
 //! Search queries may quote phrases (`"blue in green"`): quoted parts must
 //! appear exactly (case-insensitive) in the title, artist or album.
+//!
+//! Search ranking never filters by region: the user's country (from the system
+//! locale) only lifts songs released there a little, next to their taste,
+//! the artists they searched before and how complete a result is.
 
 use crate::dedupe::{normalize_artist, normalize_title};
 use crate::library::Library;
@@ -19,6 +23,29 @@ pub struct Taste {
     artists: HashMap<String, f32>,
     hidden: HashSet<String>,
     liked: HashSet<String>,
+    /// The user's country ("DE"), for a small lift of songs released there.
+    region: Option<String>,
+}
+
+/// Country part of a locale: "de-DE", "en_US.UTF-8", "zh-Hans-CN" -> DE, US, CN.
+fn region_of(locale: &str) -> Option<String> {
+    let base = locale.split(['.', '@']).next()?;
+    base.split(['-', '_'])
+        .skip(1)
+        .find(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic()))
+        .map(|p| p.to_ascii_uppercase())
+}
+
+/// The user's country from the system locale (read once).
+pub fn user_region() -> Option<String> {
+    static REGION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    REGION.get_or_init(|| sys_locale::get_locale().as_deref().and_then(region_of)).clone()
+}
+
+/// Registrant country of an ISRC ("DEUM71500123" -> DE).
+fn isrc_country(isrc: &str) -> Option<String> {
+    let c: String = isrc.trim().chars().take(2).collect();
+    (c.len() == 2 && c.chars().all(|c| c.is_ascii_alphabetic())).then(|| c.to_ascii_uppercase())
 }
 
 /// Every credited artist of "A, B feat. C" (normalised).
@@ -60,6 +87,14 @@ impl Taste {
         for (a, preference) in &lib.recommendation_feedback {
             add(a, if *preference > 0 { 8.0 } else { -12.0 });
         }
+        // What the user searched for and picked is interest too (newest most).
+        for (i, item) in lib.search_items.iter().take(40).enumerate() {
+            let fade = 0.95f32.powi(i as i32);
+            match item {
+                crate::library::SearchItem::Artist { name, .. } => add(name, 2.5 * fade),
+                crate::library::SearchItem::Song { track } => add(&track.artist, 1.5 * fade),
+            }
+        }
         let hidden: HashSet<String> = lib.hidden_artists.iter().chain(lib.recommendation_feedback.iter().filter(|(_, v)| **v <= -2).map(|(a, _)| a)).flat_map(|h| credited(h)).collect();
         for h in &hidden {
             w.remove(h);
@@ -67,7 +102,13 @@ impl Taste {
         let max = w.values().cloned().fold(0.0f32, f32::max).max(1.0);
         let artists = w.into_iter().filter(|(_, v)| *v > 0.0).map(|(k, v)| (k, (v / max).min(1.0))).collect();
         let liked = lib.liked.iter().map(song_key).collect();
-        Self { artists, hidden, liked }
+        Self { artists, hidden, liked, region: user_region() }
+    }
+
+    /// Same weights for another country (tests, server-side ranking).
+    pub fn with_region(mut self, region: Option<&str>) -> Self {
+        self.region = region.map(str::to_ascii_uppercase);
+        self
     }
 
     /// 0..1, the best of the credited artists.
@@ -191,11 +232,18 @@ fn title_artist_match(t: &Track, q: &str) -> f32 {
     s - (missing as f32 * 0.6).min(2.4)
 }
 
-/// Rank of `t` for `query` (higher first): text match, odd versions, taste.
+/// Rank of `t` for `query` (higher first): text match, odd versions, taste,
+/// the user's region and how complete the result is.
 pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
     let q = squash(query);
     let title = squash(&t.title);
     let artist = squash(&t.artist);
+    // Uploads titled "Artist - Song": only the song part is the title, so
+    // searching the artist does not lift them over the artist's releases.
+    let title = match title.strip_prefix(&format!("{artist} - ")).or_else(|| title.strip_prefix(&format!("{artist} – "))) {
+        Some(rest) if !artist.is_empty() && !rest.is_empty() => rest.to_string(),
+        _ => title,
+    };
     let mut s = 0.0;
     if !q.is_empty() {
         if title == q {
@@ -220,6 +268,22 @@ pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
     s += taste.artist_weight(&t.artist) * 2.0;
     if taste.is_liked(t) {
         s += 1.0;
+    }
+    // A proper release (it has an ISRC), lifted a bit more when it was
+    // released in the user's country; never a filter.
+    if let Some(isrc) = t.isrc.as_deref().filter(|i| !i.trim().is_empty()) {
+        s += 0.3;
+        if taste.region.is_some() && isrc_country(isrc) == taste.region {
+            s += 0.5;
+        }
+    }
+    // Results without a cover or a length are usually stray uploads: they
+    // drop a little below complete ones with the same match.
+    if t.cover_url.as_deref().is_none_or(|c| c.trim().is_empty()) {
+        s -= 0.6;
+    }
+    if t.duration_ms.is_none_or(|d| d == 0) {
+        s -= 0.5;
     }
     s
 }
@@ -289,6 +353,53 @@ mod tests {
         assert!(score(&feat, "stay justin bieber", &taste) > score(&tr("Stay", "Rihanna"), "stay justin bieber", &taste));
         // A title alone ranks as before.
         assert!(score(&right, "believer", &taste) > score(&other, "believer", &taste));
+    }
+
+    #[test]
+    fn region_and_completeness_rank_but_never_filter() {
+        let taste = Taste::default().with_region(Some("de"));
+        let mut german = tr("Hello", "A");
+        german.isrc = Some("DEUM71500123".into());
+        german.cover_url = Some("https://x/c.jpg".into());
+        german.duration_ms = Some(200_000);
+        let mut us = german.clone();
+        us.isrc = Some("USUM71500123".into());
+        let bare = tr("Hello", "A");
+        let (g, u, b) = (score(&german, "hello", &taste), score(&us, "hello", &taste), score(&bare, "hello", &taste));
+        assert!(g > u && u > b, "{g} {u} {b}");
+        // A better text match still wins over the region lift.
+        let mut exact = tr("Hello World", "B");
+        exact.isrc = Some("GBUM71500123".into());
+        exact.cover_url = german.cover_url.clone();
+        exact.duration_ms = german.duration_ms;
+        assert!(score(&exact, "hello world", &taste) > score(&german, "hello world", &taste));
+        assert_eq!(region_of("de-DE").as_deref(), Some("DE"));
+        assert_eq!(region_of("en_US.UTF-8").as_deref(), Some("US"));
+        assert_eq!(region_of("zh-Hans-CN").as_deref(), Some("CN"));
+        assert_eq!(region_of("de"), None);
+    }
+
+    #[test]
+    fn artist_search_puts_releases_over_titled_uploads() {
+        let taste = Taste::default();
+        let mut release = tr("Instant Crush", "Daft Punk");
+        release.isrc = Some("USQX91300101".into());
+        release.cover_url = Some("https://x/c.jpg".into());
+        release.duration_ms = Some(337_000);
+        let mut upload = tr("Daft Punk - Get Lucky", "Daft Punk");
+        upload.cover_url = Some("https://x/w.jpg".into());
+        assert!(score(&release, "daft punk", &taste) > score(&upload, "daft punk", &taste));
+        // Typing the song still finds the upload by its song part.
+        assert!(score(&upload, "get lucky", &taste) > score(&release, "get lucky", &taste));
+    }
+
+    #[test]
+    fn searched_artists_count_as_interest() {
+        let mut lib = Library::default();
+        lib.search_items.push(crate::library::SearchItem::Artist { name: "Searched".into(), track: None });
+        let taste = Taste::from_library(&lib);
+        assert!(taste.artist_weight("Searched") > 0.0);
+        assert!(score(&tr("Song", "Searched"), "song", &taste) > score(&tr("Song", "Other"), "song", &taste));
     }
 
     #[test]

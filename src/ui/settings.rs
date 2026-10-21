@@ -158,8 +158,8 @@ pub(crate) fn row_full(
         .items_center()
         .justify_between()
         .gap(px(if TOUCH { 10.0 } else { 24.0 }))
-        // Phones: a wide control (field, buttons) wraps under the label
-        // instead of running over it.
+        // Phones: the control wraps under the label only when the two would
+        // collide (label text + control wider than the row), never earlier.
         .when(TOUCH, |d| d.flex_wrap())
         .py(px(14.0))
         .child(
@@ -167,7 +167,9 @@ pub(crate) fn row_full(
                 .flex()
                 .flex_col()
                 .min_w_0()
-                .when(TOUCH, |d| d.flex_grow(1.0).flex_basis(px(200.0)))
+                // Sized by its text (no fixed basis), so a short label keeps a
+                // wide control beside it.
+                .when(TOUCH, |d| d.flex_grow(1.0))
                 .gap(px(3.0))
                 .child(
                     div()

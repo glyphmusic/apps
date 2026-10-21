@@ -223,6 +223,25 @@ impl Glyph {
                 }
                 MediaKeyEvent::SeekForward => self.seek_relative(5.0),
                 MediaKeyEvent::SeekBackward => self.seek_relative(-5.0),
+                MediaKeyEvent::Like => {
+                    if let Some(cur) = self.current.clone() {
+                        self.toggle_like(&cur, cx);
+                    }
+                }
+            }
+        }
+        // Phones: the notification shows the cover behind the controls and
+        // an add button for Liked Songs.
+        if crate::ui::compact::TOUCH && self.media_keys.is_some() {
+            let art = match self.current.clone() {
+                Some(cur) => (self.cover_path(&cur, cx), self.is_liked(&cur)),
+                None => (None, false),
+            };
+            if self.media_art_sent.as_ref() != Some(&art) {
+                if let Some(mk) = &self.media_keys {
+                    guard(|| mk.set_artwork(art.0.as_deref(), art.1));
+                }
+                self.media_art_sent = Some(art);
             }
         }
 
@@ -327,9 +346,31 @@ impl Glyph {
                 crate::ui::widgets::keep_eq_seen();
             }
         }
+        if let Some(every) = self.slow_motion_every() {
+            if self.slow_redraw.elapsed() >= every {
+                self.slow_redraw = Instant::now();
+                dirty = true;
+            }
+        }
         if dirty {
             cx.notify();
         }
+    }
+
+    /// Phones: motion that can run for minutes redraws at its own lower rate,
+    /// not on every tick: a full redraw at display rate for as long as a song
+    /// played in Now Playing heated the phone. The seek bar and clock already
+    /// follow the position every 250 ms (above); only the lyrics full screen
+    /// needs 30 fps for its gliding fill. Download progress: 4 fps.
+    fn slow_motion_every(&self) -> Option<Duration> {
+        use crate::ui::compact::{now_playing, TOUCH};
+        if !TOUCH {
+            return None;
+        }
+        if now_playing::lyrics_open() && self.is_playing() {
+            return Some(Duration::from_millis(33));
+        }
+        (!self.downloading.is_empty()).then_some(Duration::from_millis(250))
     }
 
     pub fn is_animating(&self) -> bool {
@@ -337,13 +378,16 @@ impl Glyph {
         let settings_anim = (self.settings_open && self.settings_at.elapsed() < Duration::from_millis(220)) || self.settings_closing.is_some();
         let nav_anim = self.nav_hover.is_some_and(|(v, at)| v == View::NowPlaying || at.elapsed() < Duration::from_millis(700))
             || self.nav_leave.is_some_and(|(_, at, _)| at.elapsed().as_secs_f32() < crate::ui::chrome::NAV_EASE_BACK + 0.05);
-        let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200)) || self.ctx_closing.is_some();
+        let menu_anim = (self.ctx_menu.is_some() && self.ctx_opened.elapsed() < Duration::from_millis(200))
+            || self.ctx_closing.is_some()
+            || self.control_menu.is_some_and(|(_, _, at)| at.elapsed() < Duration::from_millis(200))
+            || self.control_closing.is_some();
         let tip_anim = self.side_hover.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(600));
         let info_anim = self.lyrics_info.is_some_and(|at| at.elapsed() < Duration::from_millis(300));
         toast_fading
             || crate::ui::widgets::reveal_active()
             || info_anim
-            || !self.downloading.is_empty()
+            || (!crate::ui::compact::TOUCH && !self.downloading.is_empty())
             || self.download_done.values().any(|at| at.elapsed().as_secs_f32() < crate::ui::widgets::DL_DONE_ANIM_S)
             || (self.settings_open && self.settings_group_motion.values().any(|(at,_,_)| at.elapsed() < Duration::from_millis(180)))
             || settings_anim
@@ -366,7 +410,8 @@ impl Glyph {
             || self.update.installing.is_some()
             || matches!(self.conn_test, Some(ConnTest::Running))
             || self.backend_state == BackendState::Connecting
-            || ((self.view == View::NowPlaying || crate::ui::compact::now_playing::is_open()) && self.is_playing())
+            // Phones: `slow_motion_every`.
+            || (!crate::ui::compact::TOUCH && self.view == View::NowPlaying && self.is_playing())
     }
 
     // ------------------------------------------------------------ helpers

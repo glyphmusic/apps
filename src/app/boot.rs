@@ -129,20 +129,29 @@ impl Glyph {
             );
         }
 
-        let poll = cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            let Ok(title) = this.update(cx, |s, cx| {
-                s.poll(cx);
-                s.take_window_title()
-            }) else {
-                break;
-            };
-            // Rendering pauses while the window is in the background; the
-            // title (taskbar preview, alt-tab) must follow the song anyway.
-            if let Some((handle, title)) = title {
-                let _ = cx.update_window(handle, |_, w, _| w.set_window_title(&title));
+        let poll_window = window.window_handle();
+        let poll = cx.spawn(async move |this, cx| {
+            let mut every = Duration::from_millis(16);
+            loop {
+                cx.background_executor().timer(every).await;
+                let Ok(title) = this.update(cx, |s, cx| {
+                    s.poll(cx);
+                    s.take_window_title()
+                }) else {
+                    break;
+                };
+                // Rendering pauses while the window is in the background; the
+                // title (taskbar preview, alt-tab) must follow the song anyway.
+                if let Some((handle, title)) = title {
+                    let _ = cx.update_window(handle, |_, w, _| w.set_window_title(&title));
+                }
+                // Phones: in the background (music playing for hours) a tick
+                // every 100 ms is plenty; 60 wake-ups a second drained and
+                // warmed the phone.
+                if crate::ui::compact::TOUCH {
+                    let active = cx.update_window(poll_window, |_, w, _| w.is_window_active()).unwrap_or(true);
+                    every = Duration::from_millis(if active { 16 } else { 100 });
+                }
             }
         });
 
@@ -159,6 +168,7 @@ impl Glyph {
             history: Vec::new(),
             ctx_menu: None,
             control_menu: None,
+            control_closing: None,
             ctx_opened: Instant::now(),
             ctx_closing: None,
             heroes: Default::default(),
@@ -277,6 +287,7 @@ impl Glyph {
             stats_synced: Instant::now(),
             window_title: String::new(),
             eq_redraw: Instant::now(),
+            slow_redraw: Instant::now(),
             mcp: Default::default(),
             jam: Default::default(),
             mpd: None,
@@ -330,6 +341,7 @@ impl Glyph {
             ascii_covers: Default::default(),
             embed: crate::embed::EmbedHost::new(raw_handle(window)),
             media_keys_sent: None,
+            media_art_sent: None,
             started: Instant::now(),
             _subs: subs,
             _poll: poll,

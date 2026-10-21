@@ -122,6 +122,10 @@ impl MediaKeys {
     pub fn set_now_playing(&self, track: Option<&Track>, playing: bool, position: Duration) {
         let _ = self.tx.send(Msg::Now { track: track.cloned(), playing, position });
     }
+
+    /// Phones only (notification artwork and like button); the desktop
+    /// controls take the track's cover URL.
+    pub fn set_artwork(&self, _cover: Option<&std::path::Path>, _liked: bool) {}
 }
 
 impl Drop for MediaKeys {

@@ -92,6 +92,14 @@ pub fn is_open() -> bool {
     NP.with(|n| n.borrow().open)
 }
 
+/// The lyrics full screen is up.
+pub fn lyrics_open() -> bool {
+    NP.with(|n| {
+        let n = n.borrow();
+        n.open && n.lyrics
+    })
+}
+
 /// `View::NowPlaying` becomes the sheet over the page it was opened from.
 pub fn adopt_view(app: &mut Glyph, cx: &mut Context<Glyph>) {
     if app.view != View::NowPlaying {

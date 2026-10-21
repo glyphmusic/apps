@@ -13,6 +13,11 @@
 //! user turned that off in Settings > Appearance), and pauses
 //! while the window is being moved or resized. The worker also reports the
 //! displayed luminance per UI zone so the text colour can adapt.
+//!
+//! Phones run it slower (20 fps, the ASCII layer at ~7 fps, 4 fps while the
+//! app is not in front): the full-resolution ASCII image of a dense phone
+//! screen is large, and re-rasterising and uploading it at desktop rates kept
+//! the CPU and GPU busy for as long as the app was open.
 
 use super::field::{self, Motion, Preset, Ramp};
 use super::palette::{Palette, PaletteFade, Rgb};
@@ -31,6 +36,10 @@ use std::time::{Duration, Instant};
 /// Dark → bright.
 pub const RAMP: &str = " .-=+xX0S8#@";
 const PRESET_FADE: f32 = 1.5;
+/// Field frame interval (ms): active, inactive window.
+const FIELD_MS: (u64, u64) = if crate::ui::compact::TOUCH { (50, 250) } else { (33, 100) };
+/// The ASCII layer is redrawn every n-th field frame.
+const ASCII_EVERY: u64 = if crate::ui::compact::TOUCH { 3 } else { 2 };
 /// Glow sample pitch (logical px).
 const GLOW_PITCH: f32 = 8.0;
 /// ASCII cell (logical px). Sparse on purpose: the grid is texture, not content.
@@ -366,7 +375,8 @@ impl GlowView {
                 if v.tick() {
                     cx.notify();
                 }
-                if v.active || !v.throttle_inactive { 33 } else { 100 }
+                // Phones: inactive is the background (or the shade pulled down).
+                if v.active || (!v.throttle_inactive && !crate::ui::compact::TOUCH) { FIELD_MS.0 } else { FIELD_MS.1 }
             }) {
                 Ok(ms) => ms,
                 Err(_) => break,
@@ -627,9 +637,9 @@ impl GlowView {
             level: 0.5 + 0.5 * self.intensity,
             density: 0.75 + 0.45 * highs + 0.08 * playing,
             threshold: 0.42 - 0.06 * highs,
-            // 15 fps normally, every frame while the page scrolls or stands still
+            // 15 fps normally (phones ~7), every frame while the page scrolls or stands still
             // (a still frame is the last one for a while).
-            ascii: self.frame_no % 2 == 0 || mk == 0.0 || self.ascii_img.is_none() || (self.scroll - self.ascii_scroll).abs() > 0.5,
+            ascii: self.frame_no % ASCII_EVERY == 0 || mk == 0.0 || self.ascii_img.is_none() || (self.scroll - self.ascii_scroll).abs() > 0.5,
             dot_level: 0.18 + 0.14 * self.intensity + 0.28 * bass + 0.10 * pulse,
             blend,
             scroll: self.scroll,

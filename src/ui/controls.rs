@@ -103,9 +103,20 @@ pub fn mcp_approval(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyEleme
 }
 
 pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> Option<AnyElement> {
-    let (kind, pos, opened) = app.control_menu?;
-    let k = (opened.elapsed().as_secs_f32() / 0.14).min(1.0);
-    let alpha = 1.0 - (1.0 - k).powi(3);
+    // Open: fade in (140 ms). Closing: fade out (110 ms), not clickable.
+    const IN: f32 = 0.14;
+    const OUT: f32 = 0.11;
+    if app.control_closing.is_some_and(|(_, _, at)| at.elapsed().as_secs_f32() >= OUT) {
+        app.control_closing = None;
+    }
+    let (kind, pos, alpha, live) = match (app.control_menu, app.control_closing) {
+        (Some((kind, pos, opened)), _) => {
+            let k = (opened.elapsed().as_secs_f32() / IN).min(1.0);
+            (kind, pos, 1.0 - (1.0 - k).powi(3), true)
+        }
+        (None, Some((kind, pos, at))) => (kind, pos, 1.0 - (at.elapsed().as_secs_f32() / OUT).min(1.0), false),
+        _ => return None,
+    };
     let mut body: Vec<AnyElement> = Vec::new();
     match kind {
         ControlMenu::Sort => {
@@ -399,9 +410,16 @@ pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyp
         .flex_col()
         .font_family(theme::FONT)
         .opacity(alpha)
+        .mt(px(6.0 * (1.0 - alpha)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .children(body);
+    let anchor = anchored().position(pos).anchor(gpui::Anchor::BottomLeft).snap_to_window_with_margin(px(8.0));
+    if !live {
+        // Fading out: drawn only; a cover keeps its rows from taking clicks.
+        let menu = div().relative().child(menu).child(div().id("control-menu-cover").absolute().inset_0().occlude());
+        return Some(deferred(div().absolute().inset_0().child(anchor.child(menu))).with_priority(3).into_any_element());
+    }
     // Opens upwards from the bar (it sits at the window's bottom edge);
     // `anchored` keeps it inside the window either way.
     let layer = div()
@@ -412,6 +430,6 @@ pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyp
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_control_menu(cx)))
         .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| this.close_control_menu(cx)))
         .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_control_menu(cx)))
-        .child(anchored().position(pos).anchor(gpui::Anchor::BottomLeft).snap_to_window_with_margin(px(8.0)).child(menu));
+        .child(anchor.child(menu));
     Some(deferred(layer).with_priority(3).into_any_element())
 }

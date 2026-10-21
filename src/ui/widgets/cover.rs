@@ -61,14 +61,34 @@ pub(super) fn cover_inner(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx
         );
     }
     // ASCII mode only ever shows the real cover; without one it is the same
-    // flat placeholder as the normal mode.
-    if app.cover_loading(t) || app.backend.is_none() {
+    // flat placeholder as the normal mode. A cover that has not come after a
+    // few seconds gets the placeholder too (a late one still replaces it).
+    if (app.cover_loading(t) || app.backend.is_none()) && !cover_overdue(&track_key(t)) {
         return skeleton(format!("cover-sk-{}-{size}", track_key(t)), size, size, radius);
     }
     base.flex()
         .items_center()
         .justify_center()
         .child(icon("music-2", (size * 0.36).clamp(14.0, 64.0), theme::text_faint()))
+}
+
+/// How long a cover may shimmer before the placeholder stands in for it.
+const COVER_WAIT: Duration = Duration::from_secs(4);
+
+thread_local! {
+    /// When each still-loading cover was first drawn.
+    static COVER_SINCE: std::cell::RefCell<std::collections::HashMap<String, std::time::Instant>> = Default::default();
+}
+
+/// The cover of `key` has been loading for longer than [`COVER_WAIT`].
+fn cover_overdue(key: &str) -> bool {
+    COVER_SINCE.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 4096 && !m.contains_key(key) {
+            m.clear();
+        }
+        m.entry(key.to_string()).or_insert_with(std::time::Instant::now).elapsed() >= COVER_WAIT
+    })
 }
 
 // ---- loading skeletons ----------------------------------------------------

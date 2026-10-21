@@ -4,6 +4,12 @@
 //! `TerminateWindow`); the wgpu renderer survives that: its surface is
 //! unconfigured while the app is in the background and replaced when it
 //! returns, so atlas textures and pipelines stay valid.
+//!
+//! Frames are drawn on demand: GPUI's frame waker marks the window as
+//! wanting one, the run loop draws it at the next frame slot and otherwise
+//! sleeps. Slots follow the display rate while a finger is on the screen
+//! (and shortly after, for flings) and are capped at 60 Hz otherwise, so
+//! timer-driven motion does not keep a 120 Hz panel's GPU busy.
 
 use crate::display::AndroidDisplay;
 use crate::input::{self, ImeSync};
@@ -25,6 +31,14 @@ use raw_window_handle::{
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Frame-rate cap while nobody touches the screen.
+const CALM_MAX_HZ: f32 = 60.0;
+/// Full display rate for this long after the last touch (flings, settling).
+const TOUCH_FULL_RATE: Duration = Duration::from_millis(1500);
+/// A slot this close counts as reached (the looper may wake a bit early).
+const SLOT_SLACK: Duration = Duration::from_millis(1);
 
 /// `NativeWindow` with a display handle, as wgpu wants both.
 #[derive(Debug, Clone)]
@@ -68,6 +82,10 @@ pub(crate) struct AndroidWindowState {
     active: Cell<bool>,
     visibility: Cell<WindowVisibility>,
     force_next_frame: Cell<bool>,
+    /// GPUI wants a frame (set by its frame waker and `schedule_frame`).
+    frame_wanted: Rc<Cell<bool>>,
+    last_frame: Cell<Option<Instant>>,
+    last_touch: Cell<Option<Instant>>,
     mouse_position: Cell<Point<Pixels>>,
     modifiers: Cell<Modifiers>,
     pub(crate) touches: RefCell<input::TouchIds>,
@@ -118,6 +136,9 @@ impl AndroidWindow {
             active: Cell::new(true),
             visibility: Cell::new(WindowVisibility::Visible),
             force_next_frame: Cell::new(true),
+            frame_wanted: Rc::new(Cell::new(true)),
+            last_frame: Cell::new(None),
+            last_touch: Cell::new(None),
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             touches: RefCell::default(),
@@ -175,8 +196,29 @@ impl AndroidWindowState {
         self.native.borrow().is_some() && self.visibility.get() == WindowVisibility::Visible
     }
 
-    pub(crate) fn refresh_hz(&self) -> f32 {
-        self.refresh_hz.get()
+    /// How long the run loop may sleep before the next frame; `None` while
+    /// no frame is wanted (it then sleeps until an event or a wake).
+    pub(crate) fn next_frame_in(&self) -> Option<Duration> {
+        let wanted = self.force_next_frame.get() || self.frame_wanted.get();
+        (wanted && self.has_surface()).then(|| self.frame_wait())
+    }
+
+    fn frame_wait(&self) -> Duration {
+        let Some(last) = self.last_frame.get() else { return Duration::ZERO };
+        self.frame_interval().saturating_sub(last.elapsed()).saturating_sub(SLOT_SLACK)
+    }
+
+    fn frame_interval(&self) -> Duration {
+        let touching = self.last_touch.get().is_some_and(|t| t.elapsed() < TOUCH_FULL_RATE);
+        let hz = self.refresh_hz.get();
+        let hz = if touching { hz } else { hz.min(CALM_MAX_HZ) };
+        Duration::from_secs_f32(1.0 / hz.max(1.0))
+    }
+
+    /// The system asks for the surface's content again.
+    pub(crate) fn redraw_needed(&self) {
+        self.force_next_frame.set(true);
+        self.request_frame();
     }
 
     /// `InitWindow`: the activity has a (new) surface.
@@ -253,11 +295,18 @@ impl AndroidWindowState {
         }
     }
 
+    /// Draws if a frame is wanted and its slot has come.
     pub(crate) fn request_frame(&self) {
-        if !self.has_surface() {
+        if !self.has_surface() || !self.frame_wait().is_zero() {
             return;
         }
         let force_render = self.force_next_frame.replace(false);
+        if !force_render && !self.frame_wanted.get() {
+            return;
+        }
+        // Cleared first: a draw that wants the next frame sets it again.
+        self.frame_wanted.set(false);
+        self.last_frame.set(Some(Instant::now()));
         self.request_frame_callback.with(|cb| {
             cb(RequestFrameOptions { force_render, require_presentation: force_render, ..Default::default() })
         });
@@ -265,6 +314,9 @@ impl AndroidWindowState {
 
     /// Delivers one event; `true` when GPUI handled it.
     pub(crate) fn dispatch(&self, event: PlatformInput) -> bool {
+        if matches!(event, PlatformInput::Touch(_) | PlatformInput::MouseDown(_) | PlatformInput::MouseMove(_) | PlatformInput::ScrollWheel(_)) {
+            self.last_touch.set(Some(Instant::now()));
+        }
         match &event {
             PlatformInput::Touch(t) => self.mouse_position.set(t.position),
             PlatformInput::MouseMove(m) => self.mouse_position.set(m.position),
@@ -446,6 +498,17 @@ impl PlatformWindow for AndroidWindow {
 
     fn is_fullscreen(&self) -> bool {
         true
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        // Runs on the main thread, inside the run loop, which looks at the
+        // flag before it sleeps again.
+        let wanted = self.0.frame_wanted.clone();
+        Some(Rc::new(move || wanted.set(true)))
+    }
+
+    fn schedule_frame(&self) {
+        self.0.frame_wanted.set(true);
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

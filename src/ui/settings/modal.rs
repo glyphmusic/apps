@@ -173,7 +173,13 @@ pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Contex
                             )
                             .child(div().text_size(px(13.0)).text_color(white(0.55)).child(sub)),
                     )
-                    .child(div().pt(px(10.0)).child(body)),
+                    // Switching page or sub-tab fades the new page in.
+                    .child(div().pt(px(10.0)).child(crate::ui::widgets::fade_in(
+                        "settings-fade",
+                        crate::ui::widgets::fade_key((format!("{page:?}"), app.settings_sub)),
+                        false,
+                        body,
+                    ))),
                 page_bg,
                 22.0,
                 Some(&app.settings_scroll),

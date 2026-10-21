@@ -5,6 +5,12 @@
 ### Added
 
 - **Updates inside the Android app**: Settings > About downloads the new APK, checks it and hands it to Android's installer, no detour over GitHub. The first time, Android asks you to allow Glyph to install apps.
+- **Cover and add button in the Android media controls**: the notification and lock screen show the song's cover behind the controls, and a new add button puts the song into Liked Songs (a check once it is there).
+- **Smoother switching**: every page change, settings page and sub-tab, search filter, the queue / Connect / "Add songs" panel and its tabs now fade in softly instead of cutting over, and the player's sort and volume menus fade out when they close.
+
+### Fixed
+
+- The Android app no longer heats up the phone after a few minutes of use: the screen is only redrawn when something changes (at most 60 times a second unless you touch it), the background glow runs at a lower rate, and Now Playing, downloads and the app in the background stop redrawing or polling at full speed.
 
 ## 0.5.0 - 2026-10-21
 

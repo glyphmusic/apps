@@ -1131,7 +1131,16 @@ pub fn add_songs_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>
         .when(!searching_q, |d| d.child(chips))
         .child(
             fade_edges(
-                div().id("add-scroll").track_scroll(&app.add_scroll).size_full().overflow_y_scroll().touch_axis().px(px(10.0)).pb(px(10.0)).child(body),
+                div()
+                    .id("add-scroll")
+                    .track_scroll(&app.add_scroll)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .touch_axis()
+                    .px(px(10.0))
+                    .pb(px(10.0))
+                    // Another tab (or search vs. tabs) fades in.
+                    .child(fade_in("add-fade", fade_key((tab, searching_q)), false, body)),
                 theme::panel_strong(),
                 18.0,
                 Some(&app.add_scroll),

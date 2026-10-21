@@ -1,9 +1,10 @@
 //! `Platform` for Android: one activity, one full-screen window, the run
 //! loop on the `android_main` thread.
 //!
-//! The loop waits on the activity's looper with a timeout of one display
-//! frame while the window is visible (no timeout in the background), then
-//! drains GPUI's main-thread tasks, delivers input and asks for a frame.
+//! The loop waits on the activity's looper until the window's next frame
+//! slot while GPUI wants a frame, otherwise until an event or a wake (main-
+//! thread task, media key); then it drains GPUI's main-thread tasks,
+//! delivers input and draws if a frame is due. An idle app does not wake.
 //! GPUI's `on_finish_launching` runs once the first surface exists, because
 //! `open_window` needs it.
 
@@ -26,7 +27,6 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Duration;
 
 pub struct AndroidPlatform(Rc<AndroidPlatformState>);
 
@@ -126,7 +126,7 @@ impl AndroidPlatformState {
             }
             MainEvent::RedrawNeeded { .. } => {
                 if let Some(w) = self.window() {
-                    w.request_frame();
+                    w.redraw_needed();
                 }
             }
             MainEvent::GainedFocus => {
@@ -211,10 +211,7 @@ impl Platform for AndroidPlatform {
         let mut on_finish_launching = Some(on_finish_launching);
         let mut has_surface = false;
         while !state.quit_requested.get() {
-            let timeout = state
-                .window()
-                .filter(|w| w.has_surface())
-                .map(|w| Duration::from_secs_f32(1.0 / w.refresh_hz().max(1.0)));
+            let timeout = state.window().and_then(|w| w.next_frame_in());
             app.poll_events(timeout, |event| {
                 if let PollEvent::Main(main) = event {
                     state.handle_main_event(main, &mut has_surface);

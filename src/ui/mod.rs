@@ -243,6 +243,19 @@ impl Render for Glyph {
             }
         };
         theme::set_zone(None);
+        // Every page switch (and its tabs) fades the new page in.
+        let page_key = widgets::fade_key((
+            format!("{:?}", self.view),
+            format!("{:?}", self.open_list),
+            &self.open_artist,
+            &self.open_profile,
+            self.section.as_ref().map(|s| &s.0),
+            format!("{:?}", self.search.filter),
+            self.lib_filter,
+            self.view == View::NowPlaying && self.show_lyrics,
+            self.view == View::NowPlaying && self.lyrics_only,
+        ));
+        let main = if np_covers { main } else { widgets::fade_in("page-fade", page_key, true, main) };
         // Content floats directly on the background (Liner): no big panel.
         // Scroll frames fade in/out at their edges instead of a hard cut.
         let main = if self.view == View::NowPlaying {
@@ -302,6 +315,8 @@ impl Render for Glyph {
             } else {
                 views::queue_panel(self, window, cx).into_any_element()
             };
+            // Queue / Connect / "Add songs" swap with a fade, not a cut.
+            let inner = widgets::fade_in("side-fade", widgets::fade_key((show_add, self.show_devices)), true, inner);
             div()
                 .flex_none()
                 .h_full()

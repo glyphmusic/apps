@@ -211,12 +211,14 @@ impl Glyph {
             self.rescan_devices();
         }
         self.ctx_menu = None;
+        self.control_closing = None;
         self.control_menu = Some((kind, pos, Instant::now()));
         cx.notify();
     }
 
     pub fn close_control_menu(&mut self, cx: &mut Context<Self>) {
-        if self.control_menu.take().is_some() {
+        if let Some((kind, pos, _)) = self.control_menu.take() {
+            self.control_closing = Some((kind, pos, Instant::now()));
             cx.notify();
         }
     }

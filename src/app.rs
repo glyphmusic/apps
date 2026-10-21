@@ -381,6 +381,8 @@ pub struct Glyph {
     pub ctx_menu: Option<CtxMenu>,
     /// Right-click menu of a player control: which, where, since when.
     pub control_menu: Option<(ControlMenu, gpui::Point<gpui::Pixels>, Instant)>,
+    /// Control menu fading out: what it showed, where, since when.
+    pub control_closing: Option<(ControlMenu, gpui::Point<gpui::Pixels>, Instant)>,
     /// When the menu opened (fade/slide in) and a menu that is fading out.
     pub ctx_opened: Instant,
     pub ctx_closing: Option<(CtxMenu, Instant)>,
@@ -607,6 +609,8 @@ pub struct Glyph {
     mcp_checked: Instant,
     /// Last redraw for the playing-song equalizer.
     eq_redraw: Instant,
+    /// Last redraw for slow motion on phones (`slow_motion_every`).
+    slow_redraw: Instant,
     /// Window title last set (also updated while the window is in the background).
     window_title: String,
     window_handle: gpui::AnyWindowHandle,
@@ -663,6 +667,8 @@ pub struct Glyph {
     pub embed: crate::embed::EmbedHost,
     /// Last (track, playing, position/5 s) pushed to the OS media controls.
     media_keys_sent: Option<(Option<(glyph_protocol::ProviderId, String)>, bool, u64)>,
+    /// Cover file + like state last sent to the phone notification.
+    media_art_sent: Option<(Option<PathBuf>, bool)>,
     /// Re-render every tick while something animates (spinners).
     pub started: Instant,
     _subs: Vec<Subscription>,
