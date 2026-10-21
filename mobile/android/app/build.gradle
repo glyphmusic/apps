@@ -4,6 +4,12 @@ plugins {
     id "com.android.application"
 }
 
+// Version from the workspace Cargo.toml; versionCode must grow with every
+// release or Android refuses the in-app update (0.5.0 -> 500, 1.2.3 -> 10203).
+def glyphVersion = (rootProject.file("../../Cargo.toml").text =~ /(?m)^version\s*=\s*"([^"]+)"/)[0][1]
+def glyphVersionCode = glyphVersion.tokenize("-")[0].tokenize(".").collect { it as int }
+        .with { it[0] * 10000 + it[1] * 100 + it[2] }
+
 android {
     namespace "app.glyph"
     compileSdk 36
@@ -12,8 +18,8 @@ android {
         applicationId "app.glyph"
         minSdk 26
         targetSdk 36
-        versionCode 500
-        versionName "0.5.0"
+        versionCode glyphVersionCode
+        versionName glyphVersion
     }
 
     buildTypes {

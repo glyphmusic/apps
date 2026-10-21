@@ -117,6 +117,22 @@ pub(super) fn wheel_step(win: gpui::WindowId, hs: &gpui::ScrollHandle, e: &gpui:
     true
 }
 
+/// Phones: a scroll frame follows the finger only along its own axis. GPUI
+/// otherwise hands an up/down pan to a sideways row as sideways scrolling
+/// (meant for mouse wheels), so rows drift while the page scrolls, and a
+/// sideways pan on a row scrolls the page up or down.
+pub trait TouchAxis: StatefulInteractiveElement + Sized {
+    fn touch_axis(self) -> Self {
+        if crate::ui::compact::TOUCH {
+            self.restrict_scroll_to_axis()
+        } else {
+            self
+        }
+    }
+}
+
+impl<E: StatefulInteractiveElement> TouchAxis for E {}
+
 /// Smooth mouse-wheel scrolling for any frame tracked by `handle` (put it
 /// next to the frame, inside a `relative()` wrapper).
 pub fn smooth_wheel(handle: &gpui::ScrollHandle, horizontal: bool, cx: &mut Context<crate::app::Glyph>) -> AnyElement {

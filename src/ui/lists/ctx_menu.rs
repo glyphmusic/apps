@@ -16,19 +16,32 @@ thread_local! {
     pub(super) static MENU_BOUNDS: std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>> = const { std::cell::Cell::new(None) };
 }
 
-/// "Add to playlist" row with its hover flyout (`sub`). The flyout keeps
-/// `SUB_GAP` from the menu and stays inside the window (it slides up near the
-/// bottom edge and opens to the left near the right edge).
+/// Flyouts of the menu (`CtxMenu::sub`).
+pub(super) const SUB_PLAYLIST: u8 = 0;
+pub(super) const SUB_RECOMMEND: u8 = 1;
+pub(super) const SUB_STORAGE: u8 = 2;
+pub(super) const SUB_VERSIONS: u8 = 3;
+
+/// "Add to playlist" row with its hover flyout (`sub`).
 pub(super) fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, whole_list: bool, cx: &mut Context<Glyph>) -> AnyElement {
     // On a list it copies all of its songs, so it says so.
     let label = if whole_list { t("ctx.add_all_playlist") } else { t("ctx.add_playlist") };
-    // Phones (bottom sheet): no hover; a tap unfolds the playlists below.
+    sub_row(SUB_PLAYLIST, "list-music", label, open, flip, sub, cx)
+}
+
+/// Row with a hover flyout (`sub`) of kind `kind`. The flyout keeps
+/// `SUB_GAP` from the menu and stays inside the window (it slides up near the
+/// bottom edge and opens to the left near the right edge).
+pub(super) fn sub_row(kind: u8, name: &str, label: SharedString, open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Glyph>) -> AnyElement {
+    let id: ElementId = ("ctx-sub-row", kind as usize).into();
+    // Phones (bottom sheet): no hover; a tap unfolds the rows below.
     if crate::ui::compact::TOUCH {
-        let row = ctx_item("ctx-add-pl".into(), "list-music", label, white(0.7), false, cx)
+        let row = ctx_item(id, name, label, white(0.7), false, cx)
             .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16.0, white(0.4)))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(m) = this.ctx_menu.as_mut() {
-                    m.playlists = !m.playlists;
+                    m.playlists = !(m.playlists && m.sub == kind);
+                    m.sub = kind;
                     cx.notify();
                 }
             }));
@@ -39,13 +52,14 @@ pub(super) fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, whole_lis
             .when(open, |d| d.child(div().pl(px(20.0)).flex().flex_col().children(sub)))
             .into_any_element();
     }
-    ctx_item("ctx-add-pl".into(), "list-music", label, white(0.7), false, cx)
+    ctx_item(id, name, label, white(0.7), false, cx)
                 .relative()
                 .when(open, |d| d.bg(white(0.07)))
                 .child(icon("chevron-right", 14.0, white(0.4)))
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && !m.playlists) {
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && !(m.playlists && m.sub == kind)) {
                         m.playlists = true;
+                        m.sub = kind;
                         cx.notify();
                     }
                 }))
@@ -57,7 +71,7 @@ pub(super) fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, whole_lis
                         .occlude()
                         .w(px(SUB_W))
                         .max_h(px(320.0))
-                        .overflow_y_scroll()
+                        .overflow_y_scroll().touch_axis()
                         .p(px(6.0))
                         .rounded(px(10.0))
                         .bg(gpui::hsla(0.0, 0.0, 0.075, 0.98))
@@ -151,8 +165,9 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         None => vec![tr.clone()],
     };
     // "Add to playlist" flyout (opens on hover, to the right or left).
+    let is_open = |k: u8| m.playlists && m.sub == k;
     let mut sub: Vec<AnyElement> = Vec::new();
-    if m.playlists {
+    if is_open(SUB_PLAYLIST) {
         let t_new = songs.clone();
         sub.push(
             ctx_item("ctx-new-pl".into(), "plus", t("library.playlist.new"), white(0.7), false, cx)
@@ -312,6 +327,33 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         );
         body.push(sep().into_any_element());
         let has = !songs.is_empty();
+        // The most used actions first: save and add to playlist.
+        let album = matches!(l, ListRef::Album { .. });
+        if album {
+            let saved = app.is_saved(&l);
+            let l_s = l.clone();
+            body.push(
+                ctx_item(
+                    "lctx-save".into(),
+                    if saved { "heart-fill" } else { "heart" },
+                    if saved { t("ctx.unsave") } else { t("ctx.save") },
+                    if saved { theme::pink() } else { white(0.7) },
+                    true,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_ctx_close();
+                    this.toggle_saved(&l_s, cx)
+                }))
+                .into_any_element(),
+            );
+        }
+        if has {
+            body.push(add_pl_row(is_open(SUB_PLAYLIST), flip, sub, true, cx));
+        }
+        if album || has {
+            body.push(sep().into_any_element());
+        }
         if has {
             let (s1, s2, s3) = (songs.clone(), songs.clone(), songs.clone());
             body.push(
@@ -398,28 +440,6 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     .into_any_element(),
             );
         }
-        if has {
-            body.push(add_pl_row(m.playlists, flip, sub, true, cx));
-        }
-        if matches!(l, ListRef::Album { .. }) {
-            let saved = app.is_saved(&l);
-            let l_s = l.clone();
-            body.push(
-                ctx_item(
-                    "lctx-save".into(),
-                    if saved { "heart-fill" } else { "heart" },
-                    if saved { t("ctx.unsave") } else { t("ctx.save") },
-                    if saved { theme::pink() } else { white(0.7) },
-                    true,
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.begin_ctx_close();
-                    this.toggle_saved(&l_s, cx)
-                }))
-                .into_any_element(),
-            );
-        }
         match &l {
             ListRef::Album { artist, .. } | ListRef::ArtistLiked(artist) => {
                 let a = artist.clone();
@@ -434,26 +454,33 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             }
             ListRef::User(id) => {
                 body.push(sep().into_any_element());
-                if app.signed_in().is_some() {
-                    for (mode, key) in [(0u8, "playlist.scope.local"), (1, "playlist.scope.account"), (2, "playlist.scope.offline")] {
-                        let scope_id = id.clone();
-                        body.push(ctx_item(format!("lctx-storage-{mode}").into(), "hard-drive", t(key), white(0.7), true, cx)
-                            .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.set_playlist_storage(&scope_id, mode, cx); }))
-                            .into_any_element());
-                    }
-                }
-                let mut versions: Vec<_> = app.library.playlist_versions.iter().filter(|(_, v)| &v.playlist.id == id && app.library.playlist(id) != Some(&v.playlist)).map(|(k, v)| (k.clone(), v.saved_at)).collect();
-                versions.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
-                for (n, (revision, at)) in versions.into_iter().take(10).enumerate() {
-                    body.push(ctx_item(format!("lctx-version-{n}").into(), "history", tf("playlist.restore_version", &[("date", &at)]), white(0.7), true, cx)
-                        .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.restore_playlist_version(&revision, cx); })).into_any_element());
-                }
                 let (id1, id2) = (id.clone(), id.clone());
                 body.push(
                     ctx_item("lctx-rename".into(), "pencil", t("list.edit"), white(0.7), true, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_name_dialog(Vec::new(), Some(id1.clone()), w, cx)))
                         .into_any_element(),
                 );
+                // Storage and older versions live in flyouts.
+                if app.signed_in().is_some() {
+                    let mut rows = Vec::new();
+                    for (mode, key) in [(0u8, "playlist.scope.local"), (1, "playlist.scope.account"), (2, "playlist.scope.offline")] {
+                        let scope_id = id.clone();
+                        rows.push(ctx_item(format!("lctx-storage-{mode}").into(), "hard-drive", t(key), white(0.7), false, cx)
+                            .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.set_playlist_storage(&scope_id, mode, cx); }))
+                            .into_any_element());
+                    }
+                    body.push(sub_row(SUB_STORAGE, "hard-drive", t("ctx.storage"), is_open(SUB_STORAGE), flip, rows, cx));
+                }
+                let mut versions: Vec<_> = app.library.playlist_versions.iter().filter(|(_, v)| &v.playlist.id == id && app.library.playlist(id) != Some(&v.playlist)).map(|(k, v)| (k.clone(), v.saved_at)).collect();
+                versions.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+                if !versions.is_empty() {
+                    let mut rows = Vec::new();
+                    for (n, (revision, at)) in versions.into_iter().take(10).enumerate() {
+                        rows.push(ctx_item(format!("lctx-version-{n}").into(), "history", tf("playlist.restore_version", &[("date", &at)]), white(0.7), false, cx)
+                            .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.restore_playlist_version(&revision, cx); })).into_any_element());
+                    }
+                    body.push(sub_row(SUB_VERSIONS, "history", t("ctx.versions"), is_open(SUB_VERSIONS), flip, rows, cx));
+                }
                 body.push(
                     danger_item("lctx-delete".into(), "trash-2", t("list.delete"), cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -486,6 +513,26 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 .into_any_element(),
         );
         body.push(sep().into_any_element());
+        // The most used actions first: like and add to playlist.
+        let liked = app.is_liked(&tr);
+        let t4 = tr.clone();
+        body.push(
+            ctx_item(
+                "ctx-like".into(),
+                if liked { "heart-fill" } else { "heart" },
+                if liked { t("ctx.unlike") } else { t("ctx.like") },
+                if liked { theme::pink() } else { white(0.7) },
+                true,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.begin_ctx_close();
+                this.toggle_like(&t4.clone(), cx)
+            }))
+            .into_any_element(),
+        );
+        body.push(add_pl_row(is_open(SUB_PLAYLIST), flip, sub, false, cx));
+        body.push(sep().into_any_element());
         let t1 = tr.clone();
         body.push(
             ctx_item("ctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
@@ -514,11 +561,6 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 .into_any_element(),
         );
         let t_radio = tr.clone();
-        for (key, preference) in [("recommend.more", Some(1i8)), ("recommend.less", Some(-1)), ("recommend.block", Some(-2)), ("recommend.reset", None)] {
-            let artist = tr.artist.clone();
-            body.push(ctx_item(key.into(), "sliders-horizontal", t(key), white(0.7), true, cx)
-                .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.recommendation_feedback(&artist, preference, cx); })).into_any_element());
-        }
         body.push(
             ctx_item("ctx-radio".into(), "radio", t("ctx.radio"), white(0.7), true, cx)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -528,6 +570,14 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 }))
                 .into_any_element(),
         );
+        // Recommendation feedback for the artist, in a flyout.
+        let mut rows = Vec::new();
+        for (key, preference) in [("recommend.more", Some(1i8)), ("recommend.less", Some(-1)), ("recommend.block", Some(-2)), ("recommend.reset", None)] {
+            let artist = tr.artist.clone();
+            rows.push(ctx_item(key.into(), "sliders-horizontal", t(key), white(0.7), false, cx)
+                .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.recommendation_feedback(&artist, preference, cx); })).into_any_element());
+        }
+        body.push(sub_row(SUB_RECOMMEND, "sliders-horizontal", t("ctx.recommend"), is_open(SUB_RECOMMEND), flip, rows, cx));
         let t_dl = tr.clone();
         if app.is_downloaded(&tr) {
             body.push(
@@ -548,27 +598,6 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     .into_any_element(),
             );
         }
-        body.push(sep().into_any_element());
-        let liked = app.is_liked(&tr);
-        let t4 = tr.clone();
-        body.push(
-            ctx_item(
-                "ctx-like".into(),
-                if liked { "heart-fill" } else { "heart" },
-                if liked { t("ctx.unlike") } else { t("ctx.like") },
-                if liked { theme::pink() } else { white(0.7) },
-                true,
-                cx,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.begin_ctx_close();
-                this.toggle_like(&t4.clone(), cx)
-            }))
-            .into_any_element(),
-        );
-        body.push(
-            add_pl_row(m.playlists, flip, sub, false, cx),
-        );
         if let Some((l, i)) = m.from.clone().filter(|(l, _)| matches!(l, ListRef::User(_) | ListRef::Recent)) {
             let label = if l == ListRef::Recent { t("ctx.remove_recent") } else { t("ctx.remove") };
             let recent_track = (l == ListRef::Recent).then(|| tr.clone());
@@ -735,7 +764,7 @@ fn sheet(app: &mut Glyph, m: &crate::app::CtxMenu, body: Vec<AnyElement>, alpha:
         .bottom(px(-60.0 * (1.0 - alpha) - drag))
         .max_h(px(vh * 0.8))
         .track_scroll(&h)
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .occlude()
         .rounded_t(px(16.0))
         .bg(gpui::hsla(0.0, 0.0, 0.1, 1.0))

@@ -63,6 +63,18 @@ fn android_main(app: AndroidApp) {
         });
     }));
 
+    // In-app updates: the verified APK goes to MainActivity.gpuiInstallApk
+    // (install permission, then the system installer's confirmation).
+    glyph_core::updater::set_apk_installer(Box::new(|path| {
+        let path = path.to_string_lossy().into_owned();
+        gpui_android::java::with_activity("install update", |env, activity| {
+            let path = env.new_string(&path)?;
+            env.call_method(activity, jni_str!("gpuiInstallApk"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&path)])?;
+            Ok(())
+        })
+        .is_some()
+    }));
+
     let config = glyph_core::Config::load().unwrap_or_default();
     glyph::i18n::set_lang(glyph::i18n::Lang::system());
     gpui_android::application(app).with_assets(glyph::assets::Assets).run(move |cx| {

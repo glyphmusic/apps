@@ -65,7 +65,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                         .when(!about_open, |d| d.max_h(px(about_lh * 4.0)))
                         .when(about_open, |d| {
                             let h = crate::ui::widgets::handle_for("artist-about");
-                            d.max_h(px(about_lh * 11.0)).overflow_y_scroll().track_scroll(&h).child(crate::ui::widgets::smooth_wheel(&h, false, cx))
+                            d.max_h(px(about_lh * 11.0)).overflow_y_scroll().touch_axis().track_scroll(&h).child(crate::ui::widgets::smooth_wheel(&h, false, cx))
                         })
                         .opacity(0.15 + 0.85 * reveal_k(&format!("artist:about:{}", i.url), 0.5))
                         .child(i.about.clone()),
@@ -360,7 +360,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                     .ml(px(-8.0))
                     .mr(px(-edge))
                     .pr(px(edge))
-                    .overflow_x_scroll()
+                    .overflow_x_scroll().touch_axis()
                     .child(crate::ui::widgets::smooth_wheel(&h, true, cx))
                     .children(cards),
             )
@@ -397,7 +397,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                             .ml(px(-8.0))
                             .mr(px(-edge))
                             .pr(px(edge))
-                            .overflow_x_scroll()
+                            .overflow_x_scroll().touch_axis()
                             .child(crate::ui::widgets::smooth_wheel(&h, true, cx))
                             .children(album_cards)
                     })
@@ -442,7 +442,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
         .children(albums_section)
         .children(similar_section)
     };
-    div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0)).child(body).into_any_element()
+    div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().touch_axis().px(px(theme::PAGE_X)).pt(px(theme::PAGE_TOP)).pb(px(20.0)).child(body).into_any_element()
 }
 
 /// Phone artist header (Spotify): the photo across the top with the name on
@@ -468,7 +468,7 @@ fn phone_hero(
         .mx(px(-theme::PAGE_X))
         // Up into the page padding; the page itself starts under the status
         // bar here (see the floating back button in `ui::compact`).
-        .mt(px(-20.0))
+        .mt(px(-theme::PAGE_TOP))
         .h(px(h) + window.insets().safe_area.top)
         .overflow_hidden()
         .when_some(hero_img, |d, im| {
@@ -517,7 +517,9 @@ fn phone_hero(
         parts.push(format!("{} {}", n_songs, t("list.songs_caps").to_lowercase()));
     }
     if let Some(f) = fans {
-        parts.push(tf("artist.fans", &[("n", &compact_count(f))]).to_string());
+        // Lower case like the song count ("25 songs · 5.2M fans"); the key is
+        // written in capitals for the desktop's mono label.
+        parts.push(t("artist.fans").to_lowercase().replace("{n}", &compact_count(f)));
     }
     let meta = (!parts.is_empty()).then(|| div().text_size(px(13.0)).text_color(white(0.6)).child(parts.join(" · ")));
 
@@ -731,9 +733,9 @@ pub fn releases_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) 
         .id("releases-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .px(px(theme::PAGE_X))
-        .py(px(20.0))
+        .pt(px(theme::PAGE_TOP)).pb(px(20.0))
         .child(
             div()
                 .flex()
@@ -766,9 +768,9 @@ pub fn similar_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -
         .id("similar-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .px(px(theme::PAGE_X))
-        .py(px(20.0))
+        .pt(px(theme::PAGE_TOP)).pb(px(20.0))
         .child(
             div()
                 .flex()

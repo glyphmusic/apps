@@ -289,6 +289,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .child(time(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()), false)),
         );
 
+    let elsewhere = app.remote_on() || app.jam_active() || app.account.output_target.is_some();
     let right = div()
         .flex()
         .flex_none()
@@ -310,10 +311,10 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 }))
                 .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Repeat, cx)),
         )
-        // Connect: where music plays (this computer or a network device);
-        // pink while it plays on another device or in a jam.
+        // Connect: where music plays (this computer, another Glyph app or a
+        // network device); pink while it plays elsewhere or in a jam.
         .child(
-            toggle_button("devices", "monitor-speaker", 15.0, app.show_devices || app.remote_on() || app.jam_active(), (app.remote_on() || app.jam_active()).then(theme::pink)).on_click(cx.listener(|this, _, _, cx| {
+            toggle_button("devices", "monitor-speaker", 15.0, app.show_devices || elsewhere, elsewhere.then(theme::pink)).on_click(cx.listener(|this, _, _, cx| {
                 mark_toggled("devices");
                 this.toggle_devices_panel(cx)
             })),

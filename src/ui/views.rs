@@ -12,7 +12,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Div, FontWeight, SharedStri
 use std::rc::Rc;
 
 fn scroll_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
-    div().id(id).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0))
+    div().id(id).size_full().overflow_y_scroll().touch_axis().px(px(theme::PAGE_X)).pt(px(theme::PAGE_TOP)).pb(px(20.0))
 }
 
 fn track_list(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Div {
@@ -51,7 +51,7 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
         div()
             .flex()
             .flex_col()
-            .gap(px(if crate::ui::compact::TOUCH { 16.0 } else { 24.0 }))
+            .gap(px(if crate::ui::compact::TOUCH { 20.0 } else { 24.0 }))
             // Phones: the greeting sits in the header beside the profile picture.
             .when(!crate::ui::compact::TOUCH, |d| d.child(heading(greeting())))
             .child(cards)
@@ -132,9 +132,10 @@ thread_local! {
 }
 
 /// Home cards at least this wide; they grow to fill the row up to the max.
-const HOME_CARD_MIN: f32 = 260.0;
+/// Phones get two columns (Spotify) instead of a tall stack of six.
+const HOME_CARD_MIN: f32 = if crate::ui::compact::TOUCH { 150.0 } else { 260.0 };
 const HOME_CARD_MAX: f32 = 420.0;
-const HOME_CARD_GAP: f32 = 10.0;
+const HOME_CARD_GAP: f32 = if crate::ui::compact::TOUCH { 8.0 } else { 10.0 };
 
 /// Flat dark cards, 56 px cover left, title + subtitle. They fill the width
 /// as a grid: as many columns as fit at the minimum width, each stretched up
@@ -146,7 +147,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
             .id(id)
             .flex()
             .items_center()
-            .gap(px(14.0))
+            .gap(px(if crate::ui::compact::TOUCH { 10.0 } else { 14.0 }))
             .h(px(56.0))
             .w_full()
             .min_w_0()
@@ -284,7 +285,7 @@ fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, rec
         // Rows run to the panel edge instead of stopping at the page padding.
         .mr(px(-32.0))
         .pr(px(32.0))
-        .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
+        .overflow_x_scroll().touch_axis().child(smooth_wheel(&h, true, cx)).children(items)
 }
 
 /// "New from artists you follow": release cards (cover, title, artist,
@@ -333,7 +334,7 @@ fn new_releases_row(app: &mut Glyph, releases: Vec<glyph_core::providers::deezer
     div().id(PREFIX).track_scroll(&h).flex().gap(px(4.0)).ml(px(-8.0))
         .mr(px(-32.0))
         .pr(px(32.0))
-        .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
+        .overflow_x_scroll().touch_axis().child(smooth_wheel(&h, true, cx)).children(items)
 }
 
 /// "Recently played" row: songs and artists (a round picture, opening the
@@ -408,7 +409,7 @@ fn recent_row(app: &mut Glyph, items: Vec<RecentItem>, prefix: &'static str, cx:
         // Rows run to the panel edge instead of stopping at the page padding.
         .mr(px(-32.0))
         .pr(px(32.0))
-        .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(cards)
+        .overflow_x_scroll().touch_axis().child(smooth_wheel(&h, true, cx)).children(cards)
 }
 
 // ------------------------------------------------------------------ search
@@ -967,7 +968,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .id("q-scroll")
                 .track_scroll(&app.queue_scroll)
                 .size_full()
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .px(px(10.0))
                 .when(!app.queue_ok, |d| d.child(div().px(px(6.0)).child(ascii_state(ART_OFFLINE, t("status.queue_offline"), ""))))
                 .when(app.queue_ok && n == 0, |d| {
@@ -1126,7 +1127,7 @@ pub fn add_songs_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>
         .when(!searching_q, |d| d.child(chips))
         .child(
             fade_edges(
-                div().id("add-scroll").track_scroll(&app.add_scroll).size_full().overflow_y_scroll().px(px(10.0)).pb(px(10.0)).child(body),
+                div().id("add-scroll").track_scroll(&app.add_scroll).size_full().overflow_y_scroll().touch_axis().px(px(10.0)).pb(px(10.0)).child(body),
                 theme::panel_strong(),
                 18.0,
                 Some(&app.add_scroll),

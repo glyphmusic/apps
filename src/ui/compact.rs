@@ -4,9 +4,14 @@
 //! * a header with the profile picture on the left; tapping it slides the
 //!   profile menu in from the left ([`drawer`]);
 //! * three tabs at the bottom (Home, Search, Library) with the mini player
-//!   above them; Now Playing opens from the mini player, Settings from the menu;
+//!   above them; Now Playing slides up over the page from the mini player
+//!   ([`now_playing`]), Settings opens from the menu;
 //! * Settings as a full-screen list with quick actions on top ([`settings`]);
-//! * the Library as a filterable list ([`library`]).
+//! * the Library as a filterable list ([`library`]);
+//! * swipes ([`swipe_step`]): left/right on the mini player or the Now
+//!   Playing cover skips, up on the mini player opens Now Playing, down at
+//!   the top of Now Playing closes it, right on a song row queues the song,
+//!   right on the header opens the profile menu and left closes it.
 //!
 //! The pieces copy the desktop components (cover, play button, rows, chips,
 //! switches) with their sizes and colours. Nothing here runs on the desktop.
@@ -16,7 +21,12 @@ use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::lists::list_cover;
 use crate::ui::widgets::*;
-use gpui::{div, hsla, prelude::*, px, AnyElement, Context, FontWeight, MouseButton, SharedString, Window};
+use gpui::{div, hsla, prelude::*, px, AnyElement, Context, FontWeight, MouseButton, ScrollWheelEvent, SharedString, TouchPhase, Window};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
+
+pub mod now_playing;
 
 /// Phones (Android, iOS).
 pub const TOUCH: bool = cfg!(any(target_os = "android", target_os = "ios"));
@@ -44,12 +54,230 @@ fn white(a: f32) -> gpui::Hsla {
     hsla(0.0, 0.0, 1.0, a)
 }
 
+// ------------------------------------------------------------------ swipes
+
+/// Distance a swipe must travel to act (skip, queue, open/close).
+const SWIPE_ACT: f32 = 72.0;
+/// Seconds a released swipe takes to ease back to rest.
+const SWIPE_SETTLE: f32 = 0.24;
+
+/// One swipe on an element. GPUI turns touch pans into scroll events, locked
+/// to one axis and hit-tested where the finger went down: `Started`,
+/// `Moved`..., `Ended` at release, then maybe a fling's momentum, which a
+/// swipe swallows.
+#[derive(Clone, Copy, Default)]
+struct Swipe {
+    /// Finger travel (x, y) of the pan in progress, or at release.
+    d: (f32, f32),
+    /// The finger is down and this element took the pan.
+    live: bool,
+    /// Released; the fling's momentum events still belong to this swipe.
+    fling: bool,
+    /// Easing back to rest from this offset since then.
+    settle: Option<(Instant, (f32, f32))>,
+    /// Keep the offset after release (the element is leaving anyway).
+    hold: bool,
+}
+
+thread_local! {
+    static SWIPES: RefCell<HashMap<String, Swipe>> = RefCell::new(HashMap::new());
+}
+
+/// What a scroll event means for a swipe.
+enum Step {
+    /// Not this element's pan: let it scroll whatever is underneath.
+    Pass,
+    /// Taken (finger moved, or fling swallowed): stop it here, redraw.
+    Take,
+    /// The finger lifted after travelling (x, y).
+    Release(f32, f32),
+}
+
+/// Feeds one scroll event to the swipe on `key`. `claim` sees the pan's
+/// first movement (x, y) and says whether this element takes the pan.
+fn swipe_step(key: &str, e: &ScrollWheelEvent, claim: impl FnOnce(f32, f32) -> bool) -> Step {
+    let p = e.delta.pixel_delta(px(16.0));
+    let (dx, dy) = (f32::from(p.x), f32::from(p.y));
+    SWIPES.with(|m| {
+        let mut m = m.borrow_mut();
+        match e.touch_phase {
+            TouchPhase::Started => {
+                if !claim(dx, dy) {
+                    if let Some(s) = m.get_mut(key) {
+                        s.live = false;
+                        s.fling = false;
+                    }
+                    return Step::Pass;
+                }
+                m.insert(key.to_string(), Swipe { d: (dx, dy), live: true, ..Swipe::default() });
+                Step::Take
+            }
+            TouchPhase::Moved => match m.get_mut(key) {
+                Some(s) if s.live => {
+                    s.d.0 += dx;
+                    s.d.1 += dy;
+                    Step::Take
+                }
+                Some(s) if s.fling => Step::Take,
+                _ => Step::Pass,
+            },
+            TouchPhase::Ended | TouchPhase::Cancelled => match m.get_mut(key) {
+                Some(s) if s.live => {
+                    s.d.0 += dx;
+                    s.d.1 += dy;
+                    s.live = false;
+                    s.fling = true;
+                    s.settle = Some((Instant::now(), s.d));
+                    if e.touch_phase == TouchPhase::Ended { Step::Release(s.d.0, s.d.1) } else { Step::Take }
+                }
+                Some(s) if s.fling => {
+                    s.fling = false;
+                    Step::Take
+                }
+                _ => Step::Pass,
+            },
+        }
+    })
+}
+
+/// After an acting release: ease in from `from` instead (the next song's
+/// cover comes in from the other side).
+fn swipe_settle_from(key: &str, from: (f32, f32)) {
+    SWIPES.with(|m| {
+        if let Some(s) = m.borrow_mut().get_mut(key) {
+            s.settle = Some((Instant::now(), from));
+        }
+    });
+}
+
+/// After an acting release: stay where the finger left it.
+fn swipe_hold(key: &str) {
+    SWIPES.with(|m| {
+        if let Some(s) = m.borrow_mut().get_mut(key) {
+            s.hold = true;
+        }
+    });
+}
+
+fn swipe_reset(key: &str) {
+    SWIPES.with(|m| m.borrow_mut().remove(key));
+}
+
+/// Where the swipe on `key` has the element now: the finger's travel while
+/// it is down, easing back to rest after release (true while easing).
+fn swipe_value(key: &str) -> ((f32, f32), bool) {
+    SWIPES.with(|m| {
+        let mut m = m.borrow_mut();
+        let Some(s) = m.get_mut(key) else { return ((0.0, 0.0), false) };
+        if s.live || s.hold {
+            return (s.d, false);
+        }
+        let Some((at, from)) = s.settle else { return ((0.0, 0.0), false) };
+        let t = at.elapsed().as_secs_f32() / SWIPE_SETTLE;
+        if t >= 1.0 {
+            s.settle = None;
+            return ((0.0, 0.0), false);
+        }
+        // ease-out cubic, as `Slide`
+        let k = (1.0 - t).powi(3);
+        ((from.0 * k, from.1 * k), true)
+    })
+}
+
+/// [`swipe_value`], asking for frames while it eases back.
+fn swipe_offset(key: &str, window: &mut Window) -> (f32, f32) {
+    let (d, easing) = swipe_value(key);
+    if easing {
+        window.request_animation_frame();
+    }
+    d
+}
+
+/// Redraws while a released swipe eases back, for elements built without a
+/// window (song rows).
+fn settle_frames(cx: &mut Context<Glyph>) {
+    cx.spawn(async move |this, cx| {
+        let end = Instant::now() + std::time::Duration::from_secs_f32(SWIPE_SETTLE + 0.05);
+        while Instant::now() < end {
+            cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Song row swipes (as Spotify): right adds the song to the queue, left
+/// plays it next. The row follows the finger over the action's icon, which
+/// lights up once a release would act.
+fn queue_swipe(row: gpui::Stateful<gpui::Div>, key: String, tr: glyph_protocol::Track, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    let ((x, _), _) = swipe_value(&key);
+    let x = x.clamp(-160.0, 160.0);
+    let ink = if x.abs() >= SWIPE_ACT { theme::pink() } else { theme::text_dim() };
+    let slot = |d: gpui::Div| d.absolute().top_0().bottom_0().w(px(x.abs())).flex().items_center().justify_center();
+    row.relative()
+        .left(px(x))
+        .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| match swipe_step(&key, e, horizontal) {
+            Step::Pass => {}
+            Step::Take => {
+                cx.stop_propagation();
+                cx.notify();
+            }
+            Step::Release(dx, _) => {
+                cx.stop_propagation();
+                if dx.abs() >= SWIPE_ACT {
+                    this.queue_add(tr.clone(), dx < 0.0, cx);
+                }
+                settle_frames(cx);
+                cx.notify();
+            }
+        }))
+        .when(x > 0.5, |d| d.child(slot(div()).left(px(-x)).child(icon("list-plus", 20.0, ink))))
+        .when(x < -0.5, |d| d.child(slot(div()).right(px(x)).child(icon("list-start", 20.0, ink))))
+}
+
+fn horizontal(dx: f32, dy: f32) -> bool {
+    dx.abs() > dy.abs()
+}
+
+/// Skips on a left/right swipe: left plays the next song, right the
+/// previous one; the swiped element then eases in from the other side.
+fn swipe_skip(this: &mut Glyph, key: &str, dx: f32, cx: &mut Context<Glyph>) {
+    if dx.abs() < SWIPE_ACT {
+        return;
+    }
+    if dx < 0.0 {
+        this.next(false, cx);
+    } else {
+        this.previous_song(cx);
+    }
+    swipe_settle_from(key, (-dx.signum() * 120.0, 0.0));
+}
+
+/// Opens Now Playing over the current page ([`now_playing`]).
+fn open_now_playing(this: &mut Glyph, cx: &mut Context<Glyph>) {
+    now_playing::open(this, cx);
+}
+
 // ------------------------------------------------------------------ header
 
 /// Profile picture + page title (+ actions on the right).
 pub fn header(app: &mut Glyph, title: Option<SharedString>, actions: Vec<AnyElement>, cx: &mut Context<Glyph>) -> impl IntoElement {
     let pfp = crate::ui::profile::own_avatar(app, 40.0, cx);
     div()
+        // Swipe right: the profile menu (as the tap on the picture).
+        .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| match swipe_step("header", e, horizontal) {
+            Step::Pass => {}
+            Step::Take => cx.stop_propagation(),
+            Step::Release(dx, _) => {
+                cx.stop_propagation();
+                if dx > SWIPE_ACT {
+                    this.drawer_open = true;
+                    cx.notify();
+                }
+            }
+        }))
         .flex_none()
         .h(px(HEADER_H))
         .px(px(EDGE))
@@ -67,10 +295,12 @@ pub fn header(app: &mut Glyph, title: Option<SharedString>, actions: Vec<AnyElem
                 }))
                 .child(pfp),
         )
+        // Only one flexible child: a spacer beside the title would take half
+        // of its width and cut it short ("Welcome ba...").
+        .when(title.is_none(), |d| d.child(div().flex_1()))
         .when_some(title, |d, title| {
             d.child(div().flex_1().min_w_0().truncate().text_size(px(22.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title))
         })
-        .when(actions.is_empty(), |d| d.child(div().flex_1()))
         .children(actions)
 }
 
@@ -142,19 +372,43 @@ pub fn floating_back(app: &Glyph) -> bool {
 
 /// Round back button over the photo plus a dark band under the status bar;
 /// fixed while the page scrolls under it.
-pub fn floating_back_bar(window: &Window, cx: &mut Context<Glyph>) -> AnyElement {
+pub fn floating_back_bar(app: &Glyph, window: &Window, cx: &mut Context<Glyph>) -> AnyElement {
     let top = window.insets().safe_area.top;
     let fade = |a: f32| gpui::hsla(0.0, 0.0, 0.0, a);
+    // Once the photo has scrolled away the band turns solid with the name,
+    // so the page no longer runs visibly under the status bar and button.
+    let photo_h = (f32::from(window.viewport_size().width) * 0.9).round();
+    let scrolled = -f32::from(app.main_scroll.offset().y);
+    let k = ((scrolled - (photo_h - HEADER_H - 40.0)) / 60.0).clamp(0.0, 1.0);
+    let name = app.open_artist.clone().unwrap_or_default();
     div()
         .absolute()
         .top_0()
         .left_0()
         .right_0()
         .child(div().h(top + px(HEADER_H)).bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(fade(0.55), 0.0), gpui::linear_color_stop(fade(0.0), 1.0))))
+        .when(k > 0.0, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(top + px(HEADER_H - 8.0))
+                    .pt(top)
+                    .pl(px(56.0))
+                    .pr(px(EDGE))
+                    .flex()
+                    .items_center()
+                    .opacity(k)
+                    .bg(hsla(0.0, 0.0, 0.06, 1.0))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(16.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(name)),
+            )
+        })
         .child(
-            div().absolute().top(top + px(8.0)).left(px(8.0)).child(
+            div().absolute().top(top + px(6.0)).left(px(8.0)).child(
                 icon_action("back-float", "arrow-left")
-                    .bg(fade(0.45))
+                    .bg(fade(0.45 * (1.0 - k)))
                     .on_click(cx.listener(|this, _, _, cx| back(this, cx))),
             ),
         )
@@ -255,8 +509,10 @@ pub fn tab_bar(app: &mut Glyph, cx: &mut Context<Glyph>) -> impl IntoElement {
 
 // ------------------------------------------------------------------ mini player
 
-/// Mini player: cover, title/artist and play/next. Tapping it opens Now Playing.
-pub fn mini_bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> Option<impl IntoElement> {
+/// Mini player: cover, title/artist and play/next. Tapping it (or swiping
+/// up) opens Now Playing; swiping left/right skips, the song following the
+/// finger.
+pub fn mini_bar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> Option<impl IntoElement> {
     let tr = app.current.clone()?;
     let playing = app.is_playing();
     let frac = app
@@ -296,8 +552,27 @@ pub fn mini_bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) 
         .size(px(44.0))
         .on_click(cx.listener(|this, _, _, cx| this.next(false, cx)));
 
+    let (sx, _) = swipe_offset("mini", window);
+    let on_swipe = cx.listener(|this, e: &ScrollWheelEvent, _, cx| match swipe_step("mini", e, |_, _| true) {
+        Step::Pass => {}
+        Step::Take => {
+            cx.stop_propagation();
+            cx.notify();
+        }
+        Step::Release(dx, dy) => {
+            cx.stop_propagation();
+            if horizontal(dx, dy) {
+                swipe_skip(this, "mini", dx, cx);
+            } else if dy < -SWIPE_ACT * 0.5 {
+                open_now_playing(this, cx);
+            }
+            cx.notify();
+        }
+    });
+
     Some(theme::on_panel(|| {
         div()
+            .on_scroll_wheel(on_swipe)
             .relative()
             .h(px(MINI_H))
             .bg(hsla(0.0, 0.0, 0.06, 0.94))
@@ -313,19 +588,26 @@ pub fn mini_bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) 
                     .id("mini-open")
                     .flex_1()
                     .min_w_0()
+                    .h_full()
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    // The swiped song slides under the buttons, not over them.
+                    .overflow_hidden()
                     .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        // Keeps the page underneath, so back returns to it.
-                        this.push_route();
-                        this.view = View::NowPlaying;
-                        this.main_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-                        cx.notify();
-                    }))
-                    .child(art)
-                    .child(div().flex().flex_col().min_w_0().gap(px(2.0)).child(title).child(artist)),
+                    .on_click(cx.listener(|this, _, _, cx| open_now_playing(this, cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .relative()
+                            .left(px(sx))
+                            .opacity((1.0 - sx.abs() / 220.0).max(0.15))
+                            .child(art)
+                            .child(div().flex().flex_col().min_w_0().gap(px(2.0)).child(title).child(artist)),
+                    ),
             )
             .child(play)
             .child(next)
@@ -378,10 +660,13 @@ pub fn drawer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> 
         window.request_animation_frame();
     }
     if k <= 0.001 {
+        swipe_reset("drawer");
         return None;
     }
     let safe = window.insets().safe_area;
     let w = (f32::from(window.viewport_size().width) * 0.86).min(360.0);
+    // Swiped left: the menu follows the finger and closes past the threshold.
+    let sx = swipe_offset("drawer", window).0.min(0.0);
     let close = |this: &mut Glyph, cx: &mut Context<Glyph>| {
         this.drawer_open = false;
         cx.notify();
@@ -452,7 +737,7 @@ pub fn drawer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> 
         .absolute()
         .top_0()
         .bottom_0()
-        .left(px(-(1.0 - k) * w))
+        .left(px(-(1.0 - k) * w + sx))
         .w(px(w))
         .bg(surface())
         .pt(safe.top + px(8.0))
@@ -470,8 +755,22 @@ pub fn drawer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> 
             .occlude()
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.55 * k))
+            .bg(hsla(0.0, 0.0, 0.0, 0.55 * k * (1.0 + sx / w).max(0.0)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| close(this, cx)))
+            .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                match swipe_step("drawer", e, horizontal) {
+                    Step::Pass => {}
+                    Step::Take => cx.notify(),
+                    Step::Release(dx, _) => {
+                        if dx < -SWIPE_ACT {
+                            swipe_hold("drawer");
+                            close(this, cx);
+                        }
+                        cx.notify();
+                    }
+                }
+            }))
             .child(panel)
             .into_any_element(),
     )
@@ -572,7 +871,9 @@ pub fn settings(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                         this.open_select = None;
                         cx.notify();
                     }))
-                    .child(chip(t(key), i == sel))
+                    // The off chip's own fill hardly shows on the settings
+                    // surface; a lighter one keeps the tabs visible.
+                    .child(chip(t(key), i == sel).when(i != sel, |c| c.bg(white(0.1))))
             }))
         });
         let content = crate::ui::settings::page_body(app, cx);
@@ -581,7 +882,7 @@ pub fn settings(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             .track_scroll(&app.settings_scroll)
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .overflow_y_scroll().touch_axis()
             .px(px(16.0))
             .pb(safe.bottom + px(24.0))
             .children(chips)
@@ -629,7 +930,7 @@ pub fn settings(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             .id("settings-list")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .overflow_y_scroll().touch_axis()
             .pb(safe.bottom + px(24.0))
             .child(quick)
             .children(rows)
@@ -733,7 +1034,7 @@ pub fn library(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
         .id("lib-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .flex()
         .flex_col()
         .child(chips)
@@ -779,212 +1080,6 @@ pub fn library_actions(cx: &mut Context<Glyph>) -> Vec<AnyElement> {
         icon_action("lib-search", "search").on_click(cx.listener(|this, _, w, cx| this.navigate(View::Search, w, cx))).into_any_element(),
         icon_action("lib-new", "plus").on_click(cx.listener(|this, _, w, cx| this.open_name_dialog(Vec::new(), None, w, cx))).into_any_element(),
     ]
-}
-
-// ------------------------------------------------------------------ now playing
-
-fn np_card(title: SharedString) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .p(px(16.0))
-        .rounded(px(12.0))
-        .bg(white(0.07))
-        .child(div().text_size(px(16.0)).font_weight(FontWeight::BOLD).text_color(gpui::white()).child(title))
-}
-
-/// Now Playing as one scrolling page: cover, title, seek bar and transport
-/// on the first screen; lyrics and the queue as cards below.
-pub fn now_playing(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
-    let Some(tr) = app.current.clone() else {
-        return crate::ui::now_playing::now_playing(app, window, cx).into_any_element();
-    };
-    let vw = f32::from(window.viewport_size().width);
-    let side = 24.0;
-    let art_size = (vw - side * 2.0).max(120.0);
-    let playing = app.is_playing();
-    let pos = app.position();
-    let dur = app.duration();
-    let frac = dur.filter(|d| !d.is_zero()).map(|d| (pos.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0)).unwrap_or(0.0);
-    let liked = app.is_liked(&tr);
-    let shuffle = app.shuffle();
-    let repeat = app.repeat();
-
-
-    let art = cover(app, &tr, art_size, 8.0, cx);
-    let t_like = tr.clone();
-    let title_row = div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(21.0)).font_weight(FontWeight::BOLD))
-                .child(div().truncate().text_size(px(15.0)).text_color(theme::text_dim()).child(tr.artist.clone())),
-        )
-        .child(
-            toggle_button("np-like", "heart", 24.0, liked, Some(theme::pink()))
-                .size(px(44.0))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_like(&t_like, cx))),
-        );
-
-    let weak = cx.entity().downgrade();
-    let seek: Pick = std::rc::Rc::new(move |f, _, cx| {
-        weak.update(cx, |this, cx| {
-            if let Some(d) = this.duration() {
-                this.seek_to(std::time::Duration::from_secs_f32(d.as_secs_f32() * f));
-                cx.notify();
-            }
-        })
-        .ok();
-    });
-    let seek_row = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(thin_bar("np-seek", art_size, frac, seek, None, cx))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .text_size(px(11.5))
-                .text_color(theme::text_faint())
-                .child(fmt_time(pos))
-                .child(dur.map(fmt_time).unwrap_or_default()),
-        );
-
-    let play = div()
-        .id("np-play")
-        .flex_none()
-        .size(px(68.0))
-        .rounded_full()
-        .bg(gpui::white())
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx)))
-        .child(play_glyph(app.is_loading(), playing, 26.0, 68.0));
-    let side_btn = |id: &'static str, name: &'static str, on: bool| {
-        div()
-            .id(id)
-            .flex_none()
-            .size(px(48.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .child(icon(name, 22.0, if on { theme::pink() } else { theme::text_dim() }))
-    };
-    let transport = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(side_btn("np-shuffle", "shuffle", shuffle).on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))))
-        .child(icon_button("np-prev", "skip-back", 28.0, theme::text()).size(px(56.0)).on_click(cx.listener(|this, _, _, cx| this.previous(cx))))
-        .child(play)
-        .child(icon_button("np-next", "skip-forward", 28.0, theme::text()).size(px(56.0)).on_click(cx.listener(|this, _, _, cx| this.next(false, cx))))
-        .child(
-            side_btn("np-repeat", if repeat == glyph_core::RepeatMode::One { "repeat-1" } else { "repeat" }, repeat != glyph_core::RepeatMode::Off)
-                .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx))),
-        );
-
-    // Lyrics card: a few lines around the current one; tap shows them all.
-    let expanded = app.show_lyrics;
-    let lyrics_body: AnyElement = match app.lyrics.lyrics.clone() {
-        _ if app.lyrics.loading => skeleton_lyrics(4).into_any_element(),
-        Some(l) if !l.synced.is_empty() => {
-            let active = l.active_line(pos.as_millis() as u64, app.lyrics_offset());
-            let (from, to) = if expanded {
-                (0, l.synced.len())
-            } else {
-                let a = active.unwrap_or(0);
-                (a.saturating_sub(1), (a + 4).min(l.synced.len()))
-            };
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(l.synced[from..to].iter().enumerate().map(|(i, line)| {
-                    let on = active == Some(from + i);
-                    div()
-                        .text_size(px(19.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(if on { gpui::white() } else { white(0.45) })
-                        .child(line.text.clone())
-                }))
-                .into_any_element()
-        }
-        Some(l) if l.plain.is_some() => {
-            let text = l.plain.unwrap_or_default();
-            let text = if expanded { text } else { text.lines().take(5).collect::<Vec<_>>().join("\n") };
-            div().text_size(px(17.0)).font_weight(FontWeight::MEDIUM).text_color(white(0.8)).child(text).into_any_element()
-        }
-        _ => div().text_color(white(0.6)).child(t("lyrics.none.title")).into_any_element(),
-    };
-    let lyrics = np_card(t("np.mode.lyrics")).bg(theme::accent_tile(0.24, 0.5)).child(
-        div()
-            .id("np-lyrics")
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.show_lyrics = !this.show_lyrics;
-                cx.notify();
-            }))
-            .child(lyrics_body),
-    );
-
-    let upcoming: Vec<_> = app.upcoming().into_iter().take(4).collect();
-    let queue = (!upcoming.is_empty()).then(|| {
-        let rows: Vec<AnyElement> = upcoming
-            .iter()
-            .map(|u| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(cover(app, u, 44.0, 4.0, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(div().truncate().text_size(px(14.0)).text_color(gpui::white()).child(u.title.clone()))
-                            .child(div().truncate().text_size(px(12.5)).text_color(white(0.6)).child(u.artist.clone())),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        np_card(t("queue.next")).children(rows)
-    });
-
-    div()
-        .id("np-scroll")
-        .track_scroll(&app.main_scroll)
-        .size_full()
-        .bg(NP_SCRIM)
-        .overflow_y_scroll()
-        .px(px(side))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(18.0))
-                .pb(px(32.0))
-                .child(art)
-                .child(title_row)
-                .child(seek_row)
-                .child(transport)
-                .child(lyrics)
-                .children(queue),
-        )
-        .into_any_element()
 }
 
 // ------------------------------------------------------------------ song list
@@ -1040,18 +1135,22 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
             )
         })
         .child(div().flex_1())
-        .child(icon_action("cl-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
-        .child(play);
+        // An empty list has nothing to play.
+        .when(n > 0, |d| {
+            d.child(icon_action("cl-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+                .child(play)
+        });
 
     let head = div()
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(4.0))
         .px(px(EDGE))
-        .child(div().flex().justify_center().py(px(8.0)).child(art))
+        // Cover, then title + count as one block, then the actions.
+        .child(div().flex().justify_center().pt(px(8.0)).pb(px(16.0)).child(art))
         .child(div().text_size(px(24.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title))
         .child(div().text_size(px(13.0)).text_color(theme::text_dim()).child(tf("common.n_songs", &[("n", &n)])))
-        .child(actions);
+        .child(actions.mt(px(8.0)));
 
     let list = std::rc::Rc::new(tracks);
     let scroll = app.main_scroll.clone();
@@ -1059,7 +1158,8 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
         let tr = list[i].clone();
         let now = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
         let all = list.clone();
-        div()
+        let t_queue = tr.clone();
+        let row = div()
             .id(("cl-row", i))
             .h(px(60.0))
             .flex()
@@ -1086,15 +1186,15 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
                             .when(app.is_downloaded(&tr), |d| d.child(icon("arrow-down-to-line", 12.0, theme::pink())))
                             .child(div().truncate().text_size(px(12.5)).text_color(theme::text_dim()).child(tr.artist.clone())),
                     ),
-            )
-            .into_any_element()
+            );
+        queue_swipe(row, format!("q-cl-{i}"), t_queue, cx).into_any_element()
     });
 
     div()
         .id("cl-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .flex()
         .flex_col()
         .gap(px(8.0))
@@ -1226,9 +1326,9 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
     let now = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
     let liked = app.is_liked(&tr);
     let blocked = !app.allowed(&tr);
-    let (t_like, t_menu, from_menu) = (tr.clone(), tr.clone(), from.clone());
+    let (t_like, t_menu, t_queue, from_menu) = (tr.clone(), tr.clone(), tr.clone(), from.clone());
     let all = list.clone();
-    div()
+    let row = div()
         .id((prefix, i))
         .h(px(56.0))
         .flex()
@@ -1292,5 +1392,6 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
                     }),
                 )
                 .child(icon("ellipsis-vertical", 18.0, theme::text_dim())),
-        )
+        );
+    queue_swipe(row, format!("q-{prefix}-{i}"), t_queue, cx)
 }

@@ -367,6 +367,18 @@ impl Glyph {
         }
     }
 
+    /// The song before this one, even when this one has played a while
+    /// (swiping back on the phone's cover). Remote and jam: as [`Self::previous`].
+    pub fn previous_song(&mut self, cx: &mut Context<Self>) {
+        if self.position() <= Duration::from_secs(3) || self.account.output_target.is_some() || self.jam_active() {
+            self.previous(cx);
+            return;
+        }
+        if let Some(Some(t)) = guard(|| self.queue.previous().cloned()) {
+            self.play_track(t, cx);
+        }
+    }
+
     /// `true` if the error was an expired/denied stream URL and a fresh
     /// resolve was started for the current track.
     ///

@@ -255,6 +255,8 @@ pub struct CtxMenu {
     pub from: Option<(ListRef, usize)>,
     /// Showing the "add to playlist" flyout.
     pub playlists: bool,
+    /// Which flyout `playlists` shows (`ctx_menu::SUB_*`).
+    pub sub: u8,
     /// Menu for an artist (artist page "more" button) instead of a song.
     pub artist: Option<String>,
     /// Menu for a whole list (album, playlist) instead of one song;
@@ -447,6 +449,8 @@ pub struct Glyph {
     pub discord_id_input: Entity<TextInput>,
     pub server_auth_required: bool,
     server_probe_seq: u64,
+    /// Last official-server outage announced (see `glyph_core::outage`).
+    outage_seen: u64,
     pub key_inputs: Vec<(&'static str, Entity<TextInput>)>,
 
     pub config: Config,
@@ -522,6 +526,8 @@ pub struct Glyph {
     pub show_queue: bool,
     /// "Connect to a device" panel (queue slot): where music plays.
     pub show_devices: bool,
+    /// The Connect panel shows the jam (header button) instead of the devices.
+    pub devices_jam: bool,
     pub devices_scroll: gpui::ScrollHandle,
     pub show_lyrics: bool,
     /// Now Playing shows only the lyrics (global player bar stays visible).
@@ -726,7 +732,8 @@ fn load_feeds_cache(scope: &PathBuf, max_age_s: u64) -> Option<(Vec<Track>, Vec<
 /// "New from artists you follow" as last loaded, with the follow list it
 /// was loaded for.
 fn releases_cache_path(scope: &PathBuf) -> PathBuf {
-    scope.with_extension("releases.json")
+    // v2: entries are checked against the album's main artist.
+    scope.with_extension("releases-v2.json")
 }
 
 fn save_releases_cache(scope: &PathBuf, artists: &[String], releases: &[glyph_core::providers::deezer::Release]) {

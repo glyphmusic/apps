@@ -167,6 +167,8 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 div()
                     .flex()
                     .gap(px(8.0))
+                    // A little apart from the title block above.
+                    .mt(px(4.0))
                     .child({
                         // Playing from this list: the pill pauses / resumes it.
                         let here = app.playing_from.as_ref() == Some(&l)
@@ -187,12 +189,14 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                     .child(round_icon_button("list-shuffle", "shuffle", 36.0).on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx)))),
             )
         })
-        // Secondary actions: download, queue, save / edit, more.
+        // Secondary actions: download, queue, save / edit, more. They sit
+        // close under "Play all" (one group of actions).
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .when(has, |d| d.mt(px(-4.0)))
                 .when(has, |d| {
                     // Pink check when everything is saved (click removes), a
                     // filling ring around the arrow while downloads run.
@@ -391,7 +395,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .id("list-left")
                 .track_scroll(&left_scroll)
                 .size_full()
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .pt(px(20.0))
                 .pb(px(24.0))
                 .flex()
@@ -420,7 +424,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .pt(px(top))
                 .pb(px(20.0))
                 .child(right),
@@ -492,7 +496,7 @@ pub(super) fn liked_by_artist(app: &mut Glyph, name: String, cx: &mut Context<Gl
                 .track_scroll(&app.main_scroll)
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .pb(px(20.0))
                 .child(body),
         )

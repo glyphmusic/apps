@@ -4,7 +4,10 @@
 //!   "prerelease": `/releases`, first non-draft).
 //! * SemVer compare with `env!("CARGO_PKG_VERSION")`.
 //! * Asset naming: `glyph-{version}-{target}.zip` (Windows) / `.tar.gz`
-//!   (macOS, Linux) plus `SHA256SUMS.txt` (legacy: `{asset}.sha256`). Verify before replacing.
+//!   (macOS, Linux), `glyph-{version}-android.apk` (Android) plus
+//!   `SHA256SUMS.txt` (legacy: `{asset}.sha256`). Verify before replacing.
+//! * Android cannot replace its own binary: the verified APK goes to the
+//!   system package installer (`set_apk_installer`), which asks the user.
 //! * Package-manager installs (under /usr, Homebrew Cellar, WinGet) give
 //!   `UpdateStatus::Available` with `can_self_install = false`.
 //! * At most one automatic check per 24 h (timestamp in the data dir).
@@ -120,9 +123,21 @@ struct GhAsset {
 }
 
 /// Names accepted as the release asset for `version` + `target`.
-pub fn asset_names(version: &str, target: &str) -> [String; 2] {
+pub fn asset_names(version: &str, target: &str) -> Vec<String> {
     let v = version.trim_start_matches(['v', 'V']);
-    [format!("glyph-{v}-{target}.zip"), format!("glyph-{v}-{target}.tar.gz")]
+    if target.ends_with("-android") {
+        return vec![format!("glyph-{v}-android.apk")];
+    }
+    vec![format!("glyph-{v}-{target}.zip"), format!("glyph-{v}-{target}.tar.gz")]
+}
+
+type ApkInstaller = Box<dyn Fn(&Path) -> bool + Send + Sync>;
+static APK_INSTALLER: std::sync::OnceLock<ApkInstaller> = std::sync::OnceLock::new();
+
+/// Android: hands a downloaded, verified APK to the system installer
+/// (`true` = the installer took it). Set once by the Android shell.
+pub fn set_apk_installer(f: ApkInstaller) {
+    let _ = APK_INSTALLER.set(f);
 }
 
 fn to_info(rel: &GhRelease, target: &str, can_self_install: bool) -> UpdateInfo {
@@ -353,6 +368,14 @@ pub async fn install(
         if actual != expected {
             bail!("SHA-256 mismatch (expected {expected}, got {actual}); update discarded");
         }
+        if archive.extension().is_some_and(|e| e == "apk") {
+            let install = APK_INSTALLER.get().ok_or_else(|| anyhow!("no package installer on this platform"))?;
+            // The installer reads the file after this returns; it deletes it.
+            if !install(&archive) {
+                bail!("the package installer could not be opened");
+            }
+            return Ok(true);
+        }
         let new_bin = work.join(format!("new-{}", exe_file_name()));
         let (a, n) = (archive.clone(), new_bin.clone());
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -361,11 +384,13 @@ pub async fn install(
             Ok(())
         })
         .await??;
-        Ok(())
+        Ok(false)
     }
     .await;
-    let _ = tokio::fs::remove_dir_all(&work).await;
-    result
+    if !matches!(result, Ok(true)) {
+        let _ = tokio::fs::remove_dir_all(&work).await;
+    }
+    result.map(|_| ())
 }
 
 #[cfg(test)]
@@ -427,6 +452,18 @@ mod tests {
                 .iter()
                 .map(|n| GhAsset { name: n.to_string(), browser_download_url: format!("https://dl/{n}") })
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn android_picks_the_apk() {
+        let rel = release("v0.6.0", false, false, &["glyph-0.6.0-aarch64-linux-android.tar.gz", "glyph-0.6.0-android.apk", "SHA256SUMS.txt"]);
+        match evaluate(vec![rel], "stable", "0.5.0", "aarch64-linux-android", false) {
+            UpdateStatus::Available(i) => {
+                assert_eq!(i.asset_url.as_deref(), Some("https://dl/glyph-0.6.0-android.apk"));
+                assert!(i.can_self_install);
+            }
+            other => panic!("{other:?}"),
         }
     }
 

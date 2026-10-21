@@ -152,7 +152,7 @@ pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Contex
                     .id("settings-page")
                     .track_scroll(&app.settings_scroll)
                     .size_full()
-                    .overflow_y_scroll()
+                    .overflow_y_scroll().touch_axis()
                     .px(px(28.0))
                     .py(px(22.0))
                     .child(

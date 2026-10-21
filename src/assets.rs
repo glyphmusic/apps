@@ -24,8 +24,8 @@ icons!(
     "panel-bottom", "rotate-ccw", "rotate-cw", "speaker", "circle", "audio-lines", "orbit", "arrow-right",
     "chart-column", "sparkles", "mic-vocal", "languages", "bot", "activity", "file-text", "globe", "radio", "cast",
     "monitor-speaker", "clock", "trophy", "calendar", "flame", "text-search", "badge-check", "ellipsis", "sliders-horizontal",
-    "arrow-right-left", "airplay", "tv", "monitor", "users", "thumbs-up", "thumbs-up-fill",
-    "arrow-up-down",
+    "arrow-right-left", "airplay", "tv", "monitor", "smartphone", "laptop", "users", "thumbs-up", "thumbs-up-fill",
+    "arrow-up-down", "share-2",
 );
 
 pub struct Assets;

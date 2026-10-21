@@ -198,7 +198,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
         .id("lib-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .px(px(theme::PAGE_X))
         .py(px(20.0))
         .child(div().flex().flex_col().gap(px(18.0)).child(head).children(banner).child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(tiles)).children(artists_section).children(trash))

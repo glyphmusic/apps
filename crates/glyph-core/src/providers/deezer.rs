@@ -193,6 +193,29 @@ impl Deezer {
     /// song search happens to find), newest first.
     pub async fn artist_releases(&self, name: &str) -> Result<Vec<Release>> {
         let Some(id) = self.artist_id(name).await? else { return Ok(Vec::new()) };
+        self.releases_of(&id, name).await
+    }
+
+    /// Releases of `name` out between `since` and `today` (`YYYY-MM-DD`).
+    /// Deezer's artist album list also holds releases the artist only
+    /// features on, so each one is checked against the album's main artist.
+    pub async fn artist_new_releases(&self, name: &str, since: &str, today: &str) -> Result<Vec<Release>> {
+        let Some(id) = self.artist_id(name).await? else { return Ok(Vec::new()) };
+        let recent: Vec<Release> = self.releases_of(&id, name).await?.into_iter()
+            .filter(|r| r.released.as_deref().is_some_and(|day| day >= since && day <= today))
+            .collect();
+        let mut out = Vec::new();
+        for r in recent {
+            let Ok(v) = self.get(&format!("{API}/album/{}", r.id), &[]).await else { continue };
+            let main = v["artist"]["id"].as_u64().map(|n| n.to_string()).or_else(|| v["artist"]["id"].as_str().map(str::to_string));
+            if main.as_deref() == Some(id.as_str()) {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn releases_of(&self, id: &str, name: &str) -> Result<Vec<Release>> {
         let mut out: Vec<Release> = Vec::new();
         let mut index = 0usize;
         // Paged by 100; four pages cover even very large catalogs.

@@ -205,6 +205,8 @@ impl Glyph {
     pub fn toggle_devices_panel(&mut self, cx: &mut Context<Self>) {
         self.show_devices = !self.show_devices;
         if self.show_devices {
+            // Opened from the player bar: the devices (the jam has its button).
+            self.devices_jam = false;
             self.account.output_checked = None;
             self.show_queue = false;
             if let Some(a) = self.add_songs.as_mut() {

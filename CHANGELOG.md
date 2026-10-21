@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Updates inside the Android app**: Settings > About downloads the new APK, checks it and hands it to Android's installer, no detour over GitHub. The first time, Android asks you to allow Glyph to install apps.
+
 ## 0.5.0 - 2026-10-21
 
 Glyph on your phone, AirPlay, a sleep timer and your library on every device.

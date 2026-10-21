@@ -264,9 +264,9 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
             .id("stats-scroll")
             .track_scroll(&app.main_scroll)
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scroll().touch_axis()
             .px(px(theme::PAGE_X))
-            .py(px(20.0))
+            .pt(px(theme::PAGE_TOP)).pb(px(20.0))
             .child(div().flex().flex_col().gap(px(28.0)).children(body))
             .into_any_element();
     }
@@ -387,9 +387,9 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
         .id("stats-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .px(px(theme::PAGE_X))
-        .py(px(20.0))
+        .pt(px(theme::PAGE_TOP)).pb(px(20.0))
         .child(div().flex().flex_col().gap(px(28.0)).children(back).child(head).children(body))
         .into_any_element()
 }

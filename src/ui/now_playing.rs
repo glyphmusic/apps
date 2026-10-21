@@ -194,7 +194,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             .flex()
             .justify_center()
             .px(px(40.0))
-            .child(div().w_full().max_w(px(820.0)).h_full().child(lyrics(app, cx)))
+            .child(div().w_full().max_w(px(820.0)).h_full().child(lyrics(app, cx, false)))
             .into_any_element();
     }
     // Cover column + lyrics as one centred block (not pinned to the left
@@ -214,7 +214,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(56.0))
                 .child(left)
-                .when(app.show_lyrics, |d| d.child(lyrics(app, cx))),
+                .when(app.show_lyrics, |d| d.child(lyrics(app, cx, false))),
         )
         .into_any_element()
 }
@@ -456,7 +456,7 @@ fn options_panel(app: &mut Glyph, l: &glyph_core::Lyrics, offset: i64, grow: f32
         .occlude()
         .w(px(340.0))
         .max_h(px(440.0))
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .px(px(14.0))
         .py(px(10.0))
         .rounded(px(12.0))
@@ -501,7 +501,9 @@ fn options_panel(app: &mut Glyph, l: &glyph_core::Lyrics, offset: i64, grow: f32
         })
 }
 
-fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
+/// The lyrics frame. `compact`: the phone's lyrics screen (smaller lines,
+/// no view switch: it is its own screen).
+pub(crate) fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>, compact: bool) -> gpui::AnyElement {
     let ls = &app.lyrics;
     if ls.loading {
         return div()
@@ -572,7 +574,7 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .flex()
         .items_center()
         .gap(px(8.0))
-        .child(mode_switch(app, cx))
+        .when(!compact, |d| d.child(mode_switch(app, cx)))
         .child(div().flex_1())
         .child(options_btn)
         .children(panel.map(|p| gpui::deferred(div().absolute().top(px(40.0)).right_0().child(p)).with_priority(2)));
@@ -607,8 +609,8 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
                     .when(centered, |d| d.text_center())
                     // The line being sung is a size bigger, so it is clear
                     // where the song is.
-                    .text_size(px(28.0 + 8.0 * big))
-                    .line_height(px(38.0 + 9.0 * big))
+                    .text_size(px(if compact { 24.0 + 4.0 * big } else { 28.0 + 8.0 * big }))
+                    .line_height(px(if compact { 32.0 + 5.0 * big } else { 38.0 + 9.0 * big }))
                     .font_weight(FontWeight::BOLD);
                 if Some(i) == active {
                     // The sung part fills in white with a soft edge that sweeps
@@ -657,7 +659,7 @@ fn lyrics(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::AnyElement {
         .id("lyrics-scroll")
         .track_scroll(&app.lyrics_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .flex()
         .flex_col()
         .when(centered, |d| d.items_center())

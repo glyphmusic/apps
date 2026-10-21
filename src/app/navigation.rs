@@ -225,7 +225,7 @@ impl Glyph {
                         external_ids: Default::default(),
                         explicit: false,
                     };
-                    self.ctx_menu = Some(CtxMenu { track: blank, pos, from: None, playlists: false, list: Some(l), artist: None, sidebar: None });
+                    self.ctx_menu = Some(CtxMenu { track: blank, pos, from: None, playlists: false, sub: 0, list: Some(l), artist: None, sidebar: None });
                     self.ctx_opened = Instant::now();
                     self.ctx_closing = None;
                 }

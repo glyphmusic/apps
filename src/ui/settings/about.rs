@@ -8,7 +8,8 @@ pub(super) fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         let pct = if total > 0 { done * 100 / total } else { 0 };
         (tf("update.downloading", &[("p", &pct)]).to_string(), gpui::white())
     } else if u.installed {
-        (t("update.installed").to_string(), theme::ok())
+        let key = if cfg!(target_os = "android") { "update.android_confirm" } else { "update.installed" };
+        (t(key).to_string(), theme::ok())
     } else if let Some(e) = &u.error {
         (tf("update.error", &[("e", e)]).to_string(), theme::warn())
     } else {
@@ -22,7 +23,8 @@ pub(super) fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let avail = app.available_update().cloned();
     let installable = avail
         .clone()
-        .filter(|i| i.can_self_install && !app.update.installed && app.update.installing.is_none());
+        // Android: stays, so a cancelled installer dialog can be opened again.
+        .filter(|i| i.can_self_install && (!app.update.installed || cfg!(target_os = "android")) && app.update.installing.is_none());
     let prerelease = app.config.updates.channel == "prerelease";
 
     let card = surface()
@@ -81,7 +83,7 @@ pub(super) fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .when_some(installable, |d, info| {
                     d.child(primary_button("upd-install", t("update.install")).on_click(cx.listener(move |this, _, _, cx| this.install_update(info.clone(), cx))))
                 })
-                .when(app.update.installed, |d| {
+                .when(app.update.installed && !cfg!(target_os = "android"), |d| {
                     d.child(primary_button("upd-restart", t("update.restart")).on_click(cx.listener(|this, _, _, cx| this.restart(cx))))
                 }),
         )

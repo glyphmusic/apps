@@ -354,13 +354,6 @@ impl Glyph {
         cx.notify();
     }
 
-    /// Straight to the previous song (also late in the current one).
-    pub fn previous_song(&mut self, cx: &mut Context<Self>) {
-        if let Some(Some(t)) = guard(|| self.queue.previous().cloned()) {
-            self.play_track(t, cx);
-        }
-    }
-
     pub fn toggle_normalize(&mut self, cx: &mut Context<Self>) {
         self.config.audio.normalize = !self.config.audio.normalize;
         if let Some(p) = &self.player {
@@ -630,7 +623,14 @@ Language: {}",
             this.update(cx, |s, cx| {
                 s.update.installing = None;
                 match r {
-                    Ok(()) => s.update.installed = true,
+                    Ok(()) => {
+                        s.update.installed = true;
+                        // Android: the system installer (or first its
+                        // permission screen) takes over from here.
+                        if cfg!(target_os = "android") {
+                            s.toast_info(t("update.android_confirm"));
+                        }
+                    }
                     Err(e) => s.update.error = Some(e),
                 }
                 cx.notify();

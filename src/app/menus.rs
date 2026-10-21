@@ -105,7 +105,7 @@ impl Glyph {
     }
 
     pub fn open_ctx(&mut self, track: Track, pos: gpui::Point<gpui::Pixels>, from: Option<(ListRef, usize)>, cx: &mut Context<Self>) {
-        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, list: None, artist: None, sidebar: None });
+        self.ctx_menu = Some(CtxMenu { track, pos, from, playlists: false, sub: 0, list: None, artist: None, sidebar: None });
         self.ctx_opened = Instant::now();
         self.ctx_closing = None;
         cx.notify();
@@ -127,7 +127,7 @@ impl Glyph {
             external_ids: Default::default(),
             explicit: false,
         });
-        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: None, artist: Some(name.to_string()), sidebar: None });
+        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, sub: 0, list: None, artist: Some(name.to_string()), sidebar: None });
         self.ctx_opened = Instant::now();
         self.ctx_closing = None;
         cx.notify();
@@ -198,7 +198,7 @@ impl Glyph {
             },
             None => return,
         };
-        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, list: Some(l), artist: None, sidebar: None });
+        self.ctx_menu = Some(CtxMenu { track, pos, from: None, playlists: false, sub: 0, list: Some(l), artist: None, sidebar: None });
         self.ctx_opened = Instant::now();
         self.ctx_closing = None;
         cx.notify();

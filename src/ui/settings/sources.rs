@@ -94,7 +94,7 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         (t("ytdlp.mode.local"), local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Local, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
         (t("ytdlp.mode.server"), !local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Server, cx))),
     ], cx, "youtube-mode");
-    let top = rows(vec![
+    let mut top = vec![
         row(t("sp.search.mode"), Some(t("sp.search.mode.desc")), segmented(vec![
             (t("ytdlp.mode.local"), app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(true, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
             (t("ytdlp.mode.server"), !app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(false, cx))),
@@ -109,8 +109,11 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             Some(t("settings.sources.fallback.hint")),
             switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
         ),
+    ];
+    // Phones always use the built-in r-dlp: yt-dlp cannot be installed there.
+    if !crate::ui::compact::TOUCH {
         // Which program finds YouTube audio on this computer.
-        row(t("sp.extractor"), Some(t("sp.extractor.desc")), {
+        top.push(row(t("sp.extractor"), Some(t("sp.extractor.desc")), {
             use glyph_core::config::Extractor;
             let cur = app.config.providers.extractor;
             segmented(
@@ -121,10 +124,11 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 cx,
                 "extractor",
             )
-        }),
+        }));
         // Local yt-dlp plays YouTube directly (only matters with YouTube on).
-        row_status(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)),
-    ]);
+        top.push(row_status(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)));
+    }
+    let top = rows(top);
     let enabled = app.config.providers.enabled.clone();
     let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
         .into_iter()

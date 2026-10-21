@@ -24,6 +24,7 @@ pub mod jam;
 pub mod library;
 pub mod lyrics;
 pub mod lyricsearch;
+pub mod outage;
 pub mod paths;
 pub mod profile_images;
 pub mod provider;
@@ -395,7 +396,7 @@ impl Backend {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = self.cur();
         let q = query.trim().to_string();
-        let route = if inner.config.providers.local_search || inner.server.is_none() { "local" } else { "server" };
+        let route = if inner.config.providers.local_search || inner.live_server().is_none() { "local" } else { "server" };
         let key = format!("{route}:{} #p{page}", q.to_lowercase());
         let cache = self.search_cache.clone();
         let hit = cache
@@ -456,7 +457,7 @@ impl Backend {
         };
         self.rt.as_ref().expect("runtime alive").spawn(async move {
             let work = async {
-                if let Some(server) = inner.server.as_ref().filter(|_| !inner.config.providers.local_search) {
+                if let Some(server) = inner.live_server().filter(|_| !inner.config.providers.local_search) {
                     match server.search_into(&q, page, &tx).await {
                         Ok(true) => return,
                         Ok(false) => {
@@ -464,10 +465,15 @@ impl Backend {
                             return;
                         }
                         Err(e) => {
-                            tracing::warn!("server search failed: {e}");
-                            let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });
-                            let _ = tx.send(SearchEvent::Done);
-                            return;
+                            // The official server is out: search from here instead.
+                            if outage::note(server.base_url(), &e).await.is_some() {
+                                tracing::warn!("server search failed, searching locally: {e}");
+                            } else {
+                                tracing::warn!("server search failed: {e}");
+                                let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });
+                                let _ = tx.send(SearchEvent::Done);
+                                return;
+                            }
                         },
                     }
                 }
@@ -509,7 +515,7 @@ impl Backend {
                 Some(r) => Some(r),
                 None => inner.resolve(&track).await?,
             }};
-            if let (Some(server), Some(resolved)) = (&inner.server, r.as_mut()) {
+            if let (Some(server), Some(resolved)) = (inner.live_server(), r.as_mut()) {
                 if let PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. } = &mut resolved.source {
                     *url = server.audio_quality_url(url, inner.config.audio.quality);
                 }
@@ -548,7 +554,7 @@ impl Backend {
                 if !inner.config.storage.data_saver {
                     if let Some(Resolved { source: PlaybackSource::Stream { url, .. }, .. }) = &r {
                         if url.starts_with("https://") || url.starts_with("http://") {
-                            let url = inner.server.as_ref().map(|s| s.audio_quality_url(url, inner.config.audio.quality)).unwrap_or_else(|| url.clone());
+                            let url = inner.live_server().map(|s| s.audio_quality_url(url, inner.config.audio.quality)).unwrap_or_else(|| url.clone());
                             let warmer = STREAM_WARMER.read().unwrap().clone();
                             if let Some(warmer) = warmer { warmer(url); }
                         }
@@ -656,8 +662,8 @@ impl Backend {
             let (since, today) = (catalog::date_days_ago(days), catalog::date_days_ago(0));
             let mut out: Vec<providers::deezer::Release> = Vec::new();
             for name in artists {
-                if let Ok(list) = d.artist_releases(&name).await {
-                    out.extend(list.into_iter().filter(|r| r.released.as_deref().is_some_and(|day| day >= since.as_str() && day <= today.as_str())));
+                if let Ok(list) = d.artist_new_releases(&name, &since, &today).await {
+                    out.extend(list);
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }

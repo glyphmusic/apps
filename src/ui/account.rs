@@ -39,6 +39,18 @@ pub struct AccountUi {
     pub output_live_checked: Option<Instant>,
     pub output_seen: std::collections::BTreeMap<String, Option<String>>,
     pub transfer_ack: Option<String>,
+    /// When the pending transfer arrived (acknowledged at the latest after a while).
+    pub transfer_ack_at: Option<Instant>,
+    /// Device a transfer is being sent to (its row says "Connecting…").
+    pub transfer_to: Option<String>,
+    /// Device the last error belongs to (shown in its row).
+    pub output_error_at: Option<String>,
+    /// Play/pause just sent to the controlled device, shown until it reports back.
+    pub output_playing: std::cell::Cell<Option<(bool, Instant)>>,
+    /// Polls that failed in a row (the list is kept over short outages).
+    pub output_failures: u32,
+    /// Since when the controlled device has not reported (dropped after a grace time).
+    pub output_missing_since: Option<Instant>,
     pub sync_failures: u32,
     pub sync_pending: usize,
     pub data_epoch: u64,
@@ -761,8 +773,11 @@ fn signed_out(app: &mut Glyph, col: Div, cx: &mut Context<Glyph>) -> Div {
             Login::Failed(m) => Some(div().text_center().text_size(px(12.5)).text_color(theme::warn()).child(m.clone())),
             _ => None,
         };
+        let touch = crate::ui::compact::TOUCH;
         let buttons = div()
-            .w(px(320.0))
+            // Phones: full width, as the rest of the settings page.
+            .when(touch, |d| d.w_full())
+            .when(!touch, |d| d.w(px(320.0)))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -784,6 +799,11 @@ fn signed_out(app: &mut Glyph, col: Div, cx: &mut Context<Glyph>) -> Div {
                         cx.notify();
                     })),
             );
+        // Desktop: centred in the modal. Phones: at the top of the page
+        // (centred in a 400 px box they floated under a big empty gap).
+        if touch {
+            return col.child(div().w_full().pt(px(8.0)).child(buttons));
+        }
         return col.child(div().w_full().h(px(400.0)).flex().flex_col().items_center().justify_center().child(buttons));
     }
     let a = &app.account;

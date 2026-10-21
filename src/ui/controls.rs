@@ -7,7 +7,7 @@ use crate::app::{ControlMenu, Glyph, Sleep};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::lists::menu_row;
-use crate::ui::widgets::icon;
+use crate::ui::widgets::{icon, TouchAxis};
 use glyph_core::config::{ChannelMode, ListSort, ShuffleStyle};
 use glyph_core::RepeatMode;
 use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, Context, ElementId, MouseButton, MouseDownEvent, SharedString, Window};
@@ -111,7 +111,6 @@ pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyp
         ControlMenu::Sort => {
             let l = app.open_list.clone()?;
             let cur = app.list_sort(&l);
-            body.push(caption(t("sort.title")));
             for (id, icon_name, label, s) in [
                 ("ctl-sort-custom", "list-music", if l == crate::app::ListRef::Liked { t("sort.added") } else { t("sort.custom") }, ListSort::Custom),
                 ("ctl-sort-title", "music-2", t("sort.by_title"), ListSort::Title),
@@ -390,7 +389,7 @@ pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyp
         .id("control-menu")
         .w(px(236.0))
         .max_h(px(420.0))
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .p(px(6.0))
         .rounded(px(10.0))
         .bg(gpui::hsla(0.0, 0.0, 0.075, 0.98))

@@ -181,9 +181,11 @@ impl ServerClient {
             .and_then(|s| s.parse::<u64>().ok());
         let body = resp.text().await.unwrap_or_default();
         let api: Option<ApiError> = serde_json::from_str(&body).ok();
+        // Cloudflare's own page (not JSON) when the Worker's daily requests are used up.
+        let edge = api.is_none() && crate::outage::is_daily_limit_page(status.as_u16(), &body);
         Err(ServerError {
             status: status.as_u16(),
-            code: api.as_ref().map(|a| a.code.clone()).unwrap_or_else(|| status.to_string()),
+            code: api.as_ref().map(|a| a.code.clone()).unwrap_or_else(|| if edge { crate::outage::EDGE_DAILY_LIMIT.into() } else { status.to_string() }),
             message: api.as_ref().map(|a| a.message.clone()).unwrap_or_default(),
             retry_after_s: api.and_then(|a| a.retry_after_s).or(retry_header),
         }

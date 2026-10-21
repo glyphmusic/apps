@@ -64,7 +64,7 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
         .id("sp-nav")
         .track_scroll(&nav_scroll)
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scroll().touch_axis()
         .flex()
         .flex_col()
         .gap(px(2.0))

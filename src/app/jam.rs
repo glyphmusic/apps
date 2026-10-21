@@ -631,6 +631,7 @@ impl Glyph {
         if !self.show_devices {
             self.toggle_devices_panel(cx);
         }
+        self.devices_jam = true;
     }
 
     /// Copies the invite link (QR code) or the code.

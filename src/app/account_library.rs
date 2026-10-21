@@ -196,6 +196,13 @@ impl Glyph {
         self.account.output_live_checked = None;
         self.account.output_seen.clear();
         self.account.transfer_ack = None;
+        self.account.transfer_ack_at = None;
+        self.account.transfer_to = None;
+        self.account.output_error_at = None;
+        self.account.output_playing.set(None);
+        self.account.output_failures = 0;
+        self.account.output_missing_since = None;
+        self.account.output_received = None;
         self.account.sync_failures = 0;
         self.account.sync_pending = 0;
         self.account.output_target = None;

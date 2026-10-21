@@ -547,9 +547,11 @@ impl YtDlp {
 
     /// The extractor chosen in the settings: r-dlp needs nothing installed;
     /// yt-dlp needs its program. `None` when neither can run.
+    /// Phones cannot run yt-dlp, so there r-dlp is always the extractor.
     pub fn with_extractor(configured: Option<&str>, extractor: crate::config::Extractor) -> Option<Self> {
-        let native = extractor == crate::config::Extractor::RDlp;
-        let bin = locate(configured);
+        let phone = cfg!(any(target_os = "android", target_os = "ios"));
+        let native = phone || extractor == crate::config::Extractor::RDlp;
+        let bin = if phone { None } else { locate(configured) };
         if bin.is_none() && !native {
             return None;
         }

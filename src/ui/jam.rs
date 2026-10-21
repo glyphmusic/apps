@@ -1,5 +1,5 @@
-//! Jam section of the Connect panel: start or join a jam (or wait to be let
-//! in), then what plays at the host, reactions, the invite (code, QR code,
+//! Jam page of the Connect panel (its header's Jam button): start or join
+//! a jam (or wait to be let in), then what plays at the host, reactions, the invite (code, QR code,
 //! link), people waiting, who is in, what guests may do or where a guest
 //! listens, the songs coming up with who added them, and what happened
 //! (see `crate::app::jam`).
@@ -97,7 +97,6 @@ fn start(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
             .flex()
             .flex_col()
             .pb(px(12.0))
-            .child(section(t("jam.title")))
             .child(
                 div()
                     .mx(px(10.0))
@@ -172,7 +171,6 @@ fn start(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
         .flex()
         .flex_col()
         .pb(px(12.0))
-        .child(section(t("jam.title")))
         .child(start_row)
         .child(join)
         .when_some(app.jam.error.clone(), |d, e| d.child(div().mx(px(16.0)).mt(px(8.0)).child(note(e))))
@@ -483,7 +481,6 @@ fn active(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
         .flex()
         .flex_col()
         .pb(px(12.0))
-        .child(section(t("jam.title")))
         .children(now_el)
         .child(card)
         .when(!waiting.is_empty(), |d| d.child(section(t("jam.knocks"))).child(div().px(px(10.0)).flex().flex_col().children(waiting)))

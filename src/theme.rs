@@ -22,6 +22,9 @@ pub const RADIUS: f32 = 10.0;
 /// Horizontal padding of the main pages: roomy on the desktop, tight on
 /// phones so content uses the full width (plus the layout's GAP).
 pub const PAGE_X: f32 = if cfg!(any(target_os = "android", target_os = "ios")) { 16.0 } else { 32.0 };
+/// Space above a page's first item. Phones already have a header row above
+/// the page (its own padding below), so they add only a little.
+pub const PAGE_TOP: f32 = if cfg!(any(target_os = "android", target_os = "ios")) { 8.0 } else { 20.0 };
 pub const WINDOW_RADIUS: f32 = 10.0;
 
 // ---- colour themes -------------------------------------------------------

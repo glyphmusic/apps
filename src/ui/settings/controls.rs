@@ -145,7 +145,7 @@ pub(super) fn select(
                 .mt(px(-6.0 * (1.0 - alpha)))
                 .min_w(px(240.0))
                 .max_h(px(room.max(120.0)))
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .p(px(4.0))
                 .rounded(px(10.0))
                 .bg(hsla(0.0, 0.0, 0.09, 0.99))

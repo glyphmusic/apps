@@ -2,14 +2,24 @@ package app.glyph;
 
 import android.content.ClipData;
 import android.Manifest;
+import android.app.PendingIntent;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
+import android.util.Log;
 import android.view.Display;
 import android.view.View;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 import androidx.core.graphics.Insets;
 import androidx.core.view.WindowCompat;
@@ -32,6 +42,12 @@ public class MainActivity extends GameActivity {
 
     /** Link the app was opened with (jam invite, playlist), until Rust takes it. */
     private String openUrl;
+
+    /** Result of a PackageInstaller session, delivered back to this activity. */
+    private static final String ACTION_INSTALL_STATUS = "app.glyph.INSTALL_STATUS";
+
+    /** Downloaded update waiting for the "install unknown apps" permission. */
+    private String pendingApk;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,8 +75,70 @@ public class MainActivity extends GameActivity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (ACTION_INSTALL_STATUS.equals(intent.getAction())) {
+            installStatus(intent);
+            return;
+        }
         setIntent(intent);
         takeLink(intent);
+    }
+
+    /** Back from the permission screen: go on with the update once allowed. */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (pendingApk != null && getPackageManager().canRequestPackageInstalls()) {
+            String path = pendingApk;
+            pendingApk = null;
+            installApk(path);
+        }
+    }
+
+    /** Writes the APK into an installer session; the system then asks the user. */
+    private void installApk(String path) {
+        new Thread(() -> {
+            File apk = new File(path);
+            try {
+                PackageInstaller installer = getPackageManager().getPackageInstaller();
+                PackageInstaller.SessionParams params =
+                        new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                params.setAppPackageName(getPackageName());
+                int id = installer.createSession(params);
+                try (PackageInstaller.Session session = installer.openSession(id)) {
+                    try (InputStream in = new FileInputStream(apk);
+                         OutputStream out = session.openWrite("glyph.apk", 0, apk.length())) {
+                        byte[] buf = new byte[1 << 16];
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            out.write(buf, 0, n);
+                        }
+                        session.fsync(out);
+                    }
+                    // Mutable: the installer adds the status extras.
+                    int flags = PendingIntent.FLAG_UPDATE_CURRENT
+                            | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
+                    Intent status = new Intent(this, MainActivity.class).setAction(ACTION_INSTALL_STATUS);
+                    session.commit(PendingIntent.getActivity(this, 0, status, flags).getIntentSender());
+                }
+            } catch (Exception e) {
+                Log.w("glyph", "installing the update failed", e);
+            } finally {
+                apk.delete();
+            }
+        }).start();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void installStatus(Intent intent) {
+        int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
+            if (confirm != null) {
+                startActivity(confirm);
+            }
+        } else if (status != PackageInstaller.STATUS_SUCCESS) {
+            Log.w("glyph", "update not installed: " + intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
+        }
     }
 
     private void takeLink(Intent intent) {
@@ -88,6 +166,25 @@ public class MainActivity extends GameActivity {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
             } catch (Exception ignored) {
             }
+        });
+    }
+
+    /**
+     * Installs a downloaded, verified update. Without the "install unknown
+     * apps" permission it opens that setting first and goes on in onResume.
+     */
+    public void gpuiInstallApk(String path) {
+        runOnUiThread(() -> {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                pendingApk = path;
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName())));
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+            installApk(path);
         });
     }
 

@@ -34,6 +34,7 @@ impl Inner {
             let client = ServerClient::new(&url, http.clone(), server_client::install_id()).with_bearer(token)?;
             match client.check_compat().await {
                 Ok(Compat::Compatible(h)) => {
+                    if crate::outage::is_official(&url) { crate::outage::clear(); }
                     library::set_playlist_track_limit(h.playlist_max_tracks);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
@@ -49,6 +50,7 @@ impl Inner {
                 }
                 Err(e) => {
                     tracing::warn!("server {url} unreachable: {e}");
+                    crate::outage::note(&url, &e).await;
                     server_providers = Some(vec![]);
                     mode = BackendMode::Server { url, server_version: "offline".into() };
                     server = Some(client);
@@ -59,9 +61,15 @@ impl Inner {
         Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, covers, lyrics_cache })
     }
 
+    /// The server, unless it is the official one and that is out (see
+    /// [`crate::outage`]): then everything runs as in direct mode.
+    pub(super) fn live_server(&self) -> Option<&ServerClient> {
+        self.server.as_ref().filter(|s| !crate::outage::is_official(s.base_url()) || !crate::outage::switched())
+    }
+
     /// YouTube is enabled and yt-dlp runs on this machine.
     pub(super) fn local_youtube_on(&self) -> bool {
-        (self.config.providers.youtube_mode == config::YouTubeMode::Local || self.server.is_none())
+        (self.config.providers.youtube_mode == config::YouTubeMode::Local || self.live_server().is_none())
             && self.providers.youtube.as_ref().is_some_and(|y| y.local().is_some())
     }
 
@@ -159,7 +167,7 @@ impl Inner {
     /// YouTube video is already known resolve together in one yt-dlp run,
     /// the others go through the normal resolve (which caches what it finds).
     pub(super) async fn prefetch(&self, tracks: Vec<Track>) {
-        if self.server.is_some() {
+        if self.live_server().is_some() {
             for t in tracks { let _ = self.resolve(&t).await; }
             return;
         }
@@ -201,7 +209,7 @@ impl Inner {
             return self.local_youtube(t, None).await.map(Some)
                 .ok_or_else(|| anyhow!("Local YouTube playback failed. Check yt-dlp in Settings > Playback > Sources."));
         }
-        if let Some(server) = &self.server {
+        if let Some(server) = self.live_server() {
             let local_yt = self.local_youtube_on();
             let priority = self.resolver.priority();
             let rank = |p: ProviderId| priority.iter().position(|x| *x == p).unwrap_or(usize::MAX);
@@ -245,13 +253,16 @@ impl Inner {
                     return Ok(None);
                 }
                 Err(e) => {
-                    // Server down: YouTube on this machine still works.
-                    if local_yt {
-                        if let Some(r) = self.local_youtube(t, None).await {
-                            return Ok(Some(r));
+                    // The official server is out: resolve locally below.
+                    if crate::outage::note(server.base_url(), &e).await.is_none() {
+                        // Server down: YouTube on this machine still works.
+                        if local_yt {
+                            if let Some(r) = self.local_youtube(t, None).await {
+                                return Ok(Some(r));
+                            }
                         }
+                        return Err(e);
                     }
-                    return Err(e);
                 }
             }
         }
@@ -280,11 +291,16 @@ impl Inner {
             }
             return Err(anyhow!("Local YouTube download failed. Check yt-dlp in Settings > Playback > Sources."));
         }
-        if let Some(server) = &self.server {
+        // The official server out: the direct path below (`break 'server`).
+        'server: { if let Some(server) = self.live_server() {
             let lookup = match server.download_url_with_priority(t, &self.resolver.priority(), self.config.providers.youtube_only).await {
                 Ok(hit) => hit,
-                Err(e) if self.config.providers.youtube_mode == config::YouTubeMode::Server => return Err(e),
-                Err(e) => { tracing::debug!("server download lookup failed: {e}"); None }
+                Err(e) => {
+                    if crate::outage::note(server.base_url(), &e).await.is_some() { tracing::info!("official server out, downloading locally"); break 'server; }
+                    if self.config.providers.youtube_mode == config::YouTubeMode::Server { return Err(e); }
+                    tracing::debug!("server download lookup failed: {e}");
+                    None
+                }
             };
             if let Some(hit) = lookup {
                 if self.config.providers.youtube_only && hit.0 != ProviderId::YouTube {
@@ -309,7 +325,7 @@ impl Inner {
                 return Ok(Some((provider, url)));
             }
             return Ok(None);
-        }
+        } }
         if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
         const DL: [ProviderId; 4] = [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive, ProviderId::YouTube];
         for p in DL {
@@ -350,7 +366,7 @@ impl Inner {
         }
         let mut found: Option<Lyrics> = None;
         let mut server_answered = false;
-        if let Some(server) = &self.server {
+        if let Some(server) = self.live_server() {
             match server.lyrics(&t.title, &t.artist, t.album.as_deref(), t.duration_ms.map(|d| d / 1000)).await {
                 Ok(r) => {
                     server_answered = true;

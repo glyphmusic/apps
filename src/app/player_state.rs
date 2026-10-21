@@ -18,7 +18,7 @@ impl Glyph {
     }
 
     pub fn is_playing(&self) -> bool {
-        if self.account.output_target.is_some() { return self.account_output().is_some_and(|o| o.state.playing); }
+        if self.account.output_target.is_some() { return self.account_playing_hint().unwrap_or_else(|| self.account_output().is_some_and(|o| o.state.playing)); }
         self.player_state.as_ref().is_some_and(|s| s.status == Status::Playing)
     }
 
@@ -71,6 +71,11 @@ impl Glyph {
             Some(t) if self.library_ok => guard(|| self.library.lyrics_offset(t)).unwrap_or(0),
             _ => 0,
         }
+    }
+
+    /// The song "previous" goes back to (the phone's cover carousel).
+    pub fn previous_track(&self) -> Option<Track> {
+        guard(|| self.queue.history().last().map(|t| (*t).clone())).flatten()
     }
 
     pub fn upcoming(&self) -> Vec<Track> {

@@ -4,7 +4,7 @@
 use crate::app::{BackendState, Glyph, View};
 use crate::i18n::{t, tf};
 use crate::theme;
-use crate::ui::widgets::{cover, hover_fill, hover_k, icon, mono};
+use crate::ui::widgets::{cover, hover_fill, hover_k, icon, mono, TouchAxis};
 use gpui::{div, prelude::*, px, Context, FontWeight, MouseButton, SharedString, Window, WindowControlArea};
 
 const IS_MAC: bool = cfg!(target_os = "macos");
@@ -264,7 +264,7 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                 .left_0()
                 .right_0()
                 .max_h(px(440.0))
-                .overflow_y_scroll()
+                .overflow_y_scroll().touch_axis()
                 .p(px(8.0))
                 .rounded(px(8.0))
                 .bg(gpui::hsla(0.0, 0.0, 0.11, 0.98))

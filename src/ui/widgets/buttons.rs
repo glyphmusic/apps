@@ -204,7 +204,11 @@ pub fn hover_fill(key: impl Into<SharedString>, color: Hsla, radius: f32) -> gpu
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |bounds, hitbox, window, cx| {
             let win = window.window_handle().window_id();
-            let hovered = hitbox.is_hovered(window) && !UI_RT.with(|rt| rt.borrow().win(win).is_some_and(|w| w.mouse_out));
+            // Phones have no hover: the last touch would otherwise leave
+            // its card highlighted.
+            let hovered = !crate::ui::compact::TOUCH
+                && hitbox.is_hovered(window)
+                && !UI_RT.with(|rt| rt.borrow().win(win).is_some_and(|w| w.mouse_out));
             let (k, moving) = hover_track(win, &key, hovered, cx.reduce_motion());
             if k > 0.0 && color.a > 0.0 {
                 window.paint_quad(gpui::quad(

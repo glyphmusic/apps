@@ -574,7 +574,7 @@ pub(crate) fn avatar(path: Option<PathBuf>, size: f32) -> Div {
 pub fn view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(handle) = app.open_profile.clone() else { return div().into_any_element() };
     let scroll = app.main_scroll.clone();
-    let wrap = move |el: AnyElement| div().id("profile-scroll").track_scroll(&scroll).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0)).child(el).into_any_element();
+    let wrap = move |el: AnyElement| div().id("profile-scroll").track_scroll(&scroll).size_full().overflow_y_scroll().touch_axis().px(px(theme::PAGE_X)).pt(px(theme::PAGE_TOP)).pb(px(20.0)).child(el).into_any_element();
     let p = app.profile.page.clone().filter(|p| p.handle == handle);
     let Some(p) = p else {
         let body = if app.signed_in().is_none() {

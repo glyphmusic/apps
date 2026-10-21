@@ -202,6 +202,7 @@ impl Glyph {
             discord_id_input,
             server_auth_required: false,
             server_probe_seq: 0,
+            outage_seen: 0,
             key_inputs,
             config: Config::default(),
             backend: None,
@@ -245,6 +246,7 @@ impl Glyph {
             ytdlp: Default::default(),
             show_queue: false,
             show_devices: false,
+            devices_jam: false,
             devices_scroll: gpui::ScrollHandle::new(),
             show_lyrics: true,
             lyrics_only: false,
@@ -509,7 +511,8 @@ impl Glyph {
             self.queue.set_shuffle(prefs.shuffle);
             self.queue.set_repeat(repeat);
         });
-        self.show_queue = prefs.show_queue;
+        // Phones: the queue is a sheet, not reopened on start.
+        self.show_queue = prefs.show_queue && !crate::ui::compact::TOUCH;
         self.mini_on_top = prefs.mini_on_top;
         self.mini_big = prefs.mini_large;
         self.mini_card_w = prefs.mini_card_w;

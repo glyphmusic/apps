@@ -312,7 +312,7 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
         let vw = f32::from(window.viewport_size().width);
         DECK_W.with(|w| w.set((vw - 24.0).min(W_DESKTOP)));
         // Settings and Now Playing cover the tabs and the mini player.
-        let bare = app.view == crate::app::View::NowPlaying || app.settings_open;
+        let bare = app.view == crate::app::View::NowPlaying || app.settings_open || crate::ui::compact::now_playing::is_open();
         let tabs = if bare { theme::GAP } else { TABS_H + theme::GAP * 2.0 };
         let mini = if !bare && app.current.is_some() { MINI_H + theme::GAP } else { 0.0 };
         f32::from(window.insets().safe_area.bottom) + tabs + mini + 8.0

@@ -14,6 +14,7 @@ impl Glyph {
         self.save_player_prefs(cx);
         self.tick_stats(cx);
         self.tick_sleep(cx);
+        self.announce_outage();
         // AI assistants (MCP): calls that arrived, and every few seconds the
         // server / relay state (sign-in changes start or stop the relay).
         if self.poll_mcp(cx) {
@@ -365,10 +366,26 @@ impl Glyph {
             || self.update.installing.is_some()
             || matches!(self.conn_test, Some(ConnTest::Running))
             || self.backend_state == BackendState::Connecting
-            || (self.view == View::NowPlaying && self.is_playing())
+            || ((self.view == View::NowPlaying || crate::ui::compact::now_playing::is_open()) && self.is_playing())
     }
 
     // ------------------------------------------------------------ helpers
+
+    /// The official server went out (offline, or Cloudflare's daily limit):
+    /// says once that search and playback run locally in the meantime. No
+    /// internet on this device is announced as that, without a switch.
+    fn announce_outage(&mut self) {
+        use glyph_core::outage::{self, Kind};
+        let Some(o) = outage::current() else { return };
+        if o.seq == self.outage_seen || !outage::is_official(self.config.effective_server_url()) { return; }
+        self.outage_seen = o.seq;
+        let (key, sub) = match o.kind {
+            Kind::Offline => ("toast.server_out.offline", "toast.server_out.local"),
+            Kind::DailyLimit => ("toast.server_out.limit", "toast.server_out.local"),
+            Kind::NoInternet => ("toast.no_internet", "toast.no_internet.sub"),
+        };
+        self.push_toast(format!("{} · {}", t(key), t(sub)), ToastIcon::Info);
+    }
 
     /// Confirmation toast. "Title · detail" is split at the first dot.
     pub fn toast(&mut self, msg: impl Into<String>) {
