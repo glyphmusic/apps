@@ -83,9 +83,9 @@ jobs:
           TAG="${{ inputs.tag }}"
           # Hash every asset of the release, so the list is complete even when
           # the release workflow never got to write it.
-          mkdir assets
-          gh release view "$TAG" --json assets -q '.assets[].name' | grep -vx SHA256SUMS.txt             | while read -r name; do gh release download "$TAG" --pattern "$name" --dir assets; done
-          (cd assets && sha256sum *) | sort -k2 > SHA256SUMS.txt
+          dir="$RUNNER_TEMP/release-assets"; mkdir -p "$dir"
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep -vx SHA256SUMS.txt             | while read -r name; do gh release download "$TAG" --pattern "$name" --dir "$dir"; done
+          (cd "$dir" && sha256sum *) | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$TAG" SHA256SUMS.txt --clobber
           gh release edit "$TAG" --draft=false --latest
