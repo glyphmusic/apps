@@ -311,6 +311,9 @@ pub struct SearchState {
     pub exhausted: bool,
     pub loading_more: bool,
     more_task: Option<Task<()>>,
+    /// Query whose results were shown but nothing picked yet: lands in
+    /// recent searches as plain text once the search is left or replaced.
+    pub unpicked: Option<String>,
 }
 
 #[derive(Default)]

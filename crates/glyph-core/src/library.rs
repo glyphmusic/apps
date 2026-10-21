@@ -112,12 +112,14 @@ impl ListKey {
     }
 }
 
-/// One entry of "recent searches": a song or an artist picked from search.
+/// One entry of "recent searches": a song or an artist picked from search,
+/// or a query searched without picking anything.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SearchItem {
     Song { track: Track },
     Artist { name: String, #[serde(default, skip_serializing_if = "Option::is_none")] track: Option<Track> },
+    Query { text: String },
 }
 
 impl SearchItem {
@@ -125,6 +127,7 @@ impl SearchItem {
         match (self, other) {
             (SearchItem::Song { track: a }, SearchItem::Song { track: b }) => same_entry(a, b),
             (SearchItem::Artist { name: a, .. }, SearchItem::Artist { name: b, .. }) => a.eq_ignore_ascii_case(b),
+            (SearchItem::Query { text: a }, SearchItem::Query { text: b }) => a.trim().eq_ignore_ascii_case(b.trim()),
             _ => false,
         }
     }
@@ -656,6 +659,14 @@ impl Library {
         self.push_search_item(SearchItem::Artist { name: name.trim().to_string(), track });
     }
 
+    /// Remember a query that was searched but nothing picked from.
+    pub fn push_search_query(&mut self, text: &str) {
+        let text = text.trim();
+        if !text.is_empty() {
+            self.push_search_item(SearchItem::Query { text: text.to_string() });
+        }
+    }
+
     fn push_search_item(&mut self, item: SearchItem) {
         self.search_items.retain(|i| !i.same(&item));
         self.search_items.insert(0, item);
@@ -1129,6 +1140,7 @@ mod tests {
         match i {
             SearchItem::Song { track } => &track.title,
             SearchItem::Artist { name, .. } => name,
+            SearchItem::Query { text } => text,
         }
     }
 
@@ -1149,6 +1161,11 @@ mod tests {
         lib.push_search_artist("Daft Punk", None);
         lib.push_search_artist("daft punk", None);
         assert_eq!(lib.search_items.iter().filter(|i| matches!(i, SearchItem::Artist { .. })).count(), 1);
+        lib.push_search_query("  daft punk ");
+        lib.push_search_query("Daft Punk");
+        lib.push_search_query("   ");
+        assert_eq!(lib.search_items.iter().filter(|i| matches!(i, SearchItem::Query { .. })).count(), 1);
+        assert_eq!(song_title(&lib.search_items[0]), "Daft Punk");
     }
 
     #[test]

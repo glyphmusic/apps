@@ -14,6 +14,8 @@ thread_local! {
     /// The open menu's bounds in the window (measured while painting): the
     /// flyout opens on the side where it fits.
     pub(super) static MENU_BOUNDS: std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>> = const { std::cell::Cell::new(None) };
+    /// Phones: the open submenu (title, rows), shown as its own sheet.
+    static SHEET_SUB: std::cell::RefCell<Option<(SharedString, Vec<AnyElement>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Flyouts of the menu (`CtxMenu::sub`).
@@ -34,22 +36,24 @@ pub(super) fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, whole_lis
 /// bottom edge and opens to the left near the right edge).
 pub(super) fn sub_row(kind: u8, name: &str, label: SharedString, open: bool, flip: bool, sub: Vec<AnyElement>, cx: &mut Context<Glyph>) -> AnyElement {
     let id: ElementId = ("ctx-sub-row", kind as usize).into();
-    // Phones (bottom sheet): no hover; a tap unfolds the rows below.
+    // Phones (bottom sheet): no hover; a tap swaps the sheet for one with
+    // just the submenu's rows (see `sheet`).
     if crate::ui::compact::TOUCH {
-        let row = ctx_item(id, name, label, white(0.7), false, cx)
-            .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16.0, white(0.4)))
+        if open {
+            SHEET_SUB.with(|s| *s.borrow_mut() = Some((label.clone(), sub)));
+        }
+        return ctx_item(id, name, label, white(0.7), false, cx)
+            .child(icon("chevron-right", 16.0, white(0.4)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(m) = this.ctx_menu.as_mut() {
-                    m.playlists = !(m.playlists && m.sub == kind);
+                    m.playlists = true;
                     m.sub = kind;
+                    // Slides in like a new sheet.
+                    this.ctx_opened = std::time::Instant::now();
+                    crate::ui::widgets::handle_for("ctx-sheet").set_offset(gpui::point(px(0.0), px(0.0)));
                     cx.notify();
                 }
-            }));
-        return div()
-            .flex()
-            .flex_col()
-            .child(row)
-            .when(open, |d| d.child(div().pl(px(20.0)).flex().flex_col().children(sub)))
+            }))
             .into_any_element();
     }
     ctx_item(id, name, label, white(0.7), false, cx)
@@ -156,6 +160,8 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         (None, Some((m, at))) => (m.clone(), 1.0 - (at.elapsed().as_secs_f32() / OUT).min(1.0), false),
         _ => return None,
     };
+    SHEET_SUB.with(|s| s.borrow_mut().take());
+    let touch = crate::ui::compact::TOUCH;
     let tr = m.track.clone();
     let sep = || div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(white(0.07));
     let mut body: Vec<AnyElement> = Vec::new();
@@ -420,15 +426,18 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 }))
                 .into_any_element(),
         );
-        let l_open = l.clone();
-        body.push(
-            ctx_item("lctx-open".into(), "list-music", t("ctx.open"), white(0.7), true, cx)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.begin_ctx_close();
-                    this.open_list(l_open.clone(), cx)
-                }))
-                .into_any_element(),
-        );
+        // Phones open the list with a tap on it.
+        if !touch {
+            let l_open = l.clone();
+            body.push(
+                ctx_item("lctx-open".into(), "list-music", t("ctx.open"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.open_list(l_open.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         if has {
             let l_share = l.clone();
             body.push(
@@ -493,26 +502,29 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             _ => {}
         }
     } else {
-        let art = cover(app, &tr, 36.0, 5.0, cx);
-        body.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(6.0))
-                .py(px(4.0))
-                .child(art)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(div().truncate().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(white(0.95)).child(tr.title.clone()))
-                        .child(div().truncate().text_size(px(12.0)).text_color(white(0.55)).child(tr.artist.clone())),
-                )
-                .into_any_element(),
-        );
-        body.push(sep().into_any_element());
+        // Phones: the sheet has its own, bigger song header.
+        if !touch {
+            let art = cover(app, &tr, 36.0, 5.0, cx);
+            body.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .child(art)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(div().truncate().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(white(0.95)).child(tr.title.clone()))
+                            .child(div().truncate().text_size(px(12.0)).text_color(white(0.55)).child(tr.artist.clone())),
+                    )
+                    .into_any_element(),
+            );
+            body.push(sep().into_any_element());
+        }
         // The most used actions first: like and add to playlist.
         let liked = app.is_liked(&tr);
         let t4 = tr.clone();
@@ -533,15 +545,18 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         );
         body.push(add_pl_row(is_open(SUB_PLAYLIST), flip, sub, false, cx));
         body.push(sep().into_any_element());
-        let t1 = tr.clone();
-        body.push(
-            ctx_item("ctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.begin_ctx_close();
-                    this.play_list(vec![t1.clone()], 0, cx)
-                }))
-                .into_any_element(),
-        );
+        // Phones play a song with a tap on its row.
+        if !touch {
+            let t1 = tr.clone();
+            body.push(
+                ctx_item("ctx-play".into(), "play", t("ctx.play"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.play_list(vec![t1.clone()], 0, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         let t2 = tr.clone();
         body.push(
             ctx_item("ctx-next".into(), "list-start", t("ctx.play_next"), white(0.7), true, cx)
@@ -660,8 +675,9 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 .into_any_element(),
         );
     }
-    if crate::ui::compact::TOUCH {
-        return Some(sheet(app, &m, body, alpha, live, window, cx));
+    if touch {
+        let sub = SHEET_SUB.with(|s| s.borrow_mut().take());
+        return Some(sheet(app, &m, body, sub, alpha, live, window, cx));
     }
     let measure = gpui::canvas(|b, _, _| MENU_BOUNDS.with(|m| m.set(Some(b))), |_, _, _, _| {}).absolute().inset_0();
     let menu = div()
@@ -699,23 +715,59 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
 }
 
 thread_local! {
-    /// Phones: how far the sheet is pulled down, for the menu opened at the
-    /// given time (a new menu starts at 0).
-    static SHEET_DRAG: std::cell::Cell<(f32, Option<std::time::Instant>)> = const { std::cell::Cell::new((0.0, None)) };
-    /// Last pull event: a finger is on the sheet (flings end without a release).
-    static SHEET_HELD: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// Phones: the menu the sheet's pull belongs to (a new menu starts unpulled).
+    static SHEET_OPENED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
 
-/// Pull this far down to close the sheet.
-const SHEET_CLOSE: f32 = 90.0;
+/// Swipe key of the sheet's pull-down (see `compact::pull`).
+const SHEET_PULL: &str = "ctx-sheet-pull";
 
 /// Phones: the menu as a bottom sheet (song header, big rows), over a dimmed
-/// page; a tap outside or pulling it down closes it.
-fn sheet(app: &mut Glyph, m: &crate::app::CtxMenu, body: Vec<AnyElement>, alpha: f32, live: bool, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+/// page; a tap outside or pulling it down closes it. An open submenu (`sub`)
+/// takes the whole sheet: its title with a back arrow, then its rows.
+#[allow(clippy::too_many_arguments)]
+fn sheet(
+    app: &mut Glyph,
+    m: &crate::app::CtxMenu,
+    body: Vec<AnyElement>,
+    sub: Option<(SharedString, Vec<AnyElement>)>,
+    alpha: f32,
+    live: bool,
+    window: &mut Window,
+    cx: &mut Context<Glyph>,
+) -> AnyElement {
     let vh = f32::from(window.viewport_size().height);
     let safe = window.insets().safe_area;
+    let (sub_title, body) = match sub {
+        Some((title, rows)) => (Some(title), rows),
+        None => (None, body),
+    };
+    let back = sub_title.map(|title| {
+        div()
+            .id("ctx-sub-back")
+            .flex()
+            .items_center()
+            .gap(px(14.0))
+            .h(px(50.0))
+            .px(px(10.0))
+            .mb(px(4.0))
+            .border_b_1()
+            .border_color(white(0.08))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(m) = this.ctx_menu.as_mut() {
+                    m.playlists = false;
+                    this.ctx_opened = std::time::Instant::now();
+                    crate::ui::widgets::handle_for("ctx-sheet").set_offset(gpui::point(px(0.0), px(0.0)));
+                    cx.notify();
+                }
+            }))
+            .child(icon("arrow-left", 20.0, white(0.9)))
+            .child(div().flex_1().truncate().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(0.95)).child(title))
+            .into_any_element()
+    });
     // A single song: cover, title and artist on top, like Spotify.
-    let header = (m.artist.is_none() && m.list.is_none() && m.sidebar.is_none()).then(|| {
+    let header = (back.is_none() && m.artist.is_none() && m.list.is_none() && m.sidebar.is_none()).then(|| {
         let tr = m.track.clone();
         div()
             .flex()
@@ -738,24 +790,12 @@ fn sheet(app: &mut Glyph, m: &crate::app::CtxMenu, body: Vec<AnyElement>, alpha:
             )
     });
     let h = crate::ui::widgets::handle_for("ctx-sheet");
-    let opened = app.ctx_opened;
-    let drag = SHEET_DRAG.with(|c| {
-        let (d, at) = c.get();
-        if at != Some(opened) {
-            c.set((0.0, Some(opened)));
-            0.0
-        } else {
-            d
-        }
-    });
-    // Let go short of closing: springs back.
-    let held = SHEET_HELD.with(|c| c.get()).is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(150));
-    if live && drag > 0.0 && !held {
-        let back = if drag < 0.5 { 0.0 } else { drag * 0.6 };
-        SHEET_DRAG.with(|c| c.set((back, Some(opened))));
-        window.request_animation_frame();
+    if SHEET_OPENED.with(|c| c.replace(Some(app.ctx_opened))) != Some(app.ctx_opened) {
+        crate::ui::compact::swipe_reset(SHEET_PULL);
     }
-    let h2 = h.clone();
+    // Follows the finger while it is down (also when it rests), eases back
+    // when let go short of closing, stays put while a closing sheet fades.
+    let drag = crate::ui::compact::swipe_offset(SHEET_PULL, window).1.max(0.0);
     let panel = div()
         .id("ctx-sheet")
         .absolute()
@@ -777,39 +817,46 @@ fn sheet(app: &mut Glyph, m: &crate::app::CtxMenu, body: Vec<AnyElement>, alpha:
         .opacity(alpha)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         // Pulled down from the top of its list: follows the finger, closes
-        // past `SHEET_CLOSE`.
-        .when(live, |d| {
-            d.on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
-                let dy = f32::from(e.delta.pixel_delta(px(16.0)).y);
-                let at_top = f32::from(h2.offset().y) >= -0.5;
-                let (d, at) = SHEET_DRAG.with(|c| c.get());
-                match e.touch_phase {
-                    gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
-                        SHEET_HELD.with(|c| c.set(None));
-                        if d > SHEET_CLOSE {
-                            this.close_ctx(cx);
-                        }
+        // when let go far enough down.
+        .when(live, |d| d.on_scroll_wheel(crate::ui::compact::pull(SHEET_PULL, Some(h.clone()), |this, cx| this.close_ctx(cx), cx)))
+        // Grab handle.
+        .child(div().flex().justify_center().pb(px(10.0)).child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
+        .children(back)
+        .children(header)
+        .children(body);
+    // The long press that opened the menu may still be held: dragging on from
+    // there pulls the sheet too (those moves stay with the long press and
+    // never reach the sheet as a pan).
+    let weak = cx.entity().downgrade();
+    let follow = gpui::canvas(
+        |_, _, _| {},
+        move |_, _, w, _| {
+            w.on_mouse_event(move |e: &gpui::LongPressEvent, phase, w, cx| {
+                if !phase.bubble() {
+                    return;
+                }
+                match e.phase {
+                    gpui::TouchPhase::Moved => {
+                        crate::ui::compact::swipe_follow(SHEET_PULL, (0.0, f32::from(e.position.y - e.start_position.y)));
+                        w.refresh();
                     }
-                    _ if d > 0.0 || (at_top && dy > 0.0) => {
-                        cx.stop_propagation();
-                        SHEET_HELD.with(|c| c.set(Some(std::time::Instant::now())));
-                        SHEET_DRAG.with(|c| c.set(((d + dy).max(0.0), at)));
-                        if d + dy > SHEET_CLOSE * 2.5 {
-                            this.close_ctx(cx);
+                    gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                        if crate::ui::compact::swipe_let_go(SHEET_PULL) {
+                            weak.update(cx, |this, cx| this.close_ctx(cx)).ok();
                         }
+                        w.refresh();
                     }
                     _ => {}
                 }
-                cx.notify();
-            }))
-        })
-        // Grab handle.
-        .child(div().flex().justify_center().pb(px(10.0)).child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
-        .children(header)
-        .children(body);
+            });
+        },
+    )
+    .absolute()
+    .size_0();
     let layer = div().id("ctx-backdrop").absolute().inset_0().bg(black(0.5 * alpha));
     let layer = if live {
         layer
+            .child(follow)
             .occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
             .child(panel)

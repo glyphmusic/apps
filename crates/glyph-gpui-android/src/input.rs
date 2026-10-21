@@ -56,12 +56,16 @@ pub(crate) struct ImeSync {
     /// True while an IME edit is being applied to the GPUI input handler
     /// (its change notifications must not be pushed back).
     pub applying: bool,
+    /// Focus moved to an input during a draw: its text is pushed (and the
+    /// keyboard shown) once the frame is done, when the input can be read.
+    pub pending: bool,
     last_text: Option<String>,
 }
 
 impl ImeSync {
     pub fn reset(&mut self) {
         self.applying = false;
+        self.pending = false;
         self.last_text = None;
     }
 }
@@ -276,13 +280,17 @@ fn span(s: &str, span: TextSpan) -> Range<usize> {
 }
 
 /// The focused input's whole text, selection and marked range (UTF-16).
+/// `None` while the input cannot be read (e.g. during a draw): an empty text
+/// in its place would make the keyboard's next edit wipe the field.
 fn read_handler(state: &AndroidWindowState) -> Option<(String, Range<usize>, Option<Range<usize>>)> {
-    state.with_input_handler(|h| {
-        let mut actual = None;
-        let text = h.text_for_range(0..usize::MAX / 2, &mut actual).unwrap_or_default();
-        let selection = h.selected_text_range(false).map(|s| s.range).unwrap_or(0..0);
-        (text, selection, h.marked_text_range())
-    })
+    state
+        .with_input_handler(|h| {
+            let mut actual = None;
+            let text = h.text_for_range(0..usize::MAX / 2, &mut actual)?;
+            let selection = h.selected_text_range(false).map(|s| s.range).unwrap_or(0..0);
+            Some((text, selection, h.marked_text_range()))
+        })
+        .flatten()
 }
 
 /// Tells GameTextInput what the focused GPUI input contains now.

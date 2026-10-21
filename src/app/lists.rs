@@ -99,6 +99,10 @@ impl Glyph {
     }
 
     pub(crate) fn push_route(&mut self) {
+        // Something opened from the results: the query was not left unpicked.
+        if self.view == View::Search {
+            self.search.unpicked = None;
+        }
         let r = self.route();
         if self.history.last() != Some(&r) {
             self.history.push(r);

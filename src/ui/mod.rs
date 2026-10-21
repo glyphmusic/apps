@@ -210,7 +210,7 @@ impl Render for Glyph {
                 }
                 View::Home | View::Settings => div().into_any_element(),
                 _ if compact::floating_back(self) => div().into_any_element(),
-                _ => compact::back_bar(self, cx),
+                _ => compact::back_bar(self, window, cx),
             }
         } else {
             chrome::titlebar(self, window, cx).into_any_element()

@@ -140,6 +140,59 @@ fn swipe_step(key: &str, e: &ScrollWheelEvent, claim: impl FnOnce(f32, f32) -> b
     })
 }
 
+/// Pull down to close: claims a downward pan (with `scroll`, only while that
+/// frame is at its top); past the threshold `on_close` runs and the element
+/// stays where the finger left it while it slides away.
+pub(crate) fn pull<'a>(key: &'static str, scroll: Option<gpui::ScrollHandle>, on_close: fn(&mut Glyph, &mut Context<Glyph>), cx: &'a mut Context<Glyph>) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static + use<'a> {
+    cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+        let top = scroll.as_ref().is_none_or(|s| s.offset().y >= px(-1.0));
+        match swipe_step(key, e, |dx, dy| top && dy > 0.0 && !horizontal(dx, dy)) {
+            Step::Pass => {}
+            Step::Take => {
+                cx.stop_propagation();
+                cx.notify();
+            }
+            Step::Release(_, dy) => {
+                cx.stop_propagation();
+                if dy > SWIPE_ACT * 1.5 {
+                    swipe_hold(key);
+                    on_close(this, cx);
+                }
+                cx.notify();
+            }
+        }
+    })
+}
+
+/// Drives the swipe on `key` from a gesture that is not a pan (the long press
+/// that opened a sheet, still held): the finger's travel so far.
+pub(crate) fn swipe_follow(key: &str, d: (f32, f32)) {
+    SWIPES.with(|m| {
+        let mut m = m.borrow_mut();
+        let s = m.entry(key.to_string()).or_default();
+        s.d = d;
+        s.live = true;
+        s.fling = false;
+        s.settle = None;
+    });
+}
+
+/// Ends a [`swipe_follow`]: past the pull-to-close distance the element stays
+/// where the finger left it (`true`: close it now), otherwise it eases back.
+pub(crate) fn swipe_let_go(key: &str) -> bool {
+    SWIPES.with(|m| {
+        let mut m = m.borrow_mut();
+        let Some(s) = m.get_mut(key).filter(|s| s.live) else { return false };
+        s.live = false;
+        if s.d.1 > SWIPE_ACT * 1.5 {
+            s.hold = true;
+            return true;
+        }
+        s.settle = Some((Instant::now(), s.d));
+        false
+    })
+}
+
 /// After an acting release: ease in from `from` instead (the next song's
 /// cover comes in from the other side).
 fn swipe_settle_from(key: &str, from: (f32, f32)) {
@@ -159,7 +212,7 @@ fn swipe_hold(key: &str) {
     });
 }
 
-fn swipe_reset(key: &str) {
+pub(crate) fn swipe_reset(key: &str) {
     SWIPES.with(|m| m.borrow_mut().remove(key));
 }
 
@@ -185,7 +238,7 @@ fn swipe_value(key: &str) -> ((f32, f32), bool) {
 }
 
 /// [`swipe_value`], asking for frames while it eases back.
-fn swipe_offset(key: &str, window: &mut Window) -> (f32, f32) {
+pub(crate) fn swipe_offset(key: &str, window: &mut Window) -> (f32, f32) {
     let (d, easing) = swipe_value(key);
     if easing {
         window.request_animation_frame();
@@ -332,13 +385,78 @@ pub fn back(app: &mut Glyph, cx: &mut Context<Glyph>) {
     }
 }
 
+/// A list's heading once it has scrolled under the back bar.
+struct BarHeading {
+    title: SharedString,
+    /// Songs the bar's play button plays (none: no button).
+    tracks: Vec<glyph_protocol::Track>,
+    /// 0 while the page's own heading is visible, 1 once it is gone.
+    k: f32,
+}
+
+/// Lists scrolled past their heading: the name (with a play button for
+/// songs) moves up into the bar beside the back arrow, so it stays in view.
+fn bar_heading(app: &Glyph, window: &Window) -> Option<BarHeading> {
+    let scrolled = -f32::from(app.main_scroll.offset().y);
+    // Where the page's own heading starts to slide under the bar.
+    let start = match app.view {
+        View::Section | View::Releases | View::Similar => theme::PAGE_TOP,
+        View::List => {
+            // Same cover size and padding as `list_view`.
+            let art = (f32::from(window.viewport_size().width) * 0.62).clamp(140.0, 280.0);
+            8.0 + art + 16.0
+        }
+        _ => return None,
+    };
+    let k = ((scrolled - start) / 36.0).clamp(0.0, 1.0);
+    if k <= 0.0 {
+        return None;
+    }
+    let (title, tracks): (SharedString, _) = match app.view {
+        View::Section => app.section.clone().map(|(title, tracks)| (title.into(), tracks))?,
+        View::List => {
+            let l = app.open_list.clone()?;
+            (app.list_title(&l).into(), app.shown_tracks(&l))
+        }
+        _ => {
+            let name = app.open_artist.clone()?;
+            let what = t(if app.view == View::Releases { "artist.albums" } else { "artist.similar" });
+            (format!("{name} · {what}").into(), Vec::new())
+        }
+    };
+    Some(BarHeading { title, tracks, k })
+}
+
 /// Pinned bar above every sub page (lists, artists, Now Playing, ...): the
 /// back button stays reachable however far the page is scrolled.
-pub fn back_bar(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
+pub fn back_bar(app: &mut Glyph, window: &Window, cx: &mut Context<Glyph>) -> AnyElement {
     let np = app.view == View::NowPlaying;
-    let title: Option<SharedString> = match app.view {
-        View::NowPlaying => Some(t("nav.now_playing")),
-        _ => None,
+    let head = if np { None } else { bar_heading(app, window) };
+    let k = head.as_ref().map_or(1.0, |h| h.k);
+    let (title, play) = match head {
+        _ if np => (Some(t("nav.now_playing")), None),
+        None => (None, None),
+        Some(BarHeading { title, tracks, k }) => {
+            // Same button as the page's: pauses / resumes when one of its songs is on.
+            let play = (!tracks.is_empty()).then(|| {
+                let here = app.current.as_ref().is_some_and(|c| {
+                    let key = crate::app::track_key(c);
+                    tracks.iter().any(|t| crate::app::track_key(t) == key)
+                });
+                let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
+                // Still fading in: not tappable yet.
+                crate::ui::lists::round_play("bar-play", playing, loading, 32.0).when(k > 0.5, |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        if here {
+                            this.toggle_play(cx)
+                        } else {
+                            this.play_list(tracks.clone(), 0, cx)
+                        }
+                    }))
+                })
+            });
+            (Some(title), play)
+        }
     };
     div()
         .flex_none()
@@ -353,14 +471,27 @@ pub fn back_bar(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .when(np, |d| d.flex().justify_center())
-                .text_size(px(if np { 13.0 } else { 16.0 }))
-                .font_weight(if np { FontWeight::MEDIUM } else { FontWeight::BOLD })
-                .text_color(theme::text())
-                .children(title),
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .opacity(k)
+                .children(play)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when(np, |d| d.flex().justify_center())
+                        .text_size(px(if np { 13.0 } else { 16.0 }))
+                        .font_weight(if np { FontWeight::MEDIUM } else { FontWeight::BOLD })
+                        .text_color(theme::text())
+                        .children(title),
+                ),
         )
-        .child(div().flex_none().size(px(40.0)))
+        // Balances the arrow so Now Playing's title sits centred; lists use
+        // the room for their name.
+        .when(np, |d| d.child(div().flex_none().size(px(40.0))))
+        .when(!np, |d| d.pr(px(EDGE)))
         .into_any_element()
 }
 
@@ -1225,6 +1356,7 @@ pub fn search_bar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>)
         .items_center()
         .gap(px(4.0))
         .child(icon_action("search-back", "arrow-left").on_click(cx.listener(|this, _, w, cx| {
+            this.commit_search_query(cx);
             this.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             this.search.query.clear();
             let f = this.focus.clone();
@@ -1251,6 +1383,12 @@ pub fn search_recent(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                     cover(app, track, 52.0, 4.0, cx).into_any_element(),
                     track.title.clone(),
                     format!("{} • {}", t("search.kind.song"), track.artist),
+                ),
+                // Searched without a pick: the text behind a search icon.
+                glyph_core::SearchItem::Query { text } => (
+                    div().size(px(52.0)).rounded(px(4.0)).bg(white(0.08)).flex().items_center().justify_center().child(icon("search", 22.0, white(0.6))).into_any_element(),
+                    text.clone(),
+                    t("search.kind.query").to_string(),
                 ),
                 glyph_core::SearchItem::Artist { name, track } => (
                     match track {
@@ -1281,6 +1419,7 @@ pub fn search_recent(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                 .on_click(cx.listener(move |this, _, w, cx| match &pick {
                     glyph_core::SearchItem::Song { track } => this.play_suggestion(track.clone(), w, cx),
                     glyph_core::SearchItem::Artist { name, track } => this.pick_search_artist(name, track.clone(), w, cx),
+                    glyph_core::SearchItem::Query { text } => this.search_for(text.clone(), cx),
                 }))
                 .child(div().flex_none().child(art))
                 .child(

@@ -358,6 +358,7 @@
 "sp.appearance.ascii_fx.desc" = "Teks en prente dekodeer in soos hulle verskyn, laaiplekhouers glinster as ASCII. Af: dinge verskyn dadelik, plekhouers is gewone blokke."
 "sp.server.url.desc" = "Laat leeg om die openbare Glyph-bediener te gebruik, voer jou eie in, of \"off\" om bronne direk te bevraagteken."
 "search.kind.artist" = "Kunstenaar"
+"search.kind.query" = "Soektog"
 "ctx.save" = "Stoor in biblioteek"
 "ctx.unsave" = "Verwyder uit biblioteek"
 "toast.saved_to_library" = "In jou biblioteek gestoor"

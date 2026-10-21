@@ -360,6 +360,7 @@
 "sp.appearance.ascii_fx.desc" = "Texte und Bilder entschlüsseln sich beim Erscheinen, Ladeplatzhalter flimmern als ASCII. Aus: alles erscheint direkt, Platzhalter sind schlichte Boxen."
 "sp.server.url.desc" = "Leer lassen für den öffentlichen Glyph-Server, deinen eigenen eintragen, oder „off“ für direkte Abfragen."
 "search.kind.artist" = "Künstler"
+"search.kind.query" = "Suche"
 "ctx.save" = "In Bibliothek speichern"
 "ctx.unsave" = "Aus Bibliothek entfernen"
 "toast.saved_to_library" = "In deiner Bibliothek gespeichert"

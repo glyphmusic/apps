@@ -345,6 +345,7 @@
 "sp.appearance.ascii_fx.desc" = "Textos e imagens se decodificam ao aparecer e os marcadores de carregamento brilham em ASCII. Desligado: tudo aparece de uma vez e os marcadores são caixas simples."
 "sp.server.url.desc" = "Deixe vazio para usar o servidor público do Glyph, digite o seu, ou “off” para consultar as fontes diretamente."
 "search.kind.artist" = "Artista"
+"search.kind.query" = "Pesquisa"
 "ctx.save" = "Salvar na biblioteca"
 "ctx.unsave" = "Remover da biblioteca"
 "toast.saved_to_library" = "Salvo na sua biblioteca"

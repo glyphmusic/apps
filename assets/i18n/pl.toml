@@ -345,6 +345,7 @@
 "sp.appearance.ascii_fx.desc" = "Teksty i obrazy dekodują się przy pojawianiu, zaślepki ładowania migoczą w ASCII. Wyłączone: wszystko pojawia się od razu, zaślepki to zwykłe prostokąty."
 "sp.server.url.desc" = "Zostaw puste dla publicznego serwera Glyph, wpisz własny lub „off”, aby pytać źródła bezpośrednio."
 "search.kind.artist" = "Wykonawca"
+"search.kind.query" = "Wyszukiwanie"
 "ctx.save" = "Zapisz w bibliotece"
 "ctx.unsave" = "Usuń z biblioteki"
 "toast.saved_to_library" = "Zapisano w bibliotece"

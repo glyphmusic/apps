@@ -310,6 +310,11 @@ impl AndroidWindowState {
         self.request_frame_callback.with(|cb| {
             cb(RequestFrameOptions { force_render, require_presentation: force_render, ..Default::default() })
         });
+        // An input got focus in this frame: now its text can be read.
+        if std::mem::take(&mut self.ime.borrow_mut().pending) {
+            input::push_ime_state(self);
+            self.app.show_soft_input(true);
+        }
     }
 
     /// Delivers one event; `true` when GPUI handled it.
@@ -605,9 +610,11 @@ impl PlatformWindow for AndroidWindow {
 
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         match change {
+            // Sent from inside the draw, where the input cannot be read yet
+            // (it would push an empty text): see `request_frame`.
             TextInputStateChange::FocusGained => {
-                input::push_ime_state(&self.0);
-                self.0.app.show_soft_input(true);
+                self.0.ime.borrow_mut().pending = true;
+                self.0.frame_wanted.set(true);
             }
             TextInputStateChange::FocusLost => {
                 self.0.ime.borrow_mut().reset();

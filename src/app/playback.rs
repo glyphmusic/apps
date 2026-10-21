@@ -45,6 +45,9 @@ impl Glyph {
     /// `index`. A song picked from the search results is remembered for the
     /// search dropdown; radio, play buttons and the like never land there.
     pub fn play_row(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
+        if self.view == View::Search {
+            self.search.unpicked = None;
+        }
         if self.view == View::Search && self.library_ok {
             if let Some(picked) = tracks.get(index).filter(|t| self.allowed(t)).cloned() {
                 if guard(|| self.library.push_search(picked)).is_some() {

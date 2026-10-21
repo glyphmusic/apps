@@ -93,6 +93,8 @@ impl Taste {
             match item {
                 crate::library::SearchItem::Artist { name, .. } => add(name, 2.5 * fade),
                 crate::library::SearchItem::Song { track } => add(&track.artist, 1.5 * fade),
+                // Free text names no artist.
+                crate::library::SearchItem::Query { .. } => {}
             }
         }
         let hidden: HashSet<String> = lib.hidden_artists.iter().chain(lib.recommendation_feedback.iter().filter(|(_, v)| **v <= -2).map(|(a, _)| a)).flat_map(|h| credited(h)).collect();

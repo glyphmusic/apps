@@ -13,6 +13,9 @@ impl Glyph {
         self.history.clear();
         self.ctx_menu = None;
         self.selected_row = None;
+        if self.view == View::Search && view != View::Search {
+            self.commit_search_query(cx);
+        }
         self.view = view;
         if view == View::Search {
             let f = self.search_input.read(cx).focus.clone();
@@ -97,7 +100,20 @@ impl Glyph {
             self.import_eq_code(&code, cx);
             return;
         }
+        // Another query (not the same one typed on or shortened): the old
+        // one counts as searched.
+        let related = |a: &str, b: &str| {
+            let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+            a.starts_with(&b) || b.starts_with(&a)
+        };
+        if self.search.unpicked.as_deref().is_some_and(|u| q.trim().is_empty() || !related(u, &q)) {
+            self.commit_search_query(cx);
+        }
         self.search.query = q.clone();
+        // Submitted with Enter: counts even before results come in.
+        if immediate && !q.trim().is_empty() {
+            self.search.unpicked = Some(q.trim().to_string());
+        }
         self.selected_row = None;
         let seq = self.search.seq;
         if self.view != View::Search && !q.trim().is_empty() {
@@ -219,6 +235,9 @@ impl Glyph {
                             }
                             SearchEvent::Done => {
                                 s.search.loading = false;
+                                if !s.search.query.trim().is_empty() {
+                                    s.search.unpicked = Some(s.search.query.trim().to_string());
+                                }
                                 // The top hits are the likely clicks: find
                                 // their sources now so they start at once.
                                 if let Some(b) = s.backend.clone() {
@@ -376,8 +395,17 @@ impl Glyph {
         }
     }
 
+    /// The query searched without picking anything goes to recent searches.
+    pub fn commit_search_query(&mut self, cx: &mut Context<Self>) {
+        let Some(q) = self.search.unpicked.take() else { return };
+        if self.library_ok && guard(|| self.library.push_search_query(&q)).is_some() {
+            self.save_library(cx);
+        }
+    }
+
     /// Open an artist picked from search (remembered in recent searches).
     pub fn pick_search_artist(&mut self, name: &str, track: Option<Track>, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.unpicked = None;
         if self.library_ok && guard(|| self.library.push_search_artist(name, track)).is_some() {
             self.save_library(cx);
         }
@@ -388,6 +416,7 @@ impl Glyph {
 
     /// Play a song picked from the search dropdown and close it.
     pub fn play_suggestion(&mut self, track: Track, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.unpicked = None;
         if self.library_ok {
             let picked = track.clone();
             if guard(|| self.library.push_search(picked)).is_some() {

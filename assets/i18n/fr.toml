@@ -345,6 +345,7 @@
 "sp.appearance.ascii_fx.desc" = "Les textes et images se décodent à leur apparition, les emplacements de chargement scintillent en ASCII. Désactivé : tout apparaît d’un coup, les emplacements sont de simples blocs."
 "sp.server.url.desc" = "Laissez vide pour le serveur Glyph public, saisissez le vôtre, ou « off » pour interroger les sources directement."
 "search.kind.artist" = "Artiste"
+"search.kind.query" = "Recherche"
 "ctx.save" = "Enregistrer dans la bibliothèque"
 "ctx.unsave" = "Retirer de la bibliothèque"
 "toast.saved_to_library" = "Enregistré dans votre bibliothèque"

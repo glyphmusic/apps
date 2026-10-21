@@ -189,30 +189,6 @@ pub fn layers(app: &mut Glyph, top: Option<f32>, window: &mut Window, cx: &mut C
 
 // ------------------------------------------------------------------ gestures
 
-/// Pull down to close: claims a downward pan (with `scroll`, only while that
-/// frame is at its top); past the threshold `on_close` runs and the element
-/// stays where the finger left it while it slides away.
-fn pull<'a>(key: &'static str, scroll: Option<gpui::ScrollHandle>, on_close: fn(&mut Glyph, &mut Context<Glyph>), cx: &'a mut Context<Glyph>) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static + use<'a> {
-    cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
-        let top = scroll.as_ref().is_none_or(|s| s.offset().y >= px(-1.0));
-        match swipe_step(key, e, |dx, dy| top && dy > 0.0 && !horizontal(dx, dy)) {
-            Step::Pass => {}
-            Step::Take => {
-                cx.stop_propagation();
-                cx.notify();
-            }
-            Step::Release(_, dy) => {
-                cx.stop_propagation();
-                if dy > SWIPE_ACT * 1.5 {
-                    swipe_hold(key);
-                    on_close(this, cx);
-                }
-                cx.notify();
-            }
-        }
-    })
-}
-
 // ------------------------------------------------------------------ pieces
 
 /// Where music plays: icon, name, and whether that is another device.
@@ -569,6 +545,8 @@ fn sheet(app: &mut Glyph, top: f32, window: &mut Window, cx: &mut Context<Glyph>
 
     let t_like = tr.clone();
     let liked = app.is_liked(&tr);
+    // A tap on the artist opens their page and closes the sheet.
+    let artist = tr.artist.clone();
     let title_row = div()
         .flex()
         .items_center()
@@ -581,7 +559,23 @@ fn sheet(app: &mut Glyph, top: f32, window: &mut Window, cx: &mut Context<Glyph>
                 .flex_col()
                 .gap(px(2.0))
                 .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(21.0)).font_weight(FontWeight::BOLD))
-                .child(div().truncate().text_size(px(15.0)).text_color(theme::text_dim()).child(tr.artist.clone())),
+                .child(
+                    div()
+                        .id("np-artist")
+                        .self_start()
+                        .max_w_full()
+                        .truncate()
+                        .text_size(px(15.0))
+                        .text_color(theme::text_dim())
+                        .cursor_pointer()
+                        .active(|s| s.text_color(theme::text()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_artist(&artist, cx);
+                            // Already on that page: no route change, so close by hand.
+                            close(cx);
+                        }))
+                        .child(tr.artist.clone()),
+                ),
         )
         .child(
             toggle_button("np-like", "heart", 24.0, liked, Some(theme::pink()))
@@ -786,7 +780,7 @@ fn lyrics_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) ->
 // ------------------------------------------------------------------ bottom sheets
 
 /// The queue or Connect from the bottom over a dimmed screen; a tap on the
-/// dim or pulling the handle down closes it.
+/// dim or pulling it down (the handle, or the list from its top) closes it.
 fn bottom_sheet(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> Option<AnyElement> {
     let want = app.show_queue || app.show_devices;
     let (kind, k, running) = NP.with(|n| {
@@ -821,9 +815,15 @@ fn bottom_sheet(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         .on_scroll_wheel(pull("sheet-pull", None, close_sheet, cx))
         .child(div().h(px(24.0)).flex().items_center().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
         .child(head);
+    // The list pulled down from its top closes the sheet as well.
+    let list_scroll = match kind {
+        Sheet::Queue => app.queue_scroll.clone(),
+        Sheet::Devices => app.devices_scroll.clone(),
+    };
     let panel = div()
         .id("np-bottom-sheet")
         .occlude()
+        .on_scroll_wheel(pull("sheet-pull", Some(list_scroll), close_sheet, cx))
         .absolute()
         .left_0()
         .right_0()

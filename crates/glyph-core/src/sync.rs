@@ -150,6 +150,7 @@ fn search_key(i: &SearchItem) -> String {
     match i {
         SearchItem::Song { track } => format!("song:{}", track_id(track)),
         SearchItem::Artist { name, .. } => format!("artist:{}", name.trim().to_lowercase()),
+        SearchItem::Query { text } => format!("query:{}", text.trim().to_lowercase()),
     }
 }
 

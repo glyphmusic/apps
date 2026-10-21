@@ -158,6 +158,20 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                     track.title.clone(),
                     format!("{} • {}", t("search.kind.song"), track.artist),
                 ),
+                // Searched without a pick: the text behind a search icon.
+                glyph_core::SearchItem::Query { text } => (
+                    div()
+                        .size(px(44.0))
+                        .rounded(px(4.0))
+                        .bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("search", 18.0, gpui::hsla(0.0, 0.0, 1.0, 0.6)))
+                        .into_any_element(),
+                    text.clone(),
+                    t("search.kind.query").to_string(),
+                ),
                 glyph_core::SearchItem::Artist { name, track } => (
                     match track {
                         Some(tr) => cover(app, tr, 44.0, 22.0, cx).into_any_element(),
@@ -195,6 +209,7 @@ fn search_dropdown(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<gpui::Any
                     match &pick {
                         glyph_core::SearchItem::Song { track } => this.play_suggestion(track.clone(), w, cx),
                         glyph_core::SearchItem::Artist { name, track } => this.pick_search_artist(name, track.clone(), w, cx),
+                        glyph_core::SearchItem::Query { text } => this.search_for(text.clone(), cx),
                     }
                 }))
                 .child(

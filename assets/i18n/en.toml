@@ -360,6 +360,7 @@
 "sp.appearance.ascii_fx.desc" = "Text and pictures decode in as they appear, loading placeholders shimmer as ASCII. Off: things appear at once, placeholders are plain boxes."
 "sp.server.url.desc" = "Leave empty to use the public Glyph server, enter your own, or \"off\" to query sources directly."
 "search.kind.artist" = "Artist"
+"search.kind.query" = "Search"
 "ctx.save" = "Save to library"
 "ctx.unsave" = "Remove from library"
 "toast.saved_to_library" = "Saved to your library"

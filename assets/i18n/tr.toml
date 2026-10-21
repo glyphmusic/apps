@@ -345,6 +345,7 @@
 "sp.appearance.ascii_fx.desc" = "Metinler ve görseller belirirken çözülür, yükleme yer tutucuları ASCII ile parıldar. Kapalı: her şey hemen görünür, yer tutucular düz kutulardır."
 "sp.server.url.desc" = "Herkese açık Glyph sunucusu için boş bırak, kendi sunucunu gir veya kaynakları doğrudan sorgulamak için “off” yaz."
 "search.kind.artist" = "Sanatçı"
+"search.kind.query" = "Arama"
 "ctx.save" = "Kitaplığa kaydet"
 "ctx.unsave" = "Kitaplıktan çıkar"
 "toast.saved_to_library" = "Kitaplığına kaydedildi"

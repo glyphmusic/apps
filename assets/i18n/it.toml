@@ -345,6 +345,7 @@
 "sp.appearance.ascii_fx.desc" = "Testi e immagini si decodificano mentre appaiono, i segnaposto di caricamento brillano in ASCII. Disattivato: tutto appare subito, i segnaposto sono semplici riquadri."
 "sp.server.url.desc" = "Lascia vuoto per il server Glyph pubblico, inserisci il tuo, o “off” per interrogare le fonti direttamente."
 "search.kind.artist" = "Artista"
+"search.kind.query" = "Ricerca"
 "ctx.save" = "Salva in libreria"
 "ctx.unsave" = "Rimuovi dalla libreria"
 "toast.saved_to_library" = "Salvato nella tua libreria"
