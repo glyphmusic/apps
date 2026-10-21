@@ -1,5 +1,5 @@
 use super::*;
-use glyph_protocol::playback::{Command, Send, State};
+use glyph_protocol::playback::{Command, Live, Send, State};
 
 /// Last report older than this: commands waiting on the server may be older
 /// than the sender waits for them (25 s; asleep, offline, just started). They
@@ -14,6 +14,12 @@ const OUTPUT_GRACE: Duration = Duration::from_secs(20);
 const OUTPUT_OPTIMISTIC: Duration = Duration::from_secs(6);
 /// Polls failing in a row before the device list is given up.
 const POLL_FAILURES: u32 = 3;
+/// With device states arriving over the live line, polls only catch what it
+/// missed (names, devices that only poll).
+const LIVE_POLL: u64 = 30;
+/// A controlled song's position runs on locally at most this long without
+/// news (a little over [`LIVE_POLL`]).
+const POSITION_RUN_ON: Duration = Duration::from_secs(40);
 
 impl Glyph {
     pub(super) fn finish_account_transfer(&mut self, error: Option<String>, cx: &mut Context<Self>) {
@@ -42,8 +48,12 @@ impl Glyph {
             this.update(cx, |s, _| {
                 if s.signed_in() != owner { return; }
                 s.account.output_live_connecting = false;
-                if let Ok(rx) = result {
-                    s.account.output_live = Some(rx);
+                if let Ok(live) = result {
+                    s.account.output_live = Some(live);
+                    s.account.output_live_since = Some(Instant::now());
+                    s.account.output_live_states = false;
+                    // The new line hears this app's state first thing.
+                    s.account.output_reported = None;
                     // Commands sent while the line was down: fetch them now.
                     s.account.output_checked = None;
                 }
@@ -228,23 +238,33 @@ impl Glyph {
         if b.account().is_none() || self.account.signing_out || self.account.merge_pending {
             self.account.outputs.clear();
             self.account.output_target = None;
-            self.account.output_live = None;
+            self.drop_account_live();
             return;
         }
         self.connect_account_live(cx);
-        if let Some(rx) = self.account.output_live.as_mut() {
+        let mut events = Vec::new();
+        if let Some(live) = self.account.output_live.as_mut() {
             let mut closed = false;
-            loop { match rx.try_recv() {
-                Ok(()) => self.account.output_checked = None,
+            loop { match live.events.try_recv() {
+                Ok(event) => events.push(event),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => { closed = true; break; }
             }}
-            if closed { self.account.output_live = None; }
+            if closed { self.drop_account_live(); }
         }
+        for event in events {
+            self.account_live_event(event, cx);
+        }
+        self.report_account_state();
         let controlling = self.account.output_target.is_some();
         // Without the live line nothing wakes this app for a command: ask
         // more often, so a click elsewhere does not take a quarter minute.
-        let interval = if self.show_devices || controlling || self.account.transfer_to.is_some() {
+        // With states coming over it, polls are only a fallback.
+        let interval = if self.account.transfer_to.is_some() {
+            2
+        } else if self.account.output_live.is_some() && self.account.output_live_states {
+            LIVE_POLL
+        } else if self.show_devices || controlling {
             2
         } else if self.is_playing() {
             5
@@ -264,25 +284,7 @@ impl Glyph {
         self.account.output_checked = Some(Instant::now());
         self.account.output_busy = true;
         let owner = b.account();
-        let state = State {
-            acknowledgements: true,
-            track: if controlling {
-                None
-            } else {
-                self.current.clone()
-            },
-            // A song being found counts as playing unless it was paused,
-            // so the controller's play button does not flip back and forth.
-            playing: !controlling && (self.is_playing() || (self.resolving && !self.hold_play)),
-            position_ms: if controlling {
-                0
-            } else {
-                self.position().as_millis() as u64
-            },
-            duration_ms: self.duration().map(|d| d.as_millis() as u64),
-            volume: self.player_state.as_ref().map(|s| s.volume).unwrap_or(0.8),
-            available: !self.jam_active() && !controlling,
-        };
+        let state = self.account_state();
         cx.spawn(async move |this, cx| {
             let result = b.playback_poll(state).await;
             this.update(cx, |s, cx| {
@@ -292,7 +294,10 @@ impl Glyph {
                 }
                 match result {
                     Ok(poll) => {
-                        let stale = s.account.output_received.is_none_or(|at| at.elapsed() > STALE_POLL);
+                        // With the live line up since the last poll, a waiting
+                        // command woke this app at once: it is fresh.
+                        let live_through = s.account.output_live_since.zip(s.account.output_received).is_some_and(|(since, last)| since <= last);
+                        let stale = !live_through && s.account.output_received.is_none_or(|at| at.elapsed() > STALE_POLL);
                         if s.account.output_failures >= POLL_FAILURES {
                             s.account.output_error = None;
                         }
@@ -307,6 +312,7 @@ impl Glyph {
                         }
                         s.account.outputs = devices;
                         s.account.output_received = Some(Instant::now());
+                        s.account.output_state_at = Some(Instant::now());
                         if let Some(id) = s.account.output_target.clone() {
                             let found = s.account.outputs.iter().find(|o| o.device.id == id).map(|o| (o.online, o.state.playing, o.state.track.clone()));
                             match found {
@@ -381,6 +387,96 @@ impl Glyph {
             .ok();
         })
         .detach();
+    }
+
+    /// This app's state as the other devices see it.
+    fn account_state(&self) -> State {
+        let controlling = self.account.output_target.is_some();
+        State {
+            acknowledgements: true,
+            track: if controlling {
+                None
+            } else {
+                self.current.clone()
+            },
+            // A song being found counts as playing unless it was paused,
+            // so the controller's play button does not flip back and forth.
+            playing: !controlling && (self.is_playing() || (self.resolving && !self.hold_play)),
+            position_ms: if controlling {
+                0
+            } else {
+                self.position().as_millis() as u64
+            },
+            duration_ms: self.duration().map(|d| d.as_millis() as u64),
+            volume: self.player_state.as_ref().map(|s| s.volume).unwrap_or(0.8),
+            available: !self.jam_active() && !controlling,
+        }
+    }
+
+    /// Sends this app's state over the live line when it changed (another
+    /// song, play/pause, volume, a jump), so other devices see it at once.
+    fn report_account_state(&mut self) {
+        if self.account.output_live.is_none() || self.account.signing_out {
+            return;
+        }
+        let state = self.account_state();
+        let changed = self.account.output_reported.as_ref().is_none_or(|(old, at)| old.differs(&state, at.elapsed().as_millis() as u64));
+        if !changed {
+            return;
+        }
+        let Some(live) = self.account.output_live.as_ref() else { return };
+        // Full (a report still on its way): the next tick tries again.
+        if live.reports.try_send(state.clone()).is_ok() {
+            self.account.output_reported = Some((state, Instant::now()));
+        }
+    }
+
+    pub(super) fn drop_account_live(&mut self) {
+        self.account.output_live = None;
+        self.account.output_live_since = None;
+        self.account.output_live_states = false;
+        self.account.output_reported = None;
+    }
+
+    /// Something came over the live line.
+    fn account_live_event(&mut self, event: Live, cx: &mut Context<Self>) {
+        match event {
+            Live::State { device, state } => {
+                self.account.output_live_states = true;
+                let Some(output) = self.account.outputs.iter_mut().find(|o| o.device.id == device) else {
+                    // A device not in the list yet: the poll brings its name.
+                    self.account.output_checked = None;
+                    return;
+                };
+                if output.device.current {
+                    return;
+                }
+                output.online = true;
+                output.state = state;
+                if self.account.output_target.as_ref() == Some(&device) {
+                    let (playing, track) = (output.state.playing, output.state.track.clone());
+                    self.account.output_missing_since = None;
+                    self.account.output_state_at = Some(Instant::now());
+                    self.current = track;
+                    if self.account.output_playing.get().is_some_and(|(p, _)| p == playing) {
+                        self.account.output_playing.set(None);
+                    }
+                }
+                cx.notify();
+            }
+            // A command waits, or a device left the line: ask now.
+            Live::Wake | Live::Gone { .. } | Live::Report { .. } => self.account.output_checked = None,
+        }
+    }
+
+    /// Position of the controlled device's song, moved on since it was heard.
+    pub(super) fn account_output_position(&self, output: &glyph_protocol::playback::Output) -> Duration {
+        let elapsed = if output.state.playing {
+            self.account.output_state_at.map(|at| at.elapsed().min(POSITION_RUN_ON)).unwrap_or_default()
+        } else {
+            Duration::ZERO
+        };
+        (Duration::from_millis(output.state.position_ms) + elapsed).min(output.state.duration_ms.map(Duration::from_millis).unwrap_or(Duration::MAX))
     }
 
     fn apply_account_command(&mut self, command: Command, cx: &mut Context<Self>) {

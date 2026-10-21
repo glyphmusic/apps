@@ -79,7 +79,7 @@ pub fn song_row(
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             this.selected_row = Some(i);
-            this.play_list((*l2).clone(), i, cx);
+            this.play_row((*l2).clone(), i, cx);
         }))
         .child(
             div()

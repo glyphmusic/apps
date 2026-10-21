@@ -109,7 +109,7 @@ impl Glyph {
             self.search.lyric_task = None;
             self.search.lyric_hits.clear();
             self.search.loading = false;
-            self.search.results.clear();
+            self.search.clear_results();
             self.search.seen.clear();
             self.search.errors.clear();
             self.search.error = None;
@@ -152,7 +152,7 @@ impl Glyph {
                     if s.search.seq != seq {
                         return Err(None);
                     }
-                    s.search.results.clear();
+                    s.search.clear_results();
                     s.search.seen.clear();
                     s.search.errors.clear();
                     s.search.error = None;
@@ -203,18 +203,14 @@ impl Glyph {
                                     if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) || !ops.matches(&t) {
                                         continue;
                                     }
+                                    // Ranked by text match, odd versions and the user's
+                                    // taste; each song is scored once.
+                                    let sc = glyph_core::taste::score(&t, &plain, &taste);
                                     if s.search.seen.insert((t.source, t.id.clone())) {
-                                        // Ranked insert: text match, odd versions, the user's taste.
-                                        let sc = glyph_core::taste::score(&t, &plain, &taste);
-                                        let at = s
-                                            .search
-                                            .results
-                                            .iter()
-                                            .position(|x| glyph_core::taste::score(x, &plain, &taste) < sc)
-                                            .unwrap_or(s.search.results.len());
-                                        s.search.results.insert(at, t);
-                                    } else if let Some(x) = s.search.results.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
-                                        *x = t;
+                                        s.search.insert_ranked(t, sc);
+                                    } else {
+                                        // Sent again with better data: ranked again.
+                                        s.search.replace_ranked(t, sc);
                                     }
                                 }
                             }
@@ -278,7 +274,7 @@ impl Glyph {
                                 }
                                 // Later pages go below what is already shown.
                                 if s.search.seen.insert((t.source, t.id.clone())) {
-                                    s.search.results.push(t);
+                                    s.search.push_unranked(t);
                                     added += 1;
                                 }
                             }
@@ -428,5 +424,115 @@ impl Glyph {
             .then(|| self.open_artist.clone())
             .flatten()
             .map(|name| (name, Some(track.clone())))
+    }
+}
+
+/// Once results have been on screen this long, the first rows stay where
+/// they are: a better hit arriving late goes below them instead of pushing
+/// away the row that is about to be clicked.
+const SEARCH_SETTLE: Duration = Duration::from_millis(800);
+const SEARCH_PINNED: usize = 3;
+
+impl SearchState {
+    pub(super) fn clear_results(&mut self) {
+        self.results.clear();
+        self.scores.clear();
+        self.shown_at = None;
+    }
+
+    /// Rows that keep their place.
+    fn pinned(&self) -> usize {
+        match self.shown_at {
+            Some(at) if at.elapsed() >= SEARCH_SETTLE => SEARCH_PINNED.min(self.results.len()),
+            _ => 0,
+        }
+    }
+
+    /// Inserts `t` (score `sc`) below everything that scores at least as well.
+    pub(super) fn insert_ranked(&mut self, t: Track, sc: f32) {
+        let at = self.scores.iter().position(|&x| x < sc).unwrap_or(self.scores.len()).max(self.pinned());
+        self.results.insert(at, t);
+        self.scores.insert(at, sc);
+        self.shown_at.get_or_insert_with(Instant::now);
+    }
+
+    /// `t` came again (another provider, better data): it replaces its row
+    /// and moves to where its new score puts it (a pinned row stays).
+    pub(super) fn replace_ranked(&mut self, t: Track, sc: f32) {
+        let Some(i) = self.results.iter().position(|x| x.source == t.source && x.id == t.id) else { return };
+        if i < self.pinned() {
+            self.results[i] = t;
+            self.scores[i] = sc;
+            return;
+        }
+        self.results.remove(i);
+        self.scores.remove(i);
+        self.insert_ranked(t, sc);
+    }
+
+    /// A later page: below everything already shown.
+    pub(super) fn push_unranked(&mut self, t: Track) {
+        self.results.push(t);
+        self.scores.push(f32::NEG_INFINITY);
+    }
+
+    pub(super) fn retain_results(&mut self, keep: impl Fn(&Track) -> bool) {
+        let mut i = 0;
+        while i < self.results.len() {
+            if keep(&self.results[i]) {
+                i += 1;
+            } else {
+                self.results.remove(i);
+                self.scores.remove(i);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tr(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            source: ProviderId::Audius,
+            title: id.into(),
+            artist: "a".into(),
+            album: None,
+            duration_ms: None,
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+            explicit: false,
+        }
+    }
+
+    fn ids(s: &SearchState) -> Vec<&str> {
+        s.results.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn ranked_results_stay_in_step_and_settle() {
+        let mut s = SearchState::default();
+        s.insert_ranked(tr("b"), 2.0);
+        s.insert_ranked(tr("a"), 3.0);
+        s.insert_ranked(tr("c"), 1.0);
+        assert_eq!(ids(&s), ["a", "b", "c"]);
+        // "c" comes again, now the best match.
+        s.replace_ranked(tr("c"), 5.0);
+        assert_eq!(ids(&s), ["c", "a", "b"]);
+        s.retain_results(|t| t.id != "a");
+        assert_eq!(ids(&s), ["c", "b"]);
+        assert_eq!(s.scores, [5.0, 2.0]);
+        // On screen for a while: a late better hit no longer jumps on top.
+        s.shown_at = Some(Instant::now() - SEARCH_SETTLE);
+        s.insert_ranked(tr("d"), 9.0);
+        assert_eq!(ids(&s), ["c", "b", "d"]);
+        s.push_unranked(tr("e"));
+        s.insert_ranked(tr("f"), 0.5);
+        assert_eq!(ids(&s), ["c", "b", "d", "f", "e"]);
+        assert_eq!(s.results.len(), s.scores.len());
     }
 }

@@ -46,15 +46,39 @@ impl Glyph {
         }
     }
 
-    /// Removes the song shown at row `i` (the rows may be sorted).
+    /// Removes the song shown at row `i` (the rows may be sorted); the toast
+    /// offers to put it back.
     pub fn remove_shown(&mut self, l: &ListRef, i: usize, cx: &mut Context<Self>) {
+        let tracks = self.list_tracks(l);
         let i = match self.list_sort(l) {
             ListSort::Custom => Some(i),
-            s => sort_order(&self.list_tracks(l), s).get(i).copied(),
+            s => sort_order(&tracks, s).get(i).copied(),
         };
-        if let Some(i) = i {
-            self.remove_from_list(l, i, cx);
+        let Some((i, track)) = i.and_then(|i| Some((i, tracks.get(i)?.clone()))) else { return };
+        let same = |t: &Track| t.source == track.source && t.id == track.id;
+        let undo = match l {
+            ListRef::Liked | ListRef::ArtistLiked(_) => {
+                self.library.liked.iter().position(same).map(|index| Undo::Liked { index, track: track.clone() })
+            }
+            ListRef::Recent => self.library.recent_song_index(&track).map(|index| Undo::Recent { index, track: track.clone() }),
+            ListRef::User(id) => Some(Undo::PlaylistSong { id: id.clone(), index: i, track: track.clone() }),
+            ListRef::Downloads => Some(Undo::Downloads(vec![track.clone()])),
+            ListRef::Album { .. } => None,
+        };
+        let name = self.list_title(l);
+        self.remove_from_list(l, i, cx);
+        let Some(undo) = undo else { return };
+        if self.list_tracks(l).iter().any(same) {
+            return;
         }
+        // Downloads: the same text as the toast the removal already showed,
+        // so that one gets the button instead of a second toast.
+        let msg = match l {
+            ListRef::Downloads => t("toast.dl_removed_one").to_string(),
+            _ => format!("{} · {}", tf("toast.removed_from", &[("name", &name)]), track.title),
+        };
+        self.toast_undo(msg, undo);
+        cx.notify();
     }
 
     // ------------------------------------------------------------ lists & artists

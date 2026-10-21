@@ -34,7 +34,16 @@ pub enum Login {
 
 #[derive(Default)]
 pub struct AccountUi {
-    pub output_live: Option<tokio::sync::mpsc::Receiver<()>>,
+    pub output_live: Option<glyph_core::server_client::PlaybackLive>,
+    /// Since when the live line is up (commands are fetched the moment they wait).
+    pub output_live_since: Option<Instant>,
+    /// The server passes device states on over the line (it sent one): polls
+    /// are only a fallback then.
+    pub output_live_states: bool,
+    /// Last own state sent over the line, and when.
+    pub output_reported: Option<(glyph_protocol::playback::State, Instant)>,
+    /// When the controlled device's state was last heard (its position runs on from there).
+    pub output_state_at: Option<Instant>,
     pub output_live_connecting: bool,
     pub output_live_checked: Option<Instant>,
     pub output_seen: std::collections::BTreeMap<String, Option<String>>,

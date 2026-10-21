@@ -84,9 +84,42 @@ impl Glyph {
         }
     }
 
+    /// The "Undo" button of toast `id`: puts back what it removed.
+    pub fn run_undo(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id && t.gone.is_none()) else { return };
+        let Some(undo) = toast.undo.take() else { return };
+        toast.gone = Some(Instant::now());
+        if let Undo::Downloads(tracks) = undo {
+            self.download_tracks(tracks, cx);
+            return;
+        }
+        if !self.library_ok {
+            self.toast_info(t("status.library_offline"));
+            cx.notify();
+            return;
+        }
+        match undo {
+            Undo::Liked { index, track } => self.library.insert_liked(index, track),
+            Undo::Recent { index, track } => self.library.insert_recent_song(index, track),
+            Undo::PlaylistSong { id, index, track } => {
+                self.library.insert_into_playlist(&id, index, track);
+            }
+            Undo::Playlist(id) => {
+                self.library.restore_playlist(&id);
+            }
+            Undo::Downloads(_) => {}
+        }
+        self.save_library(cx);
+        cx.notify();
+    }
+
     pub fn delete_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
+        let name = self.library.playlist(id).map(|p| p.name.clone());
         if guard(|| self.library.delete_playlist(id)).is_some() {
             self.save_library(cx);
+            if let Some(name) = name {
+                self.toast_undo(format!("{} · {name}", t("toast.playlist_deleted")), Undo::Playlist(id.to_string()));
+            }
         }
         if self.open_list == Some(ListRef::User(id.to_string())) {
             self.history.retain(|r| r.list != Some(ListRef::User(id.to_string())));

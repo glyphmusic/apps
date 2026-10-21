@@ -191,7 +191,7 @@ impl Glyph {
         self.account.merge_pending = false;
         self.account.syncing = false;
         self.account.outputs.clear();
-        self.account.output_live = None;
+        self.drop_account_live();
         self.account.output_live_connecting = false;
         self.account.output_live_checked = None;
         self.account.output_seen.clear();

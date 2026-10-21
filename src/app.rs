@@ -290,7 +290,13 @@ pub enum BackendState {
 pub struct SearchState {
     pub query: String,
     pub seq: u64,
+    /// Best first; change only through the `*_ranked` / `*_results`
+    /// methods, which keep `scores` in step.
     pub results: Vec<Track>,
+    /// Ranking score of each entry of `results` (same order).
+    scores: Vec<f32>,
+    /// When the first result of this query came in.
+    shown_at: Option<Instant>,
     pub seen: HashSet<(ProviderId, String)>,
     pub errors: Vec<(ProviderId, String)>,
     pub loading: bool,
@@ -506,8 +512,13 @@ pub struct Glyph {
     /// Play/pause pressed while the new song was still being found: it is
     /// loaded paused instead of starting (the old song never resumes).
     pub hold_play: bool,
+    /// Songs skipped in a row because they could not play; the skipping
+    /// stops after a few (see [`App::skip_unplayable`]).
+    pub skip_streak: u32,
     /// Running sleep timer.
     pub sleep: Option<Sleep>,
+    /// Volume before the sleep timer started fading the song out.
+    pub sleep_fade_from: Option<f32>,
     /// Next song handed to the player for a gapless start:
     /// (queue `track_key`, resolved track the player knows it as).
     preloaded: Option<(String, Track)>,
@@ -792,6 +803,33 @@ pub struct Toast {
     pub depth_target: f32,
     /// Swiped away: dismiss animation since.
     pub gone: Option<Instant>,
+    /// What its "Undo" button puts back (the toast then stays longer).
+    pub undo: Option<Undo>,
+}
+
+impl Toast {
+    /// How long it stays on screen.
+    pub fn life(&self) -> Duration {
+        if self.undo.is_some() { TOAST_UNDO_FOR } else { TOAST_FOR }
+    }
+}
+
+/// Toasts with an "Undo" button stay this long.
+pub const TOAST_UNDO_FOR: Duration = Duration::from_millis(6000);
+
+/// A removal that a toast's "Undo" button reverses.
+#[derive(Debug, Clone)]
+pub enum Undo {
+    /// Unliked: back into Liked Songs at its place.
+    Liked { index: usize, track: Track },
+    /// Taken out of "recently played".
+    Recent { index: usize, track: Track },
+    /// Taken out of an own playlist.
+    PlaylistSong { id: String, index: usize, track: Track },
+    /// Downloads deleted: fetched again.
+    Downloads(Vec<Track>),
+    /// A deleted playlist, back from the bin.
+    Playlist(String),
 }
 
 pub fn eq_gains(v: &[f32]) -> [f32; 10] {

@@ -52,6 +52,14 @@ pub enum Compat {
     Incompatible(HealthResponse),
 }
 
+/// The open `/v1/devices/playback/live` line: what the server pushes, and
+/// this app's own state reports going up. `events` ends (after a last
+/// `Wake`) when the line closes; dropping either half closes it.
+pub struct PlaybackLive {
+    pub events: tokio::sync::mpsc::Receiver<glyph_protocol::playback::Live>,
+    pub reports: tokio::sync::mpsc::Sender<glyph_protocol::playback::State>,
+}
+
 #[derive(Clone)]
 pub struct ServerClient {
     base: String,
@@ -624,7 +632,7 @@ impl ServerClient {
         Ok(rx)
     }
 
-    pub async fn playback_live(&self, token: &str) -> Result<tokio::sync::mpsc::Receiver<()>> {
+    pub async fn playback_live(&self, token: &str) -> Result<PlaybackLive> {
         use futures::SinkExt;
         use glyph_protocol::jam::{LIVE_PING, LIVE_PING_MS};
         use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
@@ -659,7 +667,9 @@ impl ServerClient {
             }
             Ok(Err(e)) => return Err(anyhow!("playback live: {e}")),
         };
+        use glyph_protocol::playback::Live;
         let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let (report_tx, mut reports) = tokio::sync::mpsc::channel::<glyph_protocol::playback::State>(4);
         tokio::spawn(async move {
             let (mut sink, mut stream) = ws.split();
             let every = Duration::from_millis(LIVE_PING_MS);
@@ -671,6 +681,16 @@ impl ServerClient {
                     _ = tx.closed() => {
                         let _ = sink.send(Message::Close(None)).await;
                         return;
+                    }
+                    report = reports.recv() => {
+                        let Some(state) = report else {
+                            let _ = sink.send(Message::Close(None)).await;
+                            return;
+                        };
+                        let text = serde_json::to_string(&Live::Report { state }).unwrap_or_default();
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break None;
+                        }
                     }
                     _ = ping.tick() => {
                         // No answer to the last keepalives: the line is dead.
@@ -685,8 +705,9 @@ impl ServerClient {
                         heard = tokio::time::Instant::now();
                         match m {
                             Some(Ok(Message::Text(t))) => {
-                                if t.as_str() == r#"{"t":"wake"}"# {
-                                    if tx.send(()).await.is_err() {
+                                // Older servers only send `wake`; unknown messages are skipped.
+                                if let Ok(live) = serde_json::from_str::<Live>(t.as_str()) {
+                                    if tx.send(live).await.is_err() {
                                         return;
                                     }
                                 }
@@ -698,9 +719,10 @@ impl ServerClient {
                     }
                 }
             };
-            let _ = tx.send(()).await;
+            // Whatever waited while the line was down: ask once more.
+            let _ = tx.send(Live::Wake).await;
         });
-        Ok(rx)
+        Ok(PlaybackLive { events: rx, reports: report_tx })
     }
 
     /// `POST /v1/jam/{code}/state`: publishes the host's state.

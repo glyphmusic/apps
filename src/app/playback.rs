@@ -11,6 +11,7 @@ impl Glyph {
             return;
         }
         let Some(track) = tracks.get(index).cloned() else { return };
+        self.skip_streak = 0;
         if self.jam_request(&track, true) {
             return;
         }
@@ -19,13 +20,6 @@ impl Glyph {
         }
         let index = tracks[..index].iter().filter(|t| self.allowed(t)).count();
         let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
-        // Picked from search results: remember it for the search dropdown.
-        if self.library_ok && self.view == View::Search {
-            let picked = track.clone();
-            if guard(|| self.library.push_search(picked)).is_some() {
-                self.save_library(cx);
-            }
-        }
         let recent = self.recent_keys();
         if guard(|| {
             self.queue.set_recent(recent);
@@ -47,6 +41,20 @@ impl Glyph {
         self.play_track(track, cx);
     }
 
+    /// A song row was clicked (or Enter pressed on it): plays `tracks` from
+    /// `index`. A song picked from the search results is remembered for the
+    /// search dropdown; radio, play buttons and the like never land there.
+    pub fn play_row(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
+        if self.view == View::Search && self.library_ok {
+            if let Some(picked) = tracks.get(index).filter(|t| self.allowed(t)).cloned() {
+                if guard(|| self.library.push_search(picked)).is_some() {
+                    self.save_library(cx);
+                }
+            }
+        }
+        self.play_list(tracks, index, cx);
+    }
+
     pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
         if self.account_control(glyph_protocol::playback::Command::Transfer { tracks: vec![track.clone()], index: 0, position_ms: 0, playing: true }) { return; }
         if self.jam_request(&track, true) {
@@ -55,6 +63,7 @@ impl Glyph {
         if self.blocked_explicit(&track, cx) {
             return;
         }
+        self.skip_streak = 0;
         self.start_track(track, None, cx);
     }
 
@@ -62,6 +71,10 @@ impl Glyph {
     /// given resolved track), so only the UI follows; nothing is reloaded.
     pub(super) fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
         self.account.transfer_resume = None;
+        // The sleep timer faded the last song out and paused: back to normal.
+        if self.sleep.is_none() {
+            self.end_sleep_fade();
+        }
         let key = track_key(&track);
         self.preload_attempt = None;
         self.current = Some(track.clone());
@@ -164,11 +177,21 @@ impl Glyph {
                         }
                         Ok(None) => {
                             s.finish_account_transfer(Some("No playable source on target device".into()), cx);
-                            s.account.transfer_resume = None;
-                            s.toast_info(crate::i18n::t("toast.no_source"));
+                            let transfer = s.account.transfer_resume.take().is_some();
                             s.jam_no_source(&k);
+                            if transfer || !s.skip_unplayable(cx) {
+                                s.toast_info(crate::i18n::t("toast.no_source"));
+                            }
                         }
-                        Err(e) => { s.finish_account_transfer(Some(e.to_string()), cx); s.toast_info(tf("toast.resolve_error", &[("e", &e)])); }
+                        Err(e) => {
+                            s.finish_account_transfer(Some(e.to_string()), cx);
+                            let transfer = s.account.transfer_resume.take().is_some();
+                            if transfer || !s.skip_unplayable(cx) {
+                                s.toast_info(tf("toast.resolve_error", &[("e", &e)]));
+                            } else {
+                                tracing::warn!(error = %e, "playback: resolve failed, skipped");
+                            }
+                        }
                     }
                     cx.notify();
                 })
@@ -228,6 +251,35 @@ impl Glyph {
         .detach();
     }
 
+    /// The current song cannot play (no source, or the player refused it):
+    /// go on with the next one instead of stopping. Not where someone else
+    /// decides what plays (jam guest, another device), and not after
+    /// [`MAX_SKIPS`] failures in a row. `true` if the next song was started.
+    pub(super) fn skip_unplayable(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.account.output_target.is_some() || self.jam_guest() || self.skip_streak >= MAX_SKIPS {
+            return false;
+        }
+        let Some(failed) = self.current.clone() else { return false };
+        let Some(Some(next)) = guard(|| self.queue.skip_next().cloned()) else { return false };
+        // Repeat one, or a list of just this song: nothing else to go to.
+        if track_key(&next) == track_key(&failed) {
+            return false;
+        }
+        self.skip_streak += 1;
+        self.toast_info(format!("{} · {}", t("toast.skipped"), failed.title));
+        // Paused while it was being found: the next song waits paused too.
+        let hold = self.hold_play;
+        self.start_track(next, None, cx);
+        self.hold_play = hold;
+        cx.notify();
+        true
+    }
+
+    /// The local player holds no song right now (it refused to start one).
+    pub(super) fn player_idle(&self) -> bool {
+        self.player.as_ref().and_then(|p| guard(|| p.state().status)) == Some(Status::Idle)
+    }
+
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         if self.account_control(if self.is_playing() { glyph_protocol::playback::Command::Pause } else { glyph_protocol::playback::Command::Play }) { return; }
         use glyph_protocol::jam::Control;
@@ -247,6 +299,9 @@ impl Glyph {
             self.hold_play = !self.hold_play;
             cx.notify();
             return;
+        }
+        if self.sleep.is_none() && !self.is_playing() {
+            self.end_sleep_fade();
         }
         if !self.remote_send(crate::mpd::Cmd::Pause(self.is_playing())) {
             self.with_player(|p| p.toggle());
@@ -277,6 +332,11 @@ impl Glyph {
         if self.account_control(glyph_protocol::playback::Command::Volume { volume: v }) { return; }
         if v > 0.001 {
             self.unmute_volume = v;
+        }
+        if self.sleep_fade_from.is_some() {
+            // Set by hand: while the timer fades, the new level to fade
+            // from; once it is over, simply the volume.
+            self.sleep_fade_from = self.sleep.is_some().then_some(v);
         }
         if self.remote_send(crate::mpd::Cmd::Volume((v * 100.0).round() as u8)) {
             return;
@@ -498,6 +558,10 @@ impl Glyph {
         if self.remote_chosen() {
             return;
         }
+        // Sleep timer "end of this song": the next one must not start on its own.
+        if self.sleep == Some(Sleep::EndOfSong) {
+            return;
+        }
         let Some(Some(next)) = guard(|| self.queue.peek_next().cloned()) else { return };
         let Some(b) = self.backend.clone() else { return };
         let cur = self.current.as_ref().map(track_key);
@@ -560,11 +624,16 @@ impl Glyph {
         .detach();
     }
 
-    /// Queue finished: continue with similar tracks (Last.fm getSimilar).
+    /// Queue finished: continue with songs similar to the last few that
+    /// played (Last.fm getSimilar). They join the end of the queue, so
+    /// "previous" still goes back into the list, and nothing from the list
+    /// comes back.
     pub(super) fn start_radio(&mut self, cx: &mut Context<Self>) {
-        let Some(seed) = self.current.clone() else { return };
-        let title = seed.title.clone();
-        self.start_radio_from(vec![seed], title, cx);
+        let Some(current) = self.current.clone() else { return };
+        let played: Vec<Track> = guard(|| self.queue.history().into_iter().cloned().collect()).unwrap_or_default();
+        let exclude: HashSet<String> = played.iter().map(glyph_core::dedupe::track_key).collect();
+        let seeds: Vec<Track> = std::iter::once(current.clone()).chain(played.into_iter().rev().take(4)).collect();
+        self.radio_from_seeds(seeds, exclude, current.title, true, cx);
     }
 
     /// Radio from a playlist / album: songs similar to the list as a whole.
@@ -596,6 +665,12 @@ impl Glyph {
     /// songs suggested for several seeds come first, the seeds themselves
     /// are left out and one artist never plays twice in a row.
     pub fn start_radio_from(&mut self, seeds: Vec<Track>, title: String, cx: &mut Context<Self>) {
+        self.radio_from_seeds(seeds, HashSet::new(), title, false, cx);
+    }
+
+    /// [`Self::start_radio_from`], also leaving out `exclude` (song keys).
+    /// `append`: the songs go on after the ended queue instead of replacing it.
+    fn radio_from_seeds(&mut self, seeds: Vec<Track>, exclude: HashSet<String>, title: String, append: bool, cx: &mut Context<Self>) {
         const SEEDS: usize = 5;
         let Some(b) = self.backend.clone() else { return };
         if seeds.is_empty() {
@@ -604,13 +679,17 @@ impl Glyph {
         }
         let step = (seeds.len() as f32 / SEEDS as f32).max(1.0);
         let picked: Vec<Track> = (0..SEEDS.min(seeds.len())).map(|i| seeds[(i as f32 * step) as usize].clone()).collect();
-        let skip: HashSet<String> = seeds.iter().map(glyph_core::dedupe::track_key).collect();
+        let mut skip = exclude;
+        skip.extend(seeds.iter().map(glyph_core::dedupe::track_key));
+        let ended_on = self.current.as_ref().map(track_key);
         self.toast(tf("toast.radio", &[("title", &title)]));
         cx.spawn(async move |this, cx| {
             let mut found: Vec<(Track, f32)> = Vec::new();
             let mut error = None;
-            for seed in &picked {
-                match guard_async(b.similar(seed)).await {
+            // All seeds at once: one wait instead of one per seed.
+            let answers = futures::future::join_all(picked.iter().map(|seed| guard_async(b.similar(seed)))).await;
+            for answer in answers {
+                match answer {
                     Ok(sim) => {
                         for (i, t) in sim.into_iter().take(40).enumerate() {
                             let key = glyph_core::dedupe::track_key(&t);
@@ -632,11 +711,19 @@ impl Glyph {
                 found.sort_by(|a, b| b.1.total_cmp(&a.1));
                 let tracks = spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect());
                 match (tracks.is_empty(), error) {
+                    (false, _) if append => {
+                        // Something else started meanwhile: that wins.
+                        let still_ended = s.current.as_ref().map(track_key) == ended_on && guard(|| s.queue.peek_next().is_none()) == Some(true);
+                        if still_ended {
+                            s.radio_continue(tracks, tf("queue.radio_from", &[("title", &title)]).to_string(), cx);
+                        }
+                    }
                     (false, _) => {
                         let label = tf("queue.radio_from", &[("title", &title)]).to_string();
                         s.play_list(tracks, 0, cx);
                         s.queue_from = Some(label);
                         s.recent_artist_ctx = None;
+                        s.playing_from = None;
                     }
                     (true, Some(e)) => s.toast_info(tf("toast.radio_error", &[("e", &e)])),
                     (true, None) => s.toast_info(t("toast.radio_empty")),
@@ -645,6 +732,20 @@ impl Glyph {
             .ok();
         })
         .detach();
+    }
+
+    /// Radio songs join the end of the ended queue and the first one starts.
+    fn radio_continue(&mut self, tracks: Vec<Track>, label: String, cx: &mut Context<Self>) {
+        let first = guard(|| {
+            self.queue.append(tracks);
+            self.queue.skip_next().cloned()
+        });
+        let Some(Some(first)) = first else { return };
+        self.queue_from = Some(label);
+        self.recent_artist_ctx = None;
+        self.playing_from = None;
+        self.start_track(first, None, cx);
+        cx.notify();
     }
 
     pub fn shuffle_mode(&self) -> glyph_core::queue::ShuffleMode {
@@ -802,6 +903,15 @@ impl Glyph {
         self.queue_changed();
         cx.notify();
     }
+}
+
+/// Unplayable songs skipped in a row before Glyph stops and says so.
+pub(super) const MAX_SKIPS: u32 = 5;
+
+/// A problem of the audio output itself: every song would fail the same
+/// way, so skipping to the next one does not help.
+pub(super) fn output_error(e: &str) -> bool {
+    ["no audio output device", "audio output not available", "The selected audio output"].iter().any(|p| e.starts_with(p))
 }
 
 /// Same order, but a song whose artist just played moves back behind the

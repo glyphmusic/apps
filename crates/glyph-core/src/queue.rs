@@ -49,6 +49,9 @@ pub struct Queue {
     manual_current: Option<Track>,
     /// Song keys played lately (smart shuffle puts them last).
     recent: Vec<String>,
+    /// Repeat all with shuffle: the order of the next round, dealt while
+    /// the last song of this one plays (see `prepare_round`).
+    next_round: Option<Vec<usize>>,
 }
 
 impl Queue {
@@ -75,6 +78,7 @@ impl Queue {
         } else {
             self.pos = Some(index);
         }
+        self.prepare_round();
     }
 
     /// Replace the context with `tracks`, shuffle on, every song dealt
@@ -171,6 +175,14 @@ impl Queue {
         at
     }
 
+    /// Adds songs to the end of the context, after everything still to come
+    /// (radio going on after a list ended). History stays as it is.
+    pub fn append(&mut self, tracks: Vec<Track>) {
+        let start = self.base.len();
+        self.base.extend(tracks);
+        self.order.extend(start..self.base.len());
+    }
+
     /// Plays right after the current song (first of "Up next").
     pub fn play_next(&mut self, track: Track) {
         self.manual.insert(0, track);
@@ -257,9 +269,47 @@ impl Queue {
             return self.manual_current.as_ref();
         }
         let p = self.next_ctx_pos()?;
+        if self.upcoming_start() >= self.order.len() {
+            // Repeat all wraps: the next round's order, when one was dealt.
+            if let Some(round) = self.next_round.take().filter(|r| r.len() == self.order.len()) {
+                self.order = round;
+            }
+        }
         self.manual_current = None;
         self.pos = Some(p);
+        self.prepare_round();
         self.current()
+    }
+
+    /// Repeat all with shuffle, on the last song of a round: deals the next
+    /// round now (a new order, not opened by the song that ends this one),
+    /// so [`Queue::peek_next`] already knows its first song.
+    fn prepare_round(&mut self) {
+        let last_song = self.pos.is_some_and(|p| p + 1 >= self.order.len());
+        if !(self.shuffle && self.repeat == RepeatMode::All && last_song && self.order.len() > 1) {
+            self.next_round = None;
+            return;
+        }
+        if self.next_round.as_ref().is_some_and(|r| r.len() == self.order.len()) {
+            return;
+        }
+        let ending = self.pos.map(|p| self.order[p]);
+        let mut round = self.shuffled((0..self.base.len()).collect());
+        if round.first().copied() == ending {
+            round.rotate_left(1);
+        }
+        self.next_round = Some(round);
+    }
+
+    /// Context index of the song after the current one in play order (the
+    /// next round's first when repeat all wraps).
+    fn next_ctx_index(&self) -> Option<usize> {
+        let p = self.next_ctx_pos()?;
+        let wraps = self.upcoming_start() >= self.order.len();
+        Some(match &self.next_round {
+            Some(r) if wraps && r.len() == self.order.len() => r[0],
+            _ => self.order[p],
+        })
     }
 
     /// Advance (auto-next or user). Honors repeat; `None` = queue finished
@@ -296,6 +346,7 @@ impl Queue {
         } else if self.repeat == RepeatMode::All && self.order.len() > 1 {
             self.pos = Some(self.order.len() - 1);
         }
+        self.prepare_round();
         self.current()
     }
 
@@ -306,7 +357,7 @@ impl Queue {
         if let Some(t) = self.manual.first() {
             return Some(t);
         }
-        self.next_ctx_pos().map(|p| &self.base[self.order[p]])
+        self.next_ctx_index().map(|i| &self.base[i])
     }
 
     /// Jump to an entry of `upcoming()`; it becomes the current track. A
@@ -325,6 +376,7 @@ impl Queue {
         }
         self.manual_current = None;
         self.pos = Some(at);
+        self.prepare_round();
         self.current()
     }
 
@@ -397,6 +449,7 @@ impl Queue {
                 }
             }
         }
+        self.prepare_round();
     }
 
     pub fn repeat(&self) -> RepeatMode {
@@ -405,6 +458,7 @@ impl Queue {
 
     pub fn set_repeat(&mut self, mode: RepeatMode) {
         self.repeat = mode;
+        self.prepare_round();
     }
 }
 
@@ -529,6 +583,54 @@ mod tests {
         assert_eq!(q.next().unwrap().id, "y");
         assert_eq!(q.next().unwrap().id, "b");
         assert!(!q.current_is_manual());
+    }
+
+    #[test]
+    fn repeat_all_reshuffles_every_round() {
+        let all: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut q = q(&all, 0);
+        q.set_shuffle_mode(ShuffleMode::Random);
+        q.set_shuffle(true);
+        q.set_repeat(RepeatMode::All);
+        let mut rounds: Vec<Vec<String>> = Vec::new();
+        for _ in 0..6 {
+            let mut round = vec![q.current().unwrap().id.clone()];
+            for _ in 1..all.len() {
+                round.push(q.next().unwrap().id.clone());
+            }
+            let last = round.last().cloned();
+            let mut sorted = round.clone();
+            sorted.sort();
+            assert_eq!(sorted, all, "every song once per round");
+            // Wraps into the next round, never with the song that just ended,
+            // and with the song announced as next (gapless preload).
+            let announced = q.peek_next().unwrap().id.clone();
+            let first = q.next().unwrap().id.clone();
+            assert_eq!(first, announced);
+            assert_ne!(first, last.unwrap());
+            rounds.push(round);
+        }
+        // Rounds 2.. start at the wrap; with 8! orders they are not all equal.
+        assert!(rounds[1..].windows(2).any(|w| w[0] != w[1]));
+    }
+
+    #[test]
+    fn appended_songs_follow_the_ended_list() {
+        let mut q = q(&["a", "b"], 0);
+        assert_eq!(q.next().unwrap().id, "b");
+        assert!(q.peek_next().is_none());
+        q.append(vec![tr("r1"), tr("r2")]);
+        assert_eq!(q.skip_next().unwrap().id, "r1");
+        assert_eq!(names(q.history()), ["a", "b"]);
+        assert_eq!(names(q.upcoming()), ["r2"]);
+        assert_eq!(q.previous().unwrap().id, "b");
+        // After songs queued by hand, with nothing of the context playing.
+        let mut m = Queue::new();
+        m.push(tr("x"));
+        assert_eq!(m.next().unwrap().id, "x");
+        assert!(m.peek_next().is_none());
+        m.append(vec![tr("r")]);
+        assert_eq!(m.skip_next().unwrap().id, "r");
     }
 
     #[test]

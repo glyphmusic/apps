@@ -167,7 +167,7 @@ impl Glyph {
             self.save_library(cx);
             if hidden {
                 let n = name.to_string();
-                self.search.results.retain(|t| !by_artist(&n, &t.artist));
+                self.search.retain_results(|t| !by_artist(&n, &t.artist));
                 self.toast(tf("toast.artist_hidden", &[("name", &name)]));
             } else {
                 self.toast(tf("toast.artist_shown", &[("name", &name)]));

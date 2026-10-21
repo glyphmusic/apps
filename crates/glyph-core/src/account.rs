@@ -435,7 +435,7 @@ where
 }
 
 impl Backend {
-    pub async fn playback_live(&self) -> Result<tokio::sync::mpsc::Receiver<()>> {
+    pub async fn playback_live(&self) -> Result<crate::server_client::PlaybackLive> {
         let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let c = self.account_client()?;
         self.spawn(async move { with_auth(&c, |token| {

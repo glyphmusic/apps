@@ -2,7 +2,7 @@
 //! older ones peeking out below it, a little narrower and dimmer. Hovering
 //! the stack fans it out into a list; a toast can be swiped up to dismiss.
 
-use crate::app::{Glyph, Toast, ToastIcon, TOAST_FOR};
+use crate::app::{Glyph, Toast, ToastIcon};
 use crate::theme;
 use crate::ui::widgets::icon;
 use gpui::prelude::*;
@@ -41,6 +41,8 @@ const DECK: usize = 3;
 pub const GONE_S: f32 = 0.18;
 /// Swipe this far up to dismiss.
 const SWIPE: f32 = 22.0;
+/// Side padding of the "Undo" button.
+const UNDO_PAD: f32 = 10.0;
 
 fn white(a: f32) -> gpui::Hsla {
     gpui::hsla(0.0, 0.0, 1.0, a)
@@ -110,7 +112,7 @@ pub fn animating(app: &Glyph) -> bool {
                 || t.drag != 0.0
                 || t.gone.is_some()
                 || e < Duration::from_millis(250)
-                || e > TOAST_FOR - Duration::from_millis(400)
+                || e > t.life() - Duration::from_millis(400)
         })
 }
 
@@ -152,9 +154,9 @@ fn edge(left: bool) -> gpui::Div {
         ))
 }
 
-fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Glyph>) -> AnyElement {
+fn pill(t: &Toast, text_width: f32, undo_w: f32, marquee_t: Option<f32>, cx: &mut Context<Glyph>) -> AnyElement {
     let e = t.at.elapsed().as_secs_f32();
-    let left = TOAST_FOR.as_secs_f32() - e;
+    let left = t.life().as_secs_f32() - e;
     let fade_in = (e / 0.2).min(1.0);
     let fade_out = (left / 0.35).clamp(0.0, 1.0);
     let gone = t.gone.map(|g| (g.elapsed().as_secs_f32() / GONE_S).min(1.0)).unwrap_or(0.0);
@@ -248,7 +250,7 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
                 .opacity(content_a)
                 .child(div().flex_none().child(icon(icon_name, 15.0, icon_color)))
                 .child({
-                    let avail = w - 32.0 - 15.0 - 10.0;
+                    let avail = w - 32.0 - 15.0 - 10.0 - if t.undo.is_some() { undo_w + 10.0 } else { 0.0 };
                     let overflow = text_width > avail + 0.5;
                     let row = |key: &'static str| {
                         div()
@@ -291,6 +293,31 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
                         )
                         .when(moving, |d| d.child(edge(true)))
                         .when(overflow, |d| d.child(edge(false)))
+                })
+                .when(t.undo.is_some(), |d| {
+                    d.child(
+                        div()
+                            .id(("toast-undo", id as usize))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .h(px(26.0))
+                            .px(px(UNDO_PAD))
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(white(0.9))
+                            .hover(|s| s.bg(white(0.08)))
+                            .active(|s| s.bg(white(0.12)))
+                            // Not a grab of the toast: the button takes the press.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.run_undo(id, cx);
+                            }))
+                            .child(crate::i18n::t("toast.undo")),
+                    )
                 }),
         );
     body.into_any_element()
@@ -326,6 +353,11 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
     // Oldest drawn first so the newer ones lie on top.
     let marquee_t = app.toast_hover.then(|| app.toast_hover_at.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0));
     let toasts: Vec<Toast> = app.toasts.iter().rev().cloned().collect();
+    let undo_w = if toasts.iter().any(|t| t.undo.is_some()) {
+        text_w(window, &crate::i18n::t("toast.undo"), 13.0, FontWeight::SEMIBOLD) + UNDO_PAD * 2.0
+    } else {
+        0.0
+    };
     let pills: Vec<AnyElement> = toasts
         .iter()
         .map(|t| {
@@ -333,7 +365,7 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
             if let Some(sub) = &t.sub {
                 tw += 10.0 + text_w(window, "·", 13.0, FontWeight::NORMAL) + 10.0 + text_w(window, &sub.to_uppercase(), 13.0, FontWeight::MEDIUM);
             }
-            pill(t, tw, marquee_t, cx)
+            pill(t, tw, undo_w, marquee_t, cx)
         })
         .collect();
     let stack = div()

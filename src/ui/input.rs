@@ -10,6 +10,7 @@ use gpui::{
     UTF16Selection, UnderlineStyle, Window,
 };
 use gpui::{EventEmitter, KeyDownEvent};
+use std::time::{Duration, Instant};
 use unicode_segmentation::*;
 
 actions!(
@@ -24,6 +25,16 @@ actions!(
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
+        DeleteWordRight,
+        UndoEdit,
+        RedoEdit,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -46,7 +57,26 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     scroll_x: Pixels,
+    /// Earlier (value, selection) states for Ctrl+Z, newest last.
+    undo: Vec<(String, Range<usize>)>,
+    /// States undone, for Ctrl+Shift+Z / Ctrl+Y.
+    redo: Vec<(String, Range<usize>)>,
+    /// Kind and time of the last edit: typing (or deleting) in one go is
+    /// one undo step.
+    last_edit: Option<(EditKind, Instant)>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Type,
+    Delete,
+    Other,
+}
+
+/// Undo steps kept per field.
+const UNDO_STEPS: usize = 100;
+/// Typing that pauses this long starts a new undo step.
+const UNDO_PAUSE: Duration = Duration::from_millis(1000);
 
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -71,6 +101,9 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             scroll_x: px(0.0),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
         }
     }
     pub fn masked(mut self) -> Self {
@@ -100,6 +133,11 @@ impl TextInput {
         self.marked_range = None;
         self.last_layout = None;
         self.scroll_x = px(0.0);
+        // Set by the app (a search picked, a pasted code taken): Ctrl+Z must
+        // not bring back what it replaced.
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
         cx.notify();
     }
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -154,6 +192,94 @@ impl TextInput {
         self.move_to(self.value.len(), window, cx);
     }
 
+    fn select_home(&mut self, _: &SelectHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, window, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.value.len(), window, cx);
+    }
+
+    fn word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_word(self.cursor_offset()), window, cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_word(self.cursor_offset()), window, cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word(self.cursor_offset()), window, cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word(self.cursor_offset()), window, cx);
+    }
+
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let to = self.previous_word(self.cursor_offset());
+            if to == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let to = self.next_word(self.cursor_offset());
+            if to == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(to, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn undo_edit(&mut self, _: &UndoEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((value, sel)) = self.undo.pop() else { return };
+        self.redo.push((self.value.clone(), self.selected_range.clone()));
+        self.restore(value, sel, window, cx);
+    }
+
+    fn redo_edit(&mut self, _: &RedoEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((value, sel)) = self.redo.pop() else { return };
+        self.undo.push((self.value.clone(), self.selected_range.clone()));
+        self.restore(value, sel, window, cx);
+    }
+
+    /// Back to an earlier state (undo / redo); the app hears it like typing.
+    fn restore(&mut self, value: String, sel: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.value = value;
+        let end = self.value.len();
+        self.selected_range = sel.start.min(end)..sel.end.min(end);
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_edit = None;
+        window.notify_text_input_changed(&self.focus);
+        cx.emit(InputEvent::Changed(self.value.clone()));
+        cx.notify();
+    }
+
+    /// Before an edit of `kind`: remembers the state for undo, unless the
+    /// edit goes on with the one before (typing on, IME composing).
+    fn record_edit(&mut self, kind: EditKind) {
+        let goes_on = self.marked_range.is_some()
+            || self.last_edit.is_some_and(|(k, at)| k == kind && kind != EditKind::Other && at.elapsed() < UNDO_PAUSE);
+        if !goes_on {
+            self.undo.push((self.value.clone(), self.selected_range.clone()));
+            if self.undo.len() > UNDO_STEPS {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.last_edit = Some((kind, Instant::now()));
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
@@ -189,6 +315,19 @@ impl TextInput {
         self.is_selecting = true;
         window.request_virtual_keyboard();
 
+        // Double click: the word; triple click: everything.
+        if event.click_count >= 2 && !event.modifiers.shift {
+            self.is_selecting = false;
+            self.selected_range = if event.click_count == 2 {
+                self.word_range(self.index_for_mouse_position(event.position))
+            } else {
+                0..self.value.len()
+            };
+            self.selection_reversed = false;
+            window.notify_text_selection_changed(&self.focus);
+            cx.notify();
+            return;
+        }
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), window, cx);
         } else {
@@ -350,6 +489,22 @@ impl TextInput {
             .unwrap_or(self.value.len())
     }
 
+    /// Start of the word before `offset`. Hidden passwords have no words:
+    /// the very start.
+    fn previous_word(&self, offset: usize) -> usize {
+        if self.masked { 0 } else { previous_word(&self.value, offset) }
+    }
+
+    /// End of the word after `offset`.
+    fn next_word(&self, offset: usize) -> usize {
+        if self.masked { self.value.len() } else { next_word(&self.value, offset) }
+    }
+
+    /// The word (or run of spaces / punctuation) at `offset`.
+    fn word_range(&self, offset: usize) -> Range<usize> {
+        if self.masked { 0..self.value.len() } else { word_range(&self.value, offset) }
+    }
+
     #[allow(dead_code)]
     fn reset(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.value = "".into();
@@ -446,6 +601,14 @@ impl EntityInputHandler for TextInput {
             window.play_system_bell();
             return;
         }
+        let kind = if new_text.is_empty() {
+            EditKind::Delete
+        } else if range.is_empty() && new_text.chars().count() == 1 && new_text != " " {
+            EditKind::Type
+        } else {
+            EditKind::Other
+        };
+        self.record_edit(kind);
 
         self.value =
             (self.value[0..range.start].to_owned() + new_text + &self.value[range.end..]).into();
@@ -473,6 +636,8 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
         let new_text = self.fit(&range, new_text);
+        // Composing (IME): the whole composition is one undo step.
+        self.record_edit(EditKind::Other);
 
         self.value =
             (self.value[0..range.start].to_owned() + new_text + &self.value[range.end..]).into();
@@ -784,6 +949,16 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::undo_edit))
+            .on_action(cx.listener(Self::redo_edit))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -802,7 +977,29 @@ impl Focusable for TextInput {
     }
 }
 
+/// Modifier that moves by words: Option on macOS, Ctrl elsewhere.
+#[cfg(target_os = "macos")]
+const WORD: &str = "alt";
+#[cfg(not(target_os = "macos"))]
+const WORD: &str = "ctrl";
+
 pub fn bind_keys(cx: &mut App) {
+    let word = |key: &str| format!("{WORD}-{key}");
+    cx.bind_keys([
+        KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
+        KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
+        KeyBinding::new("cmd-shift-left", SelectHome, Some("TextInput")),
+        KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
+        KeyBinding::new(&word("left"), WordLeft, Some("TextInput")),
+        KeyBinding::new(&word("right"), WordRight, Some("TextInput")),
+        KeyBinding::new(&word("shift-left"), SelectWordLeft, Some("TextInput")),
+        KeyBinding::new(&word("shift-right"), SelectWordRight, Some("TextInput")),
+        KeyBinding::new(&word("backspace"), DeleteWordLeft, Some("TextInput")),
+        KeyBinding::new(&word("delete"), DeleteWordRight, Some("TextInput")),
+        KeyBinding::new("secondary-z", UndoEdit, Some("TextInput")),
+        KeyBinding::new("secondary-shift-z", RedoEdit, Some("TextInput")),
+        KeyBinding::new("ctrl-y", RedoEdit, Some("TextInput")),
+    ]);
     cx.bind_keys([
         KeyBinding::new("left", Left, Some("TextInput")),
         KeyBinding::new("right", Right, Some("TextInput")),
@@ -819,4 +1016,64 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-left", Home, Some("TextInput")),
         KeyBinding::new("cmd-right", End, Some("TextInput")),
     ]);
+}
+
+/// Start of the word before `offset` in `text`; spaces and punctuation in
+/// between are skipped (like Ctrl+Left elsewhere).
+fn previous_word(text: &str, offset: usize) -> usize {
+    text[..offset]
+        .split_word_bound_indices()
+        .rev()
+        .find(|(_, w)| w.chars().any(char::is_alphanumeric))
+        .map_or(0, |(i, _)| i)
+}
+
+/// End of the word after `offset` in `text`.
+fn next_word(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .split_word_bound_indices()
+        .find(|(_, w)| w.chars().any(char::is_alphanumeric))
+        .map_or(text.len(), |(i, w)| offset + i + w.len())
+}
+
+/// The word segment of `text` that holds `offset` (at the very end: the last one).
+fn word_range(text: &str, offset: usize) -> Range<usize> {
+    let mut found = 0..0;
+    for (i, w) in text.split_word_bound_indices() {
+        found = i..i + w.len();
+        if offset < i + w.len() {
+            break;
+        }
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_jumps() {
+        let s = "daft punk - one more time";
+        assert_eq!(previous_word(s, s.len()), 21);
+        assert_eq!(previous_word(s, 12), 5); // over " - " back to "punk"
+        assert_eq!(previous_word(s, 7), 5); // inside "punk"
+        assert_eq!(previous_word(s, 0), 0);
+        assert_eq!(next_word(s, 0), 4);
+        assert_eq!(next_word(s, 4), 9);
+        assert_eq!(next_word(s, 9), 15); // over " - " to the end of "one"
+        assert_eq!(next_word(s, s.len()), s.len());
+        let u = "über straße";
+        assert_eq!(previous_word(u, u.len()), "über ".len());
+    }
+
+    #[test]
+    fn word_at_click() {
+        let s = "one more";
+        assert_eq!(word_range(s, 1), 0..3);
+        assert_eq!(word_range(s, 3), 3..4);
+        assert_eq!(word_range(s, 5), 4..8);
+        assert_eq!(word_range(s, s.len()), 4..8);
+        assert_eq!(word_range("", 0), 0..0);
+    }
 }

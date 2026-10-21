@@ -25,8 +25,7 @@ impl Glyph {
     pub fn position(&self) -> Duration {
         if self.account.output_target.is_some() {
             let Some(o) = self.account_output() else { return Duration::ZERO };
-            let elapsed = if o.state.playing { self.account.output_received.map(|at| at.elapsed().min(Duration::from_secs(5))).unwrap_or_default() } else { Duration::ZERO };
-            return (Duration::from_millis(o.state.position_ms) + elapsed).min(o.state.duration_ms.map(Duration::from_millis).unwrap_or(Duration::MAX));
+            return self.account_output_position(o);
         }
         if self.resolving {
             return Duration::ZERO;

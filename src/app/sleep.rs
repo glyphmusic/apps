@@ -6,9 +6,22 @@ use super::*;
 /// Lengths offered in the menu, in minutes.
 pub const SLEEP_MINUTES: [u32; 5] = [15, 30, 45, 60, 90];
 
+/// A running timer turns the music down over its last stretch instead of
+/// cutting it off.
+const FADE: Duration = Duration::from_secs(30);
+
 impl Glyph {
     pub fn set_sleep(&mut self, sleep: Option<Sleep>, cx: &mut Context<Self>) {
+        self.end_sleep_fade();
         self.sleep = sleep;
+        if sleep == Some(Sleep::EndOfSong) {
+            // The next song must not start gaplessly after this one.
+            self.preloaded = None;
+            self.preload_attempt = None;
+            if let Some(p) = &self.player {
+                guard(|| p.drop_next());
+            }
+        }
         match sleep {
             Some(Sleep::At { mins, .. }) => self.toast_info(tf("sleep.toast.set", &[("time", &sleep_label(mins))]).to_string()),
             Some(Sleep::EndOfSong) => self.toast_info(t("sleep.toast.song")),
@@ -33,11 +46,36 @@ impl Glyph {
 
     pub(super) fn tick_sleep(&mut self, cx: &mut Context<Self>) {
         let Some(Sleep::At { until, .. }) = self.sleep else { return };
-        if Instant::now() < until {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            self.sleep = None;
+            // The volume comes back when playback starts again (raising it
+            // while the pause fades out would be heard).
+            self.sleep_pause(cx);
             return;
         }
-        self.sleep = None;
-        self.sleep_pause(cx);
+        // Only this computer's player fades; devices and jams just pause.
+        let local = self.account.output_target.is_none() && !self.remote_chosen() && !self.jam_active();
+        if left < FADE && local && self.is_playing() {
+            let from = match self.sleep_fade_from {
+                Some(v) => v,
+                None => {
+                    let v = self.volume();
+                    self.sleep_fade_from = Some(v);
+                    v
+                }
+            };
+            let v = from * left.as_secs_f32() / FADE.as_secs_f32();
+            self.with_player(|p| p.set_volume(v));
+        }
+    }
+
+    /// Back to the volume from before the fade-out (timer off or changed,
+    /// or playback starts again after it paused).
+    pub(super) fn end_sleep_fade(&mut self) {
+        if let Some(v) = self.sleep_fade_from.take() {
+            self.with_player(|p| p.set_volume(v));
+        }
     }
 
     /// The timer ran out: pause whatever plays (here, on a device, in a jam).

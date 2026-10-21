@@ -892,6 +892,43 @@ impl Library {
         }
     }
 
+    /// Puts a removed song back at `index` (undo). Returns `true` if added.
+    pub fn insert_into_playlist(&mut self, id: &str, index: usize, track: Track) -> bool {
+        let Some(p) = self.playlist_mut(id) else { return false };
+        if p.tracks.len() >= playlist_track_limit() || p.tracks.iter().any(|t| same_entry(t, &track)) {
+            return false;
+        }
+        let at = index.min(p.tracks.len());
+        p.tracks.insert(at, track);
+        true
+    }
+
+    /// Puts an unliked song back into Liked Songs at `index` (undo).
+    pub fn insert_liked(&mut self, index: usize, track: Track) {
+        if self.liked.iter().any(|t| same_entry(t, &track)) {
+            return;
+        }
+        let at = index.min(self.liked.len());
+        self.liked.insert(at, track);
+        if let Ok(mut g) = self.liked_cache.0.lock() {
+            *g = None;
+        }
+    }
+
+    /// Where `track` sits in "recently played" (artists counted too).
+    pub fn recent_song_index(&self, track: &Track) -> Option<usize> {
+        self.recent.iter().position(|i| matches!(i, RecentItem::Song { track: t } if same_entry(t, track)))
+    }
+
+    /// Puts a removed song back into "recently played" at `index` (undo).
+    pub fn insert_recent_song(&mut self, index: usize, track: Track) {
+        if self.recent_song_index(&track).is_some() {
+            return;
+        }
+        let at = index.min(self.recent.len());
+        self.recent.insert(at, RecentItem::Song { track });
+    }
+
     pub fn move_in_playlist(&mut self, id: &str, from: usize, to: usize) {
         if let Some(p) = self.playlist_mut(id) {
             if from < p.tracks.len() && to < p.tracks.len() {
@@ -1029,6 +1066,34 @@ mod tests {
         let decoded: Library = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded.active_tracks(5,now+28*86400),lib.active_tracks(5,now+28*86400));
         for (key,value) in &lib.song_activity { assert!((decoded.song_activity[key].score-value.score).abs()<1e-12); }
+    }
+
+    #[test]
+    fn undo_puts_removed_songs_back_in_place() {
+        let mut lib = Library::default();
+        let (a, b, c) = (tr("a", "A"), tr("b", "B"), tr("c", "C"));
+        let id = lib.create_playlist("Mix").id.clone();
+        for t in [&a, &b, &c] {
+            lib.add_to_playlist(&id, t.clone());
+        }
+        lib.remove_from_playlist(&id, 1);
+        assert!(lib.insert_into_playlist(&id, 1, b.clone()));
+        assert!(!lib.insert_into_playlist(&id, 0, b.clone()), "never twice");
+        assert_eq!(lib.playlist(&id).unwrap().tracks, vec![a.clone(), b.clone(), c.clone()]);
+
+        lib.liked = vec![a.clone(), b.clone(), c.clone()];
+        lib.toggle_like(&b);
+        lib.insert_liked(1, b.clone());
+        lib.insert_liked(0, b.clone());
+        assert_eq!(lib.liked, vec![a.clone(), b.clone(), c.clone()]);
+
+        for t in [&c, &b, &a] {
+            lib.push_recent(t.clone());
+        }
+        let at = lib.recent_song_index(&b).unwrap();
+        lib.remove_recent_song(&b);
+        lib.insert_recent_song(at, b.clone());
+        assert_eq!(lib.recent_tracks().cloned().collect::<Vec<_>>(), vec![a, b, c]);
     }
 
     #[test]

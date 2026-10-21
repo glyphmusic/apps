@@ -1168,7 +1168,7 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
             .px(px(EDGE))
             .cursor_pointer()
             .active(|s| s.bg(white(0.05)))
-            .on_click(cx.listener(move |this, _, _, cx| this.play_list((*all).clone(), i, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.play_row((*all).clone(), i, cx)))
             .child(cover(app, &tr, 48.0, 4.0, cx))
             .child(
                 div()
@@ -1337,7 +1337,7 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
         .cursor_pointer()
         .when(blocked, |d| d.opacity(0.4))
         .active(|s| s.bg(white(0.05)))
-        .on_click(cx.listener(move |this, _, _, cx| this.play_list((*all).clone(), i, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| this.play_row((*all).clone(), i, cx)))
         .child(cover(app, &tr, 48.0, 4.0, cx))
         .child(
             div()

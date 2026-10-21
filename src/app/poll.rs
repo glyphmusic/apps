@@ -63,6 +63,9 @@ impl Glyph {
                 Some(Some(st)) => {
                     if self.player_state.as_ref() != Some(&st) {
                         let playing = st.status == Status::Playing;
+                        if playing && !self.resolving {
+                            self.skip_streak = 0;
+                        }
                         if playing && !self.activity_recorded && !self.resolving && self.library_ok {
                             if let Some(track) = self.current.clone() {
                                 let threshold = track.duration_ms.map(|ms| (ms / 2000).clamp(5,30)).unwrap_or(30);
@@ -183,6 +186,10 @@ impl Glyph {
                         tracing::info!("expired preview URL, re-resolving once");
                     } else if self.repair_broken_file(&e, cx) {
                         tracing::info!("broken local file dropped, playing online: {e}");
+                    } else if !super::playback::output_error(&e) && !self.resolving && self.player_idle() && self.skip_unplayable(cx) {
+                        // It never started (a song that fails midway ends and
+                        // moves on by itself): go on with the next one.
+                        tracing::warn!("playback error, skipped: {e}");
                     } else {
                         self.toast_info(tf("toast.player_error", &[("e", &e)]));
                     }
@@ -327,7 +334,7 @@ impl Glyph {
         let hovered = self.toast_hover;
         self.toasts.retain(|t| match t.gone {
             Some(g) => g.elapsed().as_secs_f32() < crate::ui::toasts::GONE_S,
-            None => hovered || held == Some(t.id) || t.at.elapsed() <= TOAST_FOR,
+            None => hovered || held == Some(t.id) || t.at.elapsed() <= t.life(),
         });
         if self.toasts.len() != before {
             dirty = true;
@@ -447,7 +454,16 @@ impl Glyph {
         self.push_toast(format!("{} · {}", title.into(), sub.into()), ToastIcon::Check);
     }
 
+    /// Toast with an "Undo" button that reverses `undo` (see [`Self::run_undo`]).
+    pub fn toast_undo(&mut self, msg: impl Into<String>, undo: Undo) {
+        self.push_toast_with(msg.into(), ToastIcon::Check, Some(undo));
+    }
+
     pub(super) fn push_toast(&mut self, msg: String, icon: ToastIcon) {
+        self.push_toast_with(msg, icon, None);
+    }
+
+    fn push_toast_with(&mut self, msg: String, icon: ToastIcon, undo: Option<Undo>) {
         tracing::info!("{msg}");
         let (title, sub) = match msg.split_once(" · ") {
             Some((a, b)) if !b.trim().is_empty() => (a.to_string(), Some(b.to_string())),
@@ -459,6 +475,9 @@ impl Glyph {
         if let Some(i) = self.toasts.iter().position(|t| t.gone.is_none() && t.title == title && t.sub == sub) {
             let mut t = self.toasts.remove(i);
             t.at = now;
+            if undo.is_some() {
+                t.undo = undo;
+            }
             self.toasts.insert(0, t);
             return;
         }
@@ -477,6 +496,7 @@ impl Glyph {
                 depth: 0.0,
                 depth_target: 0.0,
                 gone: None,
+                undo,
             },
         );
         // Over the limit: the oldest visible ones swipe away.

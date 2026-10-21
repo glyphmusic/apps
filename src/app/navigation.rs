@@ -94,7 +94,7 @@ impl Glyph {
         let Some(i) = self.selected_row else { return };
         let tracks = self.active_tracks();
         if i < tracks.len() {
-            self.play_list(tracks, i, cx);
+            self.play_row(tracks, i, cx);
         }
     }
 

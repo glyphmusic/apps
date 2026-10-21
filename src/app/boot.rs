@@ -242,7 +242,9 @@ impl Glyph {
             redownloaded_broken: HashSet::new(),
             resolving: false,
             hold_play: false,
+            skip_streak: 0,
             sleep: None,
+            sleep_fade_from: None,
             preloaded: None,
             preload_attempt: None,
             download_check_at: Instant::now(),
@@ -545,7 +547,8 @@ impl Glyph {
         if !self.config_loaded {
             return None;
         }
-        let volume = self.player_state.as_ref().map_or(self.config.player.volume, |s| s.volume);
+        // The sleep timer's fade-out is not the volume the user chose.
+        let volume = self.sleep_fade_from.unwrap_or_else(|| self.player_state.as_ref().map_or(self.config.player.volume, |s| s.volume));
         let repeat = match self.repeat() {
             RepeatMode::Off => "off",
             RepeatMode::All => "all",

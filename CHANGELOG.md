@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Your devices update instantly**: when you control another signed-in Glyph, a new song, pause, volume or a jump shows up within a moment instead of after several seconds. Glyph also checks in with the server far less often while the live connection is up.
+- **A song that cannot play no longer stops the music**: Glyph skips it with a short note and goes on with the next one (after five in a row it stops and says so).
+- **Undo after removing**: taking a song out of a playlist, Liked Songs, Recently played or Downloads, and deleting a playlist, shows a toast with an "Undo" button.
+- **Sleep timer fades out**: the music gets quieter over the last 30 seconds instead of stopping abruptly; the volume is back when you play again.
+- **Radio after a list goes on from it**: when the queue ends with radio on, the new songs are based on the last few songs, join the end of the queue (so "previous" still goes back into the list) and leave out what just played. Every radio also starts faster.
+- **Calmer search results**: once results have been on screen for a moment, the top three stay put while more sources answer, so the row you are about to click does not jump away. A song that comes in again with better details moves to its right place, and long result lists rank faster.
+- **Shuffle with repeat all mixes every round anew** instead of playing the same shuffled order again, and a round never starts with the song that just ended.
+- **Text fields edit like everywhere else**: Ctrl+Left/Right (Option on macOS) jump by words, Ctrl+Backspace/Delete remove a word, Shift+Home/End select to the start or end, a double click selects a word and a triple click everything, and Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) undo and redo.
+
+### Fixed
+
+- Smart shuffle always puts recently played songs at the end.
+- The search history only remembers songs you picked from the search results, not songs started by radio or the play button while the search page was open.
+- Sleep timer "end of this song" no longer lets the next song play for a moment before it pauses.
+
 ## 0.6.0 - 2026-10-21
 
 A phone app that feels like one, updates inside Android and smarter search.
