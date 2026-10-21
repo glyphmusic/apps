@@ -15,7 +15,10 @@ use std::time::Duration;
 
 pub(crate) const COVER: f32 = 280.0;
 
-pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
+pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
+    // The cover grows with tall windows (280 px at most window sizes, up to
+    // 360 on large screens) instead of a small square in a big empty page.
+    let cover_size = (f32::from(w.viewport_size().height) * 0.36).clamp(COVER, 360.0);
     let Some(track) = app.current.clone() else {
         return div()
             .size_full()
@@ -60,7 +63,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
     let slot: gpui::AnyElement = if app.embed_playing() {
         let weak = weak.clone();
         div()
-            .size(px(COVER))
+            .size(px(cover_size))
             .rounded(px(12.0))
             .bg(theme::card())
             .child(
@@ -84,7 +87,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
             )
             .into_any_element()
     } else {
-        cover(app, &track, COVER, 12.0, cx).into_any_element()
+        cover(app, &track, cover_size, 12.0, cx).into_any_element()
     };
 
     let t_like = track.clone();
@@ -134,7 +137,7 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .items_center()
                 .gap(px(10.0))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(fmt_time(pos)))
-                .child(thin_bar("np-seek", 250.0, frac, seek, dur.map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
+                .child(thin_bar("np-seek", cover_size - 30.0, frac, seek, dur.map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()))),
         )
         .child(

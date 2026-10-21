@@ -45,7 +45,9 @@ const ISSUES_URL: &str = "https://github.com/glyphmusic/apps/issues/new";
 const RELEASES_URL: &str = "https://github.com/glyphmusic/apps/releases";
 
 pub(crate) const PANEL_W: f32 = 920.0;
-const PANEL_H: f32 = 600.0;
+/// Tall enough for the whole nav with one category open (it still shrinks
+/// to 90 % of small windows).
+const PANEL_H: f32 = 660.0;
 pub(crate) const NAV_W: f32 = 232.0;
 
 pub(crate) fn white(a: f32) -> Hsla {

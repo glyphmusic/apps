@@ -230,7 +230,11 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         );
     }
     let w = HOME_CARDS_W.with(|c| c.get());
-    let cols = (((w + HOME_CARD_GAP) / (HOME_CARD_MIN + HOME_CARD_GAP)).floor() as usize).clamp(1, cards.len().max(1));
+    let fit = (((w + HOME_CARD_GAP) / (HOME_CARD_MIN + HOME_CARD_GAP)).floor() as usize).clamp(1, cards.len().max(1));
+    // Even rows: 6 cards in 5 columns would leave one alone in the second
+    // row, so use as few columns as the same number of rows needs (3 + 3).
+    let rows = cards.len().max(1).div_ceil(fit);
+    let cols = cards.len().max(1).div_ceil(rows);
     let max_w = cols as f32 * HOME_CARD_MAX + (cols - 1) as f32 * HOME_CARD_GAP;
     div()
         .w_full()
