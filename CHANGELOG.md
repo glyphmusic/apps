@@ -1,16 +1,32 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-10-21
+
+A phone app that feels like one, updates inside Android and smarter search.
 
 ### Added
 
+- **Now Playing as a sheet on phones**: it slides up over the page; lyrics open full screen, the queue and Connect as bottom sheets.
+- **Swipe gestures on phones**: swipe the mini player, list rows and the side menu.
 - **Updates inside the Android app**: Settings > About downloads the new APK, checks it and hands it to Android's installer, no detour over GitHub. The first time, Android asks you to allow Glyph to install apps.
 - **Cover and add button in the Android media controls**: the notification and lock screen show the song's cover behind the controls, and a new add button puts the song into Liked Songs (a check once it is there).
 - **Smoother switching**: every page change, settings page and sub-tab, search filter, the queue / Connect / "Add songs" panel and its tabs now fade in softly instead of cutting over, and the player's sort and volume menus fade out when they close.
 
+### Changed
+
+- **Better search results**: songs released in your country rank a little higher (nothing is filtered out), artists you searched for count as interests, proper releases rise above uploads without cover or length, and "Artist - Song" uploads no longer push an artist's own releases down.
+- Home cards use as few columns as they need, so no card sits alone in a row.
+- On large windows the Now Playing cover (and its seek bar) grows up to 360 px.
+- Covers that do not load within 4 seconds show the placeholder instead of shimmering forever.
+- Phone layout: more even spacing, home cards in two columns, settings rows only wrap when label and control would collide, and Liked Songs explains how to like a song.
+- The settings window is taller, so the menu fits with a category open.
+- Glyph speaks 8 more languages completely (missing texts filled in).
+
 ### Fixed
 
 - The Android app no longer heats up the phone after a few minutes of use: the screen is only redrawn when something changes (at most 60 times a second unless you touch it), the background glow runs at a lower rate, and Now Playing, downloads and the app in the background stop redrawing or polling at full speed.
+- Touch scrolling on phones follows only the direction you swipe, so cover rows no longer drift sideways while the page scrolls.
+- No stuck highlights after a tap, page titles are no longer cut short, the artist bar stays readable once the photo scrolls away, and empty lists no longer show play buttons.
 
 ## 0.5.0 - 2026-10-21
 
