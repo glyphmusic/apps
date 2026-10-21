@@ -434,12 +434,13 @@ fn smart_shuffle(base: &[Track], idx: Vec<usize>, recent: &[String], rng: &mut i
             let jitter = rng.gen_range(-0.1..0.1) * gap;
             let mut at = start + k as f32 * gap + jitter;
             let key = crate::dedupe::track_key(&base[i]);
+            // Slots spread over -0.1..1.1 (jitter), so the offsets must clear that range.
             if recent.contains(key.as_str()) {
-                at += 1.0;
+                at += 2.0;
             }
             if !seen.insert(key) {
                 // The same song twice in one list: the copy goes last.
-                at += 2.0;
+                at += 4.0;
             }
             slots.push((at, i));
         }
