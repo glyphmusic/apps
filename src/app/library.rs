@@ -1,6 +1,41 @@
 use super::*;
 
 impl Glyph {
+    pub fn set_playlist_storage(&mut self, id: &str, mode: u8, cx: &mut Context<Self>) {
+        if !self.library_ok || (mode > 0 && self.signed_in().is_none()) { return; }
+        self.library.checkpoint_playlists();
+        let Some(p) = self.library.playlist_mut(id) else { return };
+        p.local_only = mode == 0;
+        p.auto_download = mode == 2;
+        let tracks = p.tracks.clone();
+        self.save_library(cx);
+        if mode == 2 { self.download_tracks(tracks, cx); }
+        cx.notify();
+    }
+
+    pub fn recommendation_feedback(&mut self, artist: &str, preference: Option<i8>, cx: &mut Context<Self>) {
+        if !self.library_ok { return; }
+        let key = artist.trim().to_lowercase();
+        if let Some(p) = preference { self.library.recommendation_feedback.insert(key, p); }
+        else { self.library.recommendation_feedback.remove(&key); }
+        self.save_library(cx);
+        self.reload_account_feeds(cx);
+        cx.notify();
+    }
+
+    pub fn restore_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.library_ok && self.library.restore_playlist(id) { self.save_library(cx); cx.notify(); }
+    }
+
+    pub fn restore_playlist_version(&mut self, revision: &str, cx: &mut Context<Self>) {
+        if self.library_ok && self.library.restore_playlist_version(revision) { self.save_library(cx); cx.notify(); }
+    }
+    pub fn toggle_playlist_scope(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.signed_in().is_none() { return; }
+        if let Some(p) = self.library.playlist_mut(id) { p.local_only = !p.local_only; }
+        self.save_library(cx);
+        cx.notify();
+    }
     pub fn toggle_like(&mut self, t: &Track, cx: &mut Context<Self>) {
         if !self.library_ok {
             self.toast_info(crate::i18n::t("status.library_offline"));
@@ -63,6 +98,17 @@ impl Glyph {
 
     /// Adds several songs at once (one toast).
     pub fn add_many_to_playlist(&mut self, id: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let limit = glyph_core::library::playlist_track_limit();
+        if let Some(p) = self.library.playlist(id) {
+            let mut seen = std::collections::HashSet::new();
+            let new = tracks.iter().filter(|t| !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source))
+                .filter(|t| seen.insert(format!("{:?}:{}", t.source, t.id))).count();
+            if p.tracks.len().saturating_add(new) > limit {
+                self.toast_info(tf("toast.playlist_limit", &[("n", &limit)]));
+                cx.notify();
+                return;
+            }
+        }
         self.touch_list(&ListRef::User(id.to_string()), 0.5);
         let mut added = Vec::new();
         let mut name = String::new();
@@ -127,6 +173,12 @@ impl Glyph {
     }
 
     pub fn add_to_playlist(&mut self, id: &str, t: Track, cx: &mut Context<Self>) {
+        let limit = glyph_core::library::playlist_track_limit();
+        if self.library.playlist(id).is_some_and(|p| p.tracks.len() >= limit) {
+            self.toast_info(tf("toast.playlist_limit", &[("n", &limit)]));
+            cx.notify();
+            return;
+        }
         if let Some(p) = self.library.playlists.iter_mut().find(|p| p.id == id) {
             if !p.tracks.iter().any(|x| x.id == t.id && x.source == t.source) {
                 p.tracks.push(t.clone());

@@ -114,13 +114,15 @@ impl Glyph {
 
     /// Plays on a found device; MPD servers go to the MPD output.
     pub fn select_device(&mut self, dev: Device, cx: &mut Context<Self>) {
-        if !dev.kind.playable() || self.device_out.as_ref().is_some_and(|d| d.device.id == dev.id) {
+        let (pos, playing) = (self.position().as_secs_f64(), self.is_playing());
+        self.account_control(glyph_protocol::playback::Command::Stop);
+        self.account.output_target = None;
+        if self.device_out.as_ref().is_some_and(|d| d.device.id == dev.id) {
             return;
         }
         if dev.kind == Kind::Mpd && self.mpd.as_ref().is_some_and(|m| crate::mpd::Address::parse(&dev.mpd_address()).as_ref() == Some(&m.address)) {
             return;
         }
-        let (pos, playing) = (self.position().as_secs_f64(), self.is_playing());
         if dev.kind == Kind::Mpd {
             self.drop_device_output();
             let addr = dev.mpd_address();
@@ -147,6 +149,19 @@ impl Glyph {
 
     /// Back to this computer (the user picked a local sound device).
     pub fn use_local_output(&mut self, cx: &mut Context<Self>) {
+        if self.account.output_target.is_some() {
+            // Transfer back by resolving the account device's song on this app.
+            let ms = self.position().as_millis() as u64;
+            let playing = self.is_playing();
+            self.account_control(glyph_protocol::playback::Command::Stop);
+            self.account.output_target = None;
+            let track = self.current.clone();
+            self.current = None;
+            if let Some(track) = track {
+                self.play_track(track, cx);
+                self.account.transfer_resume = Some((ms, playing));
+            }
+        }
         if !self.remote_chosen() {
             return;
         }
@@ -190,6 +205,7 @@ impl Glyph {
     pub fn toggle_devices_panel(&mut self, cx: &mut Context<Self>) {
         self.show_devices = !self.show_devices;
         if self.show_devices {
+            self.account.output_checked = None;
             self.show_queue = false;
             if let Some(a) = self.add_songs.as_mut() {
                 a.open = false;

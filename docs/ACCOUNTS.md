@@ -146,12 +146,48 @@ Wire format (`glyph-protocol`, all new fields optional so old clients ignore the
   (`sync_state.json`: outbox, last rev). The app pushes 2 s after the last change,
   pulls on start, on focus and every 5 min. Pull results are merged into the
   `Library` with the same rule, so both sides converge.
-* First sign-in on a device that already has a library: local items are pushed
-  (merge, nothing is deleted), then a full pull.
+* First sign-in with guest data asks whether to merge it or use account data only.
+  Sync stays blocked until the choice. A new sync agreement pulls first, then
+  uploads remaining local additions. Repeated imports of identical guest data
+  do not count its statistics twice.
 * Lists keep their order: liked songs and searches by `updated_at`, playlists carry
   their own track order.
-* Not synced: recently played, play/skip counters, lyrics offsets, downloaded
-  files themselves, the server URL and other device-local settings.
+* Also synced: recently played, recommendation activity, play/skip counters,
+  lyrics offsets, pinned/hidden lists, list activity and recent lists/artists.
+  Downloaded files, local-only playlists, the server URL and device settings
+  stay on the installation. Removing another device's download never removes
+  this device's files.
+
+### Account separation and local playlists
+
+Guest and account libraries use separate files. Account caches are scoped by
+both server URL and account id under `accounts/<scope>/`; queued saves retain
+their original path. Logout hides account data, stops the local session's
+playback and restores guest preferences, including provider keys. Caches remain
+available when that account signs in again. Legacy signed-in libraries are
+archived in place during migration and never reused as guest data.
+
+Downloads and their configured folder remain device-wide. A playlist's context
+menu selects local-only or account storage; the playlist page shows the scope.
+Local-only playlists are kept in `local-playlists.json`, visible across local
+sessions and excluded from account sync and public-profile playlist choices.
+
+### Playback on account devices
+
+`POST /v1/devices/playback/poll` publishes the authenticated device's playback
+state and returns signed-in devices of the same account, their online status
+and pending commands.
+Presence expires after 45 seconds; commands after 30 seconds and are consumed
+once. `POST /v1/devices/playback/command` validates ownership, online presence,
+availability and command bounds before enqueuing a command. A device in a Jam
+advertises itself as unavailable for these controls.
+
+Connect offers controlling an existing session or transferring a queue of up
+to 100 songs and its position. The receiving app resolves its own playable
+source; source URLs and account tokens are never transferred. Only the device
+actually playing records listening statistics. Both apps and the server need
+this protocol version for account-device control; network speaker discovery
+continues independently.
 
 ### Settings and API keys (17.10.2026)
 
@@ -215,8 +251,11 @@ handle checks 30 / min. Errors use the existing `ApiError` with codes such as
 ## 7. Privacy
 
 Stored: handle, passkey public keys, recovery-code hash, device name/platform/
-first and last seen, the synced items above, profile settings. Not stored: passwords, IPs, play
-history (beyond the opt-in profile songs), audio. The Worker never returns another user's data except a profile; handles are only
+first and last seen, the synced items above (including account listening history
+and recommendation activity), profile settings and short-lived playback state.
+Passwords and audio files are not stored by account sync. Private listening
+history is distinct from the opt-in recent songs on the public profile.
+The Worker never returns another user's private data; handles are only
 checked for availability.
 
 Profiles (17.10.2026): every account may set a picture and a banner, which any

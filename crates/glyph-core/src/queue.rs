@@ -89,6 +89,17 @@ impl Queue {
         self.current()
     }
 
+    /// Shows someone else's queue (a jam guest follows the host's): `manual`
+    /// as "Up next", then `after`, nothing current. Going on from here plays
+    /// them in this order.
+    pub fn mirror(&mut self, manual: Vec<Track>, after: Vec<Track>) {
+        self.manual = manual;
+        self.manual_current = None;
+        self.order = (0..after.len()).collect();
+        self.base = after;
+        self.pos = None;
+    }
+
     /// Context and hand-queued songs both emptied.
     pub fn clear(&mut self) {
         self.base.clear();
@@ -455,6 +466,21 @@ mod tests {
 
     fn names(v: Vec<&Track>) -> Vec<String> {
         v.into_iter().map(|t| t.id.clone()).collect()
+    }
+
+    #[test]
+    fn mirror_shows_a_queue_in_order() {
+        let mut q = q(&["x", "y"], 0);
+        q.push(tr("m"));
+        q.mirror(vec![tr("a"), tr("b")], vec![tr("c")]);
+        assert!(q.current().is_none());
+        assert_eq!(q.manual_len(), 2);
+        assert_eq!(names(q.upcoming()), ["a", "b", "c"]);
+        assert_eq!(q.peek_next().unwrap().id, "a");
+        assert_eq!(q.next().unwrap().id, "a");
+        assert_eq!(names(q.upcoming()), ["b", "c"]);
+        q.mirror(vec![], vec![]);
+        assert!(q.next().is_none());
     }
 
     #[test]

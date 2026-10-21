@@ -2,6 +2,7 @@
 
 - Every release must update `CHANGELOG.md` with its version, date and user-visible changes. Keep `RELEASE_NOTES.md` consistent with that version's changelog entry.
 
+- Old builds must always be deleted to save disk space; never leave stale profiles or executables behind.
 - After every local Cargo build/test (including `fast`), run `./scripts/clean-builds.ps1 -KeepProfile debug` (use `fast` or `release` for that profile). Never start a build just to clean outputs.
 - Dev launch/watch scripts invoke cleanup automatically. The watcher retries deferred cleanup while idle.
 - Remove abandoned `target/ui`; keep the current profile, running executables and other profiles used in the last 24 hours. Retain the newest executable per Cargo hash family and five timing reports.

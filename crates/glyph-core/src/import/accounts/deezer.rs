@@ -114,6 +114,7 @@ impl LibrarySource for DeezerLibrary {
                             artist: a["artist"]["name"].as_str().unwrap_or("").to_string(),
                             cover_url: a["cover_xl"].as_str().or(a["cover_big"].as_str()).map(str::to_string),
                             year: None,
+                            released: None,
                             kind: crate::catalog::AlbumKind::Album,
                         };
                         let tracks = dz.album_tracks(&release).await.unwrap_or_default();

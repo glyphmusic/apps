@@ -1,0 +1,48 @@
+// The Rust side (crates/glyph-android) is built by scripts/build-android.ps1
+// into src/main/jniLibs before Gradle packages it.
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "app.glyph"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "app.glyph"
+        minSdk 26
+        targetSdk 36
+        versionCode 500
+        versionName "0.5.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Sideloadable test builds until there is a real release key.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+}
+
+dependencies {
+    // games-activity pulls an older kotlin-stdlib-jdk7/8 next to appcompat's stdlib.
+    implementation platform("org.jetbrains.kotlin:kotlin-bom:1.8.22")
+    // Must match android-activity's GameActivity glue (0.6.1 -> 4.4.0).
+    implementation "androidx.games:games-activity:4.4.0"
+    implementation "androidx.appcompat:appcompat:1.7.1"
+    implementation "androidx.core:core:1.16.0"
+    // MediaSession + media notification for background playback.
+    implementation "androidx.media:media:1.7.0"
+}

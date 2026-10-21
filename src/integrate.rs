@@ -220,6 +220,13 @@ mod platform {
   <key>CFBundleVersion</key><string>{version}</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>Glyph links</string>
+      <key>CFBundleURLSchemes</key><array><string>glyph</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 "#

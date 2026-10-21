@@ -2,12 +2,13 @@
 //! mini player button picks card or bar, repeat and shuffle pick their mode,
 //! previous / next jump inside the song, the volume picks the output.
 
-use crate::app::{ControlMenu, Glyph};
+use crate::app::sleep::{sleep_countdown, sleep_label, SLEEP_MINUTES};
+use crate::app::{ControlMenu, Glyph, Sleep};
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::lists::menu_row;
 use crate::ui::widgets::icon;
-use glyph_core::config::{ChannelMode, ShuffleStyle};
+use glyph_core::config::{ChannelMode, ListSort, ShuffleStyle};
 use glyph_core::RepeatMode;
 use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, Context, ElementId, MouseButton, MouseDownEvent, SharedString, Window};
 
@@ -107,6 +108,66 @@ pub fn control_menu(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyp
     let alpha = 1.0 - (1.0 - k).powi(3);
     let mut body: Vec<AnyElement> = Vec::new();
     match kind {
+        ControlMenu::Sort => {
+            let l = app.open_list.clone()?;
+            let cur = app.list_sort(&l);
+            body.push(caption(t("sort.title")));
+            for (id, icon_name, label, s) in [
+                ("ctl-sort-custom", "list-music", if l == crate::app::ListRef::Liked { t("sort.added") } else { t("sort.custom") }, ListSort::Custom),
+                ("ctl-sort-title", "music-2", t("sort.by_title"), ListSort::Title),
+                ("ctl-sort-artist", "user-round", t("sort.by_artist"), ListSort::Artist),
+                ("ctl-sort-album", "disc-3", t("sort.by_album"), ListSort::Album),
+                ("ctl-sort-length", "clock", t("sort.by_length"), ListSort::Duration),
+            ] {
+                let l = l.clone();
+                body.push(
+                    choice(id, icon_name, label, cur == s, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_control_menu(cx);
+                            this.set_list_sort(&l, s, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        ControlMenu::Sleep => {
+            let cur = app.sleep;
+            body.push(caption(match (cur, app.sleep_left()) {
+                (Some(Sleep::EndOfSong), _) => t("sleep.status.song"),
+                (_, Some(left)) => tf("sleep.status.left", &[("time", &sleep_countdown(left))]),
+                _ => t("sleep.title"),
+            }));
+            for mins in SLEEP_MINUTES {
+                let on = matches!(cur, Some(Sleep::At { mins: m, .. }) if m == mins);
+                body.push(
+                    choice(("ctl-sleep", mins as usize), "timer", sleep_label(mins).into(), on, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_control_menu(cx);
+                            this.sleep_in(mins, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+            body.push(
+                choice("ctl-sleep-song", "music-2", t("sleep.end_of_song"), cur == Some(Sleep::EndOfSong), cx)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_control_menu(cx);
+                        this.set_sleep(Some(Sleep::EndOfSong), cx)
+                    }))
+                    .into_any_element(),
+            );
+            if cur.is_some() {
+                body.push(sep());
+                body.push(
+                    menu_row("ctl-sleep-off".into(), "x", t("sleep.off"), white(0.7), false, false, cx)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.close_control_menu(cx);
+                            this.set_sleep(None, cx)
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
         ControlMenu::Mini => {
             let shown = app.mini_shown;
             let big = app.mini_big;

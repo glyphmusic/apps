@@ -27,6 +27,14 @@ pub struct SharedPlaylist {
     pub author: Option<String>,
 }
 
+/// What a jam's push socket delivers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveEvent {
+    Msg(glyph_protocol::jam::Live),
+    /// The socket closed (with the server's close code, if it sent one).
+    Closed(Option<u16>),
+}
+
 /// Non-2xx answer of the server.
 #[derive(Debug, thiserror::Error)]
 #[error("server error {status}: {code} {message}")]
@@ -55,6 +63,10 @@ pub struct ServerClient {
 
 /// Random anonymous install id, persisted in the data dir.
 pub fn install_id() -> String {
+    // Startup/account workers may initialize clients together. Serialize the
+    // read-create-publish sequence so they cannot overwrite each other's ID.
+    static ID_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ID_IO.lock().unwrap_or_else(|e| e.into_inner());
     let path = paths::data_dir().join("install_id");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let s = s.trim();
@@ -74,6 +86,22 @@ pub fn normalize_base_url(url: &str) -> String {
 }
 
 impl ServerClient {
+    /// Only for reads, including metadata POSTs. Never replay account mutations.
+    async fn read_json_with_retry<T: serde::de::DeserializeOwned>(request: reqwest::RequestBuilder) -> Result<T> {
+        for attempt in 0..3u32 {
+            let cloned = request.try_clone().context("metadata request cannot be replayed")?;
+            let result: Result<T> = async { Ok(Self::check(cloned.send().await?).await?.json().await?) }.await;
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    let Some(wait) = retry_delay(&error, attempt) else { return Err(error) };
+                    tokio::time::sleep(wait).await;
+                }
+            }
+        }
+        unreachable!("last attempt returns its error")
+    }
+
     pub fn new(url: &str, http: reqwest::Client, install_id: String) -> Self {
         Self { base: normalize_base_url(url), http, install_id, bearer: None, auth_required: Default::default() }
     }
@@ -164,9 +192,7 @@ impl ServerClient {
 
     /// `GET /v1/health`.
     pub async fn health(&self) -> Result<HealthResponse> {
-        let resp = self.get("/v1/health").timeout(HEALTH_TIMEOUT).send().await?;
-        let resp = Self::check(resp).await?;
-        let health: HealthResponse = resp.json().await.context("invalid /v1/health response")?;
+        let health: HealthResponse = Self::read_json_with_retry(self.get("/v1/health").timeout(HEALTH_TIMEOUT)).await.context("invalid /v1/health response")?;
         self.auth_required.store(health.server_auth_required, std::sync::atomic::Ordering::Relaxed);
         Ok(health)
     }
@@ -273,20 +299,9 @@ impl ServerClient {
         // A cold server first has to find the song (search + companion), which
         // can take longer than the client's normal 30 s; one retry covers a
         // dropped connection or a busy moment.
-        let send = || async {
-            let req = self.member_request(self.post("/v1/download")).await.json(&body).timeout(std::time::Duration::from_secs(90));
-            Self::check(req.send().await?).await
-        };
-        let resp = match send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::info!("download lookup failed, retrying once: {e:#}");
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                send().await?
-            }
-        };
+        let req = self.member_request(self.post("/v1/download")).await.json(&body).timeout(Duration::from_secs(90));
+        let v: serde_json::Value = Self::read_json_with_retry(req).await?;
         let value: Option<(ProviderId, String)> = {
-            let v: serde_json::Value = resp.json().await?;
             if v.is_null() { None } else { Some((serde_json::from_value(v["provider"].clone())?, v["url"].as_str().context("missing download URL")?.into())) }
         };
         Ok(value.map(|(p,u)| (p, if u.starts_with("/v1/download/") { self.url(&u) } else { u })))
@@ -322,9 +337,49 @@ impl ServerClient {
 
     /// `POST /v1/import/spotify` (public Spotify / Deezer / YouTube playlist links).
     pub async fn import(&self, url: &str) -> Result<ImportResponse> {
-        let body = ImportRequest { url: url.to_string() };
-        let resp = Self::check(self.member_request(self.post("/v1/import/spotify")).await.json(&body).send().await?).await?;
-        Ok(resp.json().await?)
+        self.import_with_progress(url, None).await
+    }
+
+    pub async fn import_with_progress(&self, url: &str, progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>) -> Result<ImportResponse> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            #[serde(flatten)]
+            list: ImportResponse,
+            #[serde(default)]
+            next_offset: Option<usize>,
+        }
+        let max_tracks = self.health().await?.playlist_max_tracks.clamp(1, 50_000);
+        crate::library::set_playlist_track_limit(max_tracks);
+        let mut offset = 0usize;
+        let mut result: Option<ImportResponse> = None;
+        loop {
+            let request = self.member_request(self.post("/v1/import/spotify")).await
+                .timeout(Duration::from_secs(60)).json(&serde_json::json!({"url": url, "offset": offset}));
+            let value: serde_json::Value = Self::read_json_with_retry(request).await?;
+            let paginated = value.get("next_offset").is_some();
+            let page: Page = serde_json::from_value(value)?;
+            if !paginated && page.list.tracks.len() >= 100 {
+                return Err(anyhow!("Update the Glyph server and Companion, or import locally, to avoid an incomplete playlist"));
+            }
+            let count = page.list.tracks.len();
+            if count > max_tracks || result.as_ref().map_or(0, |r| r.tracks.len()) + count > max_tracks {
+                return Err(anyhow!("Playlists may contain at most {max_tracks} songs"));
+            }
+            match result.as_mut() {
+                Some(r) => r.tracks.extend(page.list.tracks),
+                None => result = Some(page.list),
+            }
+            if let Some(progress) = progress {
+                let done = result.as_ref().map_or(0, |r| r.tracks.len());
+                let total = if page.next_offset.is_none() { done } else { 0 };
+                let _ = progress.send(crate::ImportProgress { label: "IMPORT reading playlist".into(), done, total });
+            }
+            match page.next_offset {
+                Some(next) if count <= 100 && next == offset + 100 && next < max_tracks => offset = next,
+                Some(_) => return Err(anyhow!("invalid import pagination; no playlist was saved")),
+                None => return result.ok_or_else(|| anyhow!("empty import response")),
+            }
+        }
     }
 }
 
@@ -371,6 +426,25 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.len() >= 16);
     }
+
+    #[test]
+    fn concurrent_first_clients_share_one_installation_id() {
+        let _guard = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("GLYPH_DATA_DIR");
+        std::env::set_var("GLYPH_DATA_DIR", dir.path());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let ids = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8).map(|_| {
+                let barrier = barrier.clone();
+                scope.spawn(move || { barrier.wait(); install_id() })
+            }).collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>()
+        });
+        let stored = std::fs::read_to_string(dir.path().join("install_id")).unwrap();
+        match previous { Some(value) => std::env::set_var("GLYPH_DATA_DIR", value), None => std::env::remove_var("GLYPH_DATA_DIR") }
+        assert!(ids.iter().all(|id| id == &stored));
+    }
 }
 
 // ---------------------------------------------------------------- accounts & sync
@@ -408,6 +482,241 @@ impl ServerClient {
     /// `POST /v1/mcp/result`: the answer to one tool call.
     pub async fn mcp_result(&self, token: &str, r: &glyph_protocol::mcp::ResultRequest) -> Result<()> {
         Self::check(self.authed(reqwest::Method::POST, "/v1/mcp/result", token).json(r).send().await?).await?;
+        Ok(())
+    }
+
+    /// `POST /v1/jam`: starts a jam hosted by this account.
+    pub async fn jam_start(&self, token: &str) -> Result<glyph_protocol::jam::State> {
+        Self::json_of(self.authed(reqwest::Method::POST, "/v1/jam", token)).await
+    }
+
+    /// `GET /v1/jam/{code}?rev=`: the jam's state once it differs from `rev`
+    /// (long poll).
+    pub async fn jam_state(&self, token: &str, code: &str, rev: u64) -> Result<glyph_protocol::jam::State> {
+        let wait = Duration::from_millis(glyph_protocol::jam::WAIT_MS + 15_000);
+        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}?rev={rev}"), token).timeout(wait)).await
+    }
+
+    /// In (the state), or waiting for the host to let us in.
+    pub async fn jam_join(&self, token: &str, code: &str) -> Result<glyph_protocol::jam::JoinResponse> {
+        Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/join"), token)).await
+    }
+
+    /// `GET /v1/jam/{code}/time`: the server clock.
+    pub async fn jam_time(&self, token: &str, code: &str) -> Result<glyph_protocol::jam::TimeResponse> {
+        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/time"), token).timeout(Duration::from_secs(10))).await
+    }
+
+    /// The host lets someone in (or not).
+    pub async fn jam_admit(&self, token: &str, code: &str, handle: &str, allow: bool) -> Result<()> {
+        let body = glyph_protocol::jam::AdmitRequest { handle: handle.to_string(), allow };
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/admit"), token).json(&body).send().await?).await?;
+        Ok(())
+    }
+
+    /// Takes over a jam whose host is gone; answers the state.
+    pub async fn jam_claim(&self, token: &str, code: &str) -> Result<glyph_protocol::jam::State> {
+        Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/claim"), token)).await
+    }
+
+    /// Leaves the jam; the host ends it.
+    pub async fn jam_leave(&self, token: &str, code: &str) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/leave"), token).send().await?).await?;
+        Ok(())
+    }
+
+    pub async fn jam_op(&self, token: &str, code: &str, op: &glyph_protocol::jam::Op) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/op"), token).json(op).send().await?).await?;
+        Ok(())
+    }
+
+    /// `GET /v1/jam/{code}/ops`: the members' requests (host, long poll;
+    /// `now`: only what is there).
+    pub async fn jam_ops(&self, token: &str, code: &str, now: bool) -> Result<glyph_protocol::jam::OpsResponse> {
+        if now {
+            return Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops?wait=0"), token)).await;
+        }
+        let wait = Duration::from_millis(glyph_protocol::jam::OPS_WAIT_MS + 15_000);
+        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops"), token).timeout(wait)).await
+    }
+
+    /// `GET /v1/jam/{code}/live`: the server's pushes while the WebSocket
+    /// is open. Ends with [`LiveEvent::Closed`]; dropping the receiver
+    /// closes the socket. Servers without pushes answer `jam_push_off`.
+    pub async fn jam_live(&self, token: &str, code: &str) -> Result<tokio::sync::mpsc::Receiver<LiveEvent>> {
+        use futures::SinkExt;
+        use glyph_protocol::jam::{Live, LIVE_PING, LIVE_PING_MS};
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
+        let url = self.url(&format!("/v1/jam/{code}/live"));
+        let url = match url.strip_prefix("https://") {
+            Some(rest) => format!("wss://{rest}"),
+            None => format!("ws://{}", url.trim_start_matches("http://")),
+        };
+        let mut req = url.into_client_request()?;
+        let h = req.headers_mut();
+        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        h.insert(INSTALL_ID_HEADER, self.install_id.parse()?);
+        if let Some(b) = &self.bearer {
+            let mut v: reqwest::header::HeaderValue = format!("Bearer {b}").parse()?;
+            v.set_sensitive(true);
+            h.insert(crate::server_access::HEADER, v);
+        }
+        let ws = match tokio::time::timeout(Duration::from_secs(20), tokio_tungstenite::connect_async(req)).await {
+            Err(_) => return Err(anyhow!("jam live: connecting timed out")),
+            Ok(Ok((ws, _))) => ws,
+            // Refused before the upgrade: the server's answer, like any call.
+            Ok(Err(WsError::Http(resp))) => {
+                let body = resp.body().as_deref().unwrap_or_default();
+                let api: Option<ApiError> = serde_json::from_slice(body).ok();
+                return Err(ServerError {
+                    status: resp.status().as_u16(),
+                    code: api.as_ref().map(|a| a.code.clone()).unwrap_or_else(|| resp.status().to_string()),
+                    message: api.as_ref().map(|a| a.message.clone()).unwrap_or_default(),
+                    retry_after_s: api.and_then(|a| a.retry_after_s),
+                }
+                .into());
+            }
+            Ok(Err(e)) => return Err(anyhow!("jam live: {e}")),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move {
+            let (mut sink, mut stream) = ws.split();
+            let every = Duration::from_millis(LIVE_PING_MS);
+            let mut ping = tokio::time::interval(every);
+            ping.tick().await;
+            let mut heard = tokio::time::Instant::now();
+            let closed = loop {
+                tokio::select! {
+                    _ = tx.closed() => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        return;
+                    }
+                    _ = ping.tick() => {
+                        // No answer to the last keepalives: the line is dead.
+                        if heard.elapsed() > every * 2 + Duration::from_secs(10) {
+                            break None;
+                        }
+                        if sink.send(Message::Text(LIVE_PING.into())).await.is_err() {
+                            break None;
+                        }
+                    }
+                    m = stream.next() => {
+                        heard = tokio::time::Instant::now();
+                        match m {
+                            Some(Ok(Message::Text(t))) => {
+                                if let Ok(live) = serde_json::from_str::<Live>(t.as_str()) {
+                                    if tx.send(LiveEvent::Msg(live)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Close(frame))) => break frame.map(|f| u16::from(f.code)),
+                            Some(Ok(_)) => {}
+                            Some(Err(_)) | None => break None,
+                        }
+                    }
+                }
+            };
+            let _ = tx.send(LiveEvent::Closed(closed)).await;
+        });
+        Ok(rx)
+    }
+
+    pub async fn playback_live(&self, token: &str) -> Result<tokio::sync::mpsc::Receiver<()>> {
+        use futures::SinkExt;
+        use glyph_protocol::jam::{LIVE_PING, LIVE_PING_MS};
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
+        let url = self.url("/v1/devices/playback/live");
+        let url = match url.strip_prefix("https://") {
+            Some(rest) => format!("wss://{rest}"),
+            None => format!("ws://{}", url.trim_start_matches("http://")),
+        };
+        let mut req = url.into_client_request()?;
+        let h = req.headers_mut();
+        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+        h.insert(INSTALL_ID_HEADER, self.install_id.parse()?);
+        if let Some(b) = &self.bearer {
+            let mut v: reqwest::header::HeaderValue = format!("Bearer {b}").parse()?;
+            v.set_sensitive(true);
+            h.insert(crate::server_access::HEADER, v);
+        }
+        let ws = match tokio::time::timeout(Duration::from_secs(20), tokio_tungstenite::connect_async(req)).await {
+            Err(_) => return Err(anyhow!("playback live: connecting timed out")),
+            Ok(Ok((ws, _))) => ws,
+            // Refused before the upgrade: the server's answer, like any call.
+            Ok(Err(WsError::Http(resp))) => {
+                let body = resp.body().as_deref().unwrap_or_default();
+                let api: Option<ApiError> = serde_json::from_slice(body).ok();
+                return Err(ServerError {
+                    status: resp.status().as_u16(),
+                    code: api.as_ref().map(|a| a.code.clone()).unwrap_or_else(|| resp.status().to_string()),
+                    message: api.as_ref().map(|a| a.message.clone()).unwrap_or_default(),
+                    retry_after_s: api.and_then(|a| a.retry_after_s),
+                }
+                .into());
+            }
+            Ok(Err(e)) => return Err(anyhow!("playback live: {e}")),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move {
+            let (mut sink, mut stream) = ws.split();
+            let every = Duration::from_millis(LIVE_PING_MS);
+            let mut ping = tokio::time::interval(every);
+            ping.tick().await;
+            let mut heard = tokio::time::Instant::now();
+            let _closed = loop {
+                tokio::select! {
+                    _ = tx.closed() => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        return;
+                    }
+                    _ = ping.tick() => {
+                        // No answer to the last keepalives: the line is dead.
+                        if heard.elapsed() > every * 2 + Duration::from_secs(10) {
+                            break None;
+                        }
+                        if sink.send(Message::Text(LIVE_PING.into())).await.is_err() {
+                            break None;
+                        }
+                    }
+                    m = stream.next() => {
+                        heard = tokio::time::Instant::now();
+                        match m {
+                            Some(Ok(Message::Text(t))) => {
+                                if t.as_str() == r#"{"t":"wake"}"# {
+                                    if tx.send(()).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Close(frame))) => break frame.map(|f| u16::from(f.code)),
+                            Some(Ok(_)) => {}
+                            Some(Err(_)) | None => break None,
+                        }
+                    }
+                }
+            };
+            let _ = tx.send(()).await;
+        });
+        Ok(rx)
+    }
+
+    /// `POST /v1/jam/{code}/state`: publishes the host's state.
+    pub async fn jam_publish(&self, token: &str, state: &glyph_protocol::jam::State) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{}/state", state.code), token).json(state).send().await?).await?;
+        Ok(())
+    }
+
+    /// `POST /v1/jam/{code}/now`: only the position moved (a few hundred
+    /// bytes instead of the whole state). Older servers answer `not_found`.
+    pub async fn jam_now(&self, token: &str, code: &str, now: &glyph_protocol::jam::Now) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/now"), token).json(now).send().await?).await?;
+        Ok(())
+    }
+
+    pub async fn jam_kick(&self, token: &str, code: &str, handle: &str) -> Result<()> {
+        let body = glyph_protocol::jam::KickRequest { handle: handle.to_string() };
+        Self::check(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/kick"), token).json(&body).send().await?).await?;
         Ok(())
     }
 
@@ -494,6 +803,27 @@ impl ServerClient {
 
     pub async fn devices(&self, token: &str) -> Result<DevicesResponse> {
         Self::json_of(self.authed(reqwest::Method::GET, "/v1/devices", token)).await
+    }
+
+    pub async fn playback_poll(&self, token: &str, state: &glyph_protocol::playback::State) -> Result<glyph_protocol::playback::Poll> {
+        Self::json_of(self.authed(reqwest::Method::POST, "/v1/devices/playback/poll", token).json(state)).await
+    }
+
+    pub async fn playback_command(&self, token: &str, send: &glyph_protocol::playback::Send) -> Result<()> {
+        let response: serde_json::Value = Self::json_of(self.authed(reqwest::Method::POST, "/v1/devices/playback/command?confirm=1", token).json(send)).await?;
+        let id = response["id"].as_str().ok_or_else(|| anyhow!("Target did not confirm support for acknowledgements"))?.to_string();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        loop {
+            let receipt: glyph_protocol::playback::Receipt = Self::json_of(self.authed(reqwest::Method::POST, "/v1/devices/playback/receipt", token).json(&glyph_protocol::playback::Receipt { id: id.clone(), ..Default::default() })).await?;
+            if receipt.done { return receipt.error.map_or(Ok(()), |e| Err(anyhow!(e))); }
+            if tokio::time::Instant::now() >= deadline { return Err(anyhow!("Device did not confirm the command in time")); }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn playback_ack(&self, token: &str, receipt: &glyph_protocol::playback::Receipt) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, "/v1/devices/playback/ack", token).json(receipt).send().await?).await?;
+        Ok(())
     }
 
     pub async fn remove_device(&self, token: &str, id: &str) -> Result<()> {
@@ -586,9 +916,54 @@ pub fn server_error(e: &anyhow::Error) -> Option<(u16, &str)> {
     e.downcast_ref::<ServerError>().map(|s| (s.status, s.code.as_str()))
 }
 
+fn retry_delay(error: &anyhow::Error, attempt: u32) -> Option<Duration> {
+    if attempt >= 2 { return None; }
+    let fallback = 1 << attempt;
+    if let Some(error) = error.downcast_ref::<ServerError>() {
+        if error.status != 429 && !(500..=599).contains(&error.status) { return None; }
+        return Some(Duration::from_secs(error.retry_after_s.unwrap_or(if error.status == 429 { 5 * fallback } else { fallback }).clamp(1, 120)));
+    }
+    error.downcast_ref::<reqwest::Error>()
+        .filter(|e| e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode())
+        .map(|_| Duration::from_secs(fallback))
+}
+
 #[cfg(test)]
 mod account_tests {
     use super::*;
+
+    #[test]
+    fn metadata_retries_only_transient_errors_and_honours_retry_after() {
+        let error = |status, retry_after_s| anyhow::Error::new(ServerError { status, retry_after_s, code: String::new(), message: String::new() });
+        for status in [400, 401, 403, 404, 409] { assert_eq!(retry_delay(&error(status, None), 0), None); }
+        assert_eq!(retry_delay(&error(503, None), 0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(&error(503, None), 1), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(&error(429, Some(12)), 0), Some(Duration::from_secs(12)));
+        assert_eq!(retry_delay(&error(429, Some(u64::MAX)), 0), Some(Duration::from_secs(120)));
+        assert_eq!(retry_delay(&error(503, None), 2), None);
+    }
+
+    #[tokio::test]
+    async fn metadata_read_retries_a_cut_off_json_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            for response in [
+                "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: close\r\n\r\n{",
+                "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let request = reqwest::Client::new().post(format!("http://{addr}")).json(&serde_json::json!({"offset":100})).timeout(Duration::from_secs(3));
+        let result: serde_json::Value = ServerClient::read_json_with_retry(request).await.unwrap();
+        thread.join().unwrap();
+        assert_eq!(result["ok"], true);
+    }
 
     #[test]
     fn cover_cache_urls() {

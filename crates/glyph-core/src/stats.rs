@@ -61,6 +61,42 @@ pub struct MonthStats {
 }
 
 impl MonthStats {
+    pub(crate) fn since_guest_import(&self, baseline: &Self) -> Self {
+        let mut delta = self.clone();
+        delta.ms = delta.ms.saturating_sub(baseline.ms);
+        delta.plays = delta.plays.saturating_sub(baseline.plays);
+        delta.skips = delta.skips.saturating_sub(baseline.skips);
+        for (key, (_, stat)) in &mut delta.artists {
+            if let Some((_, old)) = baseline.artists.get(key) { stat.ms = stat.ms.saturating_sub(old.ms); stat.plays = stat.plays.saturating_sub(old.plays); }
+        }
+        for (key, stat) in &mut delta.tracks {
+            if let Some(old) = baseline.tracks.get(key) { stat.ms = stat.ms.saturating_sub(old.ms); stat.plays = stat.plays.saturating_sub(old.plays); }
+        }
+        for (dst, old) in [(&mut delta.hours, &baseline.hours), (&mut delta.weekdays, &baseline.weekdays), (&mut delta.days, &baseline.days)] {
+            for (i, d) in dst.iter_mut().enumerate() { *d = d.saturating_sub(old.get(i).copied().unwrap_or(0)); }
+        }
+        delta
+    }
+    pub(crate) fn merge_max(&mut self, other: &Self) {
+        self.ms = self.ms.max(other.ms);
+        self.plays = self.plays.max(other.plays);
+        self.skips = self.skips.max(other.skips);
+        for (k, (name, value)) in &other.artists {
+            let e = self.artists.entry(k.clone()).or_insert_with(|| (name.clone(), ArtistStat::default()));
+            e.1.ms = e.1.ms.max(value.ms); e.1.plays = e.1.plays.max(value.plays);
+        }
+        for (k, value) in &other.tracks {
+            let e = self.tracks.entry(k.clone()).or_insert_with(|| value.clone());
+            e.ms = e.ms.max(value.ms); e.plays = e.plays.max(value.plays);
+        }
+        for (dst, src) in [(&mut self.hours, &other.hours), (&mut self.weekdays, &other.weekdays), (&mut self.days, &other.days)] {
+            dst.resize(dst.len().max(src.len()), 0);
+            for (d, s) in dst.iter_mut().zip(src) { *d = (*d).max(*s); }
+        }
+        self.trim();
+    }
+
+    pub(crate) fn merge_guest(&mut self, other: &Self) { self.add(other); self.trim(); }
     fn trim(&mut self) {
         if self.artists.len() > MAX_ARTISTS {
             let mut v: Vec<_> = std::mem::take(&mut self.artists).into_iter().collect();
@@ -249,6 +285,27 @@ impl Stats {
         out
     }
 
+    /// Everything of one year (`"2026"`) from every device, added up.
+    pub fn year(&self, year: &str) -> MonthStats {
+        let mut out = MonthStats::default();
+        let months = self.months.iter().map(|(m, s)| (m.as_str(), s));
+        let remote = self.remote.iter().map(|(k, s)| (k.rsplit(':').next().unwrap_or(""), s));
+        for (m, s) in months.chain(remote) {
+            if m.starts_with(year) {
+                out.add(s);
+            }
+        }
+        out
+    }
+
+    /// Years with listening time, newest first.
+    pub fn years(&self) -> Vec<String> {
+        let mut ys: Vec<String> = self.by_month().into_iter().filter(|(_, ms)| *ms > 0).filter_map(|(m, _)| m.get(..4).map(str::to_string)).collect();
+        ys.dedup();
+        ys.reverse();
+        ys
+    }
+
     /// Listening time per month (oldest first), all devices.
     pub fn by_month(&self) -> Vec<(String, u64)> {
         let mut m: BTreeMap<String, u64> = BTreeMap::new();
@@ -318,6 +375,18 @@ mod tests {
         let mut m = [0u8; 7];
         m.copy_from_slice(month.as_bytes());
         When { month: m, hour, weekday: 2, day: 15 }
+    }
+
+    #[test]
+    fn year_adds_up_its_months() {
+        let mut s = Stats::default();
+        let t = test_track(ProviderId::Audius, "1", "Song", "Artist", None);
+        s.add_time(&t, 60_000, when("2025-12", 20));
+        s.add_time(&t, 30_000, when("2026-01", 8));
+        s.add_time(&t, 10_000, when("2026-03", 8));
+        assert_eq!(s.year("2026").ms, 40_000);
+        assert_eq!(s.year("2025").ms, 60_000);
+        assert_eq!(s.years(), vec!["2026".to_string(), "2025".to_string()]);
     }
 
     #[test]

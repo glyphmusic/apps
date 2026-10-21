@@ -46,7 +46,7 @@ pub(super) fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         })
         .collect();
     let dl_quality = select(app, "sel-dl-quality", quality_label(cur_dl), dl_options, cx);
-    rows(vec![
+    let mut items = vec![
         row(t("sp.audio.quality"), Some(t("sp.audio.quality.desc")), quality),
         row(t("sp.audio.dl_quality"), Some(t("sp.audio.dl_quality.desc")), dl_quality),
         row(t("sp.crossfade"), Some(t("sp.crossfade.desc")), {
@@ -105,6 +105,7 @@ pub(super) fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             Some(t("sp.normalize.desc")),
             switch("normalize", app.config.audio.normalize).on_click(cx.listener(|this, _, _, cx| this.toggle_normalize(cx))),
         ),
+        // MPD_ROW
         row_full(t("sp.mpd"), Some(t("sp.mpd.desc")), match (&app.mpd, app.config.mpd.enabled) {
             (Some(m), _) if m.error().is_some() => Some(format!("{} {}", t("sp.mcp.problem"), m.error().unwrap_or_default()).into()),
             (Some(m), _) if m.status().is_some() => Some(tf("sp.mpd.connected", &[("host", &m.address.label())])),
@@ -135,5 +136,13 @@ pub(super) fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 "channels",
             )
         }),
-    ])
+    ];
+    // MPD is a music daemon on a computer; phones have nothing to talk to.
+    if crate::ui::compact::TOUCH {
+        items.remove(MPD_ROW);
+    }
+    rows(items)
 }
+
+/// Index of the "Play on MPD" row in the General list.
+const MPD_ROW: usize = 6;

@@ -390,12 +390,9 @@ impl Transport for BrowserTransport {
             open(PageRequest::Open(url));
             return true;
         }
-        #[cfg(not(glyph_mobile))]
         if let Err(e) = webbrowser::open(&url) {
             tracing::error!("cannot open the browser: {e}");
         }
-        #[cfg(glyph_mobile)]
-        tracing::error!("no page opener set; the embed player {url} cannot be shown");
         true
     }
     fn name(&self) -> &'static str {

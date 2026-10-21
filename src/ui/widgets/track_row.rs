@@ -8,6 +8,11 @@ pub fn track_row(
     id_prefix: &'static str,
     cx: &mut Context<Glyph>,
 ) -> Stateful<Div> {
+    if crate::ui::compact::TOUCH {
+        let tr = list[i].clone();
+        let row = crate::ui::compact::song_row(app, list, i, id_prefix, None, cx);
+        return crate::ui::lists::with_menu(row, tr, None, cx);
+    }
     let t = list[i].clone();
     let playing = app.current.as_ref().map(track_key) == Some(track_key(&t));
     let liked = app.is_liked(&t);

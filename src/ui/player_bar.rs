@@ -28,7 +28,7 @@ thread_local! {
 
 /// Below this bar width the volume slider folds into its button (it would
 /// run into the seek bar) and opens above it on hover.
-const VOL_FOLD_W: f32 = 1010.0;
+const VOL_FOLD_W: f32 = 1072.0;
 
 /// One end of the A-B loop: a tick that grows under the mouse and can be
 /// dragged along the seek bar.
@@ -311,9 +311,9 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Repeat, cx)),
         )
         // Connect: where music plays (this computer or a network device);
-        // pink while it plays on another device.
+        // pink while it plays on another device or in a jam.
         .child(
-            toggle_button("devices", "monitor-speaker", 15.0, app.show_devices || app.remote_on(), app.remote_on().then(theme::pink)).on_click(cx.listener(|this, _, _, cx| {
+            toggle_button("devices", "monitor-speaker", 15.0, app.show_devices || app.remote_on() || app.jam_active(), (app.remote_on() || app.jam_active()).then(theme::pink)).on_click(cx.listener(|this, _, _, cx| {
                 mark_toggled("devices");
                 this.toggle_devices_panel(cx)
             })),
@@ -379,6 +379,12 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 div().flex().items_center().gap(px(6.0)).px(px(4.0)).child(mute).child(thin_bar("vol", 80.0, app.volume(), vol, vol_label, cx))
             }
         })
+        // Sleep timer: a click opens its menu (lengths, end of song, off).
+        .child(
+            toggle_button("sleep", "timer", 15.0, app.sleep.is_some(), None)
+                .on_mouse_down(gpui::MouseButton::Left, on_right_click(ControlMenu::Sleep, cx))
+                .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Sleep, cx)),
+        )
         .child(toggle_button("mini", "picture-in-picture-2", 15.0, app.mini_shown, None).on_click(cx.listener(|this, _, _, cx| {
             mark_toggled("mini");
             this.toggle_mini(cx)

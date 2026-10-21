@@ -22,6 +22,23 @@ thread_local! {
 pub(super) fn add_pl_row(open: bool, flip: bool, sub: Vec<AnyElement>, whole_list: bool, cx: &mut Context<Glyph>) -> AnyElement {
     // On a list it copies all of its songs, so it says so.
     let label = if whole_list { t("ctx.add_all_playlist") } else { t("ctx.add_playlist") };
+    // Phones (bottom sheet): no hover; a tap unfolds the playlists below.
+    if crate::ui::compact::TOUCH {
+        let row = ctx_item("ctx-add-pl".into(), "list-music", label, white(0.7), false, cx)
+            .child(icon(if open { "chevron-up" } else { "chevron-down" }, 16.0, white(0.4)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(m) = this.ctx_menu.as_mut() {
+                    m.playlists = !m.playlists;
+                    cx.notify();
+                }
+            }));
+        return div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .when(open, |d| d.child(div().pl(px(20.0)).flex().flex_col().children(sub)))
+            .into_any_element();
+    }
     ctx_item("ctx-add-pl".into(), "list-music", label, white(0.7), false, cx)
                 .relative()
                 .when(open, |d| d.bg(white(0.07)))
@@ -83,21 +100,22 @@ pub(crate) fn menu_row(id: ElementId, name: &str, label: SharedString, color: Hs
     let key = format!("menu-{id:?}");
     let k = hover_k(&key);
     let text = if danger { mix(white(0.88), gpui::hsla(0.0, 0.85, 0.75, 1.0), k) } else { white(0.88) };
+    let touch = crate::ui::compact::TOUCH;
     div()
         .id(id)
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .h(px(32.0))
+        .gap(px(if touch { 16.0 } else { 10.0 }))
+        .h(px(if touch { 50.0 } else { 32.0 }))
         .px(px(10.0))
         .rounded(px(6.0))
         .cursor_pointer()
-        .text_size(px(13.0))
+        .text_size(px(if touch { 15.0 } else { 13.0 }))
         .text_color(text)
         .relative()
         .child(hover_fill(key, if danger { gpui::hsla(0.0, 0.7, 0.5, 0.18) } else { white(0.07) }, 6.0))
-        .when(closes_sub, |d| {
+        .when(closes_sub && !touch, |d| {
             d.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if let Some(m) = this.ctx_menu.as_mut().filter(|m| *hovered && m.playlists) {
                     m.playlists = false;
@@ -105,7 +123,7 @@ pub(crate) fn menu_row(id: ElementId, name: &str, label: SharedString, color: Hs
                 }
             }))
         })
-        .child(icon(name, 15.0, color))
+        .child(icon(name, if touch { 20.0 } else { 15.0 }, color))
         .child(div().flex_1().truncate().child(label))
 }
 
@@ -129,7 +147,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     let mut body: Vec<AnyElement> = Vec::new();
     // Songs the menu acts on: one song, or a whole list.
     let songs: Vec<Track> = match &m.list {
-        Some(l) => app.list_tracks(l),
+        Some(l) => app.shown_tracks(l),
         None => vec![tr.clone()],
     };
     // "Add to playlist" flyout (opens on hover, to the right or left).
@@ -217,6 +235,15 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     .into_any_element(),
             );
         }
+        let n_radio = name.clone();
+        body.push(
+            ctx_item("actx-radio".into(), "radio", t("ctx.artist_radio"), white(0.7), true, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_ctx_close();
+                    this.artist_radio(&n_radio, cx)
+                }))
+                .into_any_element(),
+        );
         let following = app.is_following(&name);
         let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
         let first = songs.first().cloned();
@@ -311,6 +338,15 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     }))
                     .into_any_element(),
             );
+            let l_radio = l.clone();
+            body.push(
+                ctx_item("lctx-radio".into(), "radio", t("ctx.radio"), white(0.7), true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_ctx_close();
+                        this.list_radio(&l_radio, cx)
+                    }))
+                    .into_any_element(),
+            );
             let s4 = songs.clone();
             if songs.iter().all(|tr| app.is_downloaded(tr)) {
                 body.push(
@@ -398,6 +434,20 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
             }
             ListRef::User(id) => {
                 body.push(sep().into_any_element());
+                if app.signed_in().is_some() {
+                    for (mode, key) in [(0u8, "playlist.scope.local"), (1, "playlist.scope.account"), (2, "playlist.scope.offline")] {
+                        let scope_id = id.clone();
+                        body.push(ctx_item(format!("lctx-storage-{mode}").into(), "hard-drive", t(key), white(0.7), true, cx)
+                            .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.set_playlist_storage(&scope_id, mode, cx); }))
+                            .into_any_element());
+                    }
+                }
+                let mut versions: Vec<_> = app.library.playlist_versions.iter().filter(|(_, v)| &v.playlist.id == id && app.library.playlist(id) != Some(&v.playlist)).map(|(k, v)| (k.clone(), v.saved_at)).collect();
+                versions.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+                for (n, (revision, at)) in versions.into_iter().take(10).enumerate() {
+                    body.push(ctx_item(format!("lctx-version-{n}").into(), "history", tf("playlist.restore_version", &[("date", &at)]), white(0.7), true, cx)
+                        .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.restore_playlist_version(&revision, cx); })).into_any_element());
+                }
                 let (id1, id2) = (id.clone(), id.clone());
                 body.push(
                     ctx_item("lctx-rename".into(), "pencil", t("list.edit"), white(0.7), true, cx)
@@ -463,6 +513,21 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 }))
                 .into_any_element(),
         );
+        let t_radio = tr.clone();
+        for (key, preference) in [("recommend.more", Some(1i8)), ("recommend.less", Some(-1)), ("recommend.block", Some(-2)), ("recommend.reset", None)] {
+            let artist = tr.artist.clone();
+            body.push(ctx_item(key.into(), "sliders-horizontal", t(key), white(0.7), true, cx)
+                .on_click(cx.listener(move |s, _, _, cx| { s.begin_ctx_close(); s.recommendation_feedback(&artist, preference, cx); })).into_any_element());
+        }
+        body.push(
+            ctx_item("ctx-radio".into(), "radio", t("ctx.radio"), white(0.7), true, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_ctx_close();
+                    let title = t_radio.title.clone();
+                    this.start_radio_from(vec![t_radio.clone()], title, cx)
+                }))
+                .into_any_element(),
+        );
         let t_dl = tr.clone();
         if app.is_downloaded(&tr) {
             body.push(
@@ -513,7 +578,7 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                         this.begin_ctx_close();
                         match &recent_track {
                             Some(track) => this.remove_recent_track(track, cx),
-                            None => this.remove_from_list(&l, i, cx),
+                            None => this.remove_shown(&l, i, cx),
                         }
                     }))
                     .into_any_element(),
@@ -566,6 +631,9 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                 .into_any_element(),
         );
     }
+    if crate::ui::compact::TOUCH {
+        return Some(sheet(app, &m, body, alpha, live, window, cx));
+    }
     let measure = gpui::canvas(|b, _, _| MENU_BOUNDS.with(|m| m.set(Some(b))), |_, _, _, _| {}).absolute().inset_0();
     let menu = div()
         .id("ctx-menu")
@@ -599,4 +667,125 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         layer.child(anchored().position(m.pos).snap_to_window_with_margin(px(8.0)).child(menu))
     };
     Some(deferred(layer).with_priority(3).into_any_element())
+}
+
+thread_local! {
+    /// Phones: how far the sheet is pulled down, for the menu opened at the
+    /// given time (a new menu starts at 0).
+    static SHEET_DRAG: std::cell::Cell<(f32, Option<std::time::Instant>)> = const { std::cell::Cell::new((0.0, None)) };
+    /// Last pull event: a finger is on the sheet (flings end without a release).
+    static SHEET_HELD: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pull this far down to close the sheet.
+const SHEET_CLOSE: f32 = 90.0;
+
+/// Phones: the menu as a bottom sheet (song header, big rows), over a dimmed
+/// page; a tap outside or pulling it down closes it.
+fn sheet(app: &mut Glyph, m: &crate::app::CtxMenu, body: Vec<AnyElement>, alpha: f32, live: bool, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+    let vh = f32::from(window.viewport_size().height);
+    let safe = window.insets().safe_area;
+    // A single song: cover, title and artist on top, like Spotify.
+    let header = (m.artist.is_none() && m.list.is_none() && m.sidebar.is_none()).then(|| {
+        let tr = m.track.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .px(px(10.0))
+            .pb(px(10.0))
+            .mb(px(4.0))
+            .border_b_1()
+            .border_color(white(0.08))
+            .child(cover(app, &tr, 48.0, 6.0, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(px(2.0))
+                    .child(div().truncate().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(0.95)).child(tr.title.clone()))
+                    .child(div().truncate().text_size(px(13.0)).text_color(white(0.55)).child(tr.artist.clone())),
+            )
+    });
+    let h = crate::ui::widgets::handle_for("ctx-sheet");
+    let opened = app.ctx_opened;
+    let drag = SHEET_DRAG.with(|c| {
+        let (d, at) = c.get();
+        if at != Some(opened) {
+            c.set((0.0, Some(opened)));
+            0.0
+        } else {
+            d
+        }
+    });
+    // Let go short of closing: springs back.
+    let held = SHEET_HELD.with(|c| c.get()).is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(150));
+    if live && drag > 0.0 && !held {
+        let back = if drag < 0.5 { 0.0 } else { drag * 0.6 };
+        SHEET_DRAG.with(|c| c.set((back, Some(opened))));
+        window.request_animation_frame();
+    }
+    let h2 = h.clone();
+    let panel = div()
+        .id("ctx-sheet")
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(-60.0 * (1.0 - alpha) - drag))
+        .max_h(px(vh * 0.8))
+        .track_scroll(&h)
+        .overflow_y_scroll()
+        .occlude()
+        .rounded_t(px(16.0))
+        .bg(gpui::hsla(0.0, 0.0, 0.1, 1.0))
+        .px(px(8.0))
+        .pt(px(8.0))
+        .pb(safe.bottom + px(12.0))
+        .flex()
+        .flex_col()
+        .font_family(theme::FONT)
+        .opacity(alpha)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        // Pulled down from the top of its list: follows the finger, closes
+        // past `SHEET_CLOSE`.
+        .when(live, |d| {
+            d.on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
+                let dy = f32::from(e.delta.pixel_delta(px(16.0)).y);
+                let at_top = f32::from(h2.offset().y) >= -0.5;
+                let (d, at) = SHEET_DRAG.with(|c| c.get());
+                match e.touch_phase {
+                    gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                        SHEET_HELD.with(|c| c.set(None));
+                        if d > SHEET_CLOSE {
+                            this.close_ctx(cx);
+                        }
+                    }
+                    _ if d > 0.0 || (at_top && dy > 0.0) => {
+                        cx.stop_propagation();
+                        SHEET_HELD.with(|c| c.set(Some(std::time::Instant::now())));
+                        SHEET_DRAG.with(|c| c.set(((d + dy).max(0.0), at)));
+                        if d + dy > SHEET_CLOSE * 2.5 {
+                            this.close_ctx(cx);
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            }))
+        })
+        // Grab handle.
+        .child(div().flex().justify_center().pb(px(10.0)).child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
+        .children(header)
+        .children(body);
+    let layer = div().id("ctx-backdrop").absolute().inset_0().bg(black(0.5 * alpha));
+    let layer = if live {
+        layer
+            .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.close_ctx(cx)))
+            .child(panel)
+    } else {
+        layer.child(panel)
+    };
+    deferred(layer).with_priority(3).into_any_element()
 }

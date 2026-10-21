@@ -20,6 +20,7 @@ pub mod dedupe;
 pub mod downloads;
 pub mod eq;
 pub mod import;
+pub mod jam;
 pub mod library;
 pub mod lyrics;
 pub mod lyricsearch;
@@ -29,6 +30,7 @@ pub mod provider;
 pub mod providers;
 pub mod queue;
 pub mod resolver;
+pub mod search_ops;
 pub mod server_client;
 pub mod server_access;
 pub mod settings_share;
@@ -393,7 +395,8 @@ impl Backend {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let inner = self.cur();
         let q = query.trim().to_string();
-        let key = if page == 0 { q.to_lowercase() } else { format!("{} #p{page}", q.to_lowercase()) };
+        let route = if inner.config.providers.local_search || inner.server.is_none() { "local" } else { "server" };
+        let key = format!("{route}:{} #p{page}", q.to_lowercase());
         let cache = self.search_cache.clone();
         let hit = cache
             .lock()
@@ -437,7 +440,12 @@ impl Backend {
             let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<SearchEvent>();
             let fwd = tx.clone();
             self.rt.as_ref().expect("runtime alive").spawn(async move {
-                while let Some(ev) = out_rx.recv().await {
+                loop {
+                    let ev = tokio::select! {
+                        biased;
+                        _ = fwd.closed() => break,
+                        ev = out_rx.recv() => match ev { Some(ev) => ev, None => break },
+                    };
                     let _ = tap_tx.send(ev.clone());
                     if fwd.send(ev).is_err() {
                         break;
@@ -447,28 +455,32 @@ impl Backend {
             out_tx
         };
         self.rt.as_ref().expect("runtime alive").spawn(async move {
-            if let Some(server) = &inner.server {
-                match server.search_into(&q, page, &tx).await {
-                    Ok(true) => return,
-                    Ok(false) => {
-                        let _ = tx.send(SearchEvent::Done);
-                        return;
+            let work = async {
+                if let Some(server) = inner.server.as_ref().filter(|_| !inner.config.providers.local_search) {
+                    match server.search_into(&q, page, &tx).await {
+                        Ok(true) => return,
+                        Ok(false) => {
+                            let _ = tx.send(SearchEvent::Done);
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!("server search failed: {e}");
+                            let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });
+                            let _ = tx.send(SearchEvent::Done);
+                            return;
+                        },
                     }
-                    Err(e) => {
-                        tracing::warn!("server search failed: {e}");
-                        let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });
-                        let _ = tx.send(SearchEvent::Done);
-                        return;
-                    },
                 }
-            }
-            let mut events = inner.resolver.search_stream(&q, page);
-            while let Some(ev) = events.recv().await {
-                let done = ev == SearchEvent::Done;
-                if tx.send(ev).is_err() || done {
-                    break;
+                let mut events = inner.resolver.search_stream(&q, page);
+                while let Some(ev) = events.recv().await {
+                    let done = ev == SearchEvent::Done;
+                    if tx.send(ev).is_err() || done {
+                        break;
+                    }
                 }
-            }
+            };
+            // Dropping the UI search stream aborts pending server requests too.
+            tokio::select! { biased; _ = tx.closed() => {}, _ = work => {} }
         });
         futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (v, rx)) }).boxed()
     }
@@ -631,6 +643,31 @@ impl Backend {
         .await?
     }
 
+    /// Releases of `artists` that came out in the last `days` days, newest
+    /// first (Deezer catalog). Artists are asked one after another with a
+    /// short pause, so a long follow list stays under the catalog's rate limit.
+    pub async fn new_releases(&self, artists: Vec<String>, days: u32) -> anyhow::Result<Vec<providers::deezer::Release>> {
+        let inner = self.cur();
+        self.spawn(async move {
+            let d = match &inner.providers.deezer {
+                Some(d) => d.clone(),
+                None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
+            };
+            let (since, today) = (catalog::date_days_ago(days), catalog::date_days_ago(0));
+            let mut out: Vec<providers::deezer::Release> = Vec::new();
+            for name in artists {
+                if let Ok(list) = d.artist_releases(&name).await {
+                    out.extend(list.into_iter().filter(|r| r.released.as_deref().is_some_and(|day| day >= since.as_str() && day <= today.as_str())));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            out.sort_by(|a, b| b.released.cmp(&a.released));
+            out.dedup_by(|a, b| a.id == b.id);
+            Ok(out)
+        })
+        .await?
+    }
+
     /// The songs of one release.
     pub async fn release_tracks(&self, release: &providers::deezer::Release) -> anyhow::Result<Vec<Track>> {
         let (inner, release) = (self.cur(), release.clone());
@@ -770,6 +807,8 @@ impl Backend {
         self.downloads.tracks()
     }
 
+    pub fn downloaded_bytes(&self, tracks: &[Track]) -> u64 { self.downloads.saved_bytes(tracks) }
+
     pub fn remove_download(&self, track: &Track) -> bool {
         self.downloads.remove(track)
     }
@@ -835,6 +874,19 @@ impl Backend {
     pub async fn artist_info(&self, name: &str, lang: &str) -> anyhow::Result<Option<artist::ArtistInfo>> {
         let (inner, name, lang) = (self.cur(), name.to_string(), lang.to_string());
         self.spawn(async move { artist::lookup_via(&inner.http, &name, &lang, inner.server.as_ref()).await }).await?
+    }
+
+    pub async fn artist_photo(&self, name: &str, lang: &str) -> anyhow::Result<Option<PathBuf>> {
+        let (inner, name, lang) = (self.cur(), name.to_string(), lang.to_string());
+        self.spawn(async move {
+            static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+            let _permit = SLOTS.acquire().await?;
+            let catalog = artist::portrait(&inner.http, &name).await;
+            if matches!(&catalog, Ok(Some(_))) { return catalog; }
+            let fallback = artist::lookup_via(&inner.http, &name, &lang, inner.server.as_ref()).await?.and_then(|i| i.image);
+            if fallback.is_some() { return Ok(fallback); }
+            catalog
+        }).await?
     }
 
     /// Whether radio can actually deliver something. With a server the single
@@ -927,7 +979,15 @@ impl Backend {
     ) -> anyhow::Result<ImportResult> {
         let inner = self.cur();
         self.spawn(async move {
-            let (list, origin) = import::fetch_list(&input, &inner.providers, inner.server.as_ref(), &inner.http, &inner.config.keys).await?;
+            if let Some(server) = &inner.server {
+                if let Ok(health) = server.health().await {
+                    library::set_playlist_track_limit(health.playlist_max_tracks);
+                }
+            }
+            let (list, origin) = import::fetch_list_with_progress(&input, &inner.providers, inner.server.as_ref(), &inner.http, &inner.config.keys, Some(&progress)).await?;
+            if list.tracks.len() > library::playlist_track_limit() {
+                anyhow::bail!("Playlists may contain at most {} songs", library::playlist_track_limit());
+            }
             let worker = inner.clone();
             let result = import::match_all(list, origin, progress, move |t| {
                 let inner = worker.clone();
@@ -986,6 +1046,11 @@ impl Backend {
         use std::sync::atomic::Ordering;
         let inner = self.cur();
         self.spawn(async move {
+            if let Some(server) = &inner.server {
+                if let Ok(health) = server.health().await {
+                    library::set_playlist_track_limit(health.playlist_max_tracks);
+                }
+            }
             let total = collections.len();
             let stopped = || cancel.load(Ordering::Relaxed);
             for (index, c) in collections.into_iter().enumerate() {
@@ -1005,6 +1070,10 @@ impl Backend {
                             Fetched::Named(_, tracks) | Fetched::Tracks(tracks) => (c.name.clone(), tracks),
                             _ => unreachable!(),
                         };
+                        if c.kind != Kind::Liked && tracks.len() > library::playlist_track_limit() {
+                            let _ = events.send(Ev::Failed { collection: c, error: format!("Playlists may contain at most {} songs", library::playlist_track_limit()) });
+                            continue;
+                        }
                         let (ptx, mut prx) = flume_like::channel::<ImportProgress>();
                         let fwd_events = events.clone();
                         let fwd = tokio::spawn(async move {

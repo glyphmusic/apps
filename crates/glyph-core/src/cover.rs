@@ -85,7 +85,9 @@ impl CoverCache {
     }
 
     fn path_for(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{key}.jpg"))
+        // Older decoders re-encoded incomplete JPEGs as valid, half-grey files.
+        // Those cannot be recognized by an EOF check: refetch under a new key.
+        self.dir.join(format!("validated-v2-{key}.jpg"))
     }
 
     /// Cached cover for the song, fetching it through the fallback chain if needed.
@@ -93,8 +95,14 @@ impl CoverCache {
         let key = paths::hash_hex(&track_key(track));
         let path = self.path_for(&key);
         if path.is_file() {
-            touch(&path);
-            return Ok(Some(path));
+            // Covers cached before cut-off downloads were rejected may be
+            // half grey: fetch those again.
+            if cached_truncated(&path) {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                touch(&path);
+                return Ok(Some(path));
+            }
         }
         if self.misses.lock().unwrap().contains(&key) {
             return Ok(None);
@@ -229,22 +237,10 @@ impl CoverCache {
         } else {
             url
         };
-        let request = self.http.get(url);
-        let request = self.server.as_ref().map(|s| s.authorize_url(self.http.get(url),url)).unwrap_or(request);
-        let resp = request.timeout(Duration::from_secs(10)).send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("HTTP {}", resp.status()));
-        }
-        if resp.content_length().map(|l| l as usize > MAX_DOWNLOAD).unwrap_or(false) {
-            return Err(anyhow!("cover too large"));
-        }
-        let bytes = resp.bytes().await?;
-        if bytes.len() > MAX_DOWNLOAD {
-            return Err(anyhow!("cover too large"));
-        }
+        let img = download_image(&self.http, url, self.server.as_ref()).await?;
         let dest = dest.to_path_buf();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let jpeg = normalize_image(&bytes)?;
+            let jpeg = encode_cover(img)?;
             paths::write_atomic(&dest, &jpeg)
         })
         .await??;
@@ -254,13 +250,126 @@ impl CoverCache {
 
 /// Decodes any supported image and returns a JPEG with the longest edge <= [`COVER_PX`].
 pub fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>> {
+    // The JPEG decoder fills a cut-off file with grey instead of failing;
+    // such a cover would be cached half grey for good.
+    if is_truncated_jpeg(bytes) {
+        return Err(anyhow!("truncated JPEG"));
+    }
+    encode_cover(decode_image(bytes)?)
+}
+
+fn encode_cover(img: image::DynamicImage) -> Result<Vec<u8>> {
     use image::codecs::jpeg::JpegEncoder;
-    let img = image::load_from_memory(bytes)?;
     let img = if img.width().max(img.height()) > COVER_PX { img.thumbnail(COVER_PX, COVER_PX) } else { img };
     let rgb = img.to_rgb8();
     let mut out = Vec::new();
     JpegEncoder::new_with_quality(&mut out, 85).encode_image(&rgb)?;
     Ok(out)
+}
+
+/// The default image decoder tolerates broken JPEG entropy and paints grey.
+/// libjpeg warnings are errors here: tolerant decoders silently fill missing rows.
+pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage> {
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        if is_truncated_jpeg(bytes) { return Err(anyhow!("truncated JPEG")); }
+        return decode_jpeg(bytes);
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    Ok(reader.decode()?)
+}
+
+std::thread_local! { static JPEG_WARNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+extern "C-unwind" fn jpeg_fatal(_: &mut mozjpeg_sys::jpeg_common_struct) {
+    // Matches mozjpeg's unwinding error manager; caught at the decode boundary.
+    std::panic::resume_unwind(Box::new("invalid JPEG"));
+}
+
+extern "C-unwind" fn jpeg_message(_: &mut mozjpeg_sys::jpeg_common_struct, level: std::ffi::c_int) {
+    if level < 0 { JPEG_WARNING.with(|warning| warning.set(true)); }
+}
+
+fn decode_jpeg(bytes: &[u8]) -> Result<image::DynamicImage> {
+    JPEG_WARNING.with(|warning| warning.set(false));
+    std::panic::catch_unwind(|| -> Result<image::DynamicImage> {
+        // SAFETY: jpeg_error_mgr contains nullable function pointers, pointers
+        // and integers. Zero initialization is valid; jpeg_std_error then
+        // installs its defaults before the owned manager reaches the decoder.
+        let mut errors = unsafe {
+            let mut errors = std::mem::zeroed();
+            mozjpeg_sys::jpeg_std_error(&mut errors);
+            errors
+        };
+        errors.error_exit = Some(jpeg_fatal);
+        errors.emit_message = Some(jpeg_message);
+        let decoder = mozjpeg::Decompress::with_err(errors).from_mem(bytes)?;
+        let (width, height) = (decoder.width(), decoder.height());
+        if width > 8192 || height > 8192 || width.checked_mul(height).and_then(|n| n.checked_mul(3)).is_none_or(|n| n > 64 * 1024 * 1024) {
+            return Err(anyhow!("image too large"));
+        }
+        let mut decoder = decoder.rgb()?;
+        let pixels = decoder.read_scanlines::<u8>()?;
+        decoder.finish()?;
+        if JPEG_WARNING.with(|warning| warning.get()) { return Err(anyhow!("incomplete JPEG scan")); }
+        let rgb = image::RgbImage::from_raw(width as u32, height as u32, pixels).ok_or_else(|| anyhow!("invalid JPEG pixels"))?;
+        Ok(image::DynamicImage::ImageRgb8(rgb))
+    }).map_err(|_| anyhow!("invalid JPEG"))?
+}
+
+/// Fetch completely and validate before publishing; retry cut-off transfers.
+pub(crate) async fn download_image(http: &reqwest::Client, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<image::DynamicImage> {
+    use futures::StreamExt;
+    let mut last = None;
+    for attempt in 0..2 {
+        if attempt > 0 { tokio::time::sleep(Duration::from_millis(300)).await; }
+        let result: Result<image::DynamicImage> = async {
+            let request = server.map(|s| s.authorize_url(http.get(url), url)).unwrap_or_else(|| http.get(url));
+            let response = request.timeout(Duration::from_secs(15)).send().await?.error_for_status()?;
+            if response.status() != reqwest::StatusCode::OK { return Err(anyhow!("incomplete image response")); }
+            let expected = response.content_length();
+            if expected.is_some_and(|n| n > MAX_DOWNLOAD as u64) { return Err(anyhow!("image too large")); }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if bytes.len() + chunk.len() > MAX_DOWNLOAD { return Err(anyhow!("image too large")); }
+                bytes.extend_from_slice(&chunk);
+            }
+            if expected.is_some_and(|n| n != bytes.len() as u64) { return Err(anyhow!("image download cut off")); }
+            tokio::task::spawn_blocking(move || decode_image(&bytes)).await?
+        }.await;
+        match result { Ok(image) => return Ok(image), Err(error) => last = Some(error) }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("image unavailable")))
+}
+
+/// A JPEG without its end-of-image marker (FF D9) near the end.
+fn is_truncated_jpeg(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return false;
+    }
+    // Some encoders leave a few bytes of padding after the marker.
+    let tail = &bytes[bytes.len().saturating_sub(64)..];
+    !tail.windows(2).any(|w| w == [0xFF, 0xD9])
+}
+
+fn cached_truncated(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return true };
+    let mut head = [0u8; 2];
+    if f.read_exact(&mut head).is_err() || head != [0xFF, 0xD8] {
+        return true;
+    }
+    let mut tail = Vec::new();
+    if f.seek(SeekFrom::End(-64)).is_err() || f.read_to_end(&mut tail).is_err() {
+        return true;
+    }
+    !tail.windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
 fn touch(path: &Path) {
@@ -301,6 +410,73 @@ pub fn prune(dir: &Path, max_bytes: u64) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncated_jpeg_is_rejected() {
+        let img = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 30, 30]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        assert!(!is_truncated_jpeg(&jpeg));
+        assert!(normalize_image(&jpeg).is_ok());
+        let cut = &jpeg[..jpeg.len() * 6 / 10];
+        assert!(is_truncated_jpeg(cut));
+        assert!(normalize_image(cut).is_err());
+        // Not a JPEG: left to the decoder.
+        assert!(!is_truncated_jpeg(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[test]
+    fn truncated_jpeg_with_a_forged_end_marker_is_rejected() {
+        let img = image::RgbImage::from_fn(256, 256, |x, y| image::Rgb([(x % 255) as u8, (y % 255) as u8, ((x * y) % 255) as u8]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        for length in [jpeg.len() * 2 / 3, jpeg.len() * 9 / 10, jpeg.len() - 24] {
+            let mut broken = jpeg[..length].to_vec();
+            broken.extend_from_slice(&[0xff, 0xd9]);
+            assert!(!is_truncated_jpeg(&broken));
+            assert!(normalize_image(&broken).is_err(), "accepted a {length}-byte partial scan");
+        }
+        assert!(normalize_image(&[0xff, 0xd8, 0xff, 0xd9]).is_err());
+    }
+
+    #[test]
+    fn complete_progressive_photos_and_real_grey_backgrounds_are_accepted() {
+        let img = image::RgbImage::from_fn(64, 64, |_, y| if y > 32 { image::Rgb([128, 128, 128]) } else { image::Rgb([20, 180, 50]) });
+        let mut baseline = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut baseline).encode_image(&img).unwrap();
+        assert!(normalize_image(&baseline).is_ok());
+        let mut encoder = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        encoder.set_size(64, 64);
+        encoder.set_progressive_mode();
+        let mut encoder = encoder.start_compress(Vec::new()).unwrap();
+        encoder.write_scanlines(img.as_raw()).unwrap();
+        let progressive = encoder.finish().unwrap();
+        assert!(progressive.windows(2).any(|b| b == [0xff, 0xc2]));
+        assert!(normalize_image(&progressive).is_ok());
+    }
+
+    #[tokio::test]
+    async fn retries_incomplete_image_before_accepting_the_complete_one() {
+        use std::io::{Read, Write};
+        let image = image::RgbImage::from_pixel(16, 16, image::Rgb([220, 30, 20]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&image).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            for complete in [false, true] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                let body = if complete { &jpeg[..] } else { &jpeg[..jpeg.len() / 2] };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let result = download_image(&reqwest::Client::new(), &format!("http://{addr}"), None).await.unwrap();
+        thread.join().unwrap();
+        assert_eq!((result.width(), result.height()), (16, 16));
+    }
 
     #[test]
     fn normalizes_to_max_edge_jpeg() {

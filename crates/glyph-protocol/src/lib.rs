@@ -153,6 +153,8 @@ impl PlaybackSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    #[serde(default = "default_playlist_max_tracks")]
+    pub playlist_max_tracks: usize,
     /// This server requires a signed-in account for API/media access.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub account_required: bool,
@@ -170,6 +172,8 @@ pub struct HealthResponse {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub covers: bool,
 }
+
+fn default_playlist_max_tracks() -> usize { 5_000 }
 
 // ---------------------------------------------------------------- /v1/search
 
@@ -888,3 +892,503 @@ pub mod mcp {
         }
     }
 }
+
+// ---------------------------------------------------------------- /v1/jam
+
+/// Jam: listening together. A signed-in host starts a jam on the server and
+/// shares its code; friends (signed in too) join with it. The host's app is
+/// the only one that plays the queue: it publishes what plays, where it is
+/// and what comes next (`POST /v1/jam/{code}/state`) and picks up what the
+/// others ask for (`GET /v1/jam/{code}/ops`). Everyone else follows the
+/// published state (`GET /v1/jam/{code}?rev=`) and plays the same song at
+/// the same moment on their own device (or listens at the host's).
+pub mod jam {
+    use crate::Track;
+    use serde::{Deserialize, Serialize};
+
+    /// A jam ends by itself after this long (ms).
+    pub const MAX_AGE_MS: u64 = 12 * 60 * 60 * 1000;
+    /// People in one jam, host included.
+    pub const MAX_MEMBERS: usize = 20;
+    /// Songs in a jam's queue.
+    pub const MAX_QUEUE: usize = 200;
+    /// Songs of the host's own list published after the queue.
+    pub const MAX_AFTER: usize = 50;
+    /// Entries of the activity feed.
+    pub const MAX_FEED: usize = 30;
+    /// How long `GET /v1/jam/{code}` waits for a newer state (ms).
+    pub const WAIT_MS: u64 = 15_000;
+    /// How long the host's `GET /v1/jam/{code}/ops` waits for requests (ms).
+    pub const OPS_WAIT_MS: u64 = 15_000;
+    /// The host counts as offline after this long without a sign of life (ms).
+    pub const HOST_TIMEOUT_MS: u64 = 45_000;
+    /// A guest may take over a jam whose host is offline this long (ms).
+    pub const HANDOVER_MS: u64 = 120_000;
+    /// Letters of a code (no 0/O, 1/I).
+    pub const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    pub const CODE_LEN: usize = 6;
+    /// Prefix of a shared jam code (`glyph:jam:K7P2QX`).
+    pub const CODE_PREFIX: &str = "glyph:jam:";
+    /// Link that opens the app on a jam (`glyph://jam/K7P2QX`).
+    pub const APP_LINK_PREFIX: &str = "glyph://jam/";
+
+    /// The jam code in `s`: a bare code ("k7p2qx", "K7P-2QX"), a shared
+    /// `glyph:jam:` code or a `…/jam/<code>` link.
+    pub fn normalize_code(s: &str) -> Option<String> {
+        let s = s.trim();
+        let raw = if let Some(rest) = s.strip_prefix(CODE_PREFIX) {
+            rest
+        } else if let Some(i) = s.find("/jam/") {
+            s[i + 5..].split(['?', '#', '/']).next().unwrap_or("")
+        } else {
+            s
+        };
+        let code: String = raw.chars().filter(|c| !matches!(c, '-' | ' ')).map(|c| c.to_ascii_uppercase()).collect();
+        (code.len() == CODE_LEN && code.bytes().all(|b| CODE_ALPHABET.contains(&b))).then_some(code)
+    }
+
+    /// Text to share for a jam.
+    pub fn share_text(code: &str) -> String {
+        format!("{CODE_PREFIX}{code}")
+    }
+
+    /// `s` is meant as a jam (code, app link or `…/jam/<code>` web link),
+    /// not as a search.
+    pub fn is_jam_text(s: &str) -> bool {
+        let s = s.trim();
+        let marked = s.starts_with(CODE_PREFIX) || s.starts_with(APP_LINK_PREFIX) || ((s.starts_with("https://") || s.starts_with("http://")) && s.contains("/jam/"));
+        marked && normalize_code(s).is_some()
+    }
+
+    /// What guests may do besides listening. The host changes it any time.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Perms {
+        /// Add songs to the queue (and vote).
+        #[serde(default = "yes")]
+        pub add: bool,
+        /// Play a picked song right away instead of queueing it.
+        #[serde(default)]
+        pub play_now: bool,
+        /// Skip to the next / previous song.
+        #[serde(default)]
+        pub skip: bool,
+        /// Jump within the song.
+        #[serde(default)]
+        pub seek: bool,
+        /// Play and pause.
+        #[serde(default)]
+        pub pause: bool,
+    }
+
+    fn yes() -> bool {
+        true
+    }
+
+    impl Default for Perms {
+        fn default() -> Self {
+            Self { add: true, play_now: false, skip: false, seek: false, pause: false }
+        }
+    }
+
+    impl Perms {
+        /// Guests may send this playback request.
+        pub fn allows(&self, c: &Control) -> bool {
+            match c {
+                Control::Play | Control::Pause => self.pause,
+                Control::Next | Control::Previous => self.skip,
+                Control::Seek { .. } => self.seek,
+            }
+        }
+
+        /// Guests control playback in any way.
+        pub fn any_control(&self) -> bool {
+            self.pause || self.skip || self.seek || self.play_now
+        }
+
+        /// The host runs this request of a guest. `Join`, `Leave` and
+        /// `Knock` come from the server; removing (own songs) and reactions
+        /// are always fine.
+        pub fn allows_op(&self, op: &Op) -> bool {
+            match op {
+                Op::Join | Op::Leave | Op::Knock | Op::Remove { .. } | Op::React { .. } => true,
+                Op::Add { .. } | Op::Vote { .. } => self.add,
+                Op::PlayNow { .. } => self.play_now,
+                Op::Control { control } => self.allows(control),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Member {
+        /// @handle without the `@`.
+        pub handle: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub host: bool,
+        /// sha256 of their profile picture (`/v1/profiles/{handle}/images/{sha}`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub avatar: Option<String>,
+    }
+
+    /// One song in the jam's queue.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Item {
+        /// Stable while the song is queued (the host's song key).
+        pub id: String,
+        pub track: Track,
+        /// Handle of who added it.
+        pub by: String,
+        /// Handles that voted for it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub votes: Vec<String>,
+    }
+
+    /// What plays at the host.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Now {
+        pub track: Track,
+        pub position_ms: u64,
+        pub playing: bool,
+        /// Server time (ms) `position_ms` was true at: the host's estimate
+        /// of the server clock; the server fills it in when it is missing
+        /// or far off.
+        #[serde(default)]
+        pub at_ms: u64,
+        /// The song as the host's app found it (the source it plays from).
+        /// Guests try this one first, so everyone hears the same version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolved: Option<Track>,
+    }
+
+    /// A reaction to the song playing.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Reaction {
+        Heart,
+        Fire,
+        Sparkles,
+        ThumbsUp,
+    }
+
+    impl Reaction {
+        pub const ALL: [Reaction; 4] = [Reaction::Heart, Reaction::Fire, Reaction::Sparkles, Reaction::ThumbsUp];
+
+        /// Lucide icon name.
+        pub fn icon(self) -> &'static str {
+            match self {
+                Reaction::Heart => "heart",
+                Reaction::Fire => "flame",
+                Reaction::Sparkles => "sparkles",
+                Reaction::ThumbsUp => "thumbs-up",
+            }
+        }
+    }
+
+    /// Something that happened in the jam (activity feed).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Event {
+        /// Server time (ms).
+        pub at_ms: u64,
+        /// Handle it is about.
+        pub who: String,
+        pub what: What,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum What {
+        Joined,
+        Left,
+        Added { title: String },
+        Played { title: String },
+        React { reaction: Reaction },
+        /// Took over as host.
+        Host,
+    }
+
+    /// Adds `ev` to a feed, keeping the newest [`MAX_FEED`].
+    pub fn push_feed(feed: &mut Vec<Event>, ev: Event) {
+        feed.push(ev);
+        if feed.len() > MAX_FEED {
+            let cut = feed.len() - MAX_FEED;
+            feed.drain(..cut);
+        }
+    }
+
+    /// The whole jam as the host published it.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct State {
+        pub code: String,
+        /// Raised by the server on every publish.
+        #[serde(default)]
+        pub rev: u64,
+        /// Handle of the host.
+        pub host: String,
+        #[serde(default)]
+        pub members: Vec<Member>,
+        /// What guests may do.
+        #[serde(default)]
+        pub perms: Perms,
+        /// New members wait until the host lets them in.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub approve_joins: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub now: Option<Now>,
+        #[serde(default)]
+        pub queue: Vec<Item>,
+        /// What the host plays after the queue (its own list), so every
+        /// member's queue shows the same and can load ahead.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after: Vec<Track>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub feed: Vec<Event>,
+        /// The host's app gave a sign of life within [`HOST_TIMEOUT_MS`];
+        /// the server sets it.
+        #[serde(default = "yes")]
+        pub host_online: bool,
+        /// Server clock (ms) when this answer left; the server sets it.
+        #[serde(default)]
+        pub server_ms: u64,
+        /// Web link to invite people (`https://glyph.my/jam/<code>`); the
+        /// server sets it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub link: Option<String>,
+    }
+
+    impl Default for State {
+        fn default() -> Self {
+            Self {
+                code: String::new(),
+                rev: 0,
+                host: String::new(),
+                members: Vec::new(),
+                perms: Perms::default(),
+                approve_joins: false,
+                now: None,
+                queue: Vec::new(),
+                after: Vec::new(),
+                feed: Vec::new(),
+                host_online: true,
+                server_ms: 0,
+                link: None,
+            }
+        }
+    }
+
+    impl State {
+        /// Position of `now` at server time `server_now` (ms).
+        pub fn position_at(&self, server_now: u64) -> Option<u64> {
+            let n = self.now.as_ref()?;
+            let moved = if n.playing { server_now.saturating_sub(n.at_ms) } else { 0 };
+            let pos = n.position_ms + moved;
+            Some(n.track.duration_ms.map_or(pos, |d| pos.min(d)))
+        }
+    }
+
+    /// `POST /v1/jam/{code}/join`: in, or waiting for the host to let you in.
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct JoinResponse {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub state: Option<State>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub waiting: bool,
+    }
+
+    /// Playback requests of guests (only what [`Perms`] allows).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "action", rename_all = "snake_case")]
+    pub enum Control {
+        Play,
+        Pause,
+        Next,
+        Previous,
+        Seek { ms: u64 },
+    }
+
+    /// What a member asks the host for (`POST /v1/jam/{code}/op`). `Join`,
+    /// `Leave` and `Knock` are queued by the server itself.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    pub enum Op {
+        Join,
+        Leave,
+        /// Someone wants in (the host lets them in with `/admit`).
+        Knock,
+        Add { track: Track },
+        /// Play this song right now ([`Perms::play_now`]).
+        PlayNow { track: Track },
+        /// Vote for (or with `up: false` take back the vote on) a queued song.
+        Vote { item: String, up: bool },
+        /// Take a song out again (own songs; the host decides).
+        Remove { item: String },
+        Control { control: Control },
+        React { reaction: Reaction },
+    }
+
+    /// One request as the host gets it.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct OpFrom {
+        /// Handle of the member.
+        pub from: String,
+        pub op: Op,
+        /// Their profile picture (set by the server on `Join` and `Knock`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub avatar: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct OpsResponse {
+        #[serde(default)]
+        pub ops: Vec<OpFrom>,
+    }
+
+    /// `POST /v1/jam/{code}/kick`: the host removes someone.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct KickRequest {
+        pub handle: String,
+    }
+
+    /// `POST /v1/jam/{code}/admit`: the host lets someone in (or not).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct AdmitRequest {
+        pub handle: String,
+        pub allow: bool,
+    }
+
+    /// `GET /v1/jam/{code}/time`: the server clock, for clock sync.
+    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+    pub struct TimeResponse {
+        pub server_ms: u64,
+    }
+
+    /// `GET /v1/jam/{code}/live` (WebSocket, optional): the server pushes
+    /// changes instead of members asking for them. Without it (older or
+    /// self-hosted servers, or the free push budget used up) the apps long
+    /// poll `GET /v1/jam/{code}` and `/ops` as before.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    pub enum Live {
+        /// The host published (members).
+        State { state: Box<State> },
+        /// Only the position moved (`POST /v1/jam/{code}/now`): the rest
+        /// of the state stays.
+        Now { rev: u64, now: Now, server_ms: u64 },
+        /// Requests wait for the host: `GET /v1/jam/{code}/ops?wait=0`.
+        Ops,
+        /// The host's app connected or went away.
+        Host { online: bool },
+        /// No more pushes for now: long poll instead.
+        Fallback,
+    }
+
+    /// Keepalive the apps send; the server answers [`LIVE_PONG`].
+    pub const LIVE_PING: &str = "ping";
+    pub const LIVE_PONG: &str = "pong";
+    /// How often the apps send [`LIVE_PING`] (ms).
+    pub const LIVE_PING_MS: u64 = 50_000;
+    /// A host on push still asks for requests this often (ms): its sign of
+    /// life, and requests whose push got lost.
+    pub const LIVE_HOST_EVERY_MS: u64 = 30_000;
+    /// Close code: connect again (someone took over as host).
+    pub const LIVE_CLOSE_AGAIN: u16 = 4000;
+    /// Close code: the jam ended.
+    pub const LIVE_CLOSE_ENDED: u16 = 4001;
+    /// Close code: removed from the jam.
+    pub const LIVE_CLOSE_REMOVED: u16 = 4003;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn track() -> Track {
+            Track {
+                id: "1".into(),
+                source: crate::ProviderId::Audius,
+                title: "t".into(),
+                artist: "a".into(),
+                album: None,
+                duration_ms: Some(60_000),
+                cover_url: None,
+                isrc: None,
+                permalink: None,
+                external_ids: Default::default(),
+                explicit: false,
+            }
+        }
+
+        #[test]
+        fn codes_are_found_in_links_and_shared_text() {
+            assert_eq!(normalize_code("k7p2qx").as_deref(), Some("K7P2QX"));
+            assert_eq!(normalize_code(" K7P-2QX ").as_deref(), Some("K7P2QX"));
+            assert_eq!(normalize_code("glyph:jam:K7P2QX").as_deref(), Some("K7P2QX"));
+            assert_eq!(normalize_code("https://glyph.my/jam/K7P2QX?x=1").as_deref(), Some("K7P2QX"));
+            assert_eq!(normalize_code("K7P2Q0"), None);
+            assert_eq!(normalize_code("K7P2Q"), None);
+            assert_eq!(normalize_code("hello world"), None);
+            assert_eq!(normalize_code("glyph://jam/K7P2QX").as_deref(), Some("K7P2QX"));
+            assert!(is_jam_text("glyph:jam:K7P2QX") && is_jam_text("glyph://jam/k7p2qx") && is_jam_text("https://glyph.my/jam/K7P2QX"));
+            // A bare code is no search query.
+            assert!(!is_jam_text("K7P2QX") && !is_jam_text("glyph:jam:nope"));
+        }
+
+        #[test]
+        fn perms_default_to_adding_only() {
+            let p: Perms = serde_json::from_str("{}").unwrap();
+            assert_eq!(p, Perms::default());
+            assert!(p.add && !p.any_control() && !p.allows(&Control::Next));
+            assert!(p.allows_op(&Op::Add { track: track() }) && !p.allows_op(&Op::PlayNow { track: track() }));
+            assert!(p.allows_op(&Op::React { reaction: Reaction::Fire }));
+            let p = Perms { seek: true, add: false, ..p };
+            assert!(p.allows(&Control::Seek { ms: 1 }) && !p.allows(&Control::Pause));
+            assert!(!p.allows_op(&Op::Vote { item: "x".into(), up: true }));
+        }
+
+        #[test]
+        fn position_moves_only_while_playing() {
+            let mut s = State { now: Some(Now { track: track(), position_ms: 10_000, playing: true, at_ms: 1_000, resolved: None }), ..Default::default() };
+            assert_eq!(s.position_at(3_000), Some(12_000));
+            assert_eq!(s.position_at(500_000), Some(60_000));
+            s.now.as_mut().unwrap().playing = false;
+            assert_eq!(s.position_at(3_000), Some(10_000));
+        }
+
+        #[test]
+        fn old_states_read_with_defaults() {
+            let s: State = serde_json::from_str(r#"{"code":"K7P2QX","host":"a"}"#).unwrap();
+            assert!(s.host_online && s.perms.add && s.feed.is_empty());
+        }
+
+        #[test]
+        fn feed_keeps_the_newest() {
+            let mut f = Vec::new();
+            for i in 0..(MAX_FEED as u64 + 5) {
+                push_feed(&mut f, Event { at_ms: i, who: "a".into(), what: What::Joined });
+            }
+            assert_eq!(f.len(), MAX_FEED);
+            assert_eq!(f[0].at_ms, 5);
+        }
+
+        #[test]
+        fn ops_round_trip() {
+            let o = OpFrom { from: "ana".into(), op: Op::Control { control: Control::Seek { ms: 5 } }, avatar: None };
+            let j = serde_json::to_string(&o).unwrap();
+            assert_eq!(serde_json::from_str::<OpFrom>(&j).unwrap(), o);
+            let v: Op = serde_json::from_str(r#"{"op":"vote","item":"x","up":true}"#).unwrap();
+            assert_eq!(v, Op::Vote { item: "x".into(), up: true });
+            let r: Op = serde_json::from_str(r#"{"op":"react","reaction":"thumbs_up"}"#).unwrap();
+            assert_eq!(r, Op::React { reaction: Reaction::ThumbsUp });
+            let e = Event { at_ms: 1, who: "a".into(), what: What::Added { title: "x".into() } };
+            assert_eq!(serde_json::from_str::<Event>(&serde_json::to_string(&e).unwrap()).unwrap(), e);
+        }
+
+        #[test]
+        fn live_messages_are_tagged() {
+            assert_eq!(serde_json::to_string(&Live::Ops).unwrap(), r#"{"t":"ops"}"#);
+            assert_eq!(serde_json::from_str::<Live>(r#"{"t":"host","online":false}"#).unwrap(), Live::Host { online: false });
+            let s = Live::State { state: Box::new(State { code: "K7P2QX".into(), rev: 3, ..Default::default() }) };
+            assert_eq!(serde_json::from_str::<Live>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
+            let n = Live::Now { rev: 4, now: Now { track: track(), position_ms: 9, playing: true, at_ms: 5, resolved: None }, server_ms: 6 };
+            assert_eq!(serde_json::from_str::<Live>(&serde_json::to_string(&n).unwrap()).unwrap(), n);
+        }
+    }
+}
+pub mod playback;

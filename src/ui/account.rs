@@ -3,7 +3,6 @@
 //! `docs/ACCOUNTS.md`. Without an account nothing here runs.
 
 use crate::app::Glyph;
-use crate::guard::guard_res;
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::input::TextInput;
@@ -35,6 +34,24 @@ pub enum Login {
 
 #[derive(Default)]
 pub struct AccountUi {
+    pub output_live: Option<tokio::sync::mpsc::Receiver<()>>,
+    pub output_live_connecting: bool,
+    pub output_live_checked: Option<Instant>,
+    pub output_seen: std::collections::BTreeMap<String, Option<String>>,
+    pub transfer_ack: Option<String>,
+    pub sync_failures: u32,
+    pub sync_pending: usize,
+    pub data_epoch: u64,
+    pub transfer_resume: Option<(u64, bool)>,
+    pub outputs: Vec<glyph_protocol::playback::Output>,
+    pub output_target: Option<String>,
+    pub output_checked: Option<Instant>,
+    pub output_received: Option<Instant>,
+    pub output_busy: bool,
+    pub output_error: Option<String>,
+    pub output_commands: std::cell::RefCell<Vec<std::sync::mpsc::Receiver<anyhow::Result<()>>>>,
+    pub merge_pending: bool,
+    pub signing_out: bool,
     /// Server offers accounts (`None` = not checked yet).
     pub available: Option<bool>,
     pub login: Login,
@@ -134,6 +151,7 @@ impl Glyph {
 
     /// Sign in or create an account with handle + password (form on the page).
     pub fn account_password_submit(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok { self.toast_info(t("status.library_offline")); return; }
         let Some(b) = self.backend.clone() else { return };
         if self.account.busy {
             return;
@@ -151,6 +169,7 @@ impl Glyph {
             cx.notify();
             return;
         }
+        if !self.prepare_account_sign_in(cx) { return; }
         self.account.busy = true;
         self.account.login = Login::Idle;
         cx.notify();
@@ -171,7 +190,7 @@ impl Glyph {
                         let handle = s.signed_in().map(|a| a.account.handle).unwrap_or_default();
                         s.toast(tf("account.toast.signed_in", &[("handle", &handle)]).to_string());
                         s.account_page_opened(cx);
-                        s.sync_now(cx);
+                        s.account_enter(cx);
                     }
                     Err(e) => s.account.login = Login::Failed(err_text(&e)),
                 }
@@ -242,12 +261,14 @@ impl Glyph {
     /// Called when the Account page opens: availability, device list.
     pub fn account_page_opened(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         self.account.vault_ok = b.settings_vault().is_some();
         self.account.devices_error = None;
         cx.spawn(async move |this, cx| {
             let available = b.accounts_available().await;
             let devices = if b.account().is_some() { Some(b.account_devices().await) } else { None };
             this.update(cx, |s, cx| {
+                if s.signed_in() != owner { return; }
                 s.account.available = Some(available);
                 match devices {
                     Some(Ok(d)) => { s.account.devices = Some(d); s.account.devices_error = None; }
@@ -262,6 +283,8 @@ impl Glyph {
     }
 
     pub fn account_sign_in(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok { self.toast_info(t("status.library_offline")); return; }
+        if !self.prepare_account_sign_in(cx) { return; }
         let Some(b) = self.backend.clone() else { return };
         self.account.login = Login::Starting;
         self.account.notice = None;
@@ -322,7 +345,7 @@ impl Glyph {
                             s.account.login = Login::Idle;
                             s.toast(tf("account.toast.signed_in", &[("handle", &handle)]).to_string());
                             s.account_page_opened(cx);
-                            s.sync_now(cx);
+                            s.account_enter(cx);
                             cx.notify();
                         })
                         .ok();
@@ -362,7 +385,13 @@ impl Glyph {
             this.update(cx, |s, cx| {
                 match r {
                     Ok(v) => done(s, v, cx),
-                    Err(e) => s.account.notice = Some((err_text(&e), false)),
+                    Err(e) => {
+                        if s.account.signing_out {
+                            s.account.signing_out = false;
+                            if s.signed_in().is_none() { s.account_leave(cx); }
+                        }
+                        s.account.notice = Some((err_text(&e), false));
+                    }
                 }
                 cx.notify();
             })
@@ -463,10 +492,16 @@ impl Glyph {
     }
 
     pub fn account_sign_out(&mut self, cx: &mut Context<Self>) {
+        if self.account.signing_out { return; }
+        if self.backend.is_none() { return; }
+        self.flush_stats(cx);
+        self.save_library(cx);
+        self.account.signing_out = true;
         self.account_call(
             cx,
             |b| Box::pin(async move { b.account_sign_out().await }),
-            |s, _, _| {
+            |s, _, cx| {
+                s.account_leave(cx);
                 s.account.devices = None;
                 s.account.recovery_code = None;
                 s.account.last_sync = None;
@@ -486,9 +521,10 @@ impl Glyph {
         self.account_call(
             cx,
             move |b| Box::pin(async move { b.account_delete(&typed).await }),
-            |s, _, _| {
+            |s, _, cx| {
                 s.account.devices = None;
                 s.account.recovery_code = None;
+                s.account_leave(cx);
                 s.toast(t("account.toast.deleted").to_string());
             },
         );
@@ -507,8 +543,12 @@ impl Glyph {
                 return;
             }
             // Data saver: sync a quarter as often.
-            let saver = this.update(cx, |s, _| s.config.storage.data_saver).unwrap_or(false);
-            cx.background_executor().timer(if saver { SYNC_EVERY * 4 } else { SYNC_EVERY }).await;
+            let delay = this.update(cx, |s, _| {
+                if s.account.sync_failures > 0 {
+                    Duration::from_secs((5u64 << s.account.sync_failures.min(6)).min(300))
+                } else if s.config.storage.data_saver { SYNC_EVERY * 4 } else { SYNC_EVERY }
+            }).unwrap_or(SYNC_EVERY);
+            cx.background_executor().timer(delay).await;
         })
         .detach();
     }
@@ -519,6 +559,9 @@ impl Glyph {
             return;
         }
         self.account.sync_gen += 1;
+        if let Some(b) = &self.backend {
+            self.account.sync_pending = b.sync_pending(&glyph_core::sync::snapshot(&self.library, &b.sync_wanted_downloads()));
+        }
         let gen = self.account.sync_gen;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SYNC_DEBOUNCE).await;
@@ -535,19 +578,24 @@ impl Glyph {
     /// One sync round: snapshot here, exchange on the backend, apply here.
     pub fn sync_now(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
-        if self.account.syncing || !self.library_ok || b.account().is_none() {
+        if self.account.syncing || self.account.signing_out || self.account.merge_pending || !self.library_ok || b.account().is_none()
+            || b.account().is_some_and(|a| glyph_core::account::guest_merge_pending(&a.server)) {
             return;
         }
         self.account.syncing = true;
+        let generation = self.account.sync_gen;
+        let owner = b.account();
         let snap = glyph_core::sync::snapshot(&self.library, &b.sync_wanted_downloads());
         let settings = glyph_core::settings_sync::items(&self.config, b.settings_vault().as_ref());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let r = b.sync_exchange(snap, settings).await;
             this.update(cx, |s, cx| {
+                if s.signed_in() != owner || s.account.signing_out || s.account.merge_pending { return; }
                 s.account.syncing = false;
                 match r {
                     Ok(round) => {
+                        s.account.sync_failures = 0;
                         // Songs of auto-download playlists before the round,
                         // to find the ones another device added.
                         let auto_before: Vec<(String, std::collections::HashSet<String>)> = s
@@ -557,7 +605,11 @@ impl Glyph {
                             .filter(|p| p.auto_download)
                             .map(|p| (p.id.clone(), p.tracks.iter().map(glyph_core::dedupe::track_key).collect()))
                             .collect();
-                        let applied = b.sync_apply(&mut s.library, &round);
+                        let mut applied = b.sync_apply(&mut s.library, &round);
+                        let merge_error = match b.sync_merge_guest(&mut s.library) {
+                            Ok(changed) => { applied.library_changed |= changed; None }
+                            Err(e) => Some(e.to_string()),
+                        };
                         let mut cfg = s.config.clone();
                         let st = b.sync_apply_settings(&mut cfg, &round);
                         if st.changed {
@@ -565,14 +617,7 @@ impl Glyph {
                         }
                         s.account.vault_ok = b.settings_vault().is_some();
                         if applied.library_changed {
-                            let lib = s.library.clone();
-                            cx.background_executor()
-                                .spawn(async move {
-                                    if let Err(e) = guard_res(|| lib.save()) {
-                                        tracing::warn!("library save after sync: {e}");
-                                    }
-                                })
-                                .detach();
+                            s.save_library(cx);
                         }
                         if !applied.download.is_empty() {
                             s.download_tracks(applied.download, cx);
@@ -589,14 +634,27 @@ impl Glyph {
                             s.auto_download_added(&id, added, cx);
                         }
                         s.account.last_sync = Some(Instant::now());
-                        s.account.sync_error = None;
+                        s.account.sync_error = merge_error;
+                        s.account.sync_pending = b.sync_pending(&glyph_core::sync::snapshot(&s.library, &b.sync_wanted_downloads()));
+                        if round.bootstrap || s.account.sync_gen != generation || s.account.sync_pending > 0 { s.schedule_sync(cx); }
+                        if round.bootstrap { s.reload_account_feeds(cx); }
                     }
                     Err(e) => {
+                        s.account.sync_failures = s.account.sync_failures.saturating_add(1);
                         if is_signed_out(&e) {
                             s.account.devices = None;
+                            s.account_leave(cx);
                         }
                         tracing::info!("sync: {e:#}");
                         s.account.sync_error = Some(err_text(&e));
+                        let failures = s.account.sync_failures;
+                        let retry_owner = s.signed_in();
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_secs((5u64 << failures.min(6)).min(300))).await;
+                            this.update(cx, |s, cx| {
+                                if s.signed_in() == retry_owner && s.account.sync_failures == failures { s.sync_now(cx); }
+                            }).ok();
+                        }).detach();
                     }
                 }
                 cx.notify();
@@ -652,6 +710,15 @@ fn code_box(code: &str) -> Div {
 pub fn page(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     app.account_inputs(cx);
     let col = div().flex().flex_col();
+    if app.account.merge_pending {
+        return col
+            .child(div().py(px(16.0)).child(t("account.merge.description")))
+            .child(div().flex().flex_col().items_start().gap(px(10.0))
+                .child(primary_button("account-merge", t("account.merge.yes")).on_click(cx.listener(|s, _, _, cx| s.account_choose_merge(true, cx))))
+                .child(button("account-no-merge", t("account.merge.no")).on_click(cx.listener(|s, _, _, cx| s.account_choose_merge(false, cx))))
+                .child(button("account-cancel-merge", t("account.signout")).on_click(cx.listener(|s, _, _, cx| s.account_sign_out(cx)))))
+            .when_some(app.account.notice.clone(), |d, (m, _)| d.child(div().pt(px(10.0)).text_color(theme::warn()).child(m)));
+    }
     let official = app.config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(glyph_core::config::DEFAULT_SERVER_URL);
     if app.backend.is_some() && official && app.account.available == Some(false) {
         // The public server always has accounts: it just could not be reached.
@@ -857,6 +924,9 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
     } else {
         t("account.sync.never")
     };
+    let status: SharedString = if a.sync_pending > 0 {
+        format!("{status} · {}", tf("account.sync.pending", &[("n", &a.sync_pending)])).into()
+    } else { status };
     let limit = a.devices.as_ref().map_or(acc.account.device_limit, |d| d.device_limit);
 
     let (handle_in, code_in, delete_in) = (a.handle_input.clone().unwrap(), a.code_input.clone().unwrap(), a.delete_input.clone().unwrap());

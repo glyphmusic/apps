@@ -4,7 +4,7 @@
 
 use crate::app::Glyph;
 use crate::devices::{Device, Kind};
-use crate::i18n::{t, tf};
+use crate::i18n::t;
 use crate::theme;
 use crate::ui::views::QUEUE_W;
 use crate::ui::widgets::*;
@@ -77,7 +77,9 @@ pub fn panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl 
     let search_on = app.discovery.is_some();
 
     // Where music plays now.
-    let (cur_icon, cur_name, cur_sub): (&str, SharedString, SharedString) = if let Some(o) = &app.device_out {
+    let (cur_icon, cur_name, cur_sub): (&str, SharedString, SharedString) = if let Some(o) = app.account_output() {
+        ("monitor", o.device.name.clone().into(), t("connect.account.control"))
+    } else if let Some(o) = &app.device_out {
         let sub = match (o.error(), o.status()) {
             (Some(_), _) => t("connect.unreachable"),
             (None, None) => t("connect.connecting"),
@@ -117,7 +119,7 @@ pub fn panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl 
 
     let mut rows: Vec<AnyElement> = Vec::new();
     // Back to this computer.
-    if app.remote_chosen() {
+    if app.remote_chosen() || app.account.output_target.is_some() {
         rows.push(
             row("dev-local", "monitor", t("connect.this_computer"), app.config.audio.output_device.clone().map(SharedString::from).unwrap_or_else(|| t("sp.output.default")), true)
                 .on_click(cx.listener(|this, _, _, cx| this.use_local_output(cx)))
@@ -129,15 +131,12 @@ pub fn panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl 
         _ => selected.as_ref().is_some_and(|s| s.id == d.id),
     };
     for (i, d) in devices.iter().filter(|d| !is_on(d)).enumerate() {
-        let playable = d.kind.playable();
-        let sub: SharedString = if playable { kind_label(d.kind).into() } else { tf("ctl.output.unsupported", &[("name", &kind_label(d.kind))]) };
-        let r = row(format!("dev-{i}"), d.icon, d.name.clone().into(), sub, playable);
-        rows.push(if playable {
-            let dev = d.clone();
-            r.on_click(cx.listener(move |this, _, _, cx| this.select_device(dev.clone(), cx))).into_any_element()
-        } else {
-            r.into_any_element()
-        });
+        let dev = d.clone();
+        rows.push(
+            row(format!("dev-{i}"), d.icon, d.name.clone().into(), kind_label(d.kind).into(), true)
+                .on_click(cx.listener(move |this, _, _, cx| this.select_device(dev.clone(), cx)))
+                .into_any_element(),
+        );
     }
 
     let body: AnyElement = if !search_on {
@@ -164,6 +163,31 @@ pub fn panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl 
             .when(!searching && devices.is_empty(), |d| d.child(div().px(px(16.0)).py(px(10.0)).text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("ctl.output.none"))))
             .into_any_element()
     };
+
+    // Listening together comes first, the devices below.
+    let jam = crate::ui::jam::section_el(app, cx);
+    let mut account_rows = Vec::new();
+    for output in app.account.outputs.iter().filter(|o| !o.device.current) {
+        let id = output.device.id.clone();
+        let transfer_id = id.clone();
+        let subtitle = if !output.online { t("connect.account.offline").to_string() } else if !output.state.available { t("connect.account.busy").to_string() } else { output.state.track.as_ref().map(|t| format!("{} · {}", t.artist, t.title))
+            .unwrap_or_else(|| t("connect.account.ready").to_string()) };
+        let enabled = output.online && output.state.available;
+        account_rows.push(div().flex().flex_col()
+            .child(row(format!("account-device-{id}"), "monitor", output.device.name.clone().into(), subtitle.into(), enabled)
+                .when(enabled, |d| d.on_click(cx.listener(move |s, _, _, cx| s.select_account_output(id.clone(), cx)))))
+            .when(enabled && app.current.is_some(), |d| d.child(
+                button(SharedString::from(format!("account-transfer-{transfer_id}")), t("connect.account.transfer"))
+                    .on_click(cx.listener(move |s, _, _, cx| s.transfer_account_output(transfer_id.clone(), cx)))))
+            .into_any_element());
+    }
+    let account_devices = div().flex().flex_col()
+        .when(!app.account.output_commands.borrow().is_empty(), |d| d.child(div().px(px(16.0)).text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("connect.account.confirming"))))
+        .when(app.signed_in().is_some(), |d| d.child(section(t("connect.account.title"))))
+        .children(account_rows)
+        .when(app.signed_in().is_some() && app.account.outputs.iter().all(|o| o.device.current), |d| d.child(
+            div().px(px(16.0)).pb(px(10.0)).text_size(theme::text_sm()).text_color(theme::text_dim()).child(t("connect.account.none"))))
+        .when_some(app.account.output_error.clone(), |d, e| d.child(div().px(px(16.0)).text_size(theme::text_sm()).text_color(theme::warn()).child(e)));
 
     let help = div()
         .id("dev-help")
@@ -214,7 +238,7 @@ pub fn panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl 
         .child(current)
         .child(
             fade_edges(
-                div().id("dev-scroll").track_scroll(&app.devices_scroll).size_full().overflow_y_scroll().pb(px(10.0)).child(body),
+                div().id("dev-scroll").track_scroll(&app.devices_scroll).size_full().overflow_y_scroll().pb(px(10.0)).child(jam).child(account_devices).child(body),
                 theme::panel_strong(),
                 18.0,
                 Some(&app.devices_scroll),

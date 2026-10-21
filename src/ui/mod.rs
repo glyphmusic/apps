@@ -6,9 +6,11 @@
 
 pub mod account;
 pub mod chrome;
+pub mod compact;
 pub mod connect;
 pub mod controls;
 pub mod input;
+pub mod jam;
 pub mod lists;
 pub mod migrate;
 pub mod mini;
@@ -134,6 +136,9 @@ impl Render for Shell {
                     .border_color(theme::border_faint())
             })
             .child(div().absolute().inset_0().child(self.glow.clone()))
+            // Phones: the glow fills the whole small screen; dim it so text
+            // on top stays readable (Spotify-dark).
+            .when(compact::TOUCH, |d| d.child(div().absolute().inset_0().bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))))
             // Window control areas (drag strip, window buttons) live here, outside
             // the cached app view: GPUI does not carry them over when it reuses a
             // cached view's paint, so inside it they vanish after the first frame
@@ -156,7 +161,7 @@ impl Render for Shell {
                     .inset_0()
                     .child(self.app.clone().cached(StyleRefinement::default().size_full())),
             )
-            .when(!cfg!(target_os = "macos"), |d| {
+            .when(!cfg!(any(target_os = "macos", target_os = "android", target_os = "ios")), |d| {
                 d.child(
                     div()
                         .absolute()
@@ -183,7 +188,23 @@ impl Render for Glyph {
         widgets::set_ascii_effects(self.config.visuals.ascii_effects);
         theme::set_theme(&self.config.visuals.theme);
         theme::set_zone(Some(0));
-        let titlebar = chrome::titlebar(self, window, cx).into_any_element();
+        // Phones: Spotify-like layout (see `compact`); the desktop is unchanged.
+        let compact = compact::is_compact(window);
+        let titlebar = if compact {
+            match self.view {
+                View::Home if !self.settings_open => compact::header(self, Some(crate::i18n::t("home.greeting")), Vec::new(), cx).into_any_element(),
+                View::Search => compact::search_bar(self, window, cx),
+                View::Library => {
+                    let actions = compact::library_actions(cx);
+                    compact::header(self, Some(crate::i18n::t("nav.library")), actions, cx).into_any_element()
+                }
+                View::Home | View::Settings => div().into_any_element(),
+                _ if compact::floating_back(self) => div().into_any_element(),
+                _ => compact::back_bar(self, cx),
+            }
+        } else {
+            chrome::titlebar(self, window, cx).into_any_element()
+        };
         theme::set_zone(Some(1));
         let sidebar = chrome::sidebar(self, window, cx).into_any_element();
         // Settings is built from cards: panel ink throughout.
@@ -191,7 +212,9 @@ impl Render for Glyph {
         let main = match self.view {
             View::Home => views::home(self, window, cx).into_any_element(),
             View::Search => views::search(self, window, cx).into_any_element(),
+            View::Library if compact => compact::library(self, window, cx),
             View::Library => lists::library(self, window, cx),
+            View::List if compact => compact::list_view(self, window, cx),
             View::List => lists::list_view(self, window, cx),
             View::Artist => lists::artist_view(self, window, cx),
             View::Profile => profile::view(self, window, cx),
@@ -199,6 +222,7 @@ impl Render for Glyph {
             View::Releases => lists::releases_view(self, window, cx).into_any_element(),
             View::Similar => lists::similar_view(self, window, cx).into_any_element(),
             View::Stats => stats::view(self, window, cx),
+            View::NowPlaying if compact => compact::now_playing(self, window, cx),
             View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
             // Settings is a modal over the current view (see below).
             View::Settings => views::home(self, window, cx).into_any_element(),
@@ -214,7 +238,7 @@ impl Render for Glyph {
                 .size_full()
                 .into_any_element()
         };
-        let main_bar = (self.view != View::NowPlaying).then(|| widgets::scrollbar(&self.main_scroll, !self.settings_open, cx));
+        let main_bar = (self.view != View::NowPlaying && !compact).then(|| widgets::scrollbar(&self.main_scroll, !self.settings_open, cx));
         if self.show_queue {
             self.show_devices = false;
             if let Some(a) = self.add_songs.as_mut() {
@@ -240,10 +264,10 @@ impl Render for Glyph {
             .flex_1()
             .min_w_0()
             .h_full()
-            .mr(px(-theme::GAP))
+            .when(!compact, |d| d.mr(px(-theme::GAP)))
             // Next to the queue the page runs right up to it (no gap), like it
             // runs under the player bar's margin.
-            .child(div().size_full().pr(px(if right_open { 0.0 } else { theme::GAP })).child(div().relative().size_full().overflow_hidden().child(main)))
+            .child(div().size_full().pr(px(if right_open || compact { 0.0 } else { theme::GAP })).child(div().relative().size_full().overflow_hidden().child(main)))
             .when_some(main_bar, |d, bar| {
                 d.child(div().absolute().top_0().bottom_0().right(px(if right_open { 0.0 } else { -5.0 })).w(px(theme::GAP + 2.0)).child(bar))
             });
@@ -279,7 +303,22 @@ impl Render for Glyph {
         // not needed (nothing loaded, or Now Playing with its own transport).
         let want_bar = !full_np && self.current.is_some();
         let shown = self.bar_slide.update(want_bar);
+        // Phones: bottom tab bar instead of the sidebar, mini player instead
+        // of the player bar, all inside the safe area (see `compact`).
+        let safe = window.insets().safe_area;
+        // Phone Now Playing is full screen: no mini player, no tabs.
+        let want_bar = want_bar && !(compact && self.view == View::NowPlaying);
         let bar = (shown > 0.0).then(|| {
+            if compact {
+                let inner = compact::mini_bar(self, window, cx).map(|b| b.into_any_element());
+                return div()
+                    .flex_none()
+                    .relative()
+                    .overflow_hidden()
+                    .h(px((compact::MINI_H + theme::GAP) * shown))
+                    .children(inner.map(|b| div().absolute().left_0().right_0().top(px(0.0)).px(px(theme::GAP)).pt(px(theme::GAP)).child(b)))
+                    .into_any_element();
+            }
             let h = theme::PLAYER_H + theme::GAP * 2.0;
             div()
                 .flex_none()
@@ -297,9 +336,29 @@ impl Render for Glyph {
                 )
                 .into_any_element()
         });
+        let tabs = (compact && self.view != View::NowPlaying).then(|| {
+            div()
+                .flex_none()
+                .px(px(theme::GAP))
+                .pt(px(theme::GAP))
+                .pb(px(theme::GAP) + safe.bottom)
+                // Dark under the tabs so the labels stay readable over the glow.
+                .bg(gpui::linear_gradient(
+                    180.0,
+                    gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 0.0, 0.75), 0.0),
+                    gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 0.0, 0.97), 0.5),
+                ))
+                .child(compact::tab_bar(self, cx))
+                .into_any_element()
+        });
         let toasts = toasts::layer(self, window, cx);
         let sk = self.settings_k();
-        let modal = (sk > 0.0).then(|| div().absolute().inset_0().opacity(sk).child(settings::modal(self, window, cx)));
+        let modal = if compact {
+            self.settings_open.then(|| div().absolute().inset_0().child(compact::settings(self, window, cx)))
+        } else {
+            (sk > 0.0).then(|| div().absolute().inset_0().opacity(sk).child(settings::modal(self, window, cx)))
+        };
+        let drawer = if compact { compact::drawer(self, window, cx) } else { None };
         let menu = lists::ctx_menu(self, window, cx);
         let control_menu = controls::control_menu(self, window, cx);
         if self.splash.as_ref().is_some_and(|s| !s.active()) {
@@ -321,8 +380,9 @@ impl Render for Glyph {
         });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
         let approval = controls::mcp_approval(self, cx);
+        let alpha = compact::alpha_notice(window, cx);
         let crop = self.profile.crop.is_some().then(|| crate::ui::profile::crop_dialog(self, cx));
-        let dim = sk > 0.0;
+        let dim = sk > 0.0 && !compact;
         let dim_a = 1.0 - 0.92 * sk;
 
         div()
@@ -374,6 +434,23 @@ impl Render for Glyph {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
+                // Phones: Escape is the system back gesture.
+                if compact::TOUCH && this.name_dialog.is_none() && this.control_menu.is_none() && this.ctx_menu.is_none() && this.open_select.is_none() {
+                    if this.drawer_open {
+                        this.drawer_open = false;
+                    } else if this.settings_open && this.settings_in_page {
+                        this.settings_in_page = false;
+                    } else if this.settings_open {
+                        this.close_settings(w, cx);
+                    } else if !this.history.is_empty() || !matches!(this.view, View::Home | View::Search | View::Library) {
+                        compact::back(this, cx);
+                    } else {
+                        // Nothing to go back to: Android moves the app to the background.
+                        cx.propagate();
+                    }
+                    cx.notify();
+                    return;
+                }
                 if this.name_dialog.is_some() {
                     this.close_name_dialog(cx);
                 } else if this.control_menu.is_some() {
@@ -410,6 +487,7 @@ impl Render for Glyph {
             .size_full()
             .flex()
             .flex_col()
+            .when(compact && !compact::floating_back(self), |d| d.pt(safe.top))
             // Behind the settings modal only the (already soft) glow stays
             // visible: GPUI has no backdrop blur, so the UI fades out instead.
             .child(div().flex_none().when(dim, |d| d.opacity(dim_a)).child(titlebar))
@@ -419,24 +497,29 @@ impl Render for Glyph {
                     .min_h_0()
                     .flex()
                     .gap(px(theme::GAP))
-                    .px(px(theme::GAP))
+                    // Phones: pages run edge to edge and pad themselves.
+                    .when(!compact, |d| d.px(px(theme::GAP)))
                     // The page runs on under the player bar's top margin
                     // instead of stopping at a hard edge above it.
                     .mb(px(-theme::GAP * shown))
                     .when(dim, |d| d.opacity(dim_a))
                     // Side panels keep their gap to the bar.
-                    .child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar))
+                    .when(!compact, |d| d.child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar)))
                     .child(main_panel)
                     // Always one gap above the bottom: the player bar's when it
                     // is there, the window edge's when it is not (Now Playing).
                     .children(queue.map(|q| div().flex_none().h_full().pb(px(theme::GAP)).child(q))),
             )
             .children(bar.map(|b| div().flex_none().when(dim, |d| d.opacity(dim_a)).child(b)))
+            .children(tabs.map(|t| div().flex_none().when(dim, |d| d.opacity(dim_a)).child(t)))
+            .children((compact && compact::floating_back(self)).then(|| compact::floating_back_bar(window, cx)))
             .children(modal)
+            .children(drawer)
             .children(menu)
             .children(control_menu)
             .children(dialog)
             .children(approval)
+            .children(alpha)
             .children(crop)
             .children(splash)
             .children(toasts)

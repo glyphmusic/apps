@@ -37,7 +37,7 @@ impl Glyph {
     /// Track list of the currently active view for keyboard navigation.
     pub fn active_tracks(&self) -> Vec<Track> {
         match self.view {
-            View::List => self.open_list.as_ref().map(|l| self.list_tracks(l)).unwrap_or_default(),
+            View::List => self.open_list.as_ref().map(|l| self.shown_tracks(l)).unwrap_or_default(),
             View::Search => self.search.results.clone(),
             View::Section => self.section.as_ref().map(|(_, t)| t.clone()).unwrap_or_default(),
             View::Artist => self
@@ -109,7 +109,7 @@ impl Glyph {
         let (Some(l), Some(i)) = (self.open_list.clone(), self.selected_row) else { return };
         let len = self.list_tracks(&l).len();
         if i < len {
-            self.remove_from_list(&l, i, cx);
+            self.remove_shown(&l, i, cx);
             let new_len = self.list_tracks(&l).len();
             self.selected_row = if new_len == 0 { None } else { Some(i.min(new_len - 1)) };
             cx.notify();

@@ -19,6 +19,9 @@ pub const SIDEBAR_W: f32 = 64.0;
 pub const PLAYER_H: f32 = 80.0;
 pub const GAP: f32 = 10.0;
 pub const RADIUS: f32 = 10.0;
+/// Horizontal padding of the main pages: roomy on the desktop, tight on
+/// phones so content uses the full width (plus the layout's GAP).
+pub const PAGE_X: f32 = if cfg!(any(target_os = "android", target_os = "ios")) { 16.0 } else { 32.0 };
 pub const WINDOW_RADIUS: f32 = 10.0;
 
 // ---- colour themes -------------------------------------------------------

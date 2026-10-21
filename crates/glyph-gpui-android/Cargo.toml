@@ -1,0 +1,26 @@
+[package]
+name = "glyph-gpui-android"
+description = "GPUI platform backend for Android (GameActivity + wgpu), so the Glyph views run on phones."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "gpui_android"
+
+# Empty on every other target (see `#![cfg(target_os = "android")]` in lib.rs),
+# so desktop builds of the workspace never pull these in.
+[target.'cfg(target_os = "android")'.dependencies]
+# Same pinned Zed revision as the desktop app (Cargo.toml at the repo root).
+gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+android-activity = { version = "0.6.1", features = ["game-activity"] }
+ndk = { version = "0.9", features = ["rwh_06"] }
+ndk-context = "0.1"
+jni = "0.22"
+raw-window-handle = "0.6"
+futures = "0.3"
+anyhow = "1"
+log = "0.4"
+uuid = { version = "1", features = ["v5"] }

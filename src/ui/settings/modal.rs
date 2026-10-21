@@ -7,7 +7,7 @@ pub fn modal(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> A
 }
 
 /// Title, subtitle and nav icon of a settings page.
-pub(super) fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static str) {
+pub fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static str) {
     match page {
         SettingsPage::Playback => (t("sp.playback"), t("sp.playback.sub"), "play"),
         SettingsPage::Audio => (t("sp.eq"), t("sp.eq.sub"), "volume-2"),
@@ -50,6 +50,7 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Playback, 1, "sp.shuffle", "shuffle zufall random smart"),
     (SettingsPage::Playback, 1, "sp.stats", "stats statistics statistik analytics hörzeit listening time tracking"),
     (SettingsPage::Playback, 2, "sp.extractor", "r-dlp rdlp yt-dlp extractor youtube schneller faster"),
+    (SettingsPage::Playback, 2, "sp.search.mode", "search suche lokal local server rate limit ban quellen sources"),
     (SettingsPage::Playback, 1, "sp.explicit", "explicit explizit"),
     (SettingsPage::Playback, 1, "sp.radio", "radio autoplay"),
     (SettingsPage::Playback, 1, "sp.hidden", "hidden ausgeblendet blocked artists künstler"),
@@ -104,13 +105,12 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::About, 2, "sp.keys.play", "keyboard shortcuts tastenkürzel tastatur hotkeys keys tasten"),
 ];
 
-pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+/// Content of the current settings page and sub-tab (shared by the desktop
+/// modal and the phone settings in `ui::compact`).
+pub fn page_body(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     select_anim_tick(app.open_select);
     PAGE_SCROLL.with(|h| *h.borrow_mut() = Some(app.settings_scroll.clone()));
-    let page = app.settings_page;
-    let (title, sub, _) = page_info(page);
-    let tab = subtabs(app, page).get(app.settings_sub as usize).map(|k| t(k));
-    let body = match page {
+    match app.settings_page {
         SettingsPage::Playback => playback(app, cx),
         SettingsPage::Audio => equalizer(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
@@ -124,7 +124,14 @@ pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Contex
         SettingsPage::About if app.settings_sub == 1 => support(app, cx),
         SettingsPage::About if app.settings_sub == 2 => shortcuts(),
         SettingsPage::About => about(app, cx),
-    };
+    }
+}
+
+pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+    let page = app.settings_page;
+    let (title, sub, _) = page_info(page);
+    let tab = subtabs(app, page).get(app.settings_sub as usize).map(|k| t(k));
+    let body = page_body(app, cx);
 
     // Outer shell holds the navigation; the page sits in its own inset,
     // bordered card next to it.

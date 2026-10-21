@@ -227,7 +227,9 @@ pub(super) fn select(
 
 pub(crate) fn input_box(input: impl IntoElement) -> Div {
     div()
-        .w(px(300.0))
+        // Phones: as wide as the row allows (it wraps under the label).
+        .when(crate::ui::compact::TOUCH, |d| d.flex_1().min_w(px(200.0)))
+        .when(!crate::ui::compact::TOUCH, |d| d.w(px(300.0)))
         .h(px(34.0))
         .px(px(10.0))
         .flex()

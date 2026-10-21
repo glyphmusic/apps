@@ -45,6 +45,8 @@ pub fn client_id(config: &glyph_core::Config) -> Option<String> {
 enum Msg {
     /// What the player is doing now.
     Now { track: Option<Track>, playing: bool, position: Duration },
+    /// In a jam: party id, people, room for.
+    Party(Option<(String, usize, usize)>),
     Quit,
 }
 
@@ -69,6 +71,12 @@ impl DiscordPresence {
     /// Track, play state and position as of now.
     pub fn set(&self, track: Option<&Track>, playing: bool, position: Duration) {
         let _ = self.tx.send(Msg::Now { track: track.cloned(), playing, position });
+    }
+
+    /// Listening together (a jam): party id, people in it, room for. Discord
+    /// shows it as "(3 of 20)"; `None` when not in a jam.
+    pub fn set_party(&self, party: Option<(String, usize, usize)>) {
+        let _ = self.tx.send(Msg::Party(party));
     }
 }
 
@@ -131,6 +139,7 @@ impl Now {
 fn worker(client_id: String, rx: flume::Receiver<Msg>) {
     let mut conn: Option<Conn> = None;
     let mut now: Option<Now> = None;
+    let mut party: Option<(String, usize, usize)> = None;
     loop {
         let mut dirty = false;
         match rx.recv_timeout(RETRY) {
@@ -138,6 +147,10 @@ fn worker(client_id: String, rx: flume::Receiver<Msg>) {
             Ok(Msg::Now { track, playing, position }) => {
                 now = Some(Now { track, playing, position, captured: Instant::now() });
                 dirty = true;
+            }
+            Ok(Msg::Party(p)) => {
+                dirty = party != p;
+                party = p;
             }
             Err(flume::RecvTimeoutError::Disconnected) => break,
             // Discord may have started while the song kept playing.
@@ -159,7 +172,7 @@ fn worker(client_id: String, rx: flume::Receiver<Msg>) {
         // Send through a temporary so the `conn` borrow ends before a failed
         // write drops the connection.
         let send_failed = match conn.as_mut() {
-            Some(c) => c.set_activity(now.activity()).is_err(),
+            Some(c) => c.set_activity(with_party(now.activity(), party.as_ref())).is_err(),
             None => false,
         };
         if send_failed {
@@ -169,6 +182,15 @@ fn worker(client_id: String, rx: flume::Receiver<Msg>) {
     if let Some(c) = conn.as_mut() {
         c.close();
     }
+}
+
+/// Adds the jam ("party") to an activity: Discord shows "(3 of 20)".
+fn with_party(activity: Option<Value>, party: Option<&(String, usize, usize)>) -> Option<Value> {
+    let mut a = activity?;
+    if let Some((id, n, max)) = party {
+        a["party"] = json!({ "id": id, "size": [n, max] });
+    }
+    Some(a)
 }
 
 struct Conn {
@@ -295,6 +317,14 @@ mod tests {
         assert_eq!(&f[..4], &1u32.to_le_bytes());
         assert_eq!(&f[4..8], &(f.len() as u32 - 8).to_le_bytes());
         assert_eq!(&f[8..], br#"{"a":1}"#);
+    }
+
+    #[test]
+    fn jam_shows_as_party() {
+        let a = with_party(Some(json!({"type": 2})), Some(&("jam-1".to_string(), 3, 20))).unwrap();
+        assert_eq!(a["party"], json!({"id": "jam-1", "size": [3, 20]}));
+        assert!(with_party(Some(json!({})), None).unwrap().get("party").is_none());
+        assert!(with_party(None, Some(&("x".to_string(), 1, 2))).is_none());
     }
 
     #[test]

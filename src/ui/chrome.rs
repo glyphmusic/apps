@@ -10,8 +10,6 @@ use gpui::{div, prelude::*, px, Context, FontWeight, MouseButton, SharedString, 
 const IS_MAC: bool = cfg!(target_os = "macos");
 
 pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
-    let search_focused = app.search_input.read(cx).focus.is_focused(window);
-    let shortcut = if IS_MAC { "⌘K" } else { "Ctrl K" };
     let update = app.available_update().map(|u| u.version.clone());
 
     let status: Option<(String, gpui::Hsla)> = match &app.backend_state {
@@ -60,48 +58,7 @@ pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     .child(div().flex_1())
     // Centered on the window (like the toasts below it), not between the
     // logo and the wider window controls.
-    .child(div().absolute().top_0().left_0().right_0().h_full().flex().items_center().justify_center().child(theme::on_panel(|| {
-        let dropdown = (search_focused && app.search.query.trim().is_empty())
-            .then(|| search_dropdown(app, cx))
-            .flatten();
-        // Flat Liner-style field: solid dark surface, no border until focused,
-        // light text, shortcut as a small key chip.
-        div()
-            .id("search-bar")
-            .occlude()
-            .relative()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .w(px(420.0))
-            .h(px(32.0))
-            .pl(px(12.0))
-            .pr(px(6.0))
-            .rounded(px(8.0))
-            .bg(gpui::hsla(0.0, 0.0, 0.08, 0.92))
-            .border_1()
-            .border_color(if search_focused { gpui::hsla(0.0, 0.0, 1.0, 0.22) } else { gpui::transparent_black() })
-            .text_size(theme::text_sm())
-            .cursor_text()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx)))
-            .child(icon("search", 15.0, gpui::hsla(0.0, 0.0, 1.0, 0.55)))
-            .child(div().flex_1().min_w_0().child(app.search_input.clone()))
-            .child(
-                mono()
-                    .flex_none()
-                    .px(px(6.0))
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.0))
-                    .bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
-                    .text_size(px(11.0))
-                    .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.55))
-                    .child(shortcut),
-            )
-            .children(dropdown)
-    })))
+    .child(div().absolute().top_0().left_0().right_0().h_full().flex().items_center().justify_center().child(search_field(app, window, cx, Some(420.0))))
     .when_some(status, |d, (s, c)| {
         d.child(
             mono()
@@ -132,6 +89,54 @@ pub fn titlebar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     // The window pill itself is drawn by `Shell` (outside the cached view);
     // keep its space free here.
     .when(!IS_MAC, |d| d.child(div().flex_none().w(px(WINDOW_PILL_W))))
+}
+
+/// The search field: fixed width with its shortcut chip in the titlebar,
+/// full width without it (`width: None`) at the top of the phone's Search tab.
+pub fn search_field(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>, width: Option<f32>) -> impl IntoElement {
+    let search_focused = app.search_input.read(cx).focus.is_focused(window);
+    let shortcut = if IS_MAC { "⌘K" } else { "Ctrl K" };
+    theme::on_panel(|| {
+        let dropdown = (!crate::ui::compact::TOUCH && search_focused && app.search.query.trim().is_empty())
+            .then(|| search_dropdown(app, cx))
+            .flatten();
+        // Flat Liner-style field: solid dark surface, no border until focused,
+        // light text, shortcut as a small key chip.
+        div()
+            .id("search-bar")
+            .occlude()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .map(|d| match width { Some(w) => d.w(px(w)).h(px(32.0)), None => d.w_full().h(px(40.0)) })
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .rounded(px(8.0))
+            .bg(gpui::hsla(0.0, 0.0, 0.08, 0.92))
+            .border_1()
+            .border_color(if search_focused { gpui::hsla(0.0, 0.0, 1.0, 0.22) } else { gpui::transparent_black() })
+            .text_size(theme::text_sm())
+            .cursor_text()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx)))
+            .child(icon("search", 15.0, gpui::hsla(0.0, 0.0, 1.0, 0.55)))
+            .child(div().flex_1().min_w_0().child(app.search_input.clone()))
+            .when(width.is_some(), |d| d.child(
+                mono()
+                    .flex_none()
+                    .px(px(6.0))
+                    .h(px(20.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .bg(gpui::hsla(0.0, 0.0, 1.0, 0.08))
+                    .text_size(px(11.0))
+                    .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.55))
+                    .child(shortcut),
+            ))
+            .children(dropdown)
+    })
 }
 
 /// Dropdown under the focused, empty search bar: recent searches (or recently

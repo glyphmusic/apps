@@ -22,6 +22,8 @@ impl Glyph {
         }
         self.settings_closing = None;
         self.settings_open = true;
+        // Phone layout: a given page opens directly, otherwise the list.
+        self.settings_in_page = page.is_some();
         if let Some(p) = page {
             if p != self.settings_page {
                 self.settings_sub = 0;

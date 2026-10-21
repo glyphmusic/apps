@@ -43,11 +43,25 @@ impl Glyph {
     // ------------------------------------------------------------ search
 
     pub(super) fn on_query(&mut self, q: String, immediate: bool, cx: &mut Context<Self>) {
+        // Cancel pending work before handling pasted links/codes as well.
+        self.search.seq += 1;
+        self.search.task = None;
+        self.search.lyric_task = None;
+        self.search.more_task = None;
+        self.search.loading = false;
+        self.search.loading_more = false;
         // A pasted settings code opens the import in settings.
         if glyph_core::settings_share::is_code(&q) {
             let code = q.clone();
             self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
             self.import_settings_text(&code, cx);
+            return;
+        }
+        // A pasted jam code joins the jam.
+        if glyph_protocol::jam::is_jam_text(&q) {
+            let code = q.clone();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.jam_join(&code, cx);
             return;
         }
         // A pasted playlist code or link imports instead of searching.
@@ -84,7 +98,6 @@ impl Glyph {
             return;
         }
         self.search.query = q.clone();
-        self.search.seq += 1;
         self.selected_row = None;
         let seq = self.search.seq;
         if self.view != View::Search && !q.trim().is_empty() {
@@ -107,12 +120,10 @@ impl Glyph {
         cx.notify();
         // Lines of lyrics also find songs (separate section, own request).
         self.search.lyric_task = None;
-        if glyph_core::lyricsearch::looks_like_lyrics(&q) {
-            let lq = q.clone();
+        let lq = glyph_core::search_ops::SearchOps::parse(&q).text;
+        if glyph_core::lyricsearch::looks_like_lyrics(&lq) {
             self.search.lyric_task = Some(cx.spawn(async move |this, cx| {
-                if !immediate {
-                    cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-                }
+                cx.background_executor().timer(SEARCH_DEBOUNCE).await;
                 let Some(b) = this.update(cx, |s, _| (s.search.seq == seq).then(|| s.backend.clone()).flatten()).ok().flatten() else { return };
                 let r = guard_async(b.search_lyrics(&lq)).await;
                 this.update(cx, |s, cx| {
@@ -134,11 +145,8 @@ impl Glyph {
         }
         self.search.task = Some(cx.spawn(async move |this, cx| {
             // Wait until typing pauses: one request per query, not per key.
-            if !immediate {
-                cx.background_executor()
-                    .timer(SEARCH_DEBOUNCE)
-                    .await;
-            }
+            // Submit/paste must not bypass the quiet period either.
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             let stream = this
                 .update(cx, |s, _| {
                     if s.search.seq != seq {
@@ -155,7 +163,7 @@ impl Glyph {
                     let Some(b) = s.backend.clone() else {
                         return Err(Some(t("status.backend_offline").to_string()));
                     };
-                    let (plain, _) = glyph_core::taste::parse_query(q.trim());
+                    let (plain, _) = glyph_core::taste::parse_query(&glyph_core::search_ops::SearchOps::parse(q.trim()).query());
                     guard(|| b.search(&plain)).ok_or(Some(t("error.not_ready").to_string()))
                 })
                 .ok();
@@ -188,10 +196,11 @@ impl Glyph {
                         }
                         match ev {
                             SearchEvent::Results { tracks, .. } => {
-                                let (plain, phrases) = glyph_core::taste::parse_query(&s.search.query);
+                                let ops = glyph_core::search_ops::SearchOps::parse(&s.search.query);
+                                let (plain, phrases) = glyph_core::taste::parse_query(&ops.query());
                                 let taste = s.taste();
                                 for t in tracks {
-                                    if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) {
+                                    if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) || !ops.matches(&t) {
                                         continue;
                                     }
                                     if s.search.seen.insert((t.source, t.id.clone())) {
@@ -244,7 +253,7 @@ impl Glyph {
         self.search.page += 1;
         self.search.loading_more = true;
         let (seq, page) = (self.search.seq, self.search.page);
-        let (plain, _) = glyph_core::taste::parse_query(self.search.query.trim());
+        let (plain, _) = glyph_core::taste::parse_query(&glyph_core::search_ops::SearchOps::parse(self.search.query.trim()).query());
         let Some(mut stream) = guard(|| b.search_page(&plain, page)) else {
             self.search.loading_more = false;
             return;
@@ -261,9 +270,10 @@ impl Glyph {
                             return false;
                         }
                         if let SearchEvent::Results { tracks, .. } = ev {
-                            let (_, phrases) = glyph_core::taste::parse_query(&s.search.query);
+                            let ops = glyph_core::search_ops::SearchOps::parse(&s.search.query);
+                            let (_, phrases) = glyph_core::taste::parse_query(&ops.query());
                             for t in tracks {
-                                if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) {
+                                if s.is_hidden_artist(&t.artist) || !s.allowed(&t) || !glyph_core::taste::matches_phrases(&t, &phrases) || !ops.matches(&t) {
                                     continue;
                                 }
                                 // Later pages go below what is already shown.
@@ -297,7 +307,7 @@ impl Glyph {
     /// Artists in the current results, best matches for the query first:
     /// (name, a song of theirs for the picture).
     pub fn search_artists(&self, max: usize) -> Vec<(String, Track)> {
-        let q = glyph_core::taste::parse_query(self.search.query.trim()).0.to_lowercase();
+        let q = glyph_core::taste::parse_query(&glyph_core::search_ops::SearchOps::parse(self.search.query.trim()).query()).0.to_lowercase();
         let mut found: Vec<(String, Track, usize)> = Vec::new();
         for tr in &self.search.results {
             let name = primary_artist(&tr.artist);
@@ -331,7 +341,7 @@ impl Glyph {
     /// Query completions taken from the current results (titles and artists
     /// that contain what was typed), for the chips above the results.
     pub fn search_completions(&self, max: usize) -> Vec<String> {
-        let q = glyph_core::taste::parse_query(self.search.query.trim()).0.to_lowercase();
+        let q = glyph_core::taste::parse_query(&glyph_core::search_ops::SearchOps::parse(self.search.query.trim()).query()).0.to_lowercase();
         if q.len() < 2 {
             return Vec::new();
         }

@@ -172,6 +172,19 @@ impl Glyph {
                 match guard_async(b.mcp_pull()).await {
                     Ok(pull) => {
                         failures = 0;
+                        // A poll may complete after the user disabled MCP or switched modes.
+                        let alive = this.update(cx, |s, cx| {
+                            if s.mcp.relay_gen != gen {
+                                return false;
+                            }
+                            if s.mcp.error.take().is_some() {
+                                cx.notify();
+                            }
+                            true
+                        }).unwrap_or(false);
+                        if !alive {
+                            break;
+                        }
                         if !pull.approvals.is_empty() {
                             let _ = this.update(cx, |s, cx| {
                                 for a in pull.approvals.clone() {
@@ -202,7 +215,7 @@ impl Glyph {
                             cx.notify();
                         });
                         // Back off: 2, 4, 8 … 60 s.
-                        let wait = (2u64 << failures.min(5)).min(60);
+                        let wait = (1u64 << failures.min(6)).min(60);
                         cx.background_executor().timer(Duration::from_secs(wait)).await;
                     }
                 }

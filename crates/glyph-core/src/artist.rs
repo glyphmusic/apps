@@ -107,18 +107,16 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
     Ok(None)
 }
 
-/// Downloads the photo into the cache (longest edge 1280 px, JPEG).
+/// Downloads the photo into the cache (longest edge 1280 px, WebP).
 async fn fetch_image(http: &reqwest::Client, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<PathBuf> {
     let dir = paths::cache_dir().join("artists");
-    let path = dir.join(format!("{}.webp", paths::hash_hex(url)));
+    let path = dir.join(format!("validated-v2-{}.webp", paths::hash_hex(url)));
     if path.is_file() {
         return Ok(path);
     }
-    let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
-    let bytes = request.timeout(Duration::from_secs(15)).send().await?.error_for_status()?.bytes().await?;
+    let img = crate::cover::download_image(http, url, server).await?;
     let dest = path.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let img = image::load_from_memory(&bytes)?;
         let img = if img.width().max(img.height()) > 1280 { img.thumbnail(1280, 1280) } else { img };
         let out = crate::profile_images::encode_webp(&img,80.0)?;
         std::fs::create_dir_all(&dir)?;
@@ -126,6 +124,13 @@ async fn fetch_image(http: &reqwest::Client, url: &str, server: Option<&crate::s
     })
     .await??;
     Ok(path)
+}
+
+/// Public catalog profile pictures also cover artists without a Wikipedia article.
+pub async fn portrait(http: &reqwest::Client, name: &str) -> Result<Option<PathBuf>> {
+    let provider = crate::providers::deezer::Deezer::new(http.clone());
+    let Some(url) = provider.artist_picture(name).await? else { return Ok(None) };
+    fetch_image(http, &url, None).await.map(Some)
 }
 
 #[cfg(test)]

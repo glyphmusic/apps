@@ -35,7 +35,7 @@ pub fn mark_toggled(key: impl Into<SharedString>) {
 }
 
 pub(super) fn has_fill(name: &str) -> bool {
-    matches!(name, "heart" | "list-music" | "picture-in-picture-2" | "layout-split")
+    matches!(name, "heart" | "list-music" | "picture-in-picture-2" | "layout-split" | "thumbs-up")
 }
 
 /// Toggle icon button. `key` identifies it for the click animation (pass the

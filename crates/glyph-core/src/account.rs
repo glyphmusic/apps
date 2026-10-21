@@ -59,6 +59,12 @@ fn sync_state() -> &'static Mutex<Option<SyncState>> {
     S.get_or_init(|| Mutex::new(None))
 }
 
+fn require_session(expected: &Stored) -> Result<()> {
+    let guard = session().lock().unwrap();
+    if guard.as_ref().is_some_and(|s| &s.stored == expected) { Ok(()) }
+    else { Err(anyhow!(SIGNED_OUT)) }
+}
+
 fn stored_path() -> PathBuf {
     paths::data_dir().join("account.json")
 }
@@ -67,8 +73,36 @@ fn load_stored() -> Option<Stored> {
     serde_json::from_slice(&std::fs::read(stored_path()).ok()?).ok()
 }
 
+/// A private cache for one account on one server, independent of the guest library.
+pub fn library_path_for(acc: &Stored) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let scope = format!("{}\n{}", acc.server.trim_end_matches('/'), acc.account.id);
+    let key: String = Sha256::digest(scope.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    paths::data_dir().join("accounts").join(key).join("library.json")
+}
+
+pub fn library_path() -> Option<PathBuf> {
+    let acc = load_stored()?;
+    let cfg = Config::load().ok()?;
+    if cfg.effective_server_url().trim_end_matches('/') != acc.server.trim_end_matches('/') { return None; }
+    Some(library_path_for(&acc))
+}
+
+pub fn guest_merge_marker() -> PathBuf { paths::data_dir().join("guest-merge-pending.json") }
+
+pub fn guest_merge_pending(server: &str) -> bool {
+    paths::read_json::<serde_json::Value>(&guest_merge_marker())
+        .and_then(|v| v["server"].as_str().map(str::to_owned))
+        .is_some_and(|s| s.trim_end_matches('/') == server.trim_end_matches('/'))
+}
+
+pub fn stored_guest_merge_pending() -> bool {
+    load_stored().is_some_and(|s| guest_merge_pending(&s.server))
+}
+
 // ------------------------------------------------------------------ secrets
 
+#[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
 const KEYCHAIN_SERVICE: &str = "glyph";
 
 /// Secure storage of the host app (Android Keystore, iOS Keychain). When set,
@@ -95,7 +129,7 @@ fn fallback_path(device_id: &str) -> PathBuf {
     paths::data_dir().join(format!("account_token_{device_id}"))
 }
 
-#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+#[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
 fn entry(device_id: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(KEYCHAIN_SERVICE, &format!("account:{device_id}")).ok()
 }
@@ -105,7 +139,7 @@ fn put_refresh(device_id: &str, token: &str) {
         let _ = std::fs::remove_file(fallback_path(device_id));
         return;
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Some(e) = entry(device_id) {
         if e.set_password(token).is_ok() {
             let _ = std::fs::remove_file(fallback_path(device_id));
@@ -122,7 +156,7 @@ fn get_refresh(device_id: &str) -> Option<String> {
     if let Some(t) = secret_store().and_then(|s| s.get(&format!("account:{device_id}"))) {
         return Some(t);
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Some(t) = entry(device_id).and_then(|e| e.get_password().ok()) {
         return Some(t);
     }
@@ -133,7 +167,7 @@ fn forget_refresh(device_id: &str) {
     if let Some(s) = secret_store() {
         s.delete(&format!("account:{device_id}"));
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Some(e) = entry(device_id) {
         let _ = e.delete_credential();
     }
@@ -152,7 +186,7 @@ fn put_vault(account_id: &str, v: &Vault) {
         let _ = std::fs::remove_file(vault_fallback(account_id));
         return;
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
         if e.set_password(&text).is_ok() {
             let _ = std::fs::remove_file(vault_fallback(account_id));
@@ -168,7 +202,7 @@ fn get_vault(account_id: &str) -> Option<Vault> {
     if let Some(t) = secret_store().and_then(|s| s.get(&format!("settings-key:{account_id}"))) {
         return unb64(&t).and_then(|b| Vault::from_bytes(&b));
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Some(t) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")).ok().and_then(|e| e.get_password().ok()) {
         return unb64(&t).and_then(|b| Vault::from_bytes(&b));
     }
@@ -180,7 +214,7 @@ fn forget_vault(account_id: &str) {
     if let Some(s) = secret_store() {
         s.delete(&format!("settings-key:{account_id}"));
     }
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
         let _ = e.delete_credential();
     }
@@ -193,23 +227,38 @@ async fn derive_vault(password: String, account_id: String) -> Result<Vault> {
 
 /// Store a fresh session for `server` and make it current.
 fn adopt(server: &str, s: &Session) {
+    let _ = adopt_if_current(server, s, None);
+}
+
+fn adopt_if_current(server: &str, s: &Session, expected: Option<&Stored>) -> Result<()> {
+    let mut current = session().lock().unwrap();
+    if expected.is_some_and(|expected| current.as_ref().is_none_or(|live| live.stored != *expected)) {
+        return Err(anyhow!(SIGNED_OUT));
+    }
     let stored = Stored { server: server.to_string(), account: s.account.clone(), device_id: s.device_id.clone() };
     put_refresh(&s.device_id, &s.refresh_token);
     if let Err(e) = paths::write_json(&stored_path(), &stored) {
         tracing::warn!("could not save account: {e}");
     }
     let exp = Instant::now() + Duration::from_secs(s.access_expires_in_s.saturating_sub(60));
-    *session().lock().unwrap() = Some(Live { stored, access: Some((s.access_token.clone(), exp)) });
+    *current = Some(Live { stored, access: Some((s.access_token.clone(), exp)) });
+    Ok(())
 }
 
 /// Forget the local session (tokens, state). The library stays.
 fn drop_local() {
-    if let Some(live) = session().lock().unwrap().take() {
+    drop_local_if_current(None);
+}
+
+fn drop_local_if_current(expected: Option<&Stored>) {
+    let mut current = session().lock().unwrap();
+    if expected.is_some_and(|expected| current.as_ref().is_none_or(|live| live.stored != *expected)) { return; }
+    if let Some(live) = current.take() {
         forget_refresh(&live.stored.device_id);
         forget_vault(&live.stored.account.id);
     }
     let _ = std::fs::remove_file(stored_path());
-    let _ = std::fs::remove_file(SyncState::path());
+    // Keep the account's sync agreement with its private library cache.
     *sync_state().lock().unwrap() = None;
 }
 
@@ -259,6 +308,10 @@ pub fn platform() -> &'static str {
         "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
     } else {
         "other"
     }
@@ -271,6 +324,8 @@ pub fn device_name() -> String {
         "windows" => "Windows",
         "macos" => "macOS",
         "linux" => "Linux",
+        "android" => "Android",
+        "ios" => "iOS",
         _ => "Desktop",
     };
     if host.trim().is_empty() { format!("Glyph ({os})") } else { format!("{} ({os})", host.trim()) }
@@ -279,6 +334,8 @@ pub fn device_name() -> String {
 /// Results of one sync round's network part, applied with [`Backend::sync_apply`].
 #[derive(Debug, Default)]
 pub struct SyncRound {
+    pub owner: Option<Stored>,
+    pub bootstrap: bool,
     /// Remote items to apply, in rev order.
     pub items: Vec<SyncItem>,
     pub pushed: usize,
@@ -322,29 +379,30 @@ async fn access_token(client: &ServerClient, force: bool) -> Result<String> {
     }
     let _refresh = tokio::time::timeout(Duration::from_secs(15), REFRESH.get_or_init(|| tokio::sync::Mutex::new(())).lock())
         .await.map_err(|_| anyhow!("Account refresh is taking too long. Please try again."))?;
-    let (device_id, cached) = {
+    let (expected, cached) = {
         let g = session().lock().unwrap();
         let live = g.as_ref().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         if live.stored.server != client.base_url() {
             return Err(anyhow!(SIGNED_OUT));
         }
-        (live.stored.device_id.clone(), live.access.clone())
+        (live.stored.clone(), live.access.clone())
     };
     if let (false, Some((tok, exp))) = (force, cached) {
         if exp > Instant::now() {
             return Ok(tok);
         }
     }
+    let device_id = expected.device_id.clone();
     let refresh = tokio::task::spawn_blocking(move || get_refresh(&device_id)).await?
         .ok_or_else(|| anyhow!(SIGNED_OUT))?;
     match client.refresh_session(&refresh).await {
         Ok(s) => {
             let (base, fresh) = (client.base_url().to_string(), s.clone());
-            tokio::task::spawn_blocking(move || adopt(&base, &fresh)).await?;
+            tokio::task::spawn_blocking(move || adopt_if_current(&base, &fresh, Some(&expected))).await??;
             Ok(s.access_token)
         }
         Err(e) if matches!(server_error(&e), Some((401, _))) => {
-            drop_local();
+            drop_local_if_current(Some(&expected));
             Err(anyhow!(SIGNED_OUT))
         }
         Err(e) => Err(e),
@@ -358,11 +416,18 @@ where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    let expected = session().lock().unwrap().as_ref().map(|s| s.stored.clone()).ok_or_else(|| anyhow!(SIGNED_OUT))?;
     let tok = access_token(client, false).await?;
+    require_session(&expected)?;
     match f(tok).await {
-        Err(e) if matches!(server_error(&e), Some((401, "token_expired"))) => f(access_token(client, true).await?).await,
+        Err(e) if matches!(server_error(&e), Some((401, "token_expired"))) => {
+            require_session(&expected)?;
+            let token = access_token(client, true).await?;
+            require_session(&expected)?;
+            f(token).await
+        }
         Err(e) if matches!(server_error(&e), Some((401, _))) => {
-            drop_local();
+            drop_local_if_current(Some(&expected));
             Err(anyhow!(SIGNED_OUT))
         }
         r => r,
@@ -370,6 +435,86 @@ where
 }
 
 impl Backend {
+    pub async fn playback_live(&self) -> Result<tokio::sync::mpsc::Receiver<()>> {
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        let c = self.account_client()?;
+        self.spawn(async move { with_auth(&c, |token| {
+            let (c, expected) = (c.clone(), expected.clone());
+            async move { require_session(&expected)?; c.playback_live(&token).await }
+        }).await }).await?
+    }
+
+    pub async fn playback_ack(&self, receipt: glyph_protocol::playback::Receipt) -> Result<()> {
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        let c = self.account_client()?;
+        self.spawn(async move { with_auth(&c, |token| {
+            let (c, receipt, expected) = (c.clone(), receipt.clone(), expected.clone());
+            async move { require_session(&expected)?; c.playback_ack(&token, &receipt).await }
+        }).await }).await?
+    }
+    pub fn playback_send(&self, mut send: glyph_protocol::playback::Send) -> std::sync::mpsc::Receiver<Result<()>> {
+        send.request_id = Some(uuid::Uuid::new_v4().simple().to_string());
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let setup = self.account().ok_or_else(|| anyhow!(SIGNED_OUT)).and_then(|expected| Ok((expected, self.account_client()?)));
+        self.rt.as_ref().expect("runtime alive").spawn(async move {
+            let r = async {
+                let (expected, c) = setup?;
+                with_auth(&c, |token| {
+                    let (c, send, expected) = (c.clone(), send.clone(), expected.clone());
+                    async move { require_session(&expected)?; c.playback_command(&token, &send).await }
+                }).await
+            }.await;
+            let _ = tx.send(r);
+        });
+        rx
+    }
+    pub async fn playback_poll(&self, state: glyph_protocol::playback::State) -> Result<glyph_protocol::playback::Poll> {
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        let c = self.account_client()?;
+        self.spawn(async move {
+            with_auth(&c, |token| {
+                let (c, state, expected) = (c.clone(), state.clone(), expected.clone());
+                async move {
+                    require_session(&expected)?;
+                    c.playback_poll(&token, &state).await
+                }
+            }).await
+        }).await?
+    }
+
+    pub async fn playback_command(&self, mut send: glyph_protocol::playback::Send) -> Result<()> {
+        send.request_id = Some(uuid::Uuid::new_v4().simple().to_string());
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        let c = self.account_client()?;
+        self.spawn(async move {
+            with_auth(&c, |token| {
+                let (c, send, expected) = (c.clone(), send.clone(), expected.clone());
+                async move {
+                    require_session(&expected)?;
+                    c.playback_command(&token, &send).await
+                }
+            }).await
+        }).await?
+    }
+    pub fn reset_library_sync(&self) {
+        if let Some(acc) = self.account() {
+            *sync_state().lock().unwrap() = Some(SyncState::load(&acc.account.id));
+        }
+    }
+
+    /// Complete an accepted guest import only after applying a fresh cloud pull.
+    /// Keep the source snapshot until the merged account cache is durable.
+    pub fn sync_merge_guest(&self, lib: &mut Library) -> Result<bool> {
+        let acc = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        let path = library_path_for(&acc);
+        let pending = path.with_file_name("pending-guest.json");
+        if !pending.exists() { return Ok(false); }
+        let guest = Library::load_from(&pending)?;
+        sync::merge_guest(lib, &guest);
+        lib.save_to(&path)?;
+        std::fs::remove_file(pending)?;
+        Ok(true)
+    }
     fn account_client(&self) -> Result<ServerClient> {
         self.cur().server.clone().ok_or_else(|| anyhow!("no server configured"))
     }
@@ -626,6 +771,7 @@ impl Backend {
 
     /// Sign this device out (server and local). The library stays on the device.
     pub async fn account_sign_out(&self) -> Result<()> {
+        let Some(expected) = self.account() else { return Ok(()) };
         let c = self.account_client()?;
         self.spawn(async move {
             let r = with_auth(&c, |t| {
@@ -633,7 +779,7 @@ impl Backend {
                 async move { c.sign_out_device(&t).await }
             })
             .await;
-            drop_local();
+            drop_local_if_current(Some(&expected));
             match r {
                 Err(e) if !is_signed_out(&e) => tracing::warn!("server sign-out failed, signed out locally: {e:#}"),
                 _ => {}
@@ -645,6 +791,7 @@ impl Backend {
 
     /// Delete the account and everything synced. Local data stays.
     pub async fn account_delete(&self, confirm_handle: &str) -> Result<()> {
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let (c, h) = (self.account_client()?, confirm_handle.to_string());
         self.spawn(async move {
             with_auth(&c, |t| {
@@ -652,13 +799,19 @@ impl Backend {
                 async move { c.account_delete(&t, &h).await }
             })
             .await?;
-            drop_local();
+            drop_local_if_current(Some(&expected));
             Ok(())
         })
         .await?
     }
 
     /// Songs this device should keep offline (downloaded + requested by sync).
+    pub fn sync_pending(&self, snap: &Snapshot) -> usize {
+        let Some(acc) = self.account() else { return 0 };
+        let state = SyncState::load(&acc.account.id);
+        state.changes(snap, 0).len().max(state.outbox.len())
+    }
+
     pub fn sync_wanted_downloads(&self) -> Vec<Track> {
         let downloaded = self.downloaded_tracks();
         let Some(acc) = self.account() else { return downloaded };
@@ -678,6 +831,7 @@ impl Backend {
         let acc = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let c = self.account_client()?;
         self.spawn(async move {
+            require_session(&acc)?;
             let mut snap = snap;
             let mut st = {
                 let mut g = sync_state().lock().unwrap();
@@ -692,6 +846,8 @@ impl Backend {
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
             let mut round = SyncRound::default();
+            round.owner = Some(acc.clone());
+            round.bootstrap = !st.pulled_once;
 
             // Pictures first, so other devices can fetch them once the playlist arrives.
             for (sha, path) in &snap.cover_files {
@@ -717,25 +873,33 @@ impl Backend {
                 }
             }
 
-            let changes = st.changes(&snap, now);
+            // Read the account before uploading guest/default values on a new
+            // device. The following round pushes the remaining local additions.
+            let changes = if st.pulled_once { st.enqueue(&snap, now) } else { Vec::new() };
+            require_session(&acc)?;
+            st.save().context("persist sync outbox before sending")?;
+            *sync_state().lock().unwrap() = Some(st.clone());
             for chunk in sync::chunks(changes, 200, 512 * 1024) {
                 let r = with_auth(&c, |t| {
-                    let (c, items) = (c.clone(), chunk.clone());
-                    async move { c.sync_push(&t, items).await }
+                    let (c, items, acc) = (c.clone(), chunk.clone(), acc.clone());
+                    async move { require_session(&acc)?; c.sync_push(&t, items).await }
                 })
                 .await?;
                 round.pushed += r.accepted as usize;
                 let stale: std::collections::BTreeSet<(String, String)> = r.stale.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
                 let accepted: Vec<SyncItem> = chunk.into_iter().filter(|i| !stale.contains(&(i.kind.clone(), i.key.clone()))).collect();
                 st.mark_pushed(&accepted);
+                require_session(&acc)?;
+                st.save().context("persist sync acknowledgement")?;
+                *sync_state().lock().unwrap() = Some(st.clone());
                 round.items.extend(r.stale);
             }
 
             loop {
                 let since = st.last_rev;
                 let r = with_auth(&c, |t| {
-                    let c = c.clone();
-                    async move { c.sync_pull(&t, since).await }
+                    let (c, acc) = (c.clone(), acc.clone());
+                    async move { require_session(&acc)?; c.sync_pull(&t, since).await }
                 })
                 .await?;
                 if r.reset {
@@ -773,6 +937,7 @@ impl Backend {
                 }
             }
 
+            require_session(&acc)?;
             st.save().context("save sync state")?;
             *sync_state().lock().unwrap() = Some(st);
             Ok(round)
@@ -795,6 +960,7 @@ impl Backend {
     /// Main-thread half for settings: apply remote settings and keys to `cfg`.
     pub fn sync_apply_settings(&self, cfg: &mut Config, round: &SyncRound) -> SettingsApplied {
         let Some(acc) = self.account() else { return SettingsApplied::default() };
+        if round.owner.as_ref() != Some(&acc) { return SettingsApplied::default(); }
         let vault = get_vault(&acc.account.id);
         let mut g = sync_state().lock().unwrap();
         let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
@@ -856,6 +1022,7 @@ impl Backend {
     pub fn sync_apply(&self, lib: &mut Library, round: &SyncRound) -> Applied {
         let downloaded = self.downloaded_tracks();
         let Some(acc) = self.account() else { return Applied::default() };
+        if round.owner.as_ref() != Some(&acc) { return Applied::default(); }
         let mut g = sync_state().lock().unwrap();
         let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
         let applied = sync::apply(lib, st, &round.items, &downloaded);
@@ -897,6 +1064,134 @@ impl Backend {
     }
 }
 
+// ------------------------------------------------------------------ jam
+
+impl Backend {
+    /// Starts a jam hosted by the signed-in account (ends an older one).
+    pub async fn jam_start(&self) -> Result<glyph_protocol::jam::State> {
+        self.profile_call(|c, t| async move { c.jam_start(&t).await }).await
+    }
+
+    /// The jam's state once its revision differs from `rev` (long poll).
+    pub async fn jam_state(&self, code: &str, rev: u64) -> Result<glyph_protocol::jam::State> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_state(&t, &code, rev).await }
+        })
+        .await
+    }
+
+    /// In (the state), or waiting for the host to let us in.
+    pub async fn jam_join(&self, code: &str) -> Result<glyph_protocol::jam::JoinResponse> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_join(&t, &code).await }
+        })
+        .await
+    }
+
+    /// One clock sample: (local ms sent, server ms, local ms received).
+    pub async fn jam_time(&self, code: &str) -> Result<(u64, u64, u64)> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move {
+                let unix = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                let sent = unix();
+                let r = c.jam_time(&t, &code).await?;
+                Ok((sent, r.server_ms, unix()))
+            }
+        })
+        .await
+    }
+
+    pub async fn jam_admit(&self, code: &str, handle: &str, allow: bool) -> Result<()> {
+        let (code, handle) = (code.to_string(), handle.to_string());
+        self.profile_call(move |c, t| {
+            let (code, handle) = (code.clone(), handle.clone());
+            async move { c.jam_admit(&t, &code, &handle, allow).await }
+        })
+        .await
+    }
+
+    pub async fn jam_claim(&self, code: &str) -> Result<glyph_protocol::jam::State> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_claim(&t, &code).await }
+        })
+        .await
+    }
+
+    /// Leaves (or, as the host, ends) the jam.
+    pub async fn jam_leave(&self, code: &str) -> Result<()> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_leave(&t, &code).await }
+        })
+        .await
+    }
+
+    pub async fn jam_op(&self, code: &str, op: glyph_protocol::jam::Op) -> Result<()> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let (code, op) = (code.clone(), op.clone());
+            async move { c.jam_op(&t, &code, &op).await }
+        })
+        .await
+    }
+
+    /// The members' requests waiting for the host (long poll; `now`: only
+    /// what is there).
+    pub async fn jam_ops(&self, code: &str, now: bool) -> Result<glyph_protocol::jam::OpsResponse> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_ops(&t, &code, now).await }
+        })
+        .await
+    }
+
+    /// The jam's push socket (see [`ServerClient::jam_live`]).
+    pub async fn jam_live(&self, code: &str) -> Result<tokio::sync::mpsc::Receiver<crate::server_client::LiveEvent>> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let code = code.clone();
+            async move { c.jam_live(&t, &code).await }
+        })
+        .await
+    }
+
+    pub async fn jam_publish(&self, state: glyph_protocol::jam::State) -> Result<()> {
+        self.profile_call(move |c, t| {
+            let s = state.clone();
+            async move { c.jam_publish(&t, &s).await }
+        })
+        .await
+    }
+
+    pub async fn jam_now(&self, code: &str, now: glyph_protocol::jam::Now) -> Result<()> {
+        let code = code.to_string();
+        self.profile_call(move |c, t| {
+            let (code, now) = (code.clone(), now.clone());
+            async move { c.jam_now(&t, &code, &now).await }
+        })
+        .await
+    }
+
+    pub async fn jam_kick(&self, code: &str, handle: &str) -> Result<()> {
+        let (code, handle) = (code.to_string(), handle.to_string());
+        self.profile_call(move |c, t| {
+            let (code, handle) = (code.clone(), handle.clone());
+            async move { c.jam_kick(&t, &code, &handle).await }
+        })
+        .await
+    }
+}
+
 // ------------------------------------------------------------------ profiles
 
 impl Backend {
@@ -908,7 +1203,14 @@ impl Backend {
         T: Send + 'static,
     {
         let c = self.account_client()?;
-        self.spawn(async move { with_auth(&c, |t| f(c.clone(), t)).await }).await?
+        let expected = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
+        self.spawn(async move {
+            with_auth(&c, |t| {
+                let expected = expected.clone();
+                let future = f(c.clone(), t);
+                async move { require_session(&expected)?; future.await }
+            }).await
+        }).await?
     }
 
     pub async fn profile_settings(&self) -> Result<ProfileSettings> {
@@ -982,6 +1284,56 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_guest_merge_survives_restart_without_exposing_guest_data_to_account() {
+        let _env = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) { for (key, value) in &self.0 { match value { Some(v) => std::env::set_var(key, v), None => std::env::remove_var(key) } } }
+        }
+        let _restore = Restore(["GLYPH_DATA_DIR", "GLYPH_CONFIG", "GLYPH_DEMO"].into_iter().map(|key| (key, std::env::var_os(key))).collect());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::remove_var("GLYPH_DEMO");
+        std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
+        std::env::set_var("GLYPH_CONFIG", dir.path().join("config.toml"));
+        let stored = Stored { server: crate::config::DEFAULT_SERVER_URL.into(), device_id: "new-device".into(), account: Account {
+            id: "account".into(), handle: "owner".into(), device_limit: 5, created_at: 0, has_password: false,
+        }};
+        paths::write_json(&stored_path(), &stored).unwrap();
+        paths::write_json(&guest_merge_marker(), &serde_json::json!({"server": stored.server})).unwrap();
+        let mut guest = Library::default();
+        guest.toggle_like(&crate::dedupe::test_track(glyph_protocol::ProviderId::Audius, "guest", "Guest", "Artist", Some(100)));
+        guest.save_to(&Library::path()).unwrap();
+        let restarted = Library::load().unwrap();
+        assert_eq!(restarted.liked.len(), 1);
+        assert_eq!(restarted.storage_path.0, Some(Library::guest_path()));
+        assert!(!library_path_for(&stored).exists());
+        // "Use account data only" creates its empty cache, keeping guest data.
+        Library::default().save_to(&library_path_for(&stored)).unwrap();
+        std::fs::remove_file(guest_merge_marker()).unwrap();
+        assert!(Library::load().unwrap().liked.is_empty());
+        assert_eq!(Library::load_from(&Library::guest_path()).unwrap().liked.len(), 1);
+    }
+
+    #[test]
+    fn account_cache_paths_separate_servers_and_ignore_untrusted_path_segments() {
+        let _env = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = Stored { server: "https://one.example".into(), device_id: "device".into(), account: Account {
+            id: "../../account".into(), handle: "owner".into(), device_limit: 5, created_at: 0, has_password: false,
+        }};
+        let mut b = a.clone(); b.server = "https://two.example".into();
+        assert_ne!(library_path_for(&a), library_path_for(&b));
+        b = a.clone(); b.account.id = "other".into();
+        assert_ne!(library_path_for(&a), library_path_for(&b));
+        assert!(library_path_for(&a).starts_with(paths::data_dir().join("accounts")));
+        with_test_access("https://one.example", "token", || {
+            assert!(require_session(&a).is_err());
+            // A stale callback must not clear a newer session.
+            drop_local_if_current(Some(&a));
+            assert!(session().lock().unwrap().is_some());
+        });
+    }
 
     #[test]
     fn key_derivation_is_stable_and_salted() {

@@ -43,12 +43,14 @@ mod adaptive;
 pub mod http;
 pub mod eq;
 pub mod loudness;
-#[cfg(not(glyph_mobile))]
+pub mod pcm;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod media_keys;
-/// Android/iOS: media keys live in the app shell (MediaSession / MPRemoteCommandCenter).
-#[cfg(glyph_mobile)]
-#[path = "media_keys_mobile.rs"]
-mod media_keys;
+/// Phones: the app shell (Android MediaSession / iOS remote commands) shows
+/// now playing and delivers the media buttons.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[path = "media_keys_hosted.rs"]
+pub mod media_keys;
 mod native;
 pub mod spatial;
 pub mod spectrum;
@@ -131,6 +133,8 @@ pub(crate) enum Cmd {
     Seek(Duration),
     StreamQuality(String),
     Volume(f32),
+    /// Tempo of native playback (1.0 = normal); jam guests catch up with it.
+    Speed(f32),
     Crossfade(Duration),
     /// A-B loop of the current song (native playback): (start, end).
     Loop(Option<(Duration, Duration)>),
@@ -217,6 +221,12 @@ impl PlayerController {
     }
     pub fn seek(&self, position: Duration) {
         self.send(Cmd::Seek(position));
+    }
+    /// Plays native audio a little faster or slower (clamped to 0.9..=1.1;
+    /// 1.0 = normal). Jam guests use it to catch up with the host without
+    /// jumping. Embedded players ignore it. A new song starts at 1.0.
+    pub fn set_speed(&self, speed: f32) {
+        self.send(Cmd::Speed(speed));
     }
     /// 0.0..=1.0
     pub fn set_volume(&self, volume: f32) {

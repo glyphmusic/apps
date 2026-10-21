@@ -39,10 +39,10 @@ pub use server::*;
 pub use storage::*;
 pub use about::*;
 
-pub const REPO_URL: &str = "https://github.com/glyphmusic/desktop";
+pub const REPO_URL: &str = "https://github.com/glyphmusic/apps";
 const DOCS_URL: &str = "https://docs.glyph.my";
-const ISSUES_URL: &str = "https://github.com/glyphmusic/desktop/issues/new";
-const RELEASES_URL: &str = "https://github.com/glyphmusic/desktop/releases";
+const ISSUES_URL: &str = "https://github.com/glyphmusic/apps/issues/new";
+const RELEASES_URL: &str = "https://github.com/glyphmusic/apps/releases";
 
 pub(crate) const PANEL_W: f32 = 920.0;
 const PANEL_H: f32 = 600.0;
@@ -119,6 +119,8 @@ fn scroll_to_found(b: gpui::Bounds<Pixels>) {
     });
 }
 
+const TOUCH: bool = crate::ui::compact::TOUCH;
+
 /// Settings row: label left with an (i) that explains it on hover, control
 /// right.
 pub(crate) fn row(label: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> AnyElement {
@@ -153,25 +155,37 @@ pub(crate) fn row_full(
         .flex()
         .items_center()
         .justify_between()
-        .gap(px(24.0))
+        .gap(px(if TOUCH { 10.0 } else { 24.0 }))
+        // Phones: a wide control (field, buttons) wraps under the label
+        // instead of running over it.
+        .when(TOUCH, |d| d.flex_wrap())
         .py(px(14.0))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .min_w_0()
+                .when(TOUCH, |d| d.flex_grow(1.0).flex_basis(px(200.0)))
                 .gap(px(3.0))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label.clone()))
+                        .child(div().min_w_0().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(label.clone()))
                         .when_some(info, |d, s| d.child(info_tip(SharedString::from(format!("info-{label}")), s))),
                 )
                 .when_some(status, |d, s| d.child(div().text_size(px(12.5)).text_color(white(0.55)).child(s))),
         )
-        .child(div().flex_none().flex().items_center().gap(px(8.0)).child(control))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .when(TOUCH, |d| d.flex_grow(1.0).justify_end().flex_wrap().max_w_full())
+                .when(!TOUCH, |d| d.flex_none())
+                .child(control),
+        )
         .into_any_element()
 }
 

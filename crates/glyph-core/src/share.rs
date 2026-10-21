@@ -111,6 +111,9 @@ pub fn decode(s: &str) -> Result<(String, Vec<Track>)> {
         return Err(anyhow!("playlist code too large"));
     }
     let code: Code = serde_json::from_slice(&json).context("broken playlist code")?;
+    if code.t.len() > crate::library::playlist_track_limit() {
+        return Err(anyhow!("Playlist exceeds this server's limit of {} songs", crate::library::playlist_track_limit()));
+    }
     let tracks = code
         .t
         .into_iter()

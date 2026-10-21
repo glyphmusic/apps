@@ -1,0 +1,24 @@
+[package]
+name = "glyph-android"
+description = "Android shell: runs the Glyph views (src/lib.rs) on the GPUI Android backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# Loaded by GameActivity (android.app.lib_name in the manifest).
+name = "glyph_android"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+glyph = { path = "../.." }
+glyph-core.workspace = true
+glyph-audio.workspace = true
+glyph-gpui-android = { path = "../glyph-gpui-android" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+jni = "0.22"
+log = "0.4"
+android_logger = "0.15"
+# Without a subscriber, tracing events go to `log` and so to logcat.
+tracing = { workspace = true, features = ["log"] }

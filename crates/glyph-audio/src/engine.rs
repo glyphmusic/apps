@@ -293,6 +293,7 @@ impl Engine {
             Cmd::Seek(p) => self.seek(p),
             Cmd::StreamQuality(q) => self.stream_quality(Some(&q)),
             Cmd::Volume(v) => self.set_volume(v),
+            Cmd::Speed(s) => self.set_speed(s),
             Cmd::Crossfade(d) => self.crossfade = d,
             Cmd::Loop(l) => self.ab_loop = l,
             Cmd::OutputDevice(name) => {
@@ -823,6 +824,13 @@ impl Engine {
                     p.pause();
                 }
             }
+        }
+    }
+
+    fn set_speed(&mut self, s: f32) {
+        let s = if s.is_finite() { s.clamp(0.9, 1.1) } else { 1.0 };
+        if let Some(p) = &self.player {
+            p.set_speed(s);
         }
     }
 

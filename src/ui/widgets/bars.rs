@@ -170,6 +170,8 @@ pub fn ascii_state(
     theme::adaptive(("empty", title.clone()), move || {
         div()
             .self_start()
+            // Wraps the text within the page instead of running past it.
+            .max_w_full()
             .flex()
             .items_center()
             .gap(px(14.0))
@@ -187,6 +189,7 @@ pub fn ascii_state(
             )
             .child(
                 div()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(px(2.0))

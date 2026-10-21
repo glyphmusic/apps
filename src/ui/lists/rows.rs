@@ -23,6 +23,12 @@ pub fn song_row(
     show_album: bool,
     cx: &mut Context<Glyph>,
 ) -> Stateful<gpui::Div> {
+    if crate::ui::compact::TOUCH {
+        let from_ctx = from.map(|l| (l, i));
+        let tr = list[i].clone();
+        let row = crate::ui::compact::song_row(app, list, i, prefix, from_ctx.clone(), cx);
+        return with_menu(row, tr, from_ctx, cx);
+    }
     let tr = list[i].clone();
     let playing = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
     let liked = app.is_liked(&tr);

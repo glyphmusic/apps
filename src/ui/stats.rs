@@ -84,7 +84,192 @@ fn section(title: SharedString, body: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
+/// "Your 2026 in Glyph": the year at a glance (only with statistics on).
+fn recap(app: &mut Glyph, year: String, cx: &mut Context<Glyph>) -> Vec<AnyElement> {
+    let s = app.library.stats.year(&year);
+    let mut body: Vec<AnyElement> = Vec::new();
+    body.push(
+        div()
+            .id("recap-back")
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .text_size(theme::text_sm())
+            .text_color(theme::text_dim())
+            .hover(|d| d.text_color(theme::text()))
+            .on_click(cx.listener(|this, _, _, cx| this.close_recap(cx)))
+            .child(icon("chevron-left", 14.0, theme::text_dim()))
+            .child(t("stats.title"))
+            .into_any_element(),
+    );
+    body.push(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child("[ RECAP ]"))
+            .child(heading(tf("recap.title", &[("year", &year)])))
+            .into_any_element(),
+    );
+    if s.ms == 0 {
+        body.push(ascii_state(ART_EMPTY, t("stats.empty.title"), t("stats.empty.sub")).into_any_element());
+        return body;
+    }
+    let top_artists = stats::top_artists(&s, 5);
+    let top_tracks = stats::top_tracks(&s, 50);
+    let days = (s.ms / 86_400_000) as u32;
+    body.push(
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(10.0))
+            .child(tile(t("stats.time"), fmt_listen(s.ms), (days > 0).then(|| tf("recap.days", &[("n", &days)]).to_string())))
+            .child(tile(t("stats.plays"), s.plays.to_string(), None))
+            .child(tile(t("stats.artists"), s.artists.len().to_string(), None))
+            .child(tile(t("stats.songs"), s.tracks.len().to_string(), None))
+            .into_any_element(),
+    );
+    // Number one: the artist with the most listening time, shown big.
+    if let Some((name, a)) = top_artists.first().cloned() {
+        let seed = top_tracks.iter().find(|x| glyph_core::dedupe::by_artist(&x.track.artist, &name)).map(|x| x.track.clone());
+        let art = seed.map(|tr| cover(app, &tr, 120.0, 10.0, cx));
+        let n = name.clone();
+        body.push(
+            div()
+                .id("recap-top-artist")
+                .flex()
+                .items_center()
+                .gap(px(20.0))
+                .p(px(16.0))
+                .rounded(px(12.0))
+                .bg(theme::card())
+                .border_1()
+                .border_color(theme::border_faint())
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n, cx)))
+                .children(art)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(format!("[ {} ]", t("recap.top_artist").to_uppercase())))
+                        .child(div().truncate().text_size(px(28.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(name))
+                        .child(div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(tf("recap.top_artist_line", &[("t", &fmt_listen(a.ms)), ("n", &a.plays)]).to_string())),
+                )
+                .into_any_element(),
+        );
+    }
+    // Facts: when the year was listened to.
+    let peak_h = s.hours.iter().enumerate().filter(|(_, v)| **v > 0).max_by_key(|(_, v)| **v).map(|(i, _)| i);
+    let wd = ["stats.mon", "stats.tue", "stats.wed", "stats.thu", "stats.fri", "stats.sat", "stats.sun"];
+    let peak_d = s.weekdays.iter().enumerate().filter(|(_, v)| **v > 0).max_by_key(|(_, v)| **v).map(|(i, _)| t(wd[i]).to_string());
+    let months: Vec<(String, u64)> = app.library.stats.by_month().into_iter().filter(|(m, _)| m.starts_with(year.as_str())).collect();
+    let peak_m = months.iter().max_by_key(|(_, v)| *v).map(|(m, _)| m.clone());
+    let mut facts = div().flex().flex_wrap().gap(px(10.0));
+    if let Some(h) = peak_h {
+        facts = facts.child(tile(t("recap.peak_hour"), format!("{h:02}:00"), None));
+    }
+    if let Some(d) = peak_d {
+        facts = facts.child(tile(t("recap.peak_day"), d, None));
+    }
+    if let Some(m) = peak_m {
+        facts = facts.child(tile(t("recap.peak_month"), m, None));
+    }
+    body.push(facts.into_any_element());
+    // Top 5 artists and top songs.
+    let artists = div().flex().flex_col().gap(px(6.0)).children(top_artists.into_iter().enumerate().map(|(i, (name, a))| {
+        let n = name.clone();
+        div()
+            .id(("recap-artist", i))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .h(px(34.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .relative()
+            .child(hover_fill(format!("recap-artist-{i}"), white(0.05), 8.0))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_artist(&n, cx)))
+            .child(mono().w(px(22.0)).text_size(theme::text_sm()).text_color(theme::text_faint()).child(format!("{:02}", i + 1)))
+            .child(div().flex_1().truncate().text_size(theme::text_md()).child(name))
+            .child(mono().w(px(90.0)).flex().justify_end().text_size(theme::text_sm()).text_color(theme::text_dim()).child(fmt_listen(a.ms)))
+    }));
+    body.push(section(t("recap.top_artists"), artists));
+    let songs: Vec<glyph_protocol::Track> = top_tracks.iter().map(|x| x.track.clone()).collect();
+    let list = std::rc::Rc::new(songs.clone());
+    let rows = div().flex().flex_col().children((0..list.len().min(10)).map(|i| crate::ui::lists::song_row(app, list.clone(), i, "recap-row", None, false, cx)));
+    body.push(section(t("recap.top_songs"), rows));
+    // Keep or send the year: the top songs as a playlist or a link.
+    if !songs.is_empty() {
+        let (y1, y2, s1, s2) = (year.clone(), year.clone(), songs.clone(), songs);
+        body.push(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(primary_button("recap-save", t("recap.save")).on_click(cx.listener(move |this, _, _, cx| this.save_recap_playlist(&y1, s1.clone(), cx))))
+                .child(button("recap-share", t("recap.share")).on_click(cx.listener(move |this, _, _, cx| {
+                    let title = tf("recap.title", &[("year", &y2)]).to_string();
+                    this.share_songs(title, s2.clone(), "playlist", None, cx)
+                })))
+                .into_any_element(),
+        );
+    }
+    body
+}
+
+/// Entry to the recap on the statistics page: one card per year with data.
+fn recap_cards(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+    let years: Vec<String> = app.library.stats.years().into_iter().take(2).collect();
+    if years.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(10.0))
+            .children(years.into_iter().enumerate().map(|(i, y)| {
+                let y2 = y.clone();
+                div()
+                    .id(("recap-card", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(16.0))
+                    .h(px(52.0))
+                    .rounded(px(12.0))
+                    .bg(theme::card())
+                    .border_1()
+                    .border_color(theme::border_faint())
+                    .cursor_pointer()
+                    .relative()
+                    .child(hover_fill(format!("recap-card-{i}"), white(0.04), 12.0))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_recap(y2.clone(), cx)))
+                    .child(icon("sparkles", 16.0, theme::pink()))
+                    .child(div().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).child(tf("recap.title", &[("year", &y)])))
+                    .child(icon("chevron-right", 14.0, theme::text_dim()))
+            }))
+            .into_any_element(),
+    )
+}
+
 pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
+    if let Some(year) = app.recap_year.clone().filter(|_| app.config.stats.enabled) {
+        let body = recap(app, year, cx);
+        return div()
+            .id("stats-scroll")
+            .track_scroll(&app.main_scroll)
+            .size_full()
+            .overflow_y_scroll()
+            .px(px(theme::PAGE_X))
+            .py(px(20.0))
+            .child(div().flex().flex_col().gap(px(28.0)).children(body))
+            .into_any_element();
+    }
     let back = crate::ui::lists::back_button(app, cx);
     let range = app.stats_range;
     let chips = div().flex().gap(px(8.0)).children(
@@ -121,6 +306,7 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
         if s.ms == 0 && s.plays == 0 {
             body.push(ascii_state(ART_EMPTY, t("stats.empty.title"), t("stats.empty.sub")).into_any_element());
         } else {
+            body.extend(recap_cards(app, cx));
             let top_artists = stats::top_artists(&s, 10);
             let top_tracks = stats::top_tracks(&s, 10);
             let avg_day = s.ms / s.days.iter().filter(|d| **d > 0).count().max(1) as u64;
@@ -202,7 +388,7 @@ pub fn view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> AnyEle
         .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .py(px(20.0))
         .child(div().flex().flex_col().gap(px(28.0)).children(back).child(head).children(body))
         .into_any_element()

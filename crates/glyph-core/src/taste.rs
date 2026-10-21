@@ -57,7 +57,10 @@ impl Taste {
         for (a, n) in &lib.artist_skips {
             add(a, -(*n as f32).min(10.0) * 0.6);
         }
-        let hidden: HashSet<String> = lib.hidden_artists.iter().flat_map(|h| credited(h)).collect();
+        for (a, preference) in &lib.recommendation_feedback {
+            add(a, if *preference > 0 { 8.0 } else { -12.0 });
+        }
+        let hidden: HashSet<String> = lib.hidden_artists.iter().chain(lib.recommendation_feedback.iter().filter(|(_, v)| **v <= -2).map(|(a, _)| a)).flat_map(|h| credited(h)).collect();
         for h in &hidden {
             w.remove(h);
         }

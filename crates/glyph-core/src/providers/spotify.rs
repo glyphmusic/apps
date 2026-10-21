@@ -118,6 +118,9 @@ pub(crate) struct Page<T> {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PlaylistItem {
+    #[serde(default)]
+    pub item: Option<STrack>,
+    #[serde(default)]
     pub track: Option<STrack>,
 }
 
@@ -169,13 +172,23 @@ impl Spotify {
     /// All tracks of a public playlist (paged).
     pub async fn playlist_tracks(&self, id: &str) -> Result<Vec<Track>> {
         let mut out = Vec::new();
-        let mut url = format!("{API}/playlists/{id}/tracks");
-        let mut query: Vec<(&str, &str)> = vec![("limit", "100")];
-        for _ in 0..100 {
+        let mut url = format!("{API}/playlists/{id}/items");
+        let mut query: Vec<(&str, &str)> = vec![("limit", "50")];
+        let max_tracks = crate::library::playlist_track_limit();
+        let max_pages = max_tracks.div_ceil(50);
+        for page_index in 0..=max_pages {
             let page: Page<PlaylistItem> = self.get(&url, &query).await?;
-            out.extend(page.items.into_iter().filter_map(|i| i.track).filter_map(convert));
+            out.extend(page.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert));
             match page.next {
                 Some(n) => {
+                    if out.len() > max_tracks || page_index == max_pages {
+                        anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+                    }
+                    let next = reqwest::Url::parse(&n)?;
+                    if next.scheme() != "https" || next.host_str() != Some("api.spotify.com")
+                        || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
+                        anyhow::bail!("invalid provider pagination URL");
+                    }
                     url = n;
                     query.clear();
                 }
@@ -269,7 +282,7 @@ impl MusicProvider for Spotify {
 
     async fn search(&self, query: &str) -> Result<Vec<Track>> {
         let r: SearchResp = self
-            .get(&format!("{API}/search"), &[("q", query), ("type", "track"), ("limit", "20")])
+            .get(&format!("{API}/search"), &[("q", query), ("type", "track"), ("limit", "10")])
             .await?;
         Ok(r.tracks.items.into_iter().filter_map(convert).collect())
     }
@@ -295,6 +308,19 @@ impl MusicProvider for Spotify {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_rows_accept_current_and_legacy_spotify_fields() {
+        for json in [
+            r#"{"item":{"id":"a","name":"Song","artists":[{"name":"Artist"}]}}"#,
+            r#"{"track":{"id":"a","name":"Song","artists":[{"name":"Artist"}]}}"#,
+            r#"{"item":{"id":"a","name":"Song","artists":[{"name":"Artist"}]},"track":null}"#,
+        ] {
+            let row: PlaylistItem = serde_json::from_str(json).unwrap();
+            let track = convert(row.item.or(row.track).unwrap()).unwrap();
+            assert_eq!(track.id, "a");
+        }
+    }
 
     #[test]
     fn parses_tracks() {

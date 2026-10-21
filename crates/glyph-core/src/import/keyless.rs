@@ -107,7 +107,11 @@ pub async fn spotify_embed(http: &reqwest::Client, kind: &str, id: &str) -> Resu
     }
     let html = resp.text().await?;
     let e = spotify_embed_entity(&html).ok_or_else(|| anyhow!("Spotify page without a song list"))?;
-    parse_spotify_entity(&e).ok_or_else(|| anyhow!("Spotify page without a song list"))
+    let list = parse_spotify_entity(&e).ok_or_else(|| anyhow!("Spotify page without a song list"))?;
+    if kind == "playlist" && list.1.len() >= SPOTIFY_EMBED_LIMIT {
+        bail!("Spotify only exposes the first 100 songs here. Use Spotify access authorized to read this playlist, or import a complete playlist file / copied song links.");
+    }
+    Ok(list)
 }
 
 // ------------------------------------------------------------ YouTube
@@ -224,7 +228,9 @@ pub async fn youtube_playlist(http: &reqwest::Client, list_id: &str) -> Result<(
     let context = serde_json::json!({"client": {"clientName": "WEB", "clientVersion": YT_CLIENT_VERSION, "hl": "en", "gl": "US"}});
     let mut body = serde_json::json!({"context": context, "browseId": format!("VL{list_id}")});
     let (mut name, mut tracks) = (None, Vec::new());
-    for _ in 0..60 {
+    let max_tracks = crate::library::playlist_track_limit();
+    let max_pages = max_tracks.div_ceil(50);
+    for page_index in 0..=max_pages {
         let v: Value = http
             .post(YT_BROWSE)
             .header("X-Youtube-Client-Name", "1")
@@ -246,9 +252,13 @@ pub async fn youtube_playlist(http: &reqwest::Client, list_id: &str) -> Result<(
                 tracks.push(t);
             }
         }
+        if tracks.len() > max_tracks { bail!("Playlist exceeds this server's limit of {max_tracks} songs"); }
         match cont {
-            Some(token) if tracks.len() > before => body = serde_json::json!({"context": context, "continuation": token}),
-            _ => break,
+            Some(token) => {
+                if tracks.len() == before || page_index == max_pages { bail!("YouTube did not complete the playlist; retry the import"); }
+                body = serde_json::json!({"context": context, "continuation": token});
+            }
+            None => break,
         }
     }
     if tracks.is_empty() {
@@ -386,7 +396,10 @@ pub async fn read_songs(
 pub async fn fill_takeout(http: &reqwest::Client, tracks: Vec<Track>) -> Vec<Track> {
     let songs: Vec<SongLink> = tracks.iter().map(|t| SongLink::YouTube(t.id.clone())).collect();
     let dz = crate::providers::deezer::Deezer::new(http.clone());
-    read_songs(&songs, None, &dz, http).await
+    let found = read_songs(&songs, None, &dz, http).await;
+    let found: std::collections::HashMap<_, _> = found.into_iter().map(|t| (t.id.clone(), t)).collect();
+    // A temporary oEmbed failure must not remove a row from the user's export.
+    tracks.into_iter().map(|t| found.get(&t.id).cloned().unwrap_or(t)).collect()
 }
 
 #[cfg(test)]

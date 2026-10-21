@@ -178,6 +178,11 @@ pub fn now_playing(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                             mark_toggled("np-like");
                             this.toggle_like(&t_like, cx)
                         })),
+                )
+                .child(
+                    toggle_button("np-sleep", "timer", 16.0, app.sleep.is_some(), None)
+                        .on_mouse_down(gpui::MouseButton::Left, on_right_click(ControlMenu::Sleep, cx))
+                        .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Sleep, cx)),
                 ),
         );
 

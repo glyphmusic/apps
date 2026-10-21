@@ -45,6 +45,7 @@ pub fn new_token() -> String {
 pub fn start_local(port: u16, token: String, calls: flume::Sender<McpRequest>) -> std::io::Result<LocalServer> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let token = Arc::new(token);
@@ -92,7 +93,9 @@ fn same(a: &str, b: &str) -> bool {
 fn handle(stream: TcpStream, token: &str, calls: &flume::Sender<McpRequest>) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    let mut reader = BufReader::new(&stream);
+    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+    // Bound the entire request head, including lines without a newline.
+    let mut reader = BufReader::new(&stream).take(16 * 1024);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut parts = line.split_whitespace();
@@ -110,6 +113,10 @@ fn handle(stream: TcpStream, token: &str, calls: &flume::Sender<McpRequest>) -> 
             return respond(&stream, "431 Request Header Fields Too Large", b"", "text/plain");
         }
     }
+    if reader.limit() == 0 {
+        return respond(&stream, "431 Request Header Fields Too Large", b"", "text/plain");
+    }
+    let mut reader = reader.into_inner();
     let header = |k: &str| headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     // Browsers may only come from this computer (DNS rebinding).
     if let Some(origin) = header("origin") {
@@ -129,7 +136,13 @@ fn handle(stream: TcpStream, token: &str, calls: &flume::Sender<McpRequest>) -> 
         // No server-initiated event stream: answers come with each POST.
         return respond(&stream, "405 Method Not Allowed", b"", "text/plain");
     }
-    let len: usize = header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    if header("transfer-encoding").is_some() || headers.iter().filter(|(k, _)| k == "content-length").count() > 1 {
+        return respond(&stream, "400 Bad Request", b"unsupported request framing", "text/plain");
+    }
+    let len: usize = match header("content-length").and_then(|v| v.parse().ok()) {
+        Some(len) => len,
+        None => return respond(&stream, "400 Bad Request", b"valid content-length required", "text/plain"),
+    };
     if len > MAX_BODY {
         return respond(&stream, "413 Payload Too Large", b"", "text/plain");
     }
@@ -140,6 +153,7 @@ fn handle(stream: TcpStream, token: &str, calls: &flume::Sender<McpRequest>) -> 
         return respond(&stream, "400 Bad Request", err.to_string().as_bytes(), "application/json");
     };
     let answers: Vec<serde_json::Value> = match &msg {
+        serde_json::Value::Array(batch) if batch.is_empty() => vec![invalid_request()],
         serde_json::Value::Array(batch) => batch.iter().filter_map(|m| answer(m, calls)).collect(),
         m => answer(m, calls).into_iter().collect(),
     };
@@ -147,16 +161,28 @@ fn handle(stream: TcpStream, token: &str, calls: &flume::Sender<McpRequest>) -> 
         // Only notifications / responses.
         return respond(&stream, "202 Accepted", b"", "text/plain");
     }
-    let out = if msg.is_array() { serde_json::Value::Array(answers) } else { answers.into_iter().next().unwrap_or_default() };
+    let out = if msg.as_array().is_some_and(|b| !b.is_empty()) { serde_json::Value::Array(answers) } else { answers.into_iter().next().unwrap_or_default() };
     respond(&stream, "200 OK", out.to_string().as_bytes(), "application/json")
 }
 
 /// The JSON-RPC answer to one message (`None` for notifications).
+fn invalid_request() -> serde_json::Value {
+    serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}})
+}
+
 pub fn answer(m: &serde_json::Value, calls: &flume::Sender<McpRequest>) -> Option<serde_json::Value> {
+    if !m.is_object() || m["jsonrpc"] != "2.0" || !m["method"].is_string()
+        || m.get("id").is_some_and(|id| !(id.is_string() || id.is_number() || id.is_null()))
+    {
+        return Some(invalid_request());
+    }
     let id = m.get("id").cloned()?;
     let method = m["method"].as_str().unwrap_or("");
     let ok = |result: serde_json::Value| serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
     let err = |code: i64, message: String| serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } });
+    if m.get("params").is_some_and(|p| !p.is_object()) {
+        return Some(err(-32602, "params must be an object".into()));
+    }
     if let Some(r) = mcp::handle_meta(method, "glyph", env!("CARGO_PKG_VERSION")) {
         return Some(match r {
             Ok(v) => ok(v),
@@ -171,6 +197,9 @@ pub fn answer(m: &serde_json::Value, calls: &flume::Sender<McpRequest>) -> Optio
         return Some(err(-32602, format!("unknown tool: {name}")));
     }
     let args = m["params"].get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    if !args.is_object() {
+        return Some(err(-32602, "tool arguments must be an object".into()));
+    }
     Some(ok(call(name, args, calls)))
 }
 
@@ -182,7 +211,8 @@ pub fn call(name: String, args: serde_json::Value, calls: &flume::Sender<McpRequ
     }
     match rx.recv_timeout(Duration::from_millis(mcp::CALL_TIMEOUT_MS)) {
         Ok(r) => r,
-        Err(_) => mcp::text_result(&"Glyph did not answer in time.".into(), true),
+        Err(flume::RecvTimeoutError::Timeout) => mcp::text_result(&"Glyph did not answer in time.".into(), true),
+        Err(flume::RecvTimeoutError::Disconnected) => mcp::text_result(&"Glyph closed before answering.".into(), true),
     }
 }
 
@@ -198,6 +228,42 @@ pub fn client_config(url: &str, token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_malformed_requests_without_dispatching() {
+        let (tx, rx) = flume::unbounded();
+        for msg in [serde_json::json!(null), serde_json::json!(7), serde_json::json!({}),
+            serde_json::json!({"jsonrpc":"1.0","id":1,"method":"ping"}),
+            serde_json::json!({"jsonrpc":"2.0","id":[],"method":"ping"})] {
+            assert_eq!(answer(&msg, &tx).unwrap()["error"]["code"], -32600);
+        }
+        for params in [serde_json::json!([]), serde_json::json!({"name":"now_playing","arguments":null})] {
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":params});
+            assert_eq!(answer(&msg, &tx).unwrap()["error"]["code"], -32602);
+        }
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn validates_http_framing_and_batches() {
+        let (tx, _rx) = flume::unbounded();
+        let srv = start_local(0, "token".into(), tx).unwrap();
+        let send = |extra: &str, body: &str| {
+            let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(s, "POST /mcp HTTP/1.1\r\nAuthorization: Bearer token\r\n{extra}\r\n{body}").unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        assert!(send("Content-Length: nope\r\n", "").starts_with("HTTP/1.1 400"));
+        assert!(send("Content-Length: 0\r\nContent-Length: 0\r\n", "").starts_with("HTTP/1.1 400"));
+        assert!(send("Transfer-Encoding: chunked\r\n", "").starts_with("HTTP/1.1 400"));
+        let empty = send("Content-Length: 2\r\n", "[]");
+        assert!(empty.contains("\"code\":-32600"), "{empty}");
+        let notification = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(send(&format!("Content-Length: {}\r\n", notification.len()), notification).starts_with("HTTP/1.1 202"));
+    }
 
     #[test]
     fn answers_meta_and_routes_tool_calls() {

@@ -12,9 +12,12 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+flume.workspace = true
 tokio = { workspace = true, features = ["process"] }
 futures.workspace = true
 reqwest.workspace = true
+# Jam pushes (`/v1/jam/{code}/live`); rustls like reqwest.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 async-trait = "0.1"
 toml = "0.8"
 dirs = "6"
@@ -30,6 +33,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Tags + embedded covers of imported audio files (same build as glyph-audio).
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mkv"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+mozjpeg = { version = "0.10", default-features = false }
+mozjpeg-sys = { version = "2.2.3", default-features = false, features = ["unwinding"] }
 webp = { version = "0.3.1", default-features = false }
 self-replace = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
@@ -46,7 +51,7 @@ r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.1.1" }
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

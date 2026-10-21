@@ -4,6 +4,8 @@ impl Glyph {
     // ------------------------------------------------------------ polling
 
     pub(super) fn poll(&mut self, cx: &mut Context<Self>) {
+        self.ensure_account_library(cx);
+        self.poll_account_outputs(cx);
         if self.download_check_at.elapsed() >= Duration::from_secs(60) {
             self.download_check_at = Instant::now();
             if let Some(backend) = &self.backend { backend.refresh_downloads(); }
@@ -11,9 +13,13 @@ impl Glyph {
         let mut dirty = false;
         self.save_player_prefs(cx);
         self.tick_stats(cx);
+        self.tick_sleep(cx);
         // AI assistants (MCP): calls that arrived, and every few seconds the
         // server / relay state (sign-in changes start or stop the relay).
         if self.poll_mcp(cx) {
+            dirty = true;
+        }
+        if self.poll_jam(cx) {
             dirty = true;
         }
         if self.mcp_checked.elapsed() > Duration::from_secs(5) && self.config_loaded {
@@ -40,7 +46,14 @@ impl Glyph {
         if self.poll_discovery() {
             dirty = true;
         }
-        if self.remote_on() {
+        if self.account.output_target.is_some() {
+            // Only the receiving app records listens and advances its player.
+        } else if self.jam_listen_remote() {
+            // Listening at the jam host's device: the host's song and position.
+            if self.jam_remote_state() {
+                dirty = true;
+            }
+        } else if self.remote_on() {
             if self.poll_mpd(cx) {
                 dirty = true;
             }
@@ -161,6 +174,7 @@ impl Glyph {
                 PlayerEvent::Ended => self.next(true, cx),
                 PlayerEvent::NearEnd => self.preload_next(cx),
                 PlayerEvent::Error(e) => {
+                    self.finish_account_transfer(Some(e.clone()), cx);
                     // Preview URLs are signed and expire after ~15 min. If the
                     // one we are holding has expired, resolve once more (which
                     // fetches a fresh URL) and replay instead of just failing.
@@ -188,12 +202,12 @@ impl Glyph {
         for k in keys {
             dirty = true;
             match k {
-                MediaKeyEvent::Play if self.remote_on() => {
+                MediaKeyEvent::Play if self.remote_on() || self.account.output_target.is_some() => {
                     if !self.is_playing() {
                         self.toggle_play(cx)
                     }
                 }
-                MediaKeyEvent::Pause if self.remote_on() => {
+                MediaKeyEvent::Pause if self.remote_on() || self.account.output_target.is_some() => {
                     if self.is_playing() {
                         self.toggle_play(cx)
                     }
@@ -203,7 +217,9 @@ impl Glyph {
                 MediaKeyEvent::Toggle => self.toggle_play(cx),
                 MediaKeyEvent::Next => self.next(false, cx),
                 MediaKeyEvent::Previous => self.previous(cx),
-                MediaKeyEvent::Stop => self.with_player(|p| p.stop()),
+                MediaKeyEvent::Stop => {
+                    if !self.account_control(glyph_protocol::playback::Command::Stop) { self.with_player(|p| p.stop()); }
+                }
                 MediaKeyEvent::SeekForward => self.seek_relative(5.0),
                 MediaKeyEvent::SeekBackward => self.seek_relative(-5.0),
             }
@@ -256,6 +272,9 @@ impl Glyph {
         while let Some(req) = crate::instance::try_recv() {
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
                 self.dock_action(n, cx);
+            }
+            if let Some(code) = req.strip_prefix("jam ") {
+                self.jam_open_link(code, cx);
             }
             if let Some(link) = req.strip_prefix("open ") {
                 if self.backend.is_some() { self.import_share_code(link, cx); }

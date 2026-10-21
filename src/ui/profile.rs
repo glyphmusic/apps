@@ -247,6 +247,7 @@ impl Glyph {
     /// Settings -> Profile opened: load the own settings.
     pub fn profile_page_opened(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         if self.signed_in().is_none() {
             return;
         }
@@ -254,6 +255,7 @@ impl Glyph {
         cx.spawn(async move |this, cx| {
             let r = b.profile_settings().await;
             this.update(cx, |s, cx| {
+                if s.signed_in() != owner { return; }
                 match r {
                     Ok(p) => s.profile.settings = Some(p),
                     Err(e) => s.profile.notice = Some((err_text(&e), false)),
@@ -267,6 +269,7 @@ impl Glyph {
 
     pub fn profile_update(&mut self, patch: ProfilePatch, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         // Shown at once; the server's answer replaces it.
         if let Some(s) = self.profile.settings.as_mut() {
             if let Some(v) = patch.public {
@@ -284,6 +287,7 @@ impl Glyph {
         cx.spawn(async move |this, cx| {
             let r = b.profile_update(patch).await;
             this.update(cx, |s, cx| {
+                if s.signed_in() != owner { return; }
                 match r {
                     Ok(p) => {
                         s.profile.settings = Some(p);
@@ -323,6 +327,7 @@ impl Glyph {
     }
 
     pub fn profile_toggle_playlist(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.library.playlist(&id).is_none_or(|p| p.local_only) { return; }
         let Some(s) = self.profile.settings.as_ref() else { return };
         let mut ids = s.playlists.clone();
         match ids.iter().position(|x| *x == id) {
@@ -384,6 +389,7 @@ impl Glyph {
     /// Crops, compresses and uploads the picture from the crop dialog.
     pub fn profile_crop_apply(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         let Some(c) = self.profile.crop.take() else { return };
         self.profile.busy = true;
         cx.notify();
@@ -393,12 +399,14 @@ impl Glyph {
                 .background_executor()
                 .spawn(async move { glyph_core::profile_images::prepare_crop(&src, banner, crop).map_err(|e| e.to_string()) })
                 .await;
+            if b.account() != owner { return; }
             let r = match bytes {
                 Ok(bytes) => b.profile_set_image(banner, Some(bytes)).await.map_err(|e| err_text(&e)),
                 Err(e) => Err(tf("toast.cover_error", &[("e", &e)]).to_string()),
             };
             this.update(cx, |s, cx| {
                 s.profile.busy = false;
+                if s.signed_in() != owner { return; }
                 match r {
                     Ok(p) => {
                         s.profile.settings = Some(p);
@@ -416,9 +424,11 @@ impl Glyph {
 
     pub fn profile_remove_image(&mut self, banner: bool, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         cx.spawn(async move |this, cx| {
             let r = b.profile_set_image(banner, None).await;
             this.update(cx, |s, cx| {
+                if s.signed_in() != owner { return; }
                 match r {
                     Ok(p) => {
                         s.profile.settings = Some(p);
@@ -452,14 +462,16 @@ impl Glyph {
 
     /// A song started: send the recent songs shortly after, when the profile shows them.
     pub fn profile_recent_changed(&mut self, cx: &mut Context<Self>) {
-        if self.signed_in().is_none() {
+        if self.signed_in().is_none() || self.account.merge_pending || self.account.signing_out {
             return;
         }
         self.profile.recent_gen += 1;
         let gen = self.profile.recent_gen;
         let Some(b) = self.backend.clone() else { return };
+        let owner = self.signed_in();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RECENT_DEBOUNCE).await;
+            if !this.update(cx, |s, _| s.signed_in() == owner && !s.account.merge_pending && !s.account.signing_out).unwrap_or(false) { return; }
             // Settings not known yet: ask once.
             let known = this.update(cx, |s, _| s.profile.settings.as_ref().map(|p| p.show_recent)).ok().flatten();
             let on = match known {
@@ -475,7 +487,7 @@ impl Glyph {
             };
             let Some(tracks) = this
                 .update(cx, |s, _| {
-                    if !on || s.profile.recent_gen != gen {
+                    if !on || s.profile.recent_gen != gen || s.signed_in() != owner || s.account.merge_pending || s.account.signing_out {
                         return None;
                     }
                     let tracks: Vec<Track> = s.library.recent_tracks().take(RECENT_SHOWN).cloned().collect();
@@ -532,7 +544,16 @@ pub fn search_hit(app: &mut Glyph, query: &str, cx: &mut Context<Glyph>) -> Opti
 
 // ------------------------------------------------------------------ page
 
-fn avatar(path: Option<PathBuf>, size: f32) -> Div {
+/// The signed-in user's picture (placeholder icon when signed out or none set).
+pub(crate) fn own_avatar(app: &mut Glyph, size: f32, cx: &mut Context<Glyph>) -> Div {
+    let pic = app.signed_in().and_then(|acc| {
+        let sha = app.profile.settings.as_ref()?.avatar.clone()?;
+        app.profile_image(&acc.account.handle, &sha, cx)
+    });
+    avatar(pic, size).border_0()
+}
+
+pub(crate) fn avatar(path: Option<PathBuf>, size: f32) -> Div {
     let base = div()
         .flex_none()
         .size(px(size))
@@ -553,7 +574,7 @@ fn avatar(path: Option<PathBuf>, size: f32) -> Div {
 pub fn view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
     let Some(handle) = app.open_profile.clone() else { return div().into_any_element() };
     let scroll = app.main_scroll.clone();
-    let wrap = move |el: AnyElement| div().id("profile-scroll").track_scroll(&scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(el).into_any_element();
+    let wrap = move |el: AnyElement| div().id("profile-scroll").track_scroll(&scroll).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0)).child(el).into_any_element();
     let p = app.profile.page.clone().filter(|p| p.handle == handle);
     let Some(p) = p else {
         let body = if app.signed_in().is_none() {
@@ -798,7 +819,7 @@ fn privacy(app: &mut Glyph, s: &ProfileSettings, col: Div, cx: &mut Context<Glyp
         ),
     ]);
     // Playlists on the profile first, in their profile order; the rest below.
-    let mut playlists: Vec<(String, String, usize)> = guard(|| app.library.playlists.iter().map(|p| (p.id.clone(), p.name.clone(), p.tracks.len())).collect()).unwrap_or_default();
+    let mut playlists: Vec<(String, String, usize)> = guard(|| app.library.playlists.iter().filter(|p| !p.local_only).map(|p| (p.id.clone(), p.name.clone(), p.tracks.len())).collect()).unwrap_or_default();
     playlists.sort_by_key(|(id, _, _)| s.playlists.iter().position(|x| x == id).unwrap_or(usize::MAX));
     let order: Rc<Vec<String>> = Rc::new(playlists.iter().map(|p| p.0.clone()).collect());
     let width = px(crate::ui::settings::PANEL_W - crate::ui::settings::NAV_W - 64.0);

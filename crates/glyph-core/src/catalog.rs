@@ -19,7 +19,7 @@ pub struct ArtistStats {
     pub verified: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AlbumKind {
     Album,
     Ep,
@@ -125,8 +125,37 @@ pub async fn album_meta(http: &reqwest::Client, title: &str, artist: &str) -> Re
     Ok(Some(AlbumMeta { year, kind }))
 }
 
+/// The UTC day `days` days ago as `YYYY-MM-DD` (compares with catalog dates).
+pub fn date_days_ago(days: u32) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (y, m, d) = civil_from_days((now / 86_400) as i64 - days as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since 1970-01-01 to (year, month, day) (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn civil_dates() {
+        assert_eq!(super::civil_from_days(0), (1970, 1, 1));
+        assert_eq!(super::civil_from_days(20_746), (2026, 10, 20));
+        assert_eq!(super::civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(super::date_days_ago(0).len(), 10);
+    }
+
     use super::*;
 
     #[test]

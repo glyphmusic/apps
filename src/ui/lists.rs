@@ -93,6 +93,9 @@ fn meta_line(tracks: &[Track], color: Hsla) -> gpui::Div {
 
 /// Floating "Back" pill (only when there is history).
 pub(crate) fn back_button(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+    if crate::ui::compact::TOUCH {
+        return None;
+    }
     (!app.history.is_empty()).then(|| {
         div()
             .id("nav-back")
@@ -159,8 +162,35 @@ pub fn album_link(id: impl Into<ElementId>, tr: &Track, cx: &mut Context<Glyph>)
     )
 }
 
+/// Phones: a long press runs `f` (what a right click does on the desktop).
+/// GPUI's divs have no long-press listener, so a canvas over `el` registers
+/// one for its bounds.
+pub fn on_long_press(el: Stateful<gpui::Div>, f: impl Fn(&gpui::LongPressEvent, &mut Window, &mut gpui::App) + 'static) -> Stateful<gpui::Div> {
+    if !crate::ui::compact::TOUCH {
+        return el;
+    }
+    el.child(
+        gpui::canvas(
+            |b, w, _| w.insert_hitbox(b, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, w, _| {
+                w.on_mouse_event(move |e: &gpui::LongPressEvent, phase, w, cx| {
+                    if phase.bubble() && e.phase == gpui::TouchPhase::Started && hitbox.is_hovered(w) {
+                        cx.stop_propagation();
+                        w.prevent_default();
+                        f(e, w, cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0(),
+    )
+}
+
 /// Right-click on an artist (name, tile, row) opens the artist menu.
 pub fn with_artist_menu(el: Stateful<gpui::Div>, name: String, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    let nm = name.clone();
+    let el = on_long_press(el, cx.listener(move |this, e: &gpui::LongPressEvent, _, cx| this.open_artist_ctx(&crate::app::primary_artist(&nm), e.position, cx)));
     el.on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -172,6 +202,8 @@ pub fn with_artist_menu(el: Stateful<gpui::Div>, name: String, cx: &mut Context<
 
 /// Right-click on an album / playlist tile opens the list menu.
 pub fn with_list_menu(el: Stateful<gpui::Div>, l: ListRef, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    let lp = l.clone();
+    let el = on_long_press(el, cx.listener(move |this, e: &gpui::LongPressEvent, _, cx| this.open_list_ctx(lp.clone(), e.position, cx)));
     el.on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -183,6 +215,8 @@ pub fn with_list_menu(el: Stateful<gpui::Div>, l: ListRef, cx: &mut Context<Glyp
 
 /// Right-click on a song opens the song menu.
 pub fn with_menu(el: Stateful<gpui::Div>, tr: Track, from: Option<(ListRef, usize)>, cx: &mut Context<Glyph>) -> Stateful<gpui::Div> {
+    let (tp, fp) = (tr.clone(), from.clone());
+    let el = on_long_press(el, cx.listener(move |this, e: &gpui::LongPressEvent, _, cx| this.open_ctx(tp.clone(), e.position, fp.clone(), cx)));
     el.on_mouse_down(
         MouseButton::Right,
         cx.listener(move |this, e: &MouseDownEvent, _, cx| {

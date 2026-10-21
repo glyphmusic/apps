@@ -1,4 +1,5 @@
 use super::*;
+use glyph_core::config::ListSort;
 
 // ------------------------------------------------------------------ list view
 
@@ -9,7 +10,8 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
     if let ListRef::ArtistLiked(name) = &l {
         return liked_by_artist(app, name.clone(), cx);
     }
-    let tracks = app.list_tracks(&l);
+    let tracks = app.shown_tracks(&l);
+    let sort = app.list_sort(&l);
     let title = app.list_title(&l);
     let art = list_cover(app, &l, 248.0, cx);
     let art: AnyElement = match &l {
@@ -46,10 +48,16 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         _ => None,
     };
     let kind = match &l {
+        ListRef::User(id) => t(if app.library.playlist(id).is_some_and(|p| p.local_only) || app.signed_in().is_none() { "playlist.scope.local" } else if app.is_auto_download(id) { "playlist.scope.offline" } else { "playlist.scope.account" }),
         _ if app.shared_preview.is_some() => t("list.kind.playlist"),
         ListRef::Album { .. } if author.is_none() => t("list.kind.album"),
         _ => t("list.kind.playlist"),
     };
+    let kind: SharedString = if matches!(l, ListRef::User(_) | ListRef::Downloads) {
+        let saved = tracks.iter().filter(|t| app.is_downloaded(t)).count();
+        let bytes = app.backend.as_ref().map_or(0, |b| b.downloaded_bytes(&tracks));
+        format!("{kind} · {} · {:.1} MB", tf("playlist.offline_progress", &[("done", &saved), ("total", &tracks.len())]), bytes as f64 / 1_000_000.0).into()
+    } else { kind };
     // Albums and "liked by artist" show the artist, shared playlists their author.
     let sub: Option<AnyElement> = match &l {
         _ if app.shared_preview.is_some() => None,
@@ -245,6 +253,18 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
                                 .on_click(cx.listener(move |this, _, w, cx| this.toggle_add_songs(&id2, w, cx))),
                         )
                 })
+                // Radio: songs similar to this list.
+                .when(has, |d| {
+                    let l_radio = l.clone();
+                    d.child(icon_button("list-radio", "radio", 16.0, theme::text_dim()).on_click(cx.listener(move |this, _, _, cx| this.list_radio(&l_radio, cx))))
+                })
+                // Sort: title, artist, album, length or the list's own order.
+                .when(l.sort_id().is_some() && has, |d| {
+                    d.child(toggle_button("list-sort", "arrow-up-down", 16.0, sort != ListSort::Custom, None).on_mouse_down(
+                        MouseButton::Left,
+                        crate::ui::controls::on_right_click(crate::app::ControlMenu::Sort, cx),
+                    ))
+                })
                 .child(icon_button("list-more", "ellipsis-vertical", 16.0, theme::text_dim()).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -287,10 +307,10 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
             (Rc::new(items), Rc::new(songs), Rc::new(song_at))
         });
         let n = recent.as_ref().map_or(list.len(), |(items, ..)| items.len());
-        // Own playlists: songs are dragged into a new order; the rows in
-        // between glide aside (same feel as the queue).
+        // Own playlists in their own order: songs are dragged into a new
+        // order; the rows in between glide aside (same feel as the queue).
         let own = match &l {
-            ListRef::User(id) => Some(id.clone()),
+            ListRef::User(id) if sort == ListSort::Custom => Some(id.clone()),
             _ => None,
         };
         if !cx.has_active_drag() {
@@ -385,7 +405,7 @@ pub fn list_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> A
         .size_full()
         .flex()
         .gap(px(36.0))
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .when_some(drop_id, |d, id| {
             d.drag_over::<ExternalPaths>(|s, _, _, _| s.bg(theme::hover()))
                 .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
@@ -446,7 +466,7 @@ pub(super) fn liked_by_artist(app: &mut Glyph, name: String, cx: &mut Context<Gl
         .flex()
         .flex_col()
         .gap(px(16.0))
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .pt(px(20.0))
         .children(back.map(|b| div().flex_none().flex().child(b)))
         // Heading and its info line sit close together (a tighter gap than the

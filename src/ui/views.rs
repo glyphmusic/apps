@@ -12,7 +12,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Div, FontWeight, SharedStri
 use std::rc::Rc;
 
 fn scroll_area(id: &'static str) -> gpui::Stateful<gpui::Div> {
-    div().id(id).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0))
+    div().id(id).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0))
 }
 
 fn track_list(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Div {
@@ -34,7 +34,7 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
     let cards = theme::on_panel(|| home_cards(app, cx));
     let has_recent = !recent.is_empty();
     let row = if recent.is_empty() {
-        ascii_state(ART_EMPTY, t("home.empty.title"), t("home.empty.sub")).into_any_element()
+        ascii_state(ART_EMPTY, t("home.empty.title"), t(if crate::ui::compact::TOUCH { "home.empty.sub.touch" } else { "home.empty.sub" })).into_any_element()
     } else {
         recent_row(app, recent, "home-row", cx).into_any_element()
     };
@@ -44,15 +44,19 @@ pub fn home(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl I
     let (recs_all, trend_all) = (recs.clone(), trending.clone());
     let recs_row = (!recs.is_empty()).then(|| cover_row_with(app, recs, "home-recs", false, cx));
     let trend_row = (!trending.is_empty()).then(|| cover_row_with(app, trending, "home-trend", false, cx));
+    let releases = app.new_releases.clone();
+    let release_row = (!releases.is_empty()).then(|| new_releases_row(app, releases, cx));
 
     scroll_area("home-scroll").track_scroll(&app.main_scroll).child(
         div()
             .flex()
             .flex_col()
-            .gap(px(24.0))
-            .child(heading(greeting()))
+            .gap(px(if crate::ui::compact::TOUCH { 16.0 } else { 24.0 }))
+            // Phones: the greeting sits in the header beside the profile picture.
+            .when(!crate::ui::compact::TOUCH, |d| d.child(heading(greeting())))
             .child(cards)
             .child(section(section_head("disc-3", t("home.recent"), has_recent.then_some(More::Recent), cx), row))
+            .when_some(release_row, |d, r| d.child(section(section_head("sparkles", t("home.new_releases"), None, cx), r)))
             .when_some(recs_row, |d, r| d.child(section(section_head("heart", t("home.recs"), Some(More::Songs("home-recs-all", recs_all)), cx), r)))
             .when_some(trend_row, |d, r| d.child(section(section_head("headphones", t("home.trending"), Some(More::Songs("home-trend-all", trend_all)), cx), r))),
     )
@@ -66,7 +70,7 @@ enum More {
 
 /// A section: its title sits close above its content.
 fn section(head: impl IntoElement, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap(px(10.0)).child(head).child(body)
+    div().flex().flex_col().gap(px(if crate::ui::compact::TOUCH { 6.0 } else { 10.0 })).child(head).child(body)
 }
 
 /// Section title with "Show all" on the right.
@@ -283,6 +287,55 @@ fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, rec
         .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
 }
 
+/// "New from artists you follow": release cards (cover, title, artist,
+/// "SINGLE · 2026-10-12"), opening the release's song list.
+fn new_releases_row(app: &mut Glyph, releases: Vec<glyph_core::providers::deezer::Release>, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    const PREFIX: &str = "home-new";
+    let items: Vec<AnyElement> = releases
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let seed = r.cover_track();
+            let art = cover(app, &seed, 176.0, 8.0, cx);
+            let artist = artist_link((PREFIX, 10_000 + i), &r.artist, cx);
+            let kind = match r.kind {
+                glyph_core::catalog::AlbumKind::Album => t("album.kind.album"),
+                glyph_core::catalog::AlbumKind::Ep => t("album.kind.ep"),
+                glyph_core::catalog::AlbumKind::Single => t("album.kind.single"),
+                glyph_core::catalog::AlbumKind::Compilation => t("album.kind.compilation"),
+            };
+            let label = match r.released.as_deref() {
+                Some(day) => format!("{kind} · {day}"),
+                None => kind.to_string(),
+            };
+            let lm = ListRef::Album { title: r.title.clone(), artist: r.artist.clone(), tracks: vec![seed] };
+            let title = r.title.clone();
+            with_list_menu(div().id((PREFIX, i)), lm, cx)
+                .flex_none()
+                .w(px(192.0))
+                .p(px(8.0))
+                .rounded(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .relative()
+                .child(hover_fill(format!("{PREFIX}-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.05), 10.0))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_release(r.clone(), cx)))
+                .child(art)
+                .child(div().pt(px(4.0)).truncate().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
+                .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist))
+                .child(mono().text_size(px(11.0)).text_color(theme::text_faint()).child(label.to_uppercase()))
+                .into_any_element()
+        })
+        .collect();
+    let h = handle_for(PREFIX);
+    div().id(PREFIX).track_scroll(&h).flex().gap(px(4.0)).ml(px(-8.0))
+        .mr(px(-32.0))
+        .pr(px(32.0))
+        .overflow_x_scroll().child(smooth_wheel(&h, true, cx)).children(items)
+}
+
 /// "Recently played" row: songs and artists (a round picture, opening the
 /// artist page) side by side, newest first.
 fn recent_row(app: &mut Glyph, items: Vec<RecentItem>, prefix: &'static str, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
@@ -384,6 +437,8 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
     let query = app.search.query.clone();
     let body: gpui::AnyElement = if let Some(e) = app.search.error.clone() {
         ascii_state(ART_OFFLINE, e, t("search.error.sub")).into_any_element()
+    } else if query.trim().is_empty() && crate::ui::compact::TOUCH {
+        crate::ui::compact::search_recent(app, cx)
     } else if query.trim().is_empty() {
         ascii_state(ART_SEARCH, t("search.empty.title"), t("search.empty.sub")).into_any_element()
     } else if app.search.results.is_empty() && app.search.loading {
@@ -427,9 +482,25 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
                                 cx.listener(move |this, _, w, cx| this.pick_search_artist(&n2, Some(tr2.clone()), w, cx))
                             })
                             .child(art)
-                            .child(crate::ui::lists::artist_name_badged(app, &name, shown, 15.0, cx).flex_1().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()))
-                            .child(kind_chip(t("search.kind.artist")))
-                            .child(follow)
+                            .when(crate::ui::compact::TOUCH, |d| d.px(px(0.0)).gap(px(12.0)))
+                            .when(!crate::ui::compact::TOUCH, |d| {
+                                d.child(crate::ui::lists::artist_name_badged(app, &name, shown.clone(), 15.0, cx).flex_1().text_size(theme::text_md()).font_weight(FontWeight::MEDIUM).text_color(theme::text()))
+                                    .child(kind_chip(t("search.kind.artist")))
+                                    .child(follow)
+                            })
+                            // Phones: name over "Artist", like the song rows.
+                            .when(crate::ui::compact::TOUCH, |d| {
+                                d.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(crate::ui::lists::artist_name_badged(app, &name, shown.clone(), 15.0, cx).text_size(px(15.0)).text_color(theme::text()))
+                                        .child(div().text_size(px(12.5)).text_color(theme::text_dim()).child(t("search.kind.artist"))),
+                                )
+                            })
                     })
                     .collect();
                 // Songs found through a line of their lyrics, with that line.
@@ -543,7 +614,8 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
         }
     };
     // Query completions as chips: click to search for that.
-    let completions = app.search_completions(6);
+    // Phones: no completion chips; results start right under the filters.
+    let completions = if crate::ui::compact::TOUCH { Vec::new() } else { app.search_completions(6) };
     let suggest = (!completions.is_empty()).then(|| {
         div().flex().flex_wrap().gap(px(8.0)).children(completions.into_iter().enumerate().map(|(i, c)| {
             let q = c.clone();
@@ -590,8 +662,9 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             .flex()
             .flex_col()
             .gap(px(18.0))
-            .child(heading(if query.trim().is_empty() { t("nav.search") } else { format!("\u{201c}{query}\u{201d}").into() }))
-            .child(chips)
+            // Phones: the title sits in the header; filters only with results.
+            .when(!crate::ui::compact::TOUCH, |d| d.child(heading(if query.trim().is_empty() { t("nav.search") } else { format!("\u{201c}{query}\u{201d}").into() })))
+            .when(!crate::ui::compact::TOUCH || !query.trim().is_empty(), |d| d.child(chips))
             .children(suggest)
             .children(crate::ui::profile::search_hit(app, &query, cx))
             .child(body)
@@ -839,6 +912,8 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         let art = app.cover_path(&tr, cx);
         let drag = QueueDrag { from: i, track: tr.clone(), art: art.clone() };
         let shown = if i < manual { i } else { i - manual };
+        // In a jam: the picture of whoever added the song.
+        let by = if i < manual { crate::ui::jam::added_by(app, &tr, i, cx) } else { None };
         rows.push(
             queue_row_inner(shown, &tr, art, group.clone(), false)
                 .id(("q", i))
@@ -847,6 +922,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
                 .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
                 // A click plays this song and the queue goes on from it.
                 .on_click(cx.listener(move |this, _, _, cx| this.queue_jump(i, cx)))
+                .children(by)
                 .child(
                     div()
                         .opacity(hover_k(&group))

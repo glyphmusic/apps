@@ -40,10 +40,15 @@ mod settings;
 mod covers;
 mod import;
 mod net_devices;
+mod account_devices;
+mod account_library;
+mod jam;
+pub mod sleep;
+pub use jam::{reaction_label as jam_reaction_label, Jam, JamUi};
 pub use import::LinkImport;
 
 /// Typing pause before a search goes out (Enter searches at once).
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(450);
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Quiet time after the last settings change before the file is written.
 const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(700);
 /// Quiet time after listening/navigation activity before the activity sidecar is written.
@@ -116,6 +121,19 @@ pub struct NameDialog {
 }
 
 impl ListRef {
+    /// Id under which the list's sort order is saved (`None`: not sortable;
+    /// Recently played mixes songs and artists in time order).
+    pub fn sort_id(&self) -> Option<String> {
+        match self {
+            ListRef::Liked => Some("liked".into()),
+            ListRef::Recent => None,
+            ListRef::User(id) => Some(format!("playlist:{id}")),
+            ListRef::Album { title, artist, .. } => Some(format!("album:{artist}:{title}")),
+            ListRef::ArtistLiked(a) => Some(format!("liked:{a}")),
+            ListRef::Downloads => Some("downloads".into()),
+        }
+    }
+
     pub fn key(&self) -> glyph_core::ListKey {
         use glyph_core::ListKey as K;
         match self {
@@ -156,6 +174,13 @@ pub struct Route {
 }
 
 /// Artist profile data (loaded once per session and name).
+pub enum ArtistPhoto {
+    Loading,
+    Ready(PathBuf),
+    Missing,
+    RetryAt(Instant),
+}
+
 pub struct ArtistPage {
     pub name: String,
     pub tracks: Vec<Track>,
@@ -175,9 +200,21 @@ pub struct ArtistPage {
     _tasks: Vec<Task<()>>,
 }
 
+/// Sleep timer: playback pauses at a time or when the song ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sleep {
+    /// Pause at `until`; `mins` is the picked length (marks it in the menu).
+    At { until: Instant, mins: u32 },
+    EndOfSong,
+}
+
 /// Right-click menus of the player controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlMenu {
+    /// Sleep timer: lengths, end of song, off.
+    Sleep,
+    /// Sort order of the open list.
+    Sort,
     /// Card or bar mini player.
     Mini,
     /// Off / all / one.
@@ -337,6 +374,7 @@ pub struct Glyph {
     /// Keyboard-focused song row index in the active list view.
     pub selected_row: Option<usize>,
     pub artists: std::collections::HashMap<String, ArtistPage>,
+    pub artist_photos: std::collections::HashMap<String, ArtistPhoto>,
     pub history: Vec<Route>,
     pub ctx_menu: Option<CtxMenu>,
     /// Right-click menu of a player control: which, where, since when.
@@ -384,6 +422,9 @@ pub struct Glyph {
     pub recs: Vec<Track>,
     pub trending: Vec<Track>,
     feeds_loading: bool,
+    /// Home: recent releases of followed artists (newest first).
+    pub new_releases: Vec<glyph_core::providers::deezer::Release>,
+    new_releases_loading: bool,
     /// Startup animation while it runs.
     pub splash: Option<crate::ui::splash::Splash>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
@@ -459,6 +500,8 @@ pub struct Glyph {
     /// Play/pause pressed while the new song was still being found: it is
     /// loaded paused instead of starting (the old song never resumes).
     pub hold_play: bool,
+    /// Running sleep timer.
+    pub sleep: Option<Sleep>,
     /// Next song handed to the player for a gapless start:
     /// (queue `track_key`, resolved track the player knows it as).
     preloaded: Option<(String, Track)>,
@@ -524,6 +567,8 @@ pub struct Glyph {
     recent_artist_ctx: Option<String>,
     /// Range shown on the statistics page.
     pub stats_range: glyph_core::stats::Range,
+    /// The statistics page shows the year recap of this year (`"2026"`).
+    pub recap_year: Option<String>,
     /// Listening time not yet added to the statistics: (song, ms).
     stats_pending: Option<(Track, u64)>,
     stats_tick: Option<Instant>,
@@ -551,6 +596,8 @@ pub struct Glyph {
     last_load: Option<(Track, glyph_protocol::PlaybackSource)>,
     /// MCP server for AI assistants (Settings > Integrations).
     pub mcp: crate::mcp_tools::McpState,
+    /// Jam: listening together (Connect panel).
+    pub jam: JamUi,
     mcp_checked: Instant,
     /// Last redraw for the playing-song equalizer.
     eq_redraw: Instant,
@@ -566,6 +613,14 @@ pub struct Glyph {
     library_save: Option<Task<()>>,
     /// Settings modal.
     pub settings_open: bool,
+    /// Phone layout (`ui::compact`): settings show a category list first;
+    /// true once a category page is open.
+    pub settings_in_page: bool,
+    /// Phone layout: the profile menu sliding in from the left.
+    pub drawer_open: bool,
+    pub drawer_slide: Slide,
+    /// Phone library filter: 0 all, 1 playlists, 2 albums, 3 artists.
+    pub lib_filter: u8,
     /// When settings opened / started closing (fade + lift).
     settings_at: Instant,
     settings_closing: Option<Instant>,
@@ -650,22 +705,43 @@ impl Slide {
 }
 
 /// "Popular" and "Recommended for you" as last loaded (data saver).
-fn feeds_cache_path() -> PathBuf {
-    glyph_core::paths::data_dir().join("feeds.json")
+fn feeds_cache_path(scope: &PathBuf) -> PathBuf {
+    scope.with_extension("feeds.json")
 }
 
-fn save_feeds_cache(trending: &[Track], recs: &[Track]) {
+fn save_feeds_cache(scope: &PathBuf, trending: &[Track], recs: &[Track]) {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     if let Ok(bytes) = serde_json::to_vec(&(at, trending, recs)) {
-        let _ = glyph_core::paths::write_atomic(&feeds_cache_path(), &bytes);
+        let _ = glyph_core::paths::write_atomic(&feeds_cache_path(scope), &bytes);
     }
 }
 
 /// The cached feeds when younger than `max_age_s` and not empty.
-fn load_feeds_cache(max_age_s: u64) -> Option<(Vec<Track>, Vec<Track>)> {
-    let (at, trending, recs): (u64, Vec<Track>, Vec<Track>) = serde_json::from_slice(&std::fs::read(feeds_cache_path()).ok()?).ok()?;
+fn load_feeds_cache(scope: &PathBuf, max_age_s: u64) -> Option<(Vec<Track>, Vec<Track>)> {
+    let (at, trending, recs): (u64, Vec<Track>, Vec<Track>) = serde_json::from_slice(&std::fs::read(feeds_cache_path(scope)).ok()?).ok()?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     (now.saturating_sub(at) < max_age_s && !(trending.is_empty() && recs.is_empty())).then_some((trending, recs))
+}
+
+/// "New from artists you follow" as last loaded, with the follow list it
+/// was loaded for.
+fn releases_cache_path(scope: &PathBuf) -> PathBuf {
+    scope.with_extension("releases.json")
+}
+
+fn save_releases_cache(scope: &PathBuf, artists: &[String], releases: &[glyph_core::providers::deezer::Release]) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if let Ok(bytes) = serde_json::to_vec(&(at, artists, releases)) {
+        let _ = glyph_core::paths::write_atomic(&releases_cache_path(scope), &bytes);
+    }
+}
+
+/// The cached releases when younger than `max_age_s` and loaded for the same artists.
+fn load_releases_cache(scope: &PathBuf, artists: &[String], max_age_s: u64) -> Option<Vec<glyph_core::providers::deezer::Release>> {
+    type Cached = (u64, Vec<String>, Vec<glyph_core::providers::deezer::Release>);
+    let (at, names, releases): Cached = serde_json::from_slice(&std::fs::read(releases_cache_path(scope)).ok()?).ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    (now.saturating_sub(at) < max_age_s && names == artists).then_some(releases)
 }
 
 /// The song is (co-)credited to `name`.

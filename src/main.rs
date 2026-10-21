@@ -2,31 +2,9 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod assets;
-mod config_ext;
-mod devices;
-mod discord;
-mod embed;
-mod i18n;
-mod instance;
-mod integrate;
-mod mcp;
-mod mcp_tools;
-mod mpd;
-#[cfg(windows)]
-mod jumplist;
-#[cfg(windows)]
-mod thumbbar;
-mod guard;
-mod theme;
-mod ui;
-mod visuals;
-#[cfg(windows)]
-mod playback_qos;
-
+use glyph::{assets, guard, instance, integrate};
 use gpui::{
-    point, px, size, App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance,
+    point, px, size, App, Bounds, TitlebarOptions, WindowBackgroundAppearance,
     WindowBounds, WindowDecorations, WindowOptions,
 };
 use std::time::Duration;
@@ -41,7 +19,7 @@ fn main() {
         .init();
     guard::install_panic_hook();
     #[cfg(windows)]
-    playback_qos::configure();
+    glyph::playback_qos::configure();
     // Second launch (taskbar jump list, double start): hand over and quit.
     if !instance::claim_or_forward(&instance::request_from_args()) {
         return;
@@ -57,14 +35,20 @@ fn main() {
         })
     });
 
-    crate::i18n::set_lang(crate::i18n::Lang::system());
-    gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
+    glyph::i18n::set_lang(glyph::i18n::Lang::system());
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    // macOS hands `glyph://` links (jam invites, playlists) to the running
+    // app as Apple Events, not as arguments.
+    application.on_open_urls(|urls| {
+        for url in urls {
+            glyph::instance::open_url(&url);
+        }
+    });
+    application.run(move |cx: &mut App| {
         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: platform ready");
-        theme::load_fonts(cx);
-        tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: fonts ready");
-        ui::bind_keys(cx);
         let config = config.join().unwrap_or_default();
-        crate::i18n::set_lang(crate::config_ext::language(&config));
+        glyph::init(cx, &config);
+        tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: fonts ready");
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
         let options = WindowOptions {
@@ -89,13 +73,7 @@ fn main() {
             ..Default::default()
         };
 
-        let opened = cx.open_window(options, |window, cx| {
-            let app = cx.new(|cx| app::Glyph::new(window, config, cx));
-            let glow = app.read(cx).glow.clone();
-            let focus = app.read(cx).focus.clone();
-            window.focus(&focus, cx);
-            cx.new(|_| ui::Shell { glow, app })
-        });
+        let opened = cx.open_window(options, |window, cx| glyph::root(window, config, cx));
         let main_id = match opened {
             Ok(h) => Some(h.window_id()),
             Err(e) => {

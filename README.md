@@ -1,6 +1,6 @@
 # Glyph
 
-See [CHANGELOG.md](CHANGELOG.md) for the version history and [Releases](https://github.com/glyphmusic/desktop/releases) for downloads.
+See [CHANGELOG.md](CHANGELOG.md) for the version history and [Releases](https://github.com/glyphmusic/apps/releases) for downloads.
 
 A desktop music player for Linux, macOS and Windows, written in Rust with [GPUI](https://www.gpui.rs).
 Glyph searches many legal music sources at once, plays full tracks where the source allows it
@@ -25,7 +25,7 @@ Server: [glyphmusic/server](https://github.com/glyphmusic/server) — the app us
 
 ## Download
 
-Prebuilt builds for every platform are on the [Releases](https://github.com/glyphmusic/desktop/releases) page:
+Prebuilt builds for every platform are on the [Releases](https://github.com/glyphmusic/apps/releases) page:
 
 | Platform | Asset |
 |---|---|
@@ -34,6 +34,7 @@ Prebuilt builds for every platform are on the [Releases](https://github.com/glyp
 | macOS Intel | `glyph-<version>-x86_64-apple-darwin.tar.gz` |
 | Linux x64 | `glyph-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux ARM64 | `glyph-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Android (preview) | `glyph-<version>-android.apk` |
 
 New releases include one `SHA256SUMS.txt` listing every asset. Earlier releases keep individual `.sha256` files. App versions before 0.2.2 need one manual upgrade to read the new manifest.
 

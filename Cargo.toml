@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio"]
+members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio", "crates/glyph-gpui-android", "crates/glyph-android"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/glyphmusic/desktop"
+repository = "https://github.com/glyphmusic/apps"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -39,7 +39,6 @@ glyph-core.workspace = true
 glyph-audio.workspace = true
 # Pinned Zed revision (2026-10-16). Bump deliberately.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
 raw-window-handle = "0.6"
 toml = "0.8"
 sys-locale = "0.3"
@@ -54,12 +53,18 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Cast TLS channel (ring backend, as reqwest), and relaying streams to
 # devices that cannot open HTTPS.
 roxmltree = "0.20"
+# Jam invite QR code (Connect panel); drawn by the app, no image features.
+qrcode = { version = "0.14", default-features = false }
 # One search socket per network adapter (VPN / VM adapters hide the LAN).
 if-addrs = "0.13"
 socket2 = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 reqwest.workspace = true
 tokio.workspace = true
+
+# Desktop GPUI backends (the phone shells bring their own, see crates/glyph-gpui-android).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

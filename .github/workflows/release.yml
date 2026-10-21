@@ -85,8 +85,54 @@ jobs:
           path: dist/*.sha256
           if-no-files-found: error
 
+  # Android preview APK (phones + emulators). Signed with a throwaway debug key
+  # until there is a release key, so updates need an uninstall first.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: NDK and cargo-ndk
+        run: |
+          sdkmanager --install "ndk;28.2.13676358" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          cargo install cargo-ndk --locked
+      - name: Build
+        run: |
+          cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
+          cd mobile/android
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk "dist/glyph-$VERSION-android.apk"
+          cd dist && sha256sum "glyph-$VERSION-android.apk" > "glyph-$VERSION-android.apk.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums-android
+          path: dist/*.sha256
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

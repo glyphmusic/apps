@@ -215,6 +215,7 @@ impl Glyph {
         }
         if let Some(now) = guard(|| self.library.toggle_follow(name, track)) {
             self.save_library(cx);
+            self.new_releases_follow_changed(name, now, cx);
             self.toast(tf(if now { "toast.following" } else { "toast.unfollowed" }, &[("name", &name)]));
         }
         cx.notify();

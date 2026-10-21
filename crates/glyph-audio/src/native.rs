@@ -265,7 +265,7 @@ fn streamable_http_mp4(src: &mut AudioSource) -> bool {
 }
 
 /// Opens `url` and probes its container.
-fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
+pub(crate) fn open_format(url: &str, mime: Option<&str>) -> Result<Box<dyn FormatReader>, String> {
     let mut src = AudioSource::open(url).map_err(|e| format!("cannot open stream: {e} [url={url}]"))?;
     // Step over an empty ID3v2 tag (Deezer previews) that symphonia cannot parse.
     if let Some(off) = degenerate_id3v2_offset(&mut src) {

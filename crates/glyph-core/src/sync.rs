@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 pub type Key = (String, String);
 
 const DELETED: &str = "-";
+const RECENT: &str = "recent";
+const ACTIVITY: &str = "song_activity";
+const PREFERENCE: &str = "library_pref";
 
 fn provider_str(p: ProviderId) -> String {
     serde_json::to_value(p).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
@@ -159,11 +162,21 @@ fn album_key(title: &str, artist: &str) -> String {
 pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     let mut s = Snapshot::default();
     let mut push = |key: Key, v: Value| s.items.push((key, v));
+    for (key, revision) in &lib.playlist_versions {
+        if !revision.playlist.local_only { push(k("playlist_version", key), serde_json::to_value(revision).unwrap_or_default()); }
+    }
+    for (key, playlist) in &lib.playlist_trash {
+        if !playlist.local_only { push(k("playlist_trash", key), serde_json::to_value(playlist).unwrap_or_default()); }
+    }
+    for (artist, feedback) in &lib.recommendation_feedback {
+        push(k("recommend_feedback", artist), serde_json::json!(feedback));
+    }
     for t in lib.liked.iter().rev() {
         push(k(kind::LIKED, track_id(t)), serde_json::to_value(t).unwrap_or_default());
     }
-    for p in &lib.playlists {
+    for p in lib.playlists.iter().filter(|p| !p.local_only) {
         let mut v = serde_json::json!({ "name": p.name, "tracks": p.tracks, "origin": p.origin, "shared_by": p.shared_by });
+        if let Some(membership) = lib.playlist_membership.get(&p.id) { v["membership"] = serde_json::to_value(membership).unwrap_or_default(); }
         if let Some(bytes) = p.cover.as_deref().and_then(|c| std::fs::read(c).ok()) {
             let sha = sha_hex(&bytes);
             v["cover"] = Value::String(sha.clone());
@@ -193,12 +206,41 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     if lib.liked_auto_download {
         push(k(kind::AUTO_DOWNLOAD, "liked"), serde_json::json!({ "on": true }));
     }
-    for p in lib.playlists.iter().filter(|p| p.auto_download) {
+    for p in lib.playlists.iter().filter(|p| p.auto_download && !p.local_only) {
         push(k(kind::AUTO_DOWNLOAD, p.id.clone()), serde_json::json!({ "on": true }));
     }
     // Listening statistics (opt-in): this device's months.
     for (key, v) in lib.stats.sync_items(&crate::server_client::install_id()) {
         push(k(crate::stats::SYNC_KIND, key), v);
+    }
+    for (key, month) in &lib.guest_stats_imported {
+        push(k("guest_stats", key), serde_json::to_value(month).unwrap_or_default());
+    }
+    for item in lib.recent.iter().rev() {
+        let key = match item {
+            crate::library::RecentItem::Song { track } => format!("song:{}", track_id(track)),
+            crate::library::RecentItem::Artist { name, .. } => format!("artist:{}", name.trim().to_lowercase()),
+        };
+        push(k(RECENT, key), serde_json::to_value(item).unwrap_or_default());
+    }
+    for (id, activity) in &lib.song_activity {
+        push(k(ACTIVITY, id), serde_json::to_value(activity).unwrap_or_default());
+    }
+    for (name, value) in [
+        ("pinned", serde_json::to_value(&lib.pinned)),
+        ("sidebar_hidden", serde_json::to_value(&lib.sidebar_hidden)),
+        ("lyrics_offsets", serde_json::to_value(&lib.lyrics_offsets)),
+        ("recent_lists", serde_json::to_value(&lib.recent_lists)),
+        ("recent_artists", serde_json::to_value(&lib.recent_artists)),
+        ("list_activity", serde_json::to_value(&lib.list_activity)),
+        ("artist_plays", serde_json::to_value(&lib.artist_plays)),
+        ("artist_skips", serde_json::to_value(&lib.artist_skips)),
+        ("guest_imports", serde_json::to_value(&lib.guest_imports)),
+    ] {
+        let value = value.unwrap_or_default();
+        if value.as_array().is_some_and(|v| !v.is_empty()) || value.as_object().is_some_and(|v| !v.is_empty()) {
+            push(k(PREFERENCE, name), value);
+        }
     }
     s
 }
@@ -206,6 +248,11 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
 /// What this device last agreed on with the account, persisted next to the library.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncState {
+    /// Durable unacknowledged writes. Retry the same timestamp after a restart.
+    #[serde(default)]
+    pub outbox: BTreeMap<String, SyncItem>,
+    #[serde(skip)]
+    pub storage_path: Option<PathBuf>,
     pub account_id: String,
     pub last_rev: u64,
     /// `kind \u{1f} key` -> value hash (`-` = deleted).
@@ -215,6 +262,8 @@ pub struct SyncState {
     /// concurrent playlist edits.
     #[serde(default)]
     pub known_playlists: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub known_playlist_revs: BTreeMap<String, u64>,
     /// Songs another device downloaded that this one has not fetched yet.
     #[serde(default)]
     pub pending_downloads: BTreeMap<String, Track>,
@@ -240,7 +289,7 @@ fn split(s: &str) -> Option<Key> {
 
 impl SyncState {
     pub fn path() -> PathBuf {
-        paths::data_dir().join("sync_state.json")
+        crate::account::library_path().map(|p| p.with_file_name("sync_state.json")).unwrap_or_else(|| paths::data_dir().join("sync_state.json"))
     }
 
     /// State for `account_id`; a different account (or none) starts fresh.
@@ -249,15 +298,17 @@ impl SyncState {
     }
 
     pub fn load_from(path: &Path, account_id: &str) -> Self {
-        std::fs::read(path)
+        let mut state = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice::<SyncState>(&b).ok())
             .filter(|s| s.account_id == account_id)
-            .unwrap_or_else(|| SyncState { account_id: account_id.into(), ..Default::default() })
+            .unwrap_or_else(|| SyncState { account_id: account_id.into(), ..Default::default() });
+        state.storage_path = Some(path.to_path_buf());
+        state
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        paths::write_json(&Self::path(), self)
+        paths::write_json(&self.storage_path.clone().unwrap_or_else(Self::path), self)
     }
 
     /// Songs to keep offline: downloaded here plus the ones still waiting.
@@ -283,21 +334,35 @@ impl SyncState {
                         }
                     }
                 }
-                out.push(SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(value), updated_at: now, deleted: false, rev: 0 });
+                out.push(SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(value), updated_at: now, deleted: false, rev: if key.0 == kind::PLAYLIST { self.known_playlist_revs.get(&key.1).copied().unwrap_or(0) } else { 0 } });
             }
         }
         for (j, h) in &self.known {
             let Some(key) = split(j) else { continue };
             if h != DELETED && !map.contains_key(&key) {
-                out.push(SyncItem { kind: key.0, key: key.1, value: None, updated_at: now, deleted: true, rev: 0 });
+                let rev = if key.0 == kind::PLAYLIST { self.known_playlist_revs.get(&key.1).copied().unwrap_or(0) } else { 0 };
+                out.push(SyncItem { kind: key.0, key: key.1, value: None, updated_at: now, deleted: true, rev });
             }
         }
         out
     }
 
+    pub fn enqueue(&mut self, snap: &Snapshot, now: u64) -> Vec<SyncItem> {
+        let changes = self.changes(snap, now);
+        let wanted: BTreeSet<String> = changes.iter().map(|i| joined(&(i.kind.clone(), i.key.clone()))).collect();
+        self.outbox.retain(|key, _| wanted.contains(key));
+        for item in changes {
+            let key = joined(&(item.kind.clone(), item.key.clone()));
+            let unchanged = self.outbox.get(&key).is_some_and(|old| old.value == item.value && old.deleted == item.deleted && old.rev == item.rev);
+            if !unchanged { self.outbox.insert(key, item); }
+        }
+        self.outbox.values().cloned().collect()
+    }
+
     /// The server accepted these pushed items.
     pub fn mark_pushed(&mut self, items: &[SyncItem]) {
         for i in items {
+            self.outbox.remove(&joined(&(i.kind.clone(), i.key.clone())));
             let h = match (&i.value, i.deleted) {
                 (Some(v), false) => hash(v),
                 _ => DELETED.into(),
@@ -345,6 +410,7 @@ impl SyncState {
         self.last_rev = 0;
         self.known.clear();
         self.known_playlists.clear();
+        self.known_playlist_revs.clear();
         self.uploaded_covers.clear();
     }
 }
@@ -372,8 +438,67 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
     // same batch.
     let (switches, items): (Vec<&SyncItem>, Vec<&SyncItem>) = items.iter().partition(|i| i.kind == kind::AUTO_DOWNLOAD);
     for i in items.into_iter().chain(switches) {
+        if i.kind == kind::PLAYLIST { state.known_playlist_revs.insert(i.key.clone(), i.rev); }
         let gone = i.deleted || i.value.is_none();
         match i.kind.as_str() {
+            "playlist_version" => {
+                if let Some(v) = from::<crate::library::PlaylistRevision>(&i.value).filter(|v| !v.playlist.local_only) {
+                    lib.playlist_versions.entry(i.key.clone()).or_insert(v);
+                }
+            }
+            "playlist_trash" => {
+                if gone { lib.playlist_trash.remove(&i.key); }
+                else if let Some(p) = from::<Playlist>(&i.value).filter(|p| !p.local_only && p.id == i.key) { lib.playlist_trash.insert(i.key.clone(), p); }
+            }
+            "recommend_feedback" => {
+                if gone { lib.recommendation_feedback.remove(&i.key); }
+                else if let Some(v) = from::<i8>(&i.value).filter(|v| (-2..=1).contains(v)) { lib.recommendation_feedback.insert(i.key.clone(), v); }
+            }
+            "guest_stats" => {
+                if !gone {
+                    if let Some(month) = from::<crate::stats::MonthStats>(&i.value) {
+                        lib.guest_stats_imported.entry(i.key.clone()).or_default().merge_max(&month);
+                    }
+                }
+            }
+            RECENT => {
+                use crate::library::RecentItem;
+                lib.recent.retain(|item| {
+                    let key = match item {
+                        RecentItem::Song { track } => format!("song:{}", track_id(track)),
+                        RecentItem::Artist { name, .. } => format!("artist:{}", name.trim().to_lowercase()),
+                    };
+                    key != i.key
+                });
+                if !gone {
+                    if let Some(item) = from::<RecentItem>(&i.value) { lib.recent.insert(0, item); }
+                }
+                lib.recent.truncate(crate::library::RECENT_LIMIT);
+            }
+            ACTIVITY => {
+                if gone { lib.song_activity.remove(&i.key); }
+                else if let Some(activity) = from::<crate::library::SongActivity>(&i.value) {
+                    lib.song_activity.insert(i.key.clone(), activity);
+                }
+            }
+            PREFERENCE => {
+                let value = if gone { None } else { i.value.as_ref() };
+                macro_rules! field { ($field:ident) => { lib.$field = value.and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default() }; }
+                match i.key.as_str() {
+                    "pinned" => field!(pinned),
+                    "sidebar_hidden" => field!(sidebar_hidden),
+                    "lyrics_offsets" => field!(lyrics_offsets),
+                    "recent_lists" => field!(recent_lists),
+                    "recent_artists" => field!(recent_artists),
+                    "list_activity" => field!(list_activity),
+                    "artist_plays" => field!(artist_plays),
+                    "artist_skips" => field!(artist_skips),
+                    "guest_imports" => {
+                        if let Some(imports) = value.and_then(|v| serde_json::from_value::<BTreeSet<String>>(v.clone()).ok()) { lib.guest_imports.extend(imports); }
+                    }
+                    _ => continue,
+                }
+            }
             kind::LIKED => {
                 lib.invalidate_liked_index();
                 let pos = lib.liked.iter().position(|t| track_id(t) == i.key);
@@ -387,11 +512,13 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 }
             }
             kind::PLAYLIST => {
+                if lib.playlists.iter().any(|p| p.id == i.key && p.local_only) { continue; }
                 let pos = lib.playlists.iter().position(|p| p.id == i.key);
                 if gone {
                     state.known_playlists.remove(&i.key);
                     let Some(p) = pos else { continue };
-                    lib.playlists.remove(p);
+                    let archived = lib.playlists.remove(p);
+                    lib.playlist_trash.entry(i.key.clone()).or_insert(archived);
                 } else {
                     let Some(v) = i.value.as_ref() else { continue };
                     let cover = v["cover"].as_str().and_then(synced_cover).map(|p| p.display().to_string());
@@ -399,7 +526,11 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                     let remote_tracks: Vec<Track> = serde_json::from_value(v["tracks"].clone()).unwrap_or_default();
                     let remote_ids: Vec<String> = remote_tracks.iter().map(track_id).collect();
                     let remote_base: Option<Vec<String>> = v.get("base").and_then(|b| serde_json::from_value(b.clone()).ok());
-                    let tracks = match pos {
+                    if remote_tracks.len() > crate::library::playlist_track_limit()
+                        || pos.is_some_and(|p| lib.playlists[p].tracks.len() > crate::library::playlist_track_limit()) {
+                        continue;
+                    }
+                    let mut tracks = match pos {
                         Some(p) => merge_playlist_tracks(
                             state.known_playlists.get(&i.key).map(Vec::as_slice),
                             remote_base.as_deref(),
@@ -408,13 +539,21 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                         ),
                         None => remote_tracks,
                     };
+                    let remote_membership: BTreeMap<String, crate::library::PlaylistMembership> = v.get("membership").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+                    let membership = lib.playlist_membership.entry(i.key.clone()).or_default();
+                    for (id, op) in &remote_membership {
+                        if membership.get(id).is_none_or(|old| op.newer_than(old)) { membership.insert(id.clone(), op.clone()); }
+                    }
+                    tracks.retain(|t| membership.get(&track_id(t)).is_none_or(|op| op.present));
+                    tracks.truncate(crate::library::playlist_track_limit());
                     let merged_ids: Vec<String> = tracks.iter().map(track_id).collect();
-                    if merged_ids != remote_ids {
+                    if merged_ids != remote_ids || *membership != remote_membership {
                         unpushed_playlists.insert((i.kind.clone(), i.key.clone()), (hash(v), remote_ids));
                     } else {
                         state.known_playlists.insert(i.key.clone(), remote_ids);
                     }
                     let pl = Playlist {
+                        local_only: false,
                         id: i.key.clone(),
                         name: v["name"].as_str().unwrap_or("Playlist").to_string(),
                         tracks,
@@ -488,7 +627,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 let local = downloaded.iter().find(|t| track_id(t) == i.key).cloned();
                 if gone {
                     state.pending_downloads.remove(&i.key);
-                    out.remove_downloads.extend(local);
+                    // Downloaded files belong to this installation, not a session.
                 } else if let (None, Some(t)) = (local, from::<Track>(&i.value)) {
                     state.pending_downloads.insert(i.key.clone(), t.clone());
                     out.download.push(t);
@@ -500,7 +639,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 let on = !gone;
                 if i.key == "liked" {
                     lib.liked_auto_download = on;
-                } else if let Some(p) = lib.playlists.iter_mut().find(|p| p.id == i.key) {
+                } else if let Some(p) = lib.playlists.iter_mut().find(|p| p.id == i.key && !p.local_only) {
                     p.auto_download = on;
                 } else {
                     continue;
@@ -509,7 +648,14 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
             crate::stats::SYNC_KIND => {
                 let device = crate::server_client::install_id();
                 // This device's own months: what is here is newer.
-                if i.key.starts_with(&format!("{device}:")) {
+                if let Some(month) = i.key.strip_prefix(&format!("{device}:")) {
+                    if !gone {
+                        if let Some(stats) = from::<crate::stats::MonthStats>(&i.value) {
+                            lib.stats.months.entry(month.to_string()).or_default().merge_max(&stats);
+                            out.library_changed = true;
+                        }
+                    }
+                    state.agree(&(i.kind.clone(), i.key.clone()), if gone { None } else { i.value.as_ref() });
                     continue;
                 }
                 // Other devices' months are kept, never pushed back (they are
@@ -542,6 +688,38 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
 }
 
 /// Downloaded songs that reached the device leave the waiting list.
+pub fn merge_guest(target: &mut Library, guest: &Library) {
+    let fingerprint = sha_hex(&serde_json::to_vec(guest).unwrap_or_default());
+    if target.guest_imports.contains(&fingerprint) { return; }
+    let previous = target.clone();
+    let snap = snapshot(guest, &[]);
+    let items: Vec<_> = SyncState::default().changes(&snap, 0);
+    apply(target, &mut SyncState::default(), &items, &[]);
+    // A merge keeps both sets of personal list choices.
+    for item in previous.pinned { if !target.pinned.contains(&item) { target.pinned.push(item); } }
+    for item in previous.sidebar_hidden { if !target.sidebar_hidden.contains(&item) { target.sidebar_hidden.push(item); } }
+    for item in previous.recent_lists { if !target.recent_lists.contains(&item) { target.recent_lists.push(item); } }
+    target.recent_lists.truncate(crate::library::RECENT_LISTS_LIMIT);
+    for (key, value) in previous.lyrics_offsets { target.lyrics_offsets.entry(key).or_insert(value); }
+    for (key, value) in previous.artist_plays { let e = target.artist_plays.entry(key).or_default(); *e = (*e).max(value); }
+    for (key, value) in previous.artist_skips { let e = target.artist_skips.entry(key).or_default(); *e = (*e).max(value); }
+    for (key, value) in previous.list_activity { target.list_activity.entry(key).or_insert(value); }
+    for artist in previous.recent_artists {
+        if !target.recent_artists.iter().any(|a| a.name.eq_ignore_ascii_case(&artist.name)) { target.recent_artists.push(artist); }
+    }
+    for (key, month) in &guest.stats.months {
+        let import_key = format!("{}:{key}", crate::server_client::install_id());
+        let baseline = previous.guest_stats_imported.get(&import_key).cloned().unwrap_or_default();
+        let mut combined = previous.stats.months.get(key).cloned().unwrap_or_default();
+        combined.merge_guest(&month.since_guest_import(&baseline));
+        target.stats.months.insert(key.clone(), combined);
+        target.guest_stats_imported.entry(import_key).or_default().merge_max(month);
+    }
+    target.guest_imports.extend(previous.guest_imports);
+    target.guest_imports.insert(fingerprint);
+}
+
+/// Downloaded songs that reached the device leave the waiting list.
 pub fn settle_downloads(state: &mut SyncState, downloaded: &[Track]) {
     let have: BTreeSet<String> = downloaded.iter().map(track_id).collect();
     state.pending_downloads.retain(|id, _| !have.contains(id));
@@ -570,6 +748,127 @@ pub fn chunks(items: Vec<SyncItem>, max_items: usize, max_bytes: usize) -> Vec<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outbox_retry_preserves_operation_time_across_serialization() {
+        let lib = lib_with(&["Offline"]);
+        let snap = snapshot(&lib, &[]);
+        let mut state = SyncState::default();
+        let first = state.enqueue(&snap, 100);
+        let mut restarted: SyncState = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let retry = restarted.enqueue(&snap, 999);
+        assert_eq!(retry[0].updated_at, first[0].updated_at);
+        restarted.mark_pushed(&retry);
+        assert!(restarted.outbox.is_empty());
+        assert!(restarted.enqueue(&snap, 1000).is_empty());
+    }
+
+    #[test]
+    fn playlist_removal_survives_stale_edits_and_can_be_explicitly_readded() {
+        let mut local = Library::default();
+        let song = test_track("Removed", "Artist");
+        let id = local.create_playlist("Shared").id.clone();
+        local.add_to_playlist(&id, song.clone());
+        local.checkpoint_playlists();
+        let mut stale = local.clone();
+        let mut state = SyncState::default();
+        state.mark_pushed(&state.changes(&snapshot(&local, &[]), 10));
+        local.remove_from_playlist(&id, 0);
+        local.checkpoint_playlists();
+        let items = state.changes(&snapshot(&local, &[]), 20);
+        apply(&mut stale, &mut SyncState::default(), &items, &[]);
+        assert!(stale.playlist(&id).unwrap().tracks.is_empty());
+        let mut old_library = Library::default();
+        old_library.playlists.push(Playlist { tracks: vec![song.clone()], ..local.playlist(&id).unwrap().clone() });
+        let old = SyncState::default().changes(&snapshot(&old_library, &[]), 30);
+        apply(&mut stale, &mut SyncState::default(), &old, &[]);
+        assert!(stale.playlist(&id).unwrap().tracks.is_empty());
+        stale.add_to_playlist(&id, song);
+        stale.checkpoint_playlists();
+        assert!(stale.playlist_membership[&id].values().all(|op| op.present));
+    }
+
+    #[test]
+    fn trash_versions_and_explicit_feedback_sync_and_restore() {
+        let mut source = Library::default();
+        let id = source.create_playlist("Keep me").id.clone();
+        source.add_to_playlist(&id, test_track("One", "Artist"));
+        source.checkpoint_playlists();
+        source.recommendation_feedback.insert("artist".into(), -2);
+        source.delete_playlist(&id);
+        let items = SyncState::default().changes(&snapshot(&source, &[]), 1);
+        let mut target = Library::default();
+        apply(&mut target, &mut SyncState::default(), &items, &[]);
+        assert!(crate::taste::Taste::from_library(&target).is_hidden("Artist"));
+        assert!(!target.playlist_versions.is_empty());
+        assert!(target.restore_playlist(&id));
+        assert_eq!(target.playlist(&id).unwrap().tracks.len(), 1);
+    }
+
+    #[test]
+    fn listening_and_recommendation_actions_survive_account_sync() {
+        let mut source = Library::default();
+        let song = test_track("Remember", "Artist");
+        source.push_recent(song.clone());
+        source.record_play(&song);
+        source.record_listen(&song, 1000);
+        source.record_skip(&song);
+        source.pinned.push(ListKey::Liked);
+        source.sidebar_hidden.push("recent".into());
+        source.lyrics_offsets.insert("remember|artist".into(), 80);
+        let snap = snapshot(&source, &[]);
+        let items = SyncState::default().changes(&snap, 1000);
+        let mut target = Library::default();
+        let mut state = SyncState::default();
+        assert!(apply(&mut target, &mut state, &items, &[]).library_changed);
+        assert_eq!(target.recent, source.recent);
+        assert_eq!(target.song_activity, source.song_activity);
+        assert_eq!(target.artist_plays, source.artist_plays);
+        assert_eq!(target.artist_skips, source.artist_skips);
+        assert_eq!(target.pinned, source.pinned);
+        assert_eq!(target.sidebar_hidden, source.sidebar_hidden);
+        assert_eq!(target.lyrics_offsets, source.lyrics_offsets);
+        assert!(state.changes(&snapshot(&target, &[]), 2000).is_empty());
+    }
+
+    #[test]
+    fn merging_guest_preserves_account_choices_and_does_not_double_count() {
+        let _env = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guest = Library::default();
+        let song = test_track("Guest", "Artist");
+        guest.toggle_like(&song);
+        guest.pinned.push(ListKey::Recent);
+        guest.stats.months.entry("2026-10".into()).or_default().ms = 1000;
+        let mut account = Library::default();
+        account.pinned.push(ListKey::Liked);
+        account.stats.months.entry("2026-10".into()).or_default().ms = 2000;
+        merge_guest(&mut account, &guest);
+        assert!(account.is_liked(&song));
+        assert!(account.pinned.contains(&ListKey::Liked) && account.pinned.contains(&ListKey::Recent));
+        assert_eq!(account.stats.months["2026-10"].ms, 3000);
+        merge_guest(&mut account, &guest);
+        assert_eq!(account.stats.months["2026-10"].ms, 3000);
+        assert_eq!(guest.stats.months["2026-10"].ms, 1000);
+        guest.stats.months.get_mut("2026-10").unwrap().ms = 1500;
+        merge_guest(&mut account, &guest);
+        assert_eq!(account.stats.months["2026-10"].ms, 3500);
+    }
+
+    #[test]
+    fn local_playlist_and_download_files_are_not_removed_by_account_tombstones() {
+        let mut lib = Library::default();
+        let song = test_track("Offline", "Artist");
+        let playlist = lib.create_playlist("Local");
+        playlist.local_only = true;
+        playlist.tracks.push(song.clone());
+        let id = playlist.id.clone();
+        let snap = snapshot(&lib, &[]);
+        assert!(!snap.items.iter().any(|(key, _)| key.0 == kind::PLAYLIST));
+        let tombstone = |kind: &str, key: String| SyncItem { kind: kind.into(), key, value: None, deleted: true, updated_at: 10, rev: 1 };
+        let result = apply(&mut lib, &mut SyncState::default(), &[tombstone(kind::PLAYLIST, id.clone()), tombstone(kind::DOWNLOAD, track_id(&song))], &[song]);
+        assert!(lib.playlist(&id).unwrap().local_only);
+        assert!(result.remove_downloads.is_empty());
+    }
 
     #[test]
     fn synced_metadata_invalidates_liked_lookup_without_length_change() {
@@ -679,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn downloads_are_requested_and_removed() {
+    fn downloads_are_requested_but_files_remain_local() {
         let mut srv = Server::default();
         let song = test_track("Offline", "Artist");
         let (mut a, mut sa) = (Library::default(), SyncState::default());
@@ -696,12 +995,12 @@ mod tests {
         settle_downloads(&mut sb, &[song.clone()]);
         assert!(sb.pending_downloads.is_empty());
         assert!(sb.changes(&snapshot(&b, &[song.clone()]), 11).is_empty());
-        // A removes the download -> B deletes its file.
+        // A removes its download; B keeps its own downloaded file.
         let ch = sa.changes(&snapshot(&a, &[]), 20);
         assert!(ch[0].deleted);
         srv.push(&ch);
         let applied = apply(&mut b, &mut sb, &srv.pull(1), &[song.clone()]);
-        assert_eq!(applied.remove_downloads, vec![song]);
+        assert!(applied.remove_downloads.is_empty());
         let _ = &mut a;
     }
 

@@ -1,6 +1,62 @@
 use super::*;
+use glyph_core::config::ListSort;
+
+/// Display order of `tracks` under `sort`: indexes into `tracks`. Stable,
+/// so equal titles keep the list's own order; missing albums and lengths go last.
+pub fn sort_order(tracks: &[Track], sort: ListSort) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..tracks.len()).collect();
+    let text = |s: &str| s.trim().to_lowercase();
+    match sort {
+        ListSort::Custom => {}
+        ListSort::Title => order.sort_by_cached_key(|&i| text(&tracks[i].title)),
+        ListSort::Artist => order.sort_by_cached_key(|&i| (text(&tracks[i].artist), tracks[i].album.as_deref().map(text), text(&tracks[i].title))),
+        ListSort::Album => order.sort_by_cached_key(|&i| (tracks[i].album.is_none(), tracks[i].album.as_deref().map(text), text(&tracks[i].artist))),
+        ListSort::Duration => order.sort_by_key(|&i| (tracks[i].duration_ms.is_none(), tracks[i].duration_ms)),
+    }
+    order
+}
 
 impl Glyph {
+    // ------------------------------------------------------------ sorting
+
+    pub fn list_sort(&self, l: &ListRef) -> ListSort {
+        l.sort_id().and_then(|id| self.config.lists.sort.get(&id).copied()).unwrap_or_default()
+    }
+
+    pub fn set_list_sort(&mut self, l: &ListRef, sort: ListSort, cx: &mut Context<Self>) {
+        let Some(id) = l.sort_id() else { return };
+        if sort == ListSort::Custom {
+            self.config.lists.sort.remove(&id);
+        } else {
+            self.config.lists.sort.insert(id, sort);
+        }
+        // Saved quietly (no "settings saved" toast for a sort).
+        let toast = self.config_dirty.is_some_and(|(_, t)| t);
+        self.config_dirty = Some((Instant::now(), toast));
+        self.selected_row = None;
+        cx.notify();
+    }
+
+    /// The list's songs in the order the list view shows (and plays) them.
+    pub fn shown_tracks(&self, l: &ListRef) -> Vec<Track> {
+        let tracks = self.list_tracks(l);
+        match self.list_sort(l) {
+            ListSort::Custom => tracks,
+            s => sort_order(&tracks, s).into_iter().map(|i| tracks[i].clone()).collect(),
+        }
+    }
+
+    /// Removes the song shown at row `i` (the rows may be sorted).
+    pub fn remove_shown(&mut self, l: &ListRef, i: usize, cx: &mut Context<Self>) {
+        let i = match self.list_sort(l) {
+            ListSort::Custom => Some(i),
+            s => sort_order(&self.list_tracks(l), s).get(i).copied(),
+        };
+        if let Some(i) = i {
+            self.remove_from_list(l, i, cx);
+        }
+    }
+
     // ------------------------------------------------------------ lists & artists
 
     pub(super) fn route(&self) -> Route {
@@ -96,6 +152,18 @@ impl Glyph {
             return;
         }
         let title = self.list_title(l);
+        // Artist albums carry no author; a list opened from a link keeps its link.
+        let kind = if self.shared_preview.is_some() { "playlist" } else if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
+        let origin = if let Some((_, link, _)) = &self.shared_preview { Some(link.clone()) } else { match l {
+            ListRef::User(id) => self.library.playlist(id).and_then(|p| p.origin.clone()),
+            _ => None,
+        }};
+        self.share_songs(title, tracks, kind, origin, cx);
+    }
+
+    /// Copies a short link (public server) or a share code for `tracks`
+    /// under `title`.
+    pub fn share_songs(&mut self, title: String, tracks: Vec<Track>, kind: &'static str, origin: Option<String>, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else {
             let code = glyph_core::share::encode(&title, &tracks);
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
@@ -103,12 +171,6 @@ impl Glyph {
             cx.notify();
             return;
         };
-        // Artist albums carry no author; a list opened from a link keeps its link.
-        let kind = if self.shared_preview.is_some() { "playlist" } else if matches!(l, ListRef::Album { .. }) { "album" } else { "playlist" };
-        let origin = if let Some((_, link, _)) = &self.shared_preview { Some(link.clone()) } else { match l {
-            ListRef::User(id) => self.library.playlist(id).and_then(|p| p.origin.clone()),
-            _ => None,
-        }};
         let signed_in = b.account().is_some();
         cx.spawn(async move |this, cx| {
             let text = b.share_text(&title, &tracks, kind, origin).await;
@@ -259,15 +321,91 @@ impl Glyph {
         !(t.explicit && self.config.audio.hide_explicit)
     }
 
+    /// Loads "New from artists you follow" for Home: releases of the last
+    /// eight weeks. Cached for 12 hours per follow list.
+    pub fn load_new_releases(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok || self.account.merge_pending { return; }
+        let scope = self.library.storage_path.0.clone().unwrap_or_else(Library::guest_path);
+        let epoch = self.account.data_epoch;
+        const ARTISTS: usize = 40;
+        const DAYS: u32 = 56;
+        let Some(b) = self.backend.clone() else { return };
+        if self.new_releases_loading {
+            return;
+        }
+        let artists: Vec<String> = self.library.followed.iter().take(ARTISTS).map(|a| a.name.clone()).collect();
+        if artists.is_empty() {
+            self.new_releases.clear();
+            return;
+        }
+        if let Some(cached) = load_releases_cache(&scope, &artists, 12 * 3600) {
+            self.new_releases = cached;
+            cx.notify();
+            return;
+        }
+        self.new_releases_loading = true;
+        cx.spawn(async move |this, cx| {
+            let found = b.new_releases(artists.clone(), DAYS).await;
+            this.update(cx, |s, cx| {
+                if s.account.data_epoch != epoch { return; }
+                s.new_releases_loading = false;
+                if let Ok(list) = found {
+                    save_releases_cache(&scope, &artists, &list);
+                    s.new_releases = list.into_iter().filter(|r| !s.is_hidden_artist(&r.artist)).take(20).collect();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Follow / unfollow: only that artist's releases join or leave the row
+    /// (no reload of the whole follow list).
+    pub(super) fn new_releases_follow_changed(&mut self, name: &str, now: bool, cx: &mut Context<Self>) {
+        let scope = self.library.storage_path.0.clone().unwrap_or_else(Library::guest_path);
+        let epoch = self.account.data_epoch;
+        const DAYS: u32 = 56;
+        let artists: Vec<String> = self.library.followed.iter().take(40).map(|a| a.name.clone()).collect();
+        if !now {
+            self.new_releases.retain(|r| !r.artist.eq_ignore_ascii_case(name));
+            save_releases_cache(&scope, &artists, &self.new_releases);
+            cx.notify();
+            return;
+        }
+        let Some(b) = self.backend.clone() else { return };
+        let name = name.to_string();
+        cx.spawn(async move |this, cx| {
+            let Ok(found) = b.new_releases(vec![name], DAYS).await else { return };
+            this.update(cx, |s, cx| {
+                if s.account.data_epoch != epoch { return; }
+                for r in found {
+                    if !s.new_releases.iter().any(|x| x.id == r.id) {
+                        s.new_releases.push(r);
+                    }
+                }
+                s.new_releases.sort_by(|a, b| b.released.cmp(&a.released));
+                s.new_releases.truncate(20);
+                save_releases_cache(&scope, &artists, &s.new_releases);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Loads "Recommended for you" and "Popular right now" for Home.
     pub fn load_feeds(&mut self, cx: &mut Context<Self>) {
+        if !self.library_ok || self.account.merge_pending { return; }
+        let scope = self.library.storage_path.0.clone().unwrap_or_else(Library::guest_path);
+        let epoch = self.account.data_epoch;
         let Some(b) = self.backend.clone() else { return };
         if self.feeds_loading {
             return;
         }
         // Data saver: reuse the last feeds for up to 12 hours.
         if self.config.storage.data_saver {
-            if let Some((trending, recs)) = load_feeds_cache(12 * 3600) {
+            if let Some((trending, recs)) = load_feeds_cache(&scope, 12 * 3600) {
                 self.trending = trending;
                 self.recs = recs;
                 cx.notify();
@@ -295,6 +433,7 @@ impl Glyph {
         cx.spawn(async move |this, cx| {
             let trending = b.trending(30).await.unwrap_or_default();
             this.update(cx, |s, cx| {
+                if s.account.data_epoch != epoch { return; }
                 s.trending = trending.into_iter().filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist)).take(20).collect();
                 cx.notify();
             })
@@ -303,6 +442,7 @@ impl Glyph {
             // several seeds and by liked artists come first.
             let mut found: Vec<(Track, f32)> = Vec::new();
             for seed in &seeds {
+                if !this.update(cx, |s, _| s.account.data_epoch == epoch).unwrap_or(false) { return; }
                 let sim = b.similar(seed).await.unwrap_or_default();
                 for (i, t) in sim.into_iter().take(25).enumerate() {
                     let w = 1.0 - i as f32 / 30.0;
@@ -314,13 +454,15 @@ impl Glyph {
                 }
             }
             this.update(cx, |s, cx| {
+                if s.account.data_epoch != epoch { return; }
                 let taste = s.taste();
                 let recent: HashSet<String> = s.library.recent_tracks().take(30).map(glyph_core::dedupe::track_key).collect();
                 let mut v: Vec<(Track, f32)> = found
                     .into_iter()
                     .filter(|(t, _)| s.allowed(t) && !taste.is_hidden(&t.artist) && !taste.is_liked(t) && !recent.contains(&glyph_core::dedupe::track_key(t)))
                     .map(|(t, w)| {
-                        let sc = w + taste.artist_weight(&t.artist) * 0.8;
+                        let preference = s.library.recommendation_feedback.get(&t.artist.trim().to_lowercase()).copied().unwrap_or(0);
+                        let sc = w + taste.artist_weight(&t.artist) * 0.8 + preference as f32 * 2.0;
                         (t, sc)
                     })
                     .collect();
@@ -338,7 +480,7 @@ impl Glyph {
                     .take(16)
                     .collect();
                 s.feeds_loading = false;
-                save_feeds_cache(&s.trending, &s.recs);
+                save_feeds_cache(&scope, &s.trending, &s.recs);
                 cx.notify();
             })
             .ok();

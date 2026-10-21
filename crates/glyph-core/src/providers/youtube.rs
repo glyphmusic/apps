@@ -353,7 +353,9 @@ impl YouTube {
         let key = self.key()?.to_string();
         let mut out = Vec::new();
         let mut token: Option<String> = None;
-        for _ in 0..40 {
+        let max_tracks = crate::library::playlist_track_limit();
+        let max_pages = max_tracks.div_ceil(50);
+        for page_index in 0..=max_pages {
             let mut q = vec![
                 ("part", "snippet".to_string()),
                 ("playlistId", playlist_id.to_string()),
@@ -374,8 +376,9 @@ impl YouTube {
                 out.push(t);
             }
             token = r.next_page_token;
-            if token.is_none() {
-                break;
+            if token.is_none() { break; }
+            if out.len() > max_tracks || page_index == max_pages {
+                anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
             }
         }
         Ok(out)

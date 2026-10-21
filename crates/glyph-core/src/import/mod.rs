@@ -84,7 +84,7 @@ const SOUNDCLOUD_RESERVED: [&str; 14] = [
 ];
 
 fn is_id(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Recognises playlist URLs (used by the search bar to detect pasted links).
@@ -180,6 +180,17 @@ pub async fn fetch_list(
     http: &reqwest::Client,
     keys: &crate::config::ApiKeys,
 ) -> Result<(ParsedList, Option<String>)> {
+    fetch_list_with_progress(input, providers, server, http, keys, None).await
+}
+
+pub async fn fetch_list_with_progress(
+    input: &crate::ImportInput,
+    providers: &Providers,
+    server: Option<&ServerClient>,
+    http: &reqwest::Client,
+    keys: &crate::config::ApiKeys,
+    progress: Option<&flume_like::Sender<ImportProgress>>,
+) -> Result<(ParsedList, Option<String>)> {
     match input {
         crate::ImportInput::File(path) => {
             let path = path.clone();
@@ -208,7 +219,7 @@ pub async fn fetch_list(
             let sc_on_server = matches!(src, RemoteSource::SoundCloud(_));
             let mut first_err = None;
             if let (Some(server), true) = (server, src.server_capable() || sc_on_server) {
-                match server.import(&url).await {
+                match server.import_with_progress(&url, progress).await {
                     Ok(r) if !r.tracks.is_empty() => return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url))),
                     Ok(_) => {}
                     Err(e) => first_err = Some(e),
@@ -269,7 +280,8 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
     Ok(ParsedList { name, label, tracks })
 }
 
-/// Matches every track with `resolve` (4 in parallel, order preserved),
+/// Small imports match with `resolve` (4 in parallel, order preserved).
+/// Large imports keep metadata and defer matching until playback,
 /// reporting progress as `IMPORT <label> ██████░░ done/total`.
 pub async fn match_all<F, Fut>(
     list: ParsedList,
@@ -284,6 +296,12 @@ where
     let total = list.tracks.len();
     let label = format!("IMPORT {}", list.label);
     let _ = progress.send(ImportProgress { label: label.clone(), done: 0, total });
+    // Keep large transfers local: save provider metadata and match on playback.
+    if total > 100 {
+        let _ = progress.send(ImportProgress { label, done: total, total });
+        return ImportResult { name: list.name, origin, ordered: list.tracks,
+            sure: vec![], unsure: vec![], not_found: vec![] };
+    }
     let mut result = ImportResult {
         name: list.name,
         sure: vec![],
@@ -294,7 +312,7 @@ where
     };
     let mut stream = futures::stream::iter(list.tracks.into_iter().map(|t| {
         let fut = resolve(t.clone());
-        async move { (t, fut.await) }
+        async move { (t, tokio::time::timeout(std::time::Duration::from_secs(20), fut).await.ok().flatten()) }
     }))
     .buffered(4);
     let mut done = 0;
@@ -327,6 +345,9 @@ pub fn format_progress(p: &ImportProgress, width: usize) -> String {
 
 /// `matched: 139/142 (97%)` (sure + unsure count as matched).
 pub fn summary(r: &ImportResult) -> String {
+    if r.sure.is_empty() && r.unsure.is_empty() && r.not_found.is_empty() && !r.ordered.is_empty() {
+        return format!("{} songs imported; matched on playback", r.ordered.len());
+    }
     let total = r.sure.len() + r.unsure.len() + r.not_found.len();
     let matched = r.sure.len() + r.unsure.len();
     let pct = if total == 0 { 100 } else { matched * 100 / total };
@@ -430,6 +451,19 @@ mod tests {
             ordered: vec![],
         };
         assert_eq!(summary(&r), "matched: 139/142 (97%)");
+    }
+
+    #[tokio::test]
+    async fn large_import_preserves_order_without_server_matching() {
+        let list = ParsedList { name: "Large".into(), label: "test".into(),
+            tracks: (0..5000).map(|i| test_track(ProviderId::Spotify, &i.to_string(), &format!("Song {i}"), "Artist", None)).collect() };
+        let (tx, _) = flume_like::channel();
+        let result = match_all(list, None, tx, |_| async {
+            panic!("large imports must not resolve every song on the server");
+        }).await;
+        assert_eq!(result.ordered.len(), 5000);
+        assert_eq!(result.ordered[4999].id, "4999");
+        assert!(result.not_found.is_empty());
     }
 
     #[tokio::test]

@@ -161,6 +161,7 @@ pub fn jamendo_format_url(url: &str, q: AudioQuality) -> Option<String> {
 /// `true` for failures worth another try: timeouts, dropped connections and
 /// gateway errors (a server that had to prepare the file for too long).
 fn transient(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() { return true; }
     e.chain().any(|c| {
         if let Some(r) = c.downcast_ref::<reqwest::Error>() {
             return r.is_timeout() || r.is_connect() || r.is_body() || r.is_request() || r.status().is_some_and(|s| s.is_server_error() || s.as_u16() == 429);
@@ -193,8 +194,15 @@ pub async fn fetch_with_retry(
             Err(e) if transient(&e) => {
                 tracing::info!(attempt, "download failed, trying again: {e:#}");
                 // Converted server streams: fall back to the original quality.
-                if url.contains("/v1/download/") && url.contains("quality=") && !url.contains("quality=high") {
-                    url = url.split('?').next().unwrap_or(&url).to_string() + "?quality=high";
+                if attempt == 1 {
+                    if let Ok(mut parsed) = reqwest::Url::parse(&url) {
+                        if parsed.path().starts_with("/v1/download/") && parsed.query_pairs().any(|(k, v)| k == "quality" && v != "high") {
+                            let mut pairs: Vec<(String, String)> = parsed.query_pairs().filter(|(k, _)| k != "quality").map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+                            pairs.push(("quality".into(), "high".into()));
+                            parsed.query_pairs_mut().clear().extend_pairs(pairs);
+                            url = parsed.into();
+                        }
+                    }
                 }
                 last = Some(e);
             }
@@ -207,6 +215,33 @@ pub async fn fetch_with_retry(
 /// Larger files are refused (an album rip in one file, a broken server).
 const MAX_BYTES: u64 = 500 * 1024 * 1024;
 const INDEX: &str = "index.json";
+
+/// Owns a reservation until publication, including when an async job is cancelled.
+struct PendingFile {
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    path: PathBuf,
+}
+
+impl PendingFile {
+    fn new(file: std::fs::File, path: PathBuf) -> Self {
+        Self { file: Some(std::io::BufWriter::with_capacity(64 * 1024, file)), path }
+    }
+
+    fn commit(mut self, destination: &Path) -> Result<()> {
+        self.file.as_mut().unwrap().flush()?;
+        drop(self.file.take());
+        std::fs::rename(&self.path, destination)?;
+        Ok(())
+    }
+}
+
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        // Windows requires closing the file before removing it.
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -354,6 +389,12 @@ impl Downloads {
         &self.dir
     }
 
+    pub fn saved_bytes(&self, tracks: &[Track]) -> u64 {
+        let map = self.map.lock().unwrap();
+        let keys: std::collections::HashSet<_> = tracks.iter().map(track_key).collect();
+        keys.iter().filter_map(|k| map.get(k)).map(|e| e.bytes).sum()
+    }
+
     /// Cheap check for the UI (index only, no disk access).
     pub fn contains(&self, t: &Track) -> bool {
         self.map.lock().unwrap().contains_key(&track_key(t))
@@ -422,50 +463,58 @@ impl Downloads {
         std::fs::create_dir_all(&self.dir)?;
         let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
         let resp = request.timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
+        self.save_response(resp, t, provider).await
+    }
+
+    async fn save_response(&self, resp: reqwest::Response, t: &Track, provider: ProviderId) -> Result<PathBuf> {
+        use sha2::{Digest, Sha256};
+        if resp.status() != reqwest::StatusCode::OK {
+            bail!("expected a complete download, got HTTP {}", resp.status());
+        }
         let etag = resp.headers().get("etag").and_then(|h| h.to_str().ok()).map(str::to_string);
         let modified = resp.headers().get("last-modified").and_then(|h| h.to_str().ok()).map(str::to_string);
         if resp.content_length().is_some_and(|n| n > MAX_BYTES) {
             bail!("file too large");
         }
-        if let Some(n) = resp.content_length() {
+        let expected = resp.content_length();
+        if let Some(n) = expected {
             report(|p| p.set_total(n));
         }
-        let mime = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let quality = if resp.url().path().starts_with("/v1/download/") && resp.url().query_pairs().any(|(k, v)| k == "quality" && v == "high") {
+            AudioQuality::High
+        } else { job_quality() };
+        let mime = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+        if mime.starts_with("text/") || mime.contains("json") {
+            bail!("server returned a document instead of audio");
+        }
         let ext = extension(&mime, resp.url().path());
-        let (name, part, mut out) = self.reserve_name(t, ext)?;
+        let (name, part, file) = self.reserve_name(t, ext)?;
+        let mut out = PendingFile::new(file, part);
+        let mut digest = Sha256::new();
         let mut bytes = 0u64;
         let started = std::time::Instant::now();
         let transfer = glyph_protocol::network::Transfer::start();
         let mut body = resp.bytes_stream();
-        let res: Result<()> = async {
-            while let Some(chunk) = body.next().await {
-                let chunk = chunk?;
-                transfer.progress();
-                bytes += chunk.len() as u64;
-                if bytes > MAX_BYTES {
-                    bail!("file too large");
-                }
-                out.write_all(&chunk)?;
-                report(|p| p.add(chunk.len() as u64));
+        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), body.next()).await? {
+            let chunk = chunk?;
+            transfer.progress();
+            bytes += chunk.len() as u64;
+            if bytes > MAX_BYTES {
+                bail!("file too large");
             }
-            out.flush()?;
-            Ok(())
+            out.file.as_mut().unwrap().write_all(&chunk)?;
+            digest.update(&chunk);
+            report(|p| p.add(chunk.len() as u64));
         }
-        .await;
-        drop(out);
-        if let Err(e) = res {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
+        if expected.is_some_and(|n| n != bytes) { bail!("download cut off"); }
         if bytes == 0 {
-            let _ = std::fs::remove_file(&part);
             bail!("empty file");
         }
         glyph_protocol::network::observe(bytes, started.elapsed());
         let path = self.dir.join(&name);
-        std::fs::rename(&part, &path)?;
+        out.commit(&path)?;
         let entry = Entry { track: t.clone(), file: name, provider, bytes, ts: now(),
-            revision: Revision { etag, modified, sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality() } };
+            revision: Revision { etag, modified, sha256: Some(format!("{:x}", digest.finalize())), checked_at: now(), hashed_at: now(), quality } };
         self.map.lock().unwrap().insert(track_key(t), entry);
         self.save();
         Ok(path)
@@ -512,7 +561,11 @@ fn extension(mime: &str, path: &str) -> &'static str {
         "flac"
     } else if m.contains("wav") || p.ends_with(".wav") {
         "wav"
-    } else if m.contains("mp4") || m.contains("aac") || p.ends_with(".m4a") {
+    } else if m.contains("webm") || p.ends_with(".webm") {
+        "webm"
+    } else if m.contains("aac") || p.ends_with(".aac") {
+        "aac"
+    } else if m.contains("mp4") || p.ends_with(".m4a") {
         "m4a"
     } else {
         "mp3"
@@ -529,6 +582,7 @@ pub fn mime_of(path: &Path) -> &'static str {
         "m4a" | "mp4" => "audio/mp4",
         "aac" => "audio/aac",
         "mka" => "audio/x-matroska",
+        "webm" => "audio/webm",
         _ => "audio/mpeg",
     }
 }
@@ -642,6 +696,54 @@ mod tests {
         assert_eq!(extension("audio/ogg", "/x"), "ogg");
         assert_eq!(extension("", "/a/b.flac"), "flac");
         assert_eq!(extension("application/octet-stream", "/download"), "mp3");
+        assert_eq!(extension("audio/webm", "/download"), "webm");
+        assert_eq!(extension("audio/aac", "/download"), "aac");
+    }
+
+    #[tokio::test]
+    async fn complete_downloads_are_hashed_and_broken_transfers_leave_no_file() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let d = Downloads::load(dir.path().to_path_buf());
+        for (i, response) in [
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/webm\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsong",
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/mp4\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort",
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mp4\r\nContent-Length: 4\r\nConnection: close\r\n\r\npart",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 4\r\nConnection: close\r\n\r\noops",
+        ].into_iter().enumerate() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let response = reqwest::Client::new().get(format!("http://{address}")).send().await.unwrap();
+            let song = track(&format!("Download {i}"));
+            let result = d.save_response(response, &song, ProviderId::YouTube).await;
+            server.join().unwrap();
+            if i == 0 {
+                let path = result.unwrap();
+                assert_eq!(path.extension().unwrap(), "webm");
+                assert_eq!(std::fs::read(&path).unwrap(), b"song");
+                assert_eq!(d.map.lock().unwrap()[&track_key(&song)].revision.sha256.as_ref(), Some(&digest_file(&path).unwrap()));
+            } else {
+                assert!(result.is_err());
+                assert!(!d.contains(&song));
+            }
+            assert!(!std::fs::read_dir(dir.path()).unwrap().any(|e| e.unwrap().path().extension().is_some_and(|x| x == "part")));
+        }
+    }
+
+    #[test]
+    fn cancelling_a_pending_file_removes_its_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("song.part");
+        let mut pending = PendingFile::new(std::fs::File::create(&path).unwrap(), path.clone());
+        pending.file.as_mut().unwrap().write_all(b"unfinished").unwrap();
+        drop(pending);
+        assert!(!path.exists());
     }
 
     #[test]

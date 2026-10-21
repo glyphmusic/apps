@@ -59,6 +59,7 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
+                .when(crate::ui::compact::TOUCH, |d| d.flex_wrap())
                 .child(div().text_size(px(12.0)).text_color(white(0.45)).child(t("sp.eq.hint")))
                 .child(
                     div()
@@ -84,7 +85,12 @@ thread_local! {
 /// Spotify-style equalizer: a smooth curve through the ten bands with a
 /// filled area below, points to drag up and down (-12..+12 dB).
 pub(super) fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> Div {
-    const NAMES: [&str; 10] = ["32Hz", "64Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"];
+    const NAMES: [&str; 10] = if crate::ui::compact::TOUCH {
+        // Phones: ten labels in ~330 px, so without "Hz".
+        ["32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"]
+    } else {
+        ["32Hz", "64Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz"]
+    };
     const LEFT: f32 = 52.0;
     const H: f32 = 210.0;
     let view = cx.entity().downgrade();

@@ -23,6 +23,7 @@ impl Inner {
         let covers = CoverCache::new(storage::covers_dir(), http.clone(), providers.clone()).with_max_bytes(limit);
         let lyrics_cache = LyricsCache::new(paths::data_dir().join("lyrics"));
 
+        library::set_playlist_track_limit(library::MAX_PLAYLIST_TRACKS);
         let mut mode = BackendMode::Direct;
         let mut server = None;
         let mut server_providers = None;
@@ -33,6 +34,7 @@ impl Inner {
             let client = ServerClient::new(&url, http.clone(), server_client::install_id()).with_bearer(token)?;
             match client.check_compat().await {
                 Ok(Compat::Compatible(h)) => {
+                    library::set_playlist_track_limit(h.playlist_max_tracks);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
                     server = Some(client);

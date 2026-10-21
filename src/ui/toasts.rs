@@ -11,7 +11,25 @@ use std::time::{Duration, Instant};
 
 const TOP: f32 = 40.0;
 const H: f32 = 40.0;
-const W: f32 = 460.0;
+const W_DESKTOP: f32 = 460.0;
+
+thread_local! {
+    /// Deck width: fixed on the desktop, the screen minus its edges on phones.
+    static DECK_W: std::cell::Cell<f32> = const { std::cell::Cell::new(W_DESKTOP) };
+    /// Phones: the toast a finger is swiping and when it last moved (pans
+    /// arrive as scroll events, without a release when they fling).
+    static TOUCH_DRAG: std::cell::Cell<Option<(u64, Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The toast under a finger right now (phones).
+fn touch_dragging() -> Option<u64> {
+    TOUCH_DRAG.with(|d| d.get().filter(|(_, at)| at.elapsed() < Duration::from_millis(150)).map(|(id, _)| id))
+}
+
+#[allow(non_snake_case)]
+fn W() -> f32 {
+    DECK_W.with(|w| w.get())
+}
 const GAP: f32 = 8.0;
 /// How far each older toast peeks out below the one in front.
 const PEEK: f32 = 9.0;
@@ -45,7 +63,7 @@ fn expanded(app: &Glyph) -> bool {
 /// anything moves.
 fn step(app: &mut Glyph) {
     let open = expanded(app);
-    let dragging = app.toast_drag.map(|(id, _)| id);
+    let dragging = app.toast_drag.map(|(id, _)| id).or_else(touch_dragging);
     let mut slot = 0usize;
     for t in app.toasts.iter_mut() {
         if t.gone.is_none() {
@@ -83,6 +101,7 @@ pub fn animating(app: &Glyph) -> bool {
     // Hovered: long texts may be scrolling.
     (app.toast_hover && !app.toasts.is_empty())
         || app.toast_drag.is_some()
+        || touch_dragging().is_some()
         || app.toasts.iter().any(|t| {
             let e = t.at.elapsed();
             t.y.is_nan()
@@ -144,9 +163,14 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
     let alpha = (fade_in * fade_out * (1.0 - gone) * depth_a).clamp(0.0, 1.0);
     // Only the front toast shows its text; the ones behind are just edges.
     let content_a = (1.0 - t.depth).clamp(0.0, 1.0);
-    let lift = (1.0 - fade_out) * -8.0 - gone * 36.0;
+    let lift = if crate::ui::compact::TOUCH {
+        // Phones: the deck sits at the bottom; toasts leave downwards.
+        (1.0 - fade_out) * 8.0 + gone * 36.0
+    } else {
+        (1.0 - fade_out) * -8.0 - gone * 36.0
+    };
     let y = t.y + t.drag + lift;
-    let w = W - t.depth * SHRINK;
+    let w = W() - t.depth * SHRINK;
     let id = t.id;
     let (icon_name, icon_color) = match t.icon {
         ToastIcon::Check => ("check", gpui::hsla(145.0 / 360.0, 0.55, 0.52, 1.0)),
@@ -156,7 +180,7 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
         .id(("toast", id as usize))
         .absolute()
         .top(px(y))
-        .left(px((W - w) / 2.0))
+        .left(px((W() - w) / 2.0))
         .w(px(w))
         .h(px(H))
         .flex()
@@ -174,11 +198,40 @@ fn pill(t: &Toast, text_width: f32, marquee_t: Option<f32>, cx: &mut Context<Gly
         .cursor_grab()
         .opacity(alpha)
         .font_family(theme::FONT)
+        // Phones: swipe down (or up) to dismiss.
+        .when(crate::ui::compact::TOUCH, |d| {
+            d.on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                let Some(t) = this.toasts.iter_mut().find(|t| t.id == id && t.gone.is_none()) else { return };
+                match e.touch_phase {
+                    gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                        TOUCH_DRAG.with(|d| d.set(None));
+                        if t.drag.abs() > SWIPE {
+                            t.gone = Some(Instant::now());
+                        }
+                    }
+                    _ => {
+                        TOUCH_DRAG.with(|d| d.set(Some((id, Instant::now()))));
+                        t.drag += f32::from(e.delta.pixel_delta(px(16.0)).y);
+                        if t.drag.abs() > SWIPE * 3.0 {
+                            t.gone = Some(Instant::now());
+                        }
+                    }
+                }
+                cx.notify();
+            }))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if this.toasts.iter().any(|t| t.id == id && t.gone.is_none()) {
+                // Phones: a tap dismisses (no hover deck, no swipe).
+                if crate::ui::compact::TOUCH {
+                    if let Some(t) = this.toasts.iter_mut().find(|t| t.id == id && t.gone.is_none()) {
+                        t.gone = Some(Instant::now());
+                    }
+                    cx.notify();
+                } else if this.toasts.iter().any(|t| t.id == id && t.gone.is_none()) {
                     this.toast_drag = Some((id, f32::from(e.position.y)));
                     cx.notify();
                 }
@@ -252,6 +305,18 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
         return None;
     }
     step(app);
+    // Phones: above the mini player and tabs, as wide as the screen allows,
+    // so the pinned back button at the top stays free.
+    let bottom = crate::ui::compact::TOUCH.then(|| {
+        use crate::ui::compact::{MINI_H, TABS_H};
+        let vw = f32::from(window.viewport_size().width);
+        DECK_W.with(|w| w.set((vw - 24.0).min(W_DESKTOP)));
+        // Settings and Now Playing cover the tabs and the mini player.
+        let bare = app.view == crate::app::View::NowPlaying || app.settings_open;
+        let tabs = if bare { theme::GAP } else { TABS_H + theme::GAP * 2.0 };
+        let mini = if !bare && app.current.is_some() { MINI_H + theme::GAP } else { 0.0 };
+        f32::from(window.insets().safe_area.bottom) + tabs + mini + 8.0
+    });
     let live = app.toasts.iter().filter(|t| t.gone.is_none()).count();
     let stack_h = if expanded(app) {
         live as f32 * (H + GAP)
@@ -273,7 +338,10 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
         .collect();
     let stack = div()
         .absolute()
-        .top(px(TOP))
+        .map(|d| match bottom {
+            Some(b) => d.bottom(px(b)),
+            None => d.top(px(TOP)),
+        })
         .left_0()
         .right_0()
         .flex()
@@ -282,13 +350,13 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
             div()
                 .id("toast-deck")
                 .relative()
-                .w(px(W))
+                .w(px(W()))
                 .h(px(stack_h.max(H)))
-                .on_hover(cx.listener(|this, h: &bool, _, cx| {
+                .when(!crate::ui::compact::TOUCH, |d| d.on_hover(cx.listener(|this, h: &bool, _, cx| {
                     this.toast_hover = *h;
                     this.toast_hover_at = h.then(std::time::Instant::now);
                     cx.notify();
-                }))
+                })))
                 .children(pills),
         );
     let drag_layer = app.toast_drag.map(|(id, start)| {

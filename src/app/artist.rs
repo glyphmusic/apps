@@ -1,6 +1,40 @@
 use super::*;
 
 impl Glyph {
+    /// Load tile portraits without loading songs, releases or related artists.
+    pub fn artist_photo_path(&mut self, name: &str, cx: &mut Context<Self>) -> Option<PathBuf> {
+        if let Some(path) = self.artists.get(name).and_then(|p| p.info.as_ref()).and_then(|i| i.image.clone()) {
+            return Some(path);
+        }
+        let key = glyph_core::dedupe::normalize_artist(name);
+        match self.artist_photos.get(&key) {
+            Some(ArtistPhoto::Ready(path)) => return Some(path.clone()),
+            Some(ArtistPhoto::Loading | ArtistPhoto::Missing) => return None,
+            Some(ArtistPhoto::RetryAt(at)) if Instant::now() < *at => return None,
+            _ => {}
+        }
+        let Some(b) = self.backend.clone() else { return None };
+        if !self.artist_photos.contains_key(&key) && self.artist_photos.len() >= 256 {
+            let evict = self.artist_photos.iter().find(|(_, photo)| !matches!(photo, ArtistPhoto::Loading)).map(|(key, _)| key.clone());
+            if let Some(evict) = evict { self.artist_photos.remove(&evict); } else { return None; }
+        }
+        self.artist_photos.insert(key.clone(), ArtistPhoto::Loading);
+        let name = name.to_string();
+        let lang = self.lang.code();
+        cx.spawn(async move |this, cx| {
+            let photo = guard_async(b.artist_photo(&name, lang)).await;
+            this.update(cx, |s, cx| {
+                s.artist_photos.insert(key, match photo {
+                    Ok(Some(path)) => ArtistPhoto::Ready(path),
+                    Ok(None) => ArtistPhoto::Missing,
+                    Err(_) => ArtistPhoto::RetryAt(Instant::now() + Duration::from_secs(30)),
+                });
+                cx.notify();
+            }).ok();
+        }).detach();
+        None
+    }
+
     /// Opens the artist profile (first artist of a "A, B" credit).
     pub fn open_artist(&mut self, name: &str, cx: &mut Context<Self>) {
         let name = primary_artist(name);

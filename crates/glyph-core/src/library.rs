@@ -3,6 +3,16 @@
 
 use crate::dedupe::{same_song, track_key, TrackIndex};
 use crate::paths;
+
+/// Applies to every user playlist, including imports and re-imports.
+pub const MAX_PLAYLIST_TRACKS: usize = 5_000;
+static PLAYLIST_TRACK_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_PLAYLIST_TRACKS);
+pub fn playlist_track_limit() -> usize {
+    PLAYLIST_TRACK_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub(crate) fn set_playlist_track_limit(limit: usize) {
+    PLAYLIST_TRACK_LIMIT.store(limit.clamp(1, 50_000), std::sync::atomic::Ordering::Relaxed);
+}
 use glyph_protocol::Track;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,6 +39,9 @@ pub const RECENT_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Playlist {
+    /// Available on this installation across accounts; never uploaded by sync.
+    #[serde(default)]
+    pub local_only: bool,
     pub id: String,
     pub name: String,
     pub tracks: Vec<Track>,
@@ -44,6 +57,34 @@ pub struct Playlist {
     /// Handle of whoever shared it (opened from a short link); shown as the author.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistRevision {
+    pub playlist: Playlist,
+    pub saved_at: u64,
+}
+
+/// Per-song membership operation. Timestamp + installation id give every
+/// operation a stable order; a removal wins an otherwise identical tie.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistMembership {
+    pub at: u64,
+    pub device: String,
+    pub present: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct LocalPlaylistArchive {
+    trash: BTreeMap<String, Playlist>,
+    versions: BTreeMap<String, PlaylistRevision>,
+    membership: BTreeMap<String, BTreeMap<String, PlaylistMembership>>,
+}
+
+impl PlaylistMembership {
+    pub fn newer_than(&self, other: &Self) -> bool {
+        (self.at, &self.device, !self.present) > (other.at, &other.device, !other.present)
+    }
 }
 
 /// A song list the library can point at (sidebar "recent", saved albums).
@@ -177,8 +218,32 @@ impl SongActivity {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LibraryPath(pub Option<PathBuf>);
+impl PartialEq for LibraryPath {
+    fn eq(&self, _: &Self) -> bool { true }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Library {
+    #[serde(default)]
+    pub playlist_membership: BTreeMap<String, BTreeMap<String, PlaylistMembership>>,
+    /// Immutable playlist checkpoints, keyed by content hash.
+    #[serde(default)]
+    pub playlist_versions: BTreeMap<String, PlaylistRevision>,
+    #[serde(default)]
+    pub playlist_trash: BTreeMap<String, Playlist>,
+    /// Explicit recommendation preference by normalized artist: -2 block,
+    /// -1 less, +1 more. Removing an entry resets the preference.
+    #[serde(default)]
+    pub recommendation_feedback: BTreeMap<String, i8>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub guest_imports: std::collections::BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub guest_stats_imported: BTreeMap<String, crate::stats::MonthStats>,
+    /// Captured by every asynchronous save, so account switches cannot redirect it.
+    #[serde(skip)]
+    pub storage_path: LibraryPath,
     pub liked: Vec<Track>,
     /// Per-device activity; excluded from account sync. Capped at 500 songs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -294,6 +359,12 @@ impl Library {
         paths::data_dir().join("library.json")
     }
 
+    pub fn guest_path() -> PathBuf {
+        if paths::data_dir().join("legacy-library-account.json").exists() {
+            paths::data_dir().join("guest").join("library.json")
+        } else { Self::path() }
+    }
+
     pub fn activity_path() -> PathBuf {
         Self::activity_path_for(&Self::path())
     }
@@ -332,7 +403,23 @@ impl Library {
 
     /// Missing file = empty library. A corrupt file is kept as `library.json.bak`.
     pub fn load() -> anyhow::Result<Self> {
-        Self::load_from(&Self::path())
+        let account_path = crate::account::library_path();
+        if account_path.is_some() && crate::account::stored_guest_merge_pending() {
+            let mut guest = Self::load_from(&Self::guest_path())?;
+            guest.load_local_playlists()?;
+            return Ok(guest);
+        }
+        let marker = paths::data_dir().join("legacy-library-account.json");
+        if let Some(path) = account_path.as_ref().filter(|path| !path.exists() && Self::path().exists() && !marker.exists()) {
+            // Preserve the old files as an archive, but never expose an old
+            // signed-in library as the guest's data after the migration.
+            let legacy = Self::load_from(&Self::path())?;
+            legacy.save_to(path)?;
+            paths::write_json(&marker, &path.display().to_string())?;
+        }
+        let mut lib = Self::load_from(&account_path.unwrap_or_else(Self::guest_path))?;
+        lib.load_local_playlists()?;
+        Ok(lib)
     }
 
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
@@ -358,11 +445,45 @@ impl Library {
                 lib.apply_activity(act);
             }
         }
+        lib.storage_path.0 = Some(path.to_path_buf());
+        lib.checkpoint_playlists();
         Ok(lib)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        self.save_to(&Self::path())
+        self.save_to(&self.storage_path.0.clone().unwrap_or_else(Self::path))?;
+        paths::write_json(&paths::data_dir().join("local-playlists.json"), &self.playlists.iter().filter(|p| p.local_only).collect::<Vec<_>>())?;
+        let archive = LocalPlaylistArchive {
+            trash: self.playlist_trash.iter().filter(|(_, p)| p.local_only).map(|(k,v)| (k.clone(),v.clone())).collect(),
+            versions: self.playlist_versions.iter().filter(|(_, v)| v.playlist.local_only).map(|(k,v)| (k.clone(),v.clone())).collect(),
+            membership: self.playlist_membership.iter().filter(|(id, _)| self.playlist(id).or_else(|| self.playlist_trash.get(*id)).is_some_and(|p| p.local_only)).map(|(k,v)| (k.clone(),v.clone())).collect(),
+        };
+        paths::write_json(&paths::data_dir().join("local-playlist-archive.json"), &archive)
+    }
+
+    pub fn load_local_playlists(&mut self) -> anyhow::Result<()> {
+        let path = paths::data_dir().join("local-playlists.json");
+        let local: Vec<Playlist> = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        self.playlists.retain(|p| !p.local_only);
+        self.playlists.extend(local.into_iter().filter(|p| p.local_only));
+        match std::fs::read(paths::data_dir().join("local-playlist-archive.json")) {
+            Ok(bytes) => {
+                let archive: LocalPlaylistArchive = serde_json::from_slice(&bytes)?;
+                self.playlist_trash.retain(|_, p| !p.local_only);
+                self.playlist_versions.retain(|_, v| !v.playlist.local_only);
+                self.playlist_trash.extend(archive.trash.into_iter().filter(|(_, p)| p.local_only));
+                self.playlist_versions.extend(archive.versions.into_iter().filter(|(_, v)| v.playlist.local_only));
+                self.playlist_membership.extend(archive.membership);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.checkpoint_playlists();
+        Ok(())
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
@@ -372,7 +493,7 @@ impl Library {
     }
 
     pub fn save_activity(&self) -> anyhow::Result<()> {
-        self.save_activity_to(&Self::path())
+        self.save_activity_to(&self.storage_path.0.clone().unwrap_or_else(Self::path))
     }
 
     pub fn save_activity_to(&self, path: &Path) -> anyhow::Result<()> {
@@ -676,6 +797,7 @@ impl Library {
 
     pub fn create_playlist(&mut self, name: &str) -> &mut Playlist {
         self.playlists.push(Playlist {
+            local_only: false,
             id: uuid::Uuid::new_v4().simple().to_string(),
             name: clean_playlist_name(name),
             tracks: vec![],
@@ -708,14 +830,54 @@ impl Library {
     }
 
     pub fn delete_playlist(&mut self, id: &str) {
+        self.checkpoint_playlists();
+        if let Some(p) = self.playlist(id).cloned() { self.playlist_trash.insert(id.to_string(), p); }
         self.playlists.retain(|p| p.id != id);
         self.recent_lists.retain(|k| k != &ListKey::Playlist { id: id.to_string() });
+    }
+
+    pub fn checkpoint_playlists(&mut self) {
+        use sha2::{Digest, Sha256};
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        for p in &self.playlists {
+            let fresh = !self.playlist_membership.contains_key(&p.id);
+            let membership = self.playlist_membership.entry(p.id.clone()).or_default();
+            let ids: std::collections::BTreeSet<_> = p.tracks.iter().map(crate::sync::track_id).collect();
+            for (id, op) in membership.iter_mut() {
+                let present = ids.contains(id);
+                if present != op.present {
+                    *op = PlaylistMembership { at: now.max(op.at.saturating_add(1)), device: crate::server_client::install_id(), present };
+                }
+            }
+            for id in ids {
+                membership.entry(id).or_insert_with(|| PlaylistMembership { at: if fresh { 0 } else { now }, device: crate::server_client::install_id(), present: true });
+            }
+            let bytes = serde_json::to_vec(p).unwrap_or_default();
+            let key = format!("{:x}", Sha256::digest(bytes));
+            self.playlist_versions.entry(key).or_insert_with(|| PlaylistRevision {
+                playlist: p.clone(), saved_at: paths::now_unix(),
+            });
+        }
+    }
+
+    pub fn restore_playlist(&mut self, id: &str) -> bool {
+        let Some(p) = self.playlist_trash.remove(id) else { return false };
+        if self.playlist(id).is_none() { self.playlists.push(p); }
+        true
+    }
+
+    pub fn restore_playlist_version(&mut self, revision: &str) -> bool {
+        let Some(p) = self.playlist_versions.get(revision).map(|v| v.playlist.clone()) else { return false };
+        self.checkpoint_playlists();
+        self.playlist_trash.remove(&p.id);
+        if let Some(current) = self.playlist_mut(&p.id) { *current = p; } else { self.playlists.push(p); }
+        true
     }
 
     /// Appends a song unless the playlist already has it. Returns `true` if added.
     pub fn add_to_playlist(&mut self, id: &str, track: Track) -> bool {
         let Some(p) = self.playlist_mut(id) else { return false };
-        if p.tracks.iter().any(|t| same_entry(t, &track)) {
+        if p.tracks.len() >= playlist_track_limit() || p.tracks.iter().any(|t| same_entry(t, &track)) {
             return false;
         }
         p.tracks.push(track);
@@ -756,6 +918,7 @@ impl Library {
         let mut seen = TrackIndex::from_tracks(&p.tracks);
         let mut added = 0;
         for t in tracks {
+            if p.tracks.len() >= playlist_track_limit() { break; }
             if !seen.contains(&t) {
                 seen.insert(&t);
                 p.tracks.push(t);
@@ -892,7 +1055,7 @@ mod tests {
         lib.push_recent_list(ListKey::Playlist { id: "5".into() });
         assert_eq!(lib.recent_lists.len(), RECENT_LISTS_LIMIT);
         assert_eq!(lib.recent_lists[0], ListKey::Playlist { id: "5".into() });
-        lib.playlists.push(Playlist { id: "5".into(), name: "x".into(), tracks: vec![], origin: None, cover: None, auto_download: false, shared_by: None });
+        lib.playlists.push(Playlist { local_only: false, id: "5".into(), name: "x".into(), tracks: vec![], origin: None, cover: None, auto_download: false, shared_by: None });
         lib.delete_playlist("5");
         assert!(!lib.recent_lists.contains(&ListKey::Playlist { id: "5".into() }));
     }
@@ -1010,6 +1173,18 @@ mod tests {
     }
 
     #[test]
+    fn playlist_limit_covers_add_and_reimport() {
+        let mut lib = Library::default();
+        let (p, _) = lib.save_import("Full", Some("origin"), vec![]);
+        p.tracks = (0..MAX_PLAYLIST_TRACKS).map(|i| tr(&i.to_string(), &format!("Song {i}"))).collect();
+        let id = p.id.clone();
+        assert!(!lib.add_to_playlist(&id, tr("extra", "Extra")));
+        let (p, added) = lib.save_import("Full", Some("origin"), vec![tr("extra", "Extra")]);
+        assert_eq!(added, 0);
+        assert_eq!(p.tracks.len(), MAX_PLAYLIST_TRACKS);
+    }
+
+    #[test]
     fn playlists_crud_and_reimport() {
         let mut lib = Library::default();
         let id = lib.create_playlist("  Mix ").id.clone();
@@ -1053,6 +1228,23 @@ mod tests {
         std::fs::write(&path, b"{ nope").unwrap();
         assert!(Library::load_from(&path).is_err());
         assert!(path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn captured_library_and_activity_saves_keep_their_profile_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let guest_path = dir.path().join("guest/library.json");
+        let account_path = dir.path().join("account/library.json");
+        let mut guest = Library::load_from(&guest_path).unwrap();
+        guest.toggle_like(&tr("guest", "Guest song"));
+        let pending_guest = guest.clone();
+        let mut account = Library::load_from(&account_path).unwrap();
+        account.toggle_like(&tr("account", "Account song"));
+        account.save_to(&account.storage_path.0.clone().unwrap()).unwrap();
+        pending_guest.save_to(&pending_guest.storage_path.0.clone().unwrap()).unwrap();
+        assert_eq!(Library::load_from(&guest_path).unwrap().liked[0].id, "guest");
+        assert_eq!(Library::load_from(&account_path).unwrap().liked[0].id, "account");
+        assert_ne!(guest.storage_path.0, account.storage_path.0);
     }
 
     #[test]

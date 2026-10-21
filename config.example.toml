@@ -32,6 +32,9 @@ language = ""
 # lastfm = ""
 
 [providers]
+# Search directly from this device instead of through the Glyph server.
+# Uses enabled providers and your own keys where required. Device-specific.
+local_search = false
 # Providers to use (remove entries to disable them).
 # Default: pure-audio sources + metadata/lyrics providers. To enable youtube/soundcloud
 # as fallback (plays the official embed inside the app), add "youtube" / "soundcloud"
@@ -55,7 +58,7 @@ ascii_covers = false
 
 [updates]
 # GitHub repository (owner/repo) that publishes releases.
-repo = "glyphmusic/desktop"
+repo = "glyphmusic/apps"
 check_on_start = true
 # Download + install automatically (always SHA-256 verified). Restart is asked first.
 auto_install = false

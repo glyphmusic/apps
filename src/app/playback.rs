@@ -4,7 +4,16 @@ impl Glyph {
     /// Replace the queue with `tracks` and start at `index`. With "Hide
     /// explicit songs" on, explicit songs neither start nor join the queue.
     pub fn play_list(&mut self, tracks: Vec<Track>, index: usize, cx: &mut Context<Self>) {
+        if self.account.output_target.is_some() {
+            if index < tracks.len() {
+                self.account_control(glyph_protocol::playback::Command::Transfer { tracks: tracks[index..].iter().take(100).cloned().collect(), index: 0, position_ms: 0, playing: true });
+            }
+            return;
+        }
         let Some(track) = tracks.get(index).cloned() else { return };
+        if self.jam_request(&track, true) {
+            return;
+        }
         if self.blocked_explicit(&track, cx) {
             return;
         }
@@ -39,6 +48,10 @@ impl Glyph {
     }
 
     pub fn play_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.account_control(glyph_protocol::playback::Command::Transfer { tracks: vec![track.clone()], index: 0, position_ms: 0, playing: true }) { return; }
+        if self.jam_request(&track, true) {
+            return;
+        }
         if self.blocked_explicit(&track, cx) {
             return;
         }
@@ -48,6 +61,7 @@ impl Glyph {
     /// `adopted`: the player already moved on to this song gaplessly (as the
     /// given resolved track), so only the UI follows; nothing is reloaded.
     pub(super) fn start_track(&mut self, track: Track, adopted: Option<Track>, cx: &mut Context<Self>) {
+        self.account.transfer_resume = None;
         let key = track_key(&track);
         self.preload_attempt = None;
         self.current = Some(track.clone());
@@ -119,12 +133,14 @@ impl Glyph {
             let b = backend.clone();
             let t = track.clone();
             let k = key.clone();
+            let owner_path = self.library.storage_path.0.clone();
             cx.spawn(async move |this, cx| {
                 let started = Instant::now();
                 tracing::info!(provider = ?t.source, "playback: resolving source");
                 let r = guard_async(b.resolve(&t)).await;
                 tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, success = r.is_ok(), "playback: source resolved");
                 this.update(cx, |s, cx| {
+                    if s.account.output_target.is_some() || s.library.storage_path.0 != owner_path { return; }
                     if s.current.as_ref().map(track_key).as_deref() != Some(k.as_str()) {
                         return;
                     }
@@ -137,13 +153,22 @@ impl Glyph {
                             let src = res.source.clone();
                             let tr = res.track.clone();
                             let start = !s.hold_play;
-                            s.output_load(tr, src, start);
+                            if let Some((ms, playing)) = s.account.transfer_resume.take() {
+                                s.output_load_at(tr, src, playing, ms as f64 / 1000.0);
+                            } else {
+                                s.output_load(tr, src, start);
+                            }
                             // Now that this song runs, get the next ones ready
                             // (local yt-dlp only; one batch run, not one wait per song).
                             s.prefetch_upcoming();
                         }
-                        Ok(None) => s.toast_info(crate::i18n::t("toast.no_source")),
-                        Err(e) => s.toast_info(tf("toast.resolve_error", &[("e", &e)])),
+                        Ok(None) => {
+                            s.finish_account_transfer(Some("No playable source on target device".into()), cx);
+                            s.account.transfer_resume = None;
+                            s.toast_info(crate::i18n::t("toast.no_source"));
+                            s.jam_no_source(&k);
+                        }
+                        Err(e) => { s.finish_account_transfer(Some(e.to_string()), cx); s.toast_info(tf("toast.resolve_error", &[("e", &e)])); }
                     }
                     cx.notify();
                 })
@@ -204,6 +229,11 @@ impl Glyph {
     }
 
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
+        if self.account_control(if self.is_playing() { glyph_protocol::playback::Command::Pause } else { glyph_protocol::playback::Command::Play }) { return; }
+        use glyph_protocol::jam::Control;
+        if self.jam_control(if self.is_playing() { Control::Pause } else { Control::Play }) {
+            return;
+        }
         if self.current.is_none() {
             let recent: Vec<Track> = self.library.recent_tracks().cloned().collect();
             if !recent.is_empty() {
@@ -225,6 +255,10 @@ impl Glyph {
     }
 
     pub fn seek_to(&mut self, pos: Duration) {
+        if self.account_control(glyph_protocol::playback::Command::Seek { position_ms: pos.as_millis() as u64 }) { return; }
+        if self.jam_control(glyph_protocol::jam::Control::Seek { ms: pos.as_millis() as u64 }) {
+            return;
+        }
         if self.remote_send(crate::mpd::Cmd::Seek(pos.as_secs_f64())) {
             return;
         }
@@ -240,6 +274,7 @@ impl Glyph {
 
     pub fn set_volume(&mut self, v: f32) {
         let v = v.clamp(0.0, 1.0);
+        if self.account_control(glyph_protocol::playback::Command::Volume { volume: v }) { return; }
         if v > 0.001 {
             self.unmute_volume = v;
         }
@@ -256,6 +291,7 @@ impl Glyph {
             self.unmute_volume = self.volume();
         }
         let v = if muted { self.unmute_volume } else { 0.0 };
+        if self.account_control(glyph_protocol::playback::Command::Volume { volume: v }) { return; }
         if self.remote_send(crate::mpd::Cmd::Volume((v * 100.0).round() as u8)) {
             return;
         }
@@ -263,6 +299,19 @@ impl Glyph {
     }
 
     pub fn next(&mut self, auto: bool, cx: &mut Context<Self>) {
+        if self.account.output_target.is_some() {
+            if !auto { self.account_control(glyph_protocol::playback::Command::Next); }
+            return;
+        }
+        // In a jam the host decides what comes next. A guest's own player
+        // still moves on when a song ends (its queue is the host's, so the
+        // next song is the same); the host's next state corrects it if not.
+        if self.jam_guest() && (!auto || self.jam_listen_remote()) {
+            if !auto {
+                self.jam_control(glyph_protocol::jam::Control::Next);
+            }
+            return;
+        }
         if !auto && self.library_ok && self.position() < Duration::from_secs(30) {
             if let Some(cur) = self.current.clone() {
                 self.library.record_skip(&cur);
@@ -282,9 +331,15 @@ impl Glyph {
                     auto && *k == track_key(&t) && playing.as_ref().is_some_and(|p| p.id == r.id && p.source == r.source)
                 });
                 self.start_track(t, adopted.map(|(_, r)| r), cx);
+                if auto {
+                    self.sleep_after_song(cx);
+                }
             }
             Some(None) => {
-                if self.radio {
+                if auto && self.sleep == Some(Sleep::EndOfSong) {
+                    // The queue ended anyway: nothing more to stop.
+                    self.sleep = None;
+                } else if self.radio {
                     self.start_radio(cx);
                 } else if auto {
                     self.toast_info(t("toast.queue_end"));
@@ -299,6 +354,10 @@ impl Glyph {
     }
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
+        if self.account_control(glyph_protocol::playback::Command::Previous) { return; }
+        if self.jam_control(glyph_protocol::jam::Control::Previous) {
+            return;
+        }
         if self.position() > Duration::from_secs(3) {
             self.seek_to(Duration::ZERO);
             return;
@@ -417,6 +476,11 @@ impl Glyph {
     }
 
     pub(super) fn preload_next(&mut self, cx: &mut Context<Self>) {
+        if self.account.output_target.is_some() { return; }
+        // Listening at the jam host's device: nothing plays here.
+        if self.jam_listen_remote() {
+            return;
+        }
         // MPD and network devices play one song at a time; the next one is
         // sent when it ends.
         if self.remote_chosen() {
@@ -486,24 +550,85 @@ impl Glyph {
 
     /// Queue finished: continue with similar tracks (Last.fm getSimilar).
     pub(super) fn start_radio(&mut self, cx: &mut Context<Self>) {
-        let (Some(b), Some(seed)) = (self.backend.clone(), self.current.clone()) else { return };
-        self.toast(tf("toast.radio", &[("title", &seed.title)]));
+        let Some(seed) = self.current.clone() else { return };
+        let title = seed.title.clone();
+        self.start_radio_from(vec![seed], title, cx);
+    }
+
+    /// Radio from a playlist / album: songs similar to the list as a whole.
+    pub fn list_radio(&mut self, l: &ListRef, cx: &mut Context<Self>) {
+        let title = self.list_title(l).to_string();
+        let tracks = self.list_tracks(l);
+        self.start_radio_from(tracks, title, cx);
+    }
+
+    /// Radio from an artist: seeded with their songs Glyph already knows
+    /// (their page, liked and recently played songs, the followed entry).
+    pub fn artist_radio(&mut self, name: &str, cx: &mut Context<Self>) {
+        let mut seeds: Vec<Track> = self.artists.get(name).map(|p| p.tracks.iter().take(5).cloned().collect()).unwrap_or_default();
+        if seeds.is_empty() {
+            let known = self.library.liked.iter().chain(self.library.recent_tracks());
+            seeds = known.filter(|t| glyph_core::dedupe::by_artist(&t.artist, name)).take(5).cloned().collect();
+        }
+        if seeds.is_empty() {
+            seeds.extend(self.library.followed.iter().find(|f| f.name.eq_ignore_ascii_case(name)).and_then(|f| f.track.clone()));
+        }
+        if seeds.is_empty() {
+            self.toast_info(t("toast.radio_empty"));
+            return;
+        }
+        self.start_radio_from(seeds, name.to_string(), cx);
+    }
+
+    /// Plays songs similar to `seeds` (up to five, spread over the list):
+    /// songs suggested for several seeds come first, the seeds themselves
+    /// are left out and one artist never plays twice in a row.
+    pub fn start_radio_from(&mut self, seeds: Vec<Track>, title: String, cx: &mut Context<Self>) {
+        const SEEDS: usize = 5;
+        let Some(b) = self.backend.clone() else { return };
+        if seeds.is_empty() {
+            self.toast_info(t("toast.radio_empty"));
+            return;
+        }
+        let step = (seeds.len() as f32 / SEEDS as f32).max(1.0);
+        let picked: Vec<Track> = (0..SEEDS.min(seeds.len())).map(|i| seeds[(i as f32 * step) as usize].clone()).collect();
+        let skip: HashSet<String> = seeds.iter().map(glyph_core::dedupe::track_key).collect();
+        self.toast(tf("toast.radio", &[("title", &title)]));
         cx.spawn(async move |this, cx| {
-            let r = guard_async(b.similar(&seed)).await;
-            this.update(cx, |s, cx| match r {
-                Ok(tracks) if !tracks.is_empty() => {
-                    let tracks: Vec<Track> = tracks.into_iter().filter(|t| !s.is_hidden_artist(&t.artist)).collect();
-                    if tracks.is_empty() {
-                        s.toast_info(t("toast.radio_empty"));
-                    } else {
-                        let label = tf("queue.radio_from", &[("title", &seed.title)]).to_string();
+            let mut found: Vec<(Track, f32)> = Vec::new();
+            let mut error = None;
+            for seed in &picked {
+                match guard_async(b.similar(seed)).await {
+                    Ok(sim) => {
+                        for (i, t) in sim.into_iter().take(40).enumerate() {
+                            let key = glyph_core::dedupe::track_key(&t);
+                            if skip.contains(&key) {
+                                continue;
+                            }
+                            let w = 1.0 - i as f32 / 50.0;
+                            match found.iter_mut().find(|(x, _)| glyph_core::dedupe::track_key(x) == key) {
+                                Some(f) => f.1 += w,
+                                None => found.push((t, w)),
+                            }
+                        }
+                    }
+                    Err(e) => error = Some(e),
+                }
+            }
+            this.update(cx, |s, cx| {
+                found.retain(|(t, _)| !s.is_hidden_artist(&t.artist) && s.allowed(t));
+                found.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let tracks = spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect());
+                match (tracks.is_empty(), error) {
+                    (false, _) => {
+                        let label = tf("queue.radio_from", &[("title", &title)]).to_string();
                         s.play_list(tracks, 0, cx);
                         s.queue_from = Some(label);
                         s.recent_artist_ctx = None;
                     }
+                    (true, Some(e)) => s.toast_info(tf("toast.radio_error", &[("e", &e)])),
+                    (true, None) => s.toast_info(t("toast.radio_empty")),
                 }
-                Ok(_) => s.toast_info(t("toast.radio_empty")),
-                Err(e) => s.toast_info(tf("toast.radio_error", &[("e", &e)])),
             })
             .ok();
         })
@@ -628,6 +753,9 @@ impl Glyph {
     }
 
     pub fn queue_add(&mut self, t: Track, next: bool, cx: &mut Context<Self>) {
+        if self.jam_request(&t, false) {
+            return;
+        }
         if self.blocked_explicit(&t, cx) {
             return;
         }
@@ -646,14 +774,32 @@ impl Glyph {
     }
 
     pub fn queue_remove(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.jam_queue_edit(Some(i), cx) {
+            return;
+        }
         guard(|| self.queue.remove(i));
         self.queue_changed();
         cx.notify();
     }
 
     pub fn queue_move(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if self.jam_queue_edit(None, cx) {
+            return;
+        }
         guard(|| self.queue.move_item(from, to));
         self.queue_changed();
         cx.notify();
     }
+}
+
+/// Same order, but a song whose artist just played moves back behind the
+/// next song by someone else (when there is one).
+fn spread_artists(mut rest: Vec<Track>) -> Vec<Track> {
+    let mut out: Vec<Track> = Vec::with_capacity(rest.len());
+    while !rest.is_empty() {
+        let last = out.last().map(|t| glyph_core::dedupe::primary_artist(&t.artist).to_lowercase());
+        let i = rest.iter().position(|t| Some(glyph_core::dedupe::primary_artist(&t.artist).to_lowercase()) != last).unwrap_or(0);
+        out.push(rest.remove(i));
+    }
+    out
 }

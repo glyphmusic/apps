@@ -13,14 +13,21 @@ impl Glyph {
 
     /// A song is being found (resolve, yt-dlp) or opened by the player.
     pub fn is_loading(&self) -> bool {
+        if self.account.output_target.is_some() { return false; }
         self.resolving || self.player_state.as_ref().is_some_and(|s| s.status == Status::Loading)
     }
 
     pub fn is_playing(&self) -> bool {
+        if self.account.output_target.is_some() { return self.account_output().is_some_and(|o| o.state.playing); }
         self.player_state.as_ref().is_some_and(|s| s.status == Status::Playing)
     }
 
     pub fn position(&self) -> Duration {
+        if self.account.output_target.is_some() {
+            let Some(o) = self.account_output() else { return Duration::ZERO };
+            let elapsed = if o.state.playing { self.account.output_received.map(|at| at.elapsed().min(Duration::from_secs(5))).unwrap_or_default() } else { Duration::ZERO };
+            return (Duration::from_millis(o.state.position_ms) + elapsed).min(o.state.duration_ms.map(Duration::from_millis).unwrap_or(Duration::MAX));
+        }
         if self.resolving {
             return Duration::ZERO;
         }
@@ -38,6 +45,7 @@ impl Glyph {
     }
 
     pub fn duration(&self) -> Option<Duration> {
+        if self.account.output_target.is_some() { return self.account_output()?.state.duration_ms.map(Duration::from_millis); }
         if self.resolving || self.player_state.as_ref().is_some_and(|s| s.status == Status::Loading) {
             if let Some(d) = self.current.as_ref().and_then(|t| t.duration_ms) {
                 return Some(Duration::from_millis(d));
@@ -50,6 +58,7 @@ impl Glyph {
     }
 
     pub fn volume(&self) -> f32 {
+        if self.account.output_target.is_some() { return self.account_output().map(|o| o.state.volume).unwrap_or(0.0); }
         self.player_state.as_ref().map(|s| s.volume).unwrap_or(0.8)
     }
 
@@ -94,7 +103,7 @@ impl Glyph {
     pub(super) fn tick_stats(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let last = self.stats_tick.replace(now);
-        if !self.config.stats.enabled || !self.library_ok {
+        if !self.config.stats.enabled || !self.library_ok || self.account.output_target.is_some() {
             self.stats_pending = None;
             return;
         }
@@ -117,7 +126,7 @@ impl Glyph {
         }
     }
 
-    pub(super) fn flush_stats(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn flush_stats(&mut self, cx: &mut Context<Self>) {
         self.stats_flushed = Instant::now();
         let Some((t, ms)) = self.stats_pending.take() else { return };
         if ms == 0 {
@@ -146,10 +155,44 @@ impl Glyph {
         cx.notify();
     }
 
+    /// The year recap (statistics page, only with statistics on).
+    pub fn open_recap(&mut self, year: String, cx: &mut Context<Self>) {
+        if !self.config.stats.enabled {
+            return;
+        }
+        if self.view != View::Stats {
+            self.open_stats(cx);
+        }
+        self.recap_year = Some(year);
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        cx.notify();
+    }
+
+    pub fn close_recap(&mut self, cx: &mut Context<Self>) {
+        self.recap_year = None;
+        self.main_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        cx.notify();
+    }
+
+    /// The recap's top songs as a new playlist, opened right away.
+    pub fn save_recap_playlist(&mut self, year: &str, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        let name = tf("recap.playlist", &[("year", &year)]).to_string();
+        match guard(|| self.library.create_playlist(&name).id.clone()) {
+            Some(id) => {
+                self.save_library(cx);
+                self.add_many_to_playlist(&id, tracks, cx);
+                self.open_list(ListRef::User(id), cx);
+            }
+            None => self.toast_info(t("status.library_offline")),
+        }
+        cx.notify();
+    }
+
     pub fn open_stats(&mut self, cx: &mut Context<Self>) {
         if self.view == View::Stats {
             return;
         }
+        self.recap_year = None;
         self.push_route();
         self.view = View::Stats;
         self.selected_row = None;
@@ -208,6 +251,11 @@ impl Glyph {
     /// Plays the `i`-th upcoming song (queue panel click) and continues the
     /// queue from there.
     pub fn queue_jump(&mut self, i: usize, cx: &mut Context<Self>) {
+        // A jam guest asks the host for the song instead.
+        if self.jam_queue_jump(i) {
+            cx.notify();
+            return;
+        }
         let Some(Some(t)) = guard(|| self.queue.jump_to_upcoming(i).cloned()) else { return };
         self.play_track(t, cx);
         cx.notify();
@@ -260,6 +308,7 @@ impl Glyph {
         if !self.library_ok {
             return;
         }
+        self.library.checkpoint_playlists();
         let lib = self.library.clone();
         let previous = self.library_save.take();
         self.library_save = Some(cx.background_executor()
@@ -290,14 +339,16 @@ impl Glyph {
             return;
         }
         let act = self.library.activity_snapshot();
+        let path = glyph_core::Library::activity_path_for(&self.library.storage_path.0.clone().unwrap_or_else(glyph_core::Library::path));
         let previous = self.library_save.take();
         self.library_save = Some(cx.background_executor()
             .spawn(async move {
                 if let Some(save) = previous { save.await; }
-                if let Err(e) = guard_res(|| act.save()) {
+                if let Err(e) = guard_res(|| act.save_to(&path)) {
                     tracing::warn!("library activity save: {e}");
                 }
             }));
+        self.schedule_sync(cx);
     }
 
     /// Saves the config once changes stop for a moment (a slider drag is
@@ -344,6 +395,33 @@ impl Glyph {
         self.preloaded = None;
         self.save_config(cx);
         self.push_config_to_backend(cx);
+        cx.notify();
+    }
+
+    pub fn set_local_search(&mut self, local: bool, cx: &mut Context<Self>) {
+        self.config.providers.local_search = local;
+        self.save_config(cx);
+        self.search.seq += 1;
+        self.search.task = None;
+        self.search.more_task = None;
+        self.search.lyric_task = None;
+        self.search.loading = false;
+        self.search.loading_more = false;
+        let Some(backend) = self.backend.clone() else { cx.notify(); return };
+        let config = self.config.clone();
+        cx.spawn(async move |this, cx| {
+            match guard_async(backend.set_config(config)).await {
+                Ok(_) => {
+                    this.update(cx, |s, cx| {
+                        if s.config.providers.local_search == local {
+                            let query = s.search.query.clone();
+                            s.on_query(query, false, cx);
+                        }
+                    }).ok();
+                }
+                Err(e) => tracing::warn!("applying search mode: {e}"),
+            }
+        }).detach();
         cx.notify();
     }
 

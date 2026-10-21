@@ -68,7 +68,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
             .id("lib-scroll")
         .track_scroll(&app.main_scroll)
             .size_full()
-            .px(px(32.0))
+            .px(px(theme::PAGE_X))
             .py(px(20.0))
             .child(div().flex().flex_col().gap(px(18.0)).child(head).child(ascii_state(ART_OFFLINE, t("status.library_offline"), t("library.offline.sub"))))
             .into_any_element();
@@ -81,7 +81,7 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
         lists.push((ListRef::Downloads, t("list.kind.playlist").to_string()));
     }
     for p in &app.library.playlists {
-        lists.push((ListRef::User(p.id.clone()), t("list.kind.playlist").to_string()));
+        lists.push((ListRef::User(p.id.clone()), t(if p.local_only || app.signed_in().is_none() { "playlist.scope.local" } else if p.auto_download { "playlist.scope.offline" } else { "playlist.scope.account" }).to_string()));
     }
     for k in &app.library.saved_albums {
         let l = ListRef::from_key(k);
@@ -187,13 +187,20 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
             .child(section_title("user-round", t("library.artists")))
             .child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(artist_tiles))
     });
+    let trash: Vec<AnyElement> = app.library.playlist_trash.iter().enumerate().map(|(n, (id, p))| {
+        let id = id.clone();
+        div().id(("playlist-trash", n)).flex().items_center().gap(px(10.0)).cursor_pointer()
+            .child(icon("history", 16.0, white(0.7)))
+            .child(tf("playlist.restore", &[("name", &p.name)]))
+            .on_click(cx.listener(move |s, _, _, cx| s.restore_playlist(&id, cx))).into_any_element()
+    }).collect();
     div()
         .id("lib-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .py(px(20.0))
-        .child(div().flex().flex_col().gap(px(18.0)).child(head).children(banner).child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(tiles)).children(artists_section))
+        .child(div().flex().flex_col().gap(px(18.0)).child(head).children(banner).child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(tiles)).children(artists_section).children(trash))
         .into_any_element()
 }

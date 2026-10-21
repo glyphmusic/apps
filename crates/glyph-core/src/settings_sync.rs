@@ -155,6 +155,9 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
         (setting("visuals"), json(&cfg.visuals)),
         (setting("updates"), json(&cfg.updates)),
         (setting("integrations"), json(&cfg.integrations)),
+        (setting("stats"), json(&cfg.stats)),
+        (setting("playback"), json(&cfg.playback)),
+        (setting("lists"), json(&cfg.lists)),
         (
             setting("audio"),
             json(&Audio {
@@ -240,6 +243,18 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
                 let Some(x) = parse::<IntegrationsConfig>(v) else { continue };
                 cfg.integrations = x;
             }
+            (kind::SETTING, "stats") => {
+                let Some(x) = parse::<crate::config::StatsConfig>(v) else { continue };
+                cfg.stats = x;
+            }
+            (kind::SETTING, "playback") => {
+                let Some(x) = parse::<crate::config::PlaybackConfig>(v) else { continue };
+                cfg.playback = x;
+            }
+            (kind::SETTING, "lists") => {
+                let Some(x) = parse::<crate::config::ListsConfig>(v) else { continue };
+                cfg.lists = x;
+            }
             (kind::SETTING, "audio") => {
                 let Some(x) = parse::<Audio>(v) else { continue };
                 let a = &mut cfg.audio;
@@ -295,6 +310,15 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
     out.changed = *cfg != before;
     out.providers_changed = cfg.providers != before.providers || cfg.persisted_keys() != before.persisted_keys();
     out
+}
+
+/// Open keys that arrived while this device had no (current) vault.
+pub fn restore_local_preferences(cfg: &mut Config, source: &Config) {
+    let wire: Vec<_> = items(source, None).into_iter().map(|((kind, key), value)| SyncItem {
+        kind, key, value: Some(value), updated_at: 0, deleted: false, rev: 0,
+    }).collect();
+    apply(cfg, &mut SyncState::default(), &wire, None);
+    cfg.set_persisted_keys(source.persisted_keys());
 }
 
 /// Open keys that arrived while this device had no (current) vault.

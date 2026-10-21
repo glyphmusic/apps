@@ -15,6 +15,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
     let src = info
         .as_ref()
         .and_then(|i| i.image.clone())
+        .or_else(|| app.artist_photo_path(&name, cx))
         .or_else(|| (!info_loading).then(|| tracks.first().cloned().and_then(|tr| app.cover_path(&tr, cx))).flatten());
     // The hero is never wider than the window; a raster at least that wide
     // (for the hero's 420 px height) keeps its bottom fade in view.
@@ -31,14 +32,20 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
     let stats = app.artists.get(&name).and_then(|p| p.stats.clone());
     let verified = stats.as_ref().is_some_and(|s| s.verified);
     let fans = stats.map(|s| s.fans).filter(|f| *f > 0);
+    // Phones: Spotify-like page (photo with the name on it, actions below,
+    // About further down); the desktop layout is unchanged.
+    let touch = crate::ui::compact::TOUCH;
+    // Sideways rows run out to the page edge.
+    let edge = if touch { theme::PAGE_X } else { 32.0 };
 
-    let about_card = if let Some(i) = info.clone() {
+    let about_lh = if touch { 20.0 } else { 18.0 };
+    let about_card = if let Some(i) = info.clone().filter(|i| !i.about.trim().is_empty()) {
         let url = i.url.clone();
         let nm = name.clone();
         Some(
             div()
                 .id("artist-about")
-                .w(px(340.0))
+                .map(|d| if touch { d.w_full() } else { d.w(px(340.0)) })
                 .p(px(14.0))
                 .rounded(px(12.0))
                 .bg(black(0.6))
@@ -51,14 +58,14 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                 .child(
                     div()
                         .id("about-text")
-                        .text_size(px(12.5))
-                        .line_height(px(18.0))
+                        .text_size(px(if touch { 14.0 } else { 12.5 }))
+                        .line_height(px(about_lh))
                         .text_color(white(0.72))
                         .overflow_hidden()
-                        .when(!about_open, |d| d.max_h(px(18.0 * 4.0)))
+                        .when(!about_open, |d| d.max_h(px(about_lh * 4.0)))
                         .when(about_open, |d| {
                             let h = crate::ui::widgets::handle_for("artist-about");
-                            d.max_h(px(18.0 * 11.0)).overflow_y_scroll().track_scroll(&h).child(crate::ui::widgets::smooth_wheel(&h, false, cx))
+                            d.max_h(px(about_lh * 11.0)).overflow_y_scroll().track_scroll(&h).child(crate::ui::widgets::smooth_wheel(&h, false, cx))
                         })
                         .opacity(0.15 + 0.85 * reveal_k(&format!("artist:about:{}", i.url), 0.5))
                         .child(i.about.clone()),
@@ -106,7 +113,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
     } else if info_loading {
         Some(
             div()
-                .w(px(340.0))
+                .map(|d| if touch { d.w_full() } else { d.w(px(340.0)) })
                 .p(px(14.0))
                 .rounded(px(12.0))
                 .bg(black(0.6))
@@ -123,11 +130,16 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
         None
     };
 
+    let (about_card, about_bottom) = if touch { (None, about_card) } else { (about_card, None) };
+
     // Full-bleed hero: the ASCII photo is the page background here and fades
     // out at the bottom (baked into the raster), so it melts into the glow.
     // Rounded top corners like the panels around it (GPUI clips to rectangles,
     // so the picture rounds its own corners too).
-    let hero = div()
+    let hero: AnyElement = if touch {
+        phone_hero(app, &name, hero_img, still_loading, verified, n_songs, fans, tracks.clone(), window, cx)
+    } else {
+    div()
         .relative()
         .mx(px(-24.0))
         .mt(px(-12.0))
@@ -203,6 +215,10 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                                 }))
                             })
                             .child(hero_icon("artist-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+                            .child({
+                                let nm = name.clone();
+                                hero_icon("artist-radio", "radio").on_click(cx.listener(move |this, _, _, cx| this.artist_radio(&nm, cx)))
+                            })
                             .child(follow_button("artist-follow", &name, tracks.first().cloned(), app, 36.0, cx))
                             .child({
                                 let nm = name.clone();
@@ -218,7 +234,9 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                 })
                 .when(!has, |d| d.child(div().pt(px(18.0)).flex().child(follow_button("artist-follow", &name, None, app, 36.0, cx)))),
         )
-        .children(about_card.map(|c| div().absolute().right(px(32.0)).bottom(px(40.0)).child(c)));
+        .children(about_card.map(|c| div().absolute().right(px(32.0)).bottom(px(40.0)).child(c)))
+        .into_any_element()
+    };
 
     // Popular songs: 5, then "Show more".
     let n_show = if show_all { tracks.len() } else { tracks.len().min(5) };
@@ -250,7 +268,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
         let n = liked.len();
         div()
             .flex_none()
-            .w(px(300.0))
+            .map(|d| if touch { d.w_full() } else { d.w(px(300.0)) })
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -340,8 +358,8 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                     .flex()
                     .gap(px(4.0))
                     .ml(px(-8.0))
-                    .mr(px(-32.0))
-                    .pr(px(32.0))
+                    .mr(px(-edge))
+                    .pr(px(edge))
                     .overflow_x_scroll()
                     .child(crate::ui::widgets::smooth_wheel(&h, true, cx))
                     .children(cards),
@@ -349,32 +367,9 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
             .into_any_element()
     });
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .gap(px(22.0))
-        .child(hero)
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .gap(px(32.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(section_title("music-2", t("artist.popular")))
-                        .child(songs)
-                        .children(more),
-                )
-                .children(liked_card),
-        )
-        .when(!album_cards.is_empty(), |d| {
-            let nm = name.clone();
-            d.child(
+    let albums_section = (!album_cards.is_empty()).then(|| {
+        let nm = name.clone();
+
                 div()
                     .flex()
                     .flex_col()
@@ -400,16 +395,174 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
                             .flex()
                             .gap(px(4.0))
                             .ml(px(-8.0))
-                            .mr(px(-32.0))
-                            .pr(px(32.0))
+                            .mr(px(-edge))
+                            .pr(px(edge))
                             .overflow_x_scroll()
                             .child(crate::ui::widgets::smooth_wheel(&h, true, cx))
                             .children(album_cards)
-                    }),
-            )
+                    })
+                    .into_any_element()
+    });
+
+    let body = if touch {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
+            .child(hero)
+            .child(div().flex().flex_col().gap(px(8.0)).child(section_title("music-2", t("artist.popular"))).child(songs).children(more))
+            .children(liked_card)
+            .children(albums_section)
+            .children(about_bottom)
+            .children(similar_section)
+    } else {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(22.0))
+        .child(hero)
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(32.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(section_title("music-2", t("artist.popular")))
+                        .child(songs)
+                        .children(more),
+                )
+                .children(liked_card),
+        )
+        .children(albums_section)
+        .children(similar_section)
+    };
+    div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(theme::PAGE_X)).py(px(20.0)).child(body).into_any_element()
+}
+
+/// Phone artist header (Spotify): the photo across the top with the name on
+/// it, then "songs · fans" and the actions (follow, more | radio, shuffle, play).
+#[allow(clippy::too_many_arguments)]
+fn phone_hero(
+    app: &mut Glyph,
+    name: &str,
+    hero_img: Option<std::sync::Arc<gpui::RenderImage>>,
+    still_loading: bool,
+    verified: bool,
+    n_songs: usize,
+    fans: Option<u64>,
+    tracks: Vec<Track>,
+    window: &mut Window,
+    cx: &mut Context<Glyph>,
+) -> AnyElement {
+    let vw = f32::from(window.viewport_size().width);
+    let h = (vw * 0.9).round();
+    let fade = |a: f32| gpui::hsla(0.0, 0.0, 0.0, a);
+    let photo = div()
+        .relative()
+        .mx(px(-theme::PAGE_X))
+        // Up into the page padding; the page itself starts under the status
+        // bar here (see the floating back button in `ui::compact`).
+        .mt(px(-20.0))
+        .h(px(h) + window.insets().safe_area.top)
+        .overflow_hidden()
+        .when_some(hero_img, |d, im| {
+            let k = reveal_k(&format!("artist:hero:{name}"), 0.8);
+            let e = 1.0 - (1.0 - k).powi(2);
+            d.child(div().absolute().inset_0().opacity(0.1 + 0.9 * e).child(img(im).size_full().object_fit(ObjectFit::Cover)))
+                .when(k < 1.0, |d| d.child(div().absolute().inset_0().opacity(1.0 - e).child(skeleton("hero-rv", vw, h + 80.0, 0.0))))
         })
-        .children(similar_section);
-    div().id("artist-scroll").track_scroll(&app.main_scroll).size_full().overflow_y_scroll().px(px(32.0)).py(px(20.0)).child(body).into_any_element()
+        .when(still_loading, |d| d.child(div().absolute().inset_0().child(skeleton("hero-sk", vw, h + 80.0, 0.0))))
+        // Dark at the bottom so the name stays readable on any photo.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(h * 0.5))
+                .bg(gpui::linear_gradient(180.0, gpui::linear_color_stop(fade(0.0), 0.0), gpui::linear_color_stop(fade(0.6), 1.0))),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(theme::PAGE_X))
+                .right(px(theme::PAGE_X))
+                .bottom(px(14.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(40.0))
+                        .line_height(px(46.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(gpui::white())
+                        .child(decode(name, reveal_k(&format!("artist:name:{name}"), 0.7))),
+                )
+                .when(verified, |d| d.child(verified_badge(22.0))),
+        );
+
+    let has = !tracks.is_empty();
+    let mut parts = Vec::new();
+    if has {
+        parts.push(format!("{} {}", n_songs, t("list.songs_caps").to_lowercase()));
+    }
+    if let Some(f) = fans {
+        parts.push(tf("artist.fans", &[("n", &compact_count(f))]).to_string());
+    }
+    let meta = (!parts.is_empty()).then(|| div().text_size(px(13.0)).text_color(white(0.6)).child(parts.join(" · ")));
+
+    let nm = name.to_string();
+    let more = hero_icon("artist-more", "ellipsis-vertical").on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+            cx.stop_propagation();
+            this.open_artist_ctx(&nm, e.position, cx)
+        }),
+    );
+    let mut actions = div()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(follow_button("artist-follow", name, tracks.first().cloned(), app, 36.0, cx))
+        .child(more)
+        .child(div().flex_1());
+    if has {
+        let here = app.current.as_ref().is_some_and(|c| {
+            let k = glyph_core::dedupe::track_key(c);
+            c.artist.eq_ignore_ascii_case(name) || tracks.iter().any(|t| glyph_core::dedupe::track_key(t) == k)
+        });
+        let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
+        let (t_play, t_shuf) = (tracks.clone(), tracks);
+        let nm = name.to_string();
+        actions = actions
+            .child(hero_icon("artist-radio", "radio").on_click(cx.listener(move |this, _, _, cx| this.artist_radio(&nm, cx))))
+            .child(hero_icon("artist-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+            .child(round_play("artist-play", playing, loading, 52.0).on_click(cx.listener(move |this, _, _, cx| {
+                if here {
+                    this.toggle_play(cx)
+                } else {
+                    this.play_list(t_play.clone(), 0, cx)
+                }
+            })));
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(photo)
+        .children(meta)
+        .child(actions)
+        .into_any_element()
 }
 
 /// Releases in the artist page's row; the rest sits behind "Show all".
@@ -433,7 +586,7 @@ pub(super) fn artist_releases(tracks: &[Track]) -> Vec<(String, Vec<Track>)> {
 /// and its "Show all" grid.
 pub(super) fn similar_artist_card(app: &mut Glyph, i: usize, n: &str, cx: &mut Context<Glyph>) -> AnyElement {
     let nm = n.to_string();
-    let photo = app.artists.get(n).and_then(|p| p.info.as_ref()).and_then(|info| info.image.clone());
+    let photo = app.artist_photo_path(n, cx);
     let art: AnyElement = match photo {
         Some(path) => img(path).size(px(168.0)).rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
         None => match similar_artist_track(app, n) {
@@ -579,7 +732,7 @@ pub fn releases_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) 
         .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .py(px(20.0))
         .child(
             div()
@@ -614,7 +767,7 @@ pub fn similar_view(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -
         .track_scroll(&app.main_scroll)
         .size_full()
         .overflow_y_scroll()
-        .px(px(32.0))
+        .px(px(theme::PAGE_X))
         .py(px(20.0))
         .child(
             div()

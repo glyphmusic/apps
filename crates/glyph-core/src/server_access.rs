@@ -12,21 +12,42 @@ pub fn same_server(base: &str, url: &str) -> bool {
         _ => false,
     }
 }
+#[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
 fn entry(base: &str) -> Result<keyring::Entry> {
     keyring::Entry::new("glyph-server-access", &crate::paths::hash_hex(base.trim_end_matches('/'))).map_err(|_| anyhow!("server credential store unavailable"))
 }
+/// No keychain crate for Android: the app's private data folder (sandboxed per app).
+#[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
+fn fallback_path(base: &str) -> std::path::PathBuf {
+    crate::paths::data_dir().join(format!("server_access_{}", crate::paths::hash_hex(base.trim_end_matches('/'))))
+}
 pub fn load(base: &str) -> Option<String> {
     if !secure_base(base) { return None; }
-    entry(base).ok()?.get_password().ok()
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
+    return entry(base).ok()?.get_password().ok();
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
+    return std::fs::read_to_string(fallback_path(base)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 }
 pub fn store(base: &str, token: &str) -> Result<()> {
     if !secure_base(base) { return Err(anyhow!("use HTTPS for a protected server (HTTP only on localhost)")); }
-    let e = entry(base)?;
-    if token.is_empty() {
-        match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(_) => Err(anyhow!("could not remove server credential")) }
-    } else {
-        if !(32..=256).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b)) { return Err(anyhow!("use a bearer with 32-256 ASCII characters")); }
-        e.set_password(token).map_err(|_| anyhow!("could not save server credential in OS keychain"))
+    if !token.is_empty() && (!(32..=256).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))) { return Err(anyhow!("use a bearer with 32-256 ASCII characters")); }
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
+    {
+        let e = entry(base)?;
+        if token.is_empty() {
+            match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(_) => Err(anyhow!("could not remove server credential")) }
+        } else {
+            e.set_password(token).map_err(|_| anyhow!("could not save server credential in OS keychain"))
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
+    {
+        let path = fallback_path(base);
+        if token.is_empty() {
+            match std::fs::remove_file(&path) { Ok(()) => Ok(()), Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), Err(_) => Err(anyhow!("could not remove server credential")) }
+        } else {
+            crate::paths::write_atomic(&path, token.as_bytes()).map_err(|_| anyhow!("could not save server credential"))
+        }
     }
 }
 

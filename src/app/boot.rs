@@ -155,6 +155,7 @@ impl Glyph {
             section: None,
             selected_row: None,
             artists: Default::default(),
+            artist_photos: Default::default(),
             history: Vec::new(),
             ctx_menu: None,
             control_menu: None,
@@ -184,6 +185,8 @@ impl Glyph {
             recs: Vec::new(),
             trending: Vec::new(),
             feeds_loading: false,
+            new_releases: Vec::new(),
+            new_releases_loading: false,
             splash: config.visuals.startup_animation.then(crate::ui::splash::Splash::new),
             nav_leave: None,
             lyrics_info: None,
@@ -228,6 +231,7 @@ impl Glyph {
             redownloaded_broken: HashSet::new(),
             resolving: false,
             hold_play: false,
+            sleep: None,
             preloaded: None,
             preload_attempt: None,
             download_check_at: Instant::now(),
@@ -264,6 +268,7 @@ impl Glyph {
             queue_from: None,
             recent_artist_ctx: None,
             stats_range: glyph_core::stats::Range::ThisMonth,
+            recap_year: None,
             stats_pending: None,
             stats_tick: None,
             stats_flushed: Instant::now(),
@@ -271,6 +276,7 @@ impl Glyph {
             window_title: String::new(),
             eq_redraw: Instant::now(),
             mcp: Default::default(),
+            jam: Default::default(),
             mpd: None,
             mpd_input,
             mpd_was_playing: false,
@@ -289,6 +295,10 @@ impl Glyph {
             activity_dirty: None,
             library_save: None,
             settings_open: false,
+            settings_in_page: false,
+            drawer_open: false,
+            drawer_slide: Slide::default(),
+            lib_filter: 0,
             settings_at: Instant::now(),
             settings_closing: None,
             settings_page: SettingsPage::Playback,
@@ -376,6 +386,9 @@ impl Glyph {
                         s.library = l;
                         s.home_activity_cache = None;
                         s.library_ok = true;
+                        s.load_feeds(cx);
+                        s.load_new_releases(cx);
+                        s.sync_now(cx);
                     }
                     Err(e) => tracing::warn!("library: {e}"),
                 }
@@ -622,6 +635,7 @@ impl Glyph {
                 self.backend = Some(b);
                 glyph_core::cover::set_data_saver(self.config.storage.data_saver);
                 self.load_feeds(cx);
+                self.load_new_releases(cx);
                 // The server may not have a working Last.fm key: check once so
                 // the radio switch can be honest about it.
                 self.probe_radio(cx);

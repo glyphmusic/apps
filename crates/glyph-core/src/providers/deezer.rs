@@ -104,7 +104,7 @@ fn check_error(v: &serde_json::Value) -> Result<()> {
 }
 
 /// One release of an artist (album, EP, single, compilation).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct Release {
     /// Deezer album id.
     pub id: String,
@@ -112,6 +112,9 @@ pub struct Release {
     pub artist: String,
     pub cover_url: Option<String>,
     pub year: Option<u16>,
+    /// Release day `YYYY-MM-DD`, when the catalog says.
+    #[serde(default)]
+    pub released: Option<String>,
     pub kind: crate::catalog::AlbumKind,
 }
 
@@ -173,6 +176,19 @@ impl Deezer {
         Ok(hits.into_iter().filter(|a| crate::dedupe::normalize_artist(&a.name) == want).max_by_key(|a| a.nb_fan).map(|a| a.id))
     }
 
+    /// Official profile photo, selected by exact artist name rather than a song cover.
+    pub async fn artist_picture(&self, name: &str) -> Result<Option<String>> {
+        let v = self.get(&format!("{API}/search/artist"), &[("q", name), ("limit", "10")]).await?;
+        let want = crate::dedupe::normalize_artist(name);
+        Ok(v["data"].as_array().into_iter().flatten()
+            .filter(|a| a["name"].as_str().is_some_and(|n| crate::dedupe::normalize_artist(n) == want))
+            .filter_map(|a| {
+                let url = ["picture_xl", "picture_big", "picture_medium", "picture"].into_iter()
+                    .find_map(|key| a[key].as_str().filter(|u| u.starts_with("https://")))?;
+                Some((a["nb_fan"].as_u64().unwrap_or(0), url.to_string()))
+            }).max_by_key(|(fans, _)| *fans).map(|(_, url)| url))
+    }
+
     /// Every release of an artist (the whole discography, not only what a
     /// song search happens to find), newest first.
     pub async fn artist_releases(&self, name: &str) -> Result<Vec<Release>> {
@@ -195,6 +211,7 @@ impl Deezer {
                     artist: name.to_string(),
                     cover_url: r.cover_xl.or(r.cover_big),
                     year: r.release_date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()).filter(|y| *y > 1900),
+                    released: r.release_date.clone().filter(|d| d.len() == 10 && !d.starts_with("0000")),
                     kind: r.record_type.as_deref().and_then(crate::catalog::AlbumKind::parse).unwrap_or(crate::catalog::AlbumKind::Album),
                 });
             }
@@ -205,7 +222,7 @@ impl Deezer {
         }
         // Same title twice (clean + explicit, deluxe re-issues under the same
         // name): keep the newest.
-        out.sort_by(|a, b| b.year.cmp(&a.year));
+        out.sort_by(|a, b| b.released.cmp(&a.released).then(b.year.cmp(&a.year)));
         let mut seen = std::collections::HashSet::new();
         out.retain(|r| seen.insert(r.title.to_lowercase()));
         Ok(out)
@@ -313,12 +330,22 @@ impl Deezer {
         let mut out = Vec::new();
         let mut url = first;
         let mut query: Vec<(&str, &str)> = vec![("limit", "100")];
-        for _ in 0..60 {
+        let max_tracks = crate::library::playlist_track_limit();
+        let max_pages = max_tracks.div_ceil(100);
+        for page_index in 0..=max_pages {
             let v = self.get(&url, &query).await?;
             let l: DList = serde_json::from_value(v)?;
             out.extend(l.data.into_iter().filter_map(convert));
             match l.next {
                 Some(n) => {
+                    if out.len() > max_tracks || page_index == max_pages {
+                        anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+                    }
+                    let next = reqwest::Url::parse(&n)?;
+                    if next.scheme() != "https" || next.host_str() != Some("api.deezer.com")
+                        || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
+                        anyhow::bail!("invalid provider pagination URL");
+                    }
                     url = n;
                     query.clear();
                 }
@@ -344,6 +371,7 @@ impl Deezer {
             artist: v["artist"]["name"].as_str().unwrap_or("").to_string(),
             cover_url: v["cover_xl"].as_str().or(v["cover_big"].as_str()).map(str::to_string),
             year: None,
+            released: None,
             kind: crate::catalog::AlbumKind::Album,
         };
         let tracks = self.album_tracks(&release).await?;

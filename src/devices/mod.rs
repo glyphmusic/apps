@@ -6,11 +6,13 @@
 //! - UPnP / DLNA MediaRenderers (TVs, receivers, speakers) and Sonos: SSDP,
 //!   AVTransport + RenderingControl ([`upnp`]).
 //! - Google Cast (`_googlecast._tcp`): Default Media Receiver ([`cast`]).
-//! - AirPlay (`_airplay._tcp` / `_raop._tcp`): listed, not playable yet.
+//! - AirPlay (`_airplay._tcp` / `_raop._tcp`): classic AirPlay audio (RAOP);
+//!   Glyph decodes and streams the song itself ([`airplay`]).
 //!
 //! Everything is plain Rust on std sockets (plus rustls for Cast), so it
 //! works the same on Linux, macOS and Windows without system services.
 
+pub mod airplay;
 pub mod cast;
 pub mod http;
 pub mod mdns;
@@ -37,11 +39,6 @@ pub enum Kind {
 
 impl Kind {
     pub const ALL: [Kind; 5] = [Kind::Chromecast, Kind::Sonos, Kind::Upnp, Kind::Mpd, Kind::AirPlay];
-
-    /// Glyph can play on it.
-    pub fn playable(self) -> bool {
-        self != Kind::AirPlay
-    }
 
 }
 
@@ -102,7 +99,8 @@ fn connect(d: &Device) -> std::io::Result<Box<dyn Session>> {
     match d.kind {
         Kind::Chromecast => Ok(Box::new(cast::Client::connect(d)?)),
         Kind::Upnp | Kind::Sonos => Ok(Box::new(upnp::Renderer::connect(d)?)),
-        Kind::Mpd | Kind::AirPlay => Err(std::io::Error::other("not playable here")),
+        Kind::AirPlay => Ok(Box::new(airplay::Client::connect(d)?)),
+        Kind::Mpd => Err(std::io::Error::other("not playable here")),
     }
 }
 
@@ -299,8 +297,11 @@ pub fn from_mdns(services: &[mdns::Service]) -> Vec<Device> {
             }
             _ => continue,
         };
-        if !out.iter().any(|o| o.id == d.id) {
-            out.push(d);
+        match out.iter_mut().find(|o| o.id == d.id) {
+            // _airplay and _raop of one speaker: RAOP's port is the audio one.
+            Some(o) if s.service_type == "_raop._tcp.local" => o.port = d.port,
+            Some(_) => {}
+            None => out.push(d),
         }
     }
     out
@@ -328,11 +329,11 @@ pub fn from_upnp(desc: upnp::Description, location: &str) -> Option<Device> {
     })
 }
 
-/// AirPlay entries for devices Glyph can already play through another
-/// protocol (Sonos, TVs, Cast) only add noise: drop them.
+/// AirPlay entries for devices Glyph already plays through another protocol
+/// (Sonos, TVs, Cast) would list one speaker twice: those keep the other one.
 pub fn merge(mut found: Vec<Device>) -> Vec<Device> {
-    let playable: Vec<(IpAddr, String)> = found.iter().filter(|d| d.kind.playable()).map(|d| (d.addr, norm(&d.name))).collect();
-    found.retain(|d| d.kind != Kind::AirPlay || !playable.iter().any(|(a, n)| *a == d.addr || *n == norm(&d.name)));
+    let others: Vec<(IpAddr, String)> = found.iter().filter(|d| d.kind != Kind::AirPlay).map(|d| (d.addr, norm(&d.name))).collect();
+    found.retain(|d| d.kind != Kind::AirPlay || !others.iter().any(|(a, n)| *a == d.addr || *n == norm(&d.name)));
     let mut out: Vec<Device> = Vec::new();
     for d in found {
         // _airplay and _raop of the same device: one entry.
@@ -495,9 +496,9 @@ impl Output {
                     Err(e) => {
                         tracing::debug!(device = %dev.name, "device: {e}");
                         *err.lock().unwrap() = Some(e.to_string());
-                        // UPnP errors are per action; Cast I/O errors mean the
+                        // UPnP errors are per action; Cast / AirPlay I/O errors mean the
                         // connection is gone (refusals are InvalidData).
-                        if dev.kind == Kind::Chromecast && e.kind() != std::io::ErrorKind::InvalidData {
+                        if matches!(dev.kind, Kind::Chromecast | Kind::AirPlay) && e.kind() != std::io::ErrorKind::InvalidData {
                             session = None;
                         }
                     }
@@ -520,8 +521,9 @@ impl Output {
             glyph_protocol::PlaybackSource::Embed { .. } => return false,
         };
         let mime = media::guess_mime(url, mime);
-        // Cast devices open HTTPS themselves; the rest get plain HTTP from here.
-        let direct = self.device.kind == Kind::Chromecast && url.starts_with("https://");
+        // Cast devices open HTTPS themselves and AirPlay is decoded here; the
+        // rest get plain HTTP from the media server.
+        let direct = (self.device.kind == Kind::Chromecast && url.starts_with("https://")) || self.device.kind == Kind::AirPlay;
         let url = if direct { Some(url.clone()) } else { self.files.as_ref().and_then(|f| f.url_for(url, &mime, self.device.addr)) };
         let Some(url) = url else { return false };
         let preview = matches!(src, glyph_protocol::PlaybackSource::Preview { .. });

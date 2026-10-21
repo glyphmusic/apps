@@ -3,6 +3,7 @@
 
 use glyph_protocol::ProviderId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Public Glyph server used when `server_url` is empty, so nobody has to set
@@ -31,6 +32,8 @@ pub struct Config {
     pub player: PlayerPrefs,
     /// How playback behaves (shuffle style).
     pub playback: PlaybackConfig,
+    /// How lists are sorted.
+    pub lists: ListsConfig,
     /// Opt-in listening statistics (listening time, top artists), synced
     /// across the user's devices when signed in.
     pub stats: StatsConfig,
@@ -62,6 +65,8 @@ pub struct ApiKeys {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
+    /// Query providers directly from this device instead of the Glyph server.
+    pub local_search: bool,
     /// Where YouTube audio is resolved; kept local to this device.
     pub youtube_mode: YouTubeMode,
     pub youtube_only: bool,
@@ -108,6 +113,29 @@ pub enum ShuffleStyle {
 #[serde(default)]
 pub struct PlaybackConfig {
     pub shuffle: ShuffleStyle,
+}
+
+/// Order of a list's songs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSort {
+    /// The list's own order (playlists: as arranged; liked: newest first).
+    #[default]
+    Custom,
+    Title,
+    Artist,
+    Album,
+    /// Shortest first.
+    Duration,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListsConfig {
+    /// Per list (the app's list id, e.g. `liked`, `playlist:<id>`); lists
+    /// not named keep their own order.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sort: BTreeMap<String, ListSort>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -385,6 +413,7 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         use ProviderId::*;
         Self {
+            local_search: false,
             // YouTube first: with a local yt-dlp it plays full songs from this
             // machine (Deezer only has 30 s previews and often the wrong cut).
             // Without yt-dlp or an API key the YouTube provider simply is not
@@ -408,7 +437,7 @@ impl Default for VisualsConfig {
 }
 
 /// Where the release workflow publishes (the app's own repository).
-pub const RELEASES_REPO: &str = "glyphmusic/desktop";
+pub const RELEASES_REPO: &str = "glyphmusic/apps";
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
@@ -506,8 +535,8 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(e.into()),
         };
-        // Early configs named a repository that has no releases.
-        if cfg.updates.repo.trim() == "glyphmusic/glyph" {
+        // Early configs named repositories that were renamed since.
+        if matches!(cfg.updates.repo.trim(), "glyphmusic/glyph" | "glyphmusic/desktop") {
             cfg.updates.repo = RELEASES_REPO.into();
         }
         cfg.keys.blank_to_none();
@@ -639,6 +668,19 @@ mod tests {
         config.providers.youtube_mode = YouTubeMode::Local;
         let encoded = toml::to_string(&config).unwrap();
         assert_eq!(Config::from_toml(&encoded).unwrap().providers.youtube_mode, YouTubeMode::Local);
+    }
+
+    #[test]
+    fn local_search_is_device_specific_and_independent_of_playback() {
+        assert!(!Config::from_toml("").unwrap().providers.local_search);
+        let mut config = Config::default();
+        config.providers.local_search = true;
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded = Config::from_toml(&encoded).unwrap();
+        assert!(decoded.providers.local_search);
+        assert_eq!(decoded.providers.youtube_mode, YouTubeMode::Server);
+        let shared = crate::settings_share::to_json(&config);
+        assert!(!shared.contains("local_search"));
     }
 
     #[test]
