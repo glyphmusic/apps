@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 - 2026-10-22
+
+Devices that follow each other at once, a player that skips songs it cannot play, and a phone app that handles more like one.
 
 ### Changed
 
@@ -11,6 +13,11 @@
 - **Radio after a list goes on from it**: when the queue ends with radio on, the new songs are based on the last few songs, join the end of the queue (so "previous" still goes back into the list) and leave out what just played. Every radio also starts faster.
 - **Calmer search results**: once results have been on screen for a moment, the top three stay put while more sources answer, so the row you are about to click does not jump away. A song that comes in again with better details moves to its right place, and long result lists rank faster.
 - **Shuffle with repeat all mixes every round anew** instead of playing the same shuffled order again, and a round never starts with the song that just ended.
+- **Phone lists keep their name in view**: scrolled past the heading, the top bar shows the list's name (and a play button for songs).
+- **Long-press menu on phones**: one song header and no Play or Open rows; submenus open as their own sheet with a back arrow.
+- **Sheets follow your finger**: pull a sheet down, also straight on from the long press, and let go to close it. The queue and Connect also close from their list.
+- Tapping the artist in Now Playing opens their page.
+- Searches you leave without picking a result stay in recent searches as text.
 - **Text fields edit like everywhere else**: Ctrl+Left/Right (Option on macOS) jump by words, Ctrl+Backspace/Delete remove a word, Shift+Home/End select to the start or end, a double click selects a word and a triple click everything, and Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) undo and redo.
 
 ### Fixed
@@ -18,6 +25,7 @@
 - Smart shuffle always puts recently played songs at the end.
 - The search history only remembers songs you picked from the search results, not songs started by radio or the play button while the search page was open.
 - Sleep timer "end of this song" no longer lets the next song play for a moment before it pauses.
+- Android: editing a search field that already has text no longer wipes it.
 
 ## 0.6.0 - 2026-10-21
 

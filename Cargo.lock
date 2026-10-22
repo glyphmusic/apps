@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "glyph"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-android"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "android_logger",
  "glyph",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-audio"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2659,7 +2659,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-gpui-android"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "android-activity",
  "anyhow",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
