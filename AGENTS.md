@@ -9,3 +9,11 @@
 - Preserve the active incremental/dependency cache; deleting it forces expensive full recompilation. Never delete source, downloads, app data, or published files outside this checkout's `target`.
 - Skip cleanup while Cargo/Rustc is running. Do not stop another build or app to clean it. Refuse paths outside `target` and directory links.
 - A cleanup failure must be reported, never silently presented as successful. Do not bypass tool/policy rejections with a different deletion mechanism.
+
+# Pull requests
+
+Before opening a pull request, read https://docs.glyph.my/contributing/pull-requests
+(Markdown: https://docs.glyph.my/contributing/pull-requests.md) and follow it:
+one issue per pull request, the description template in
+`.github/pull_request_template.md`, a `## Unreleased` changelog entry, the
+wording check, and a last line `Agent: <model slug> via <tool>`.
