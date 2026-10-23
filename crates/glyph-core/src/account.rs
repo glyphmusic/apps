@@ -573,7 +573,7 @@ impl Backend {
     /// The current server offers accounts (`/v1/health`).
     pub async fn accounts_available(&self) -> bool {
         let Ok(c) = self.account_client() else { return false };
-        self.spawn(async move { c.health().await.map(|h| h.accounts).unwrap_or(false) }).await.unwrap_or(false)
+        self.spawn(async move { c.health().await.map(|h| h.accounts || h.supports(glyph_protocol::capability::ACCOUNTS)).unwrap_or(false) }).await.unwrap_or(false)
     }
 
     pub async fn account_login_start(&self) -> Result<LoginStartResponse> {

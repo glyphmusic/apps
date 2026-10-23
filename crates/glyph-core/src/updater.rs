@@ -6,7 +6,10 @@
 //! * SemVer compare with `env!("CARGO_PKG_VERSION")`.
 //! * Asset naming: `glyph-{version}-{target}.zip` (Windows) / `.tar.gz`
 //!   (macOS, Linux), `glyph-{version}-android.apk` (Android) plus
-//!   `SHA256SUMS.txt` (legacy: `{asset}.sha256`). Verify before replacing.
+//!   `SHA256SUMS.txt` and its signature `SHA256SUMS.txt.minisig`. The
+//!   signature must come from the Glyph release key and name this repository
+//!   and tag (`glyph_protocol::release`); only then is the checksum trusted.
+//!   Releases without a signature are shown but never installed.
 //! * Android cannot replace its own binary: the verified APK goes to the
 //!   system package installer (`set_apk_installer`), which asks the user.
 //! * Package-manager installs (under /usr, Homebrew Cellar, WinGet) give
@@ -35,6 +38,11 @@ pub struct UpdateInfo {
     pub html_url: String,
     pub asset_url: Option<String>,
     pub sha256_url: Option<String>,
+    /// `SHA256SUMS.txt.minisig` of the release.
+    pub signature_url: Option<String>,
+    /// `owner/repo` and tag the signature must name.
+    pub repo: String,
+    pub tag: String,
     pub can_self_install: bool,
 }
 
@@ -147,27 +155,38 @@ pub fn set_apk_installer(f: ApkInstaller) {
     let _ = APK_INSTALLER.set(f);
 }
 
-fn to_info(rel: &GhRelease, target: &str, can_self_install: bool) -> UpdateInfo {
+fn to_info(rel: &GhRelease, repo: &str, target: &str, can_self_install: bool) -> UpdateInfo {
+    use glyph_protocol::release::{CHECKSUM_ASSET, SIGNATURE_ASSET};
     let version = rel.tag_name.trim_start_matches(['v', 'V']).to_string();
     let names = asset_names(&version, target);
     let asset = rel.assets.iter().find(|a| names.contains(&a.name));
-    let sha = asset.and_then(|a| {
-        let want = format!("{}.sha256", a.name);
-        rel.assets.iter().find(|s| s.name == "SHA256SUMS.txt")
-            .or_else(|| rel.assets.iter().find(|s| s.name == want))
-    });
+    // Per-asset `.sha256` files of old releases carry no signature.
+    let sha = asset.and(rel.assets.iter().find(|s| s.name == CHECKSUM_ASSET));
+    let sig = sha.and(rel.assets.iter().find(|s| s.name == SIGNATURE_ASSET));
     UpdateInfo {
         version,
         notes: rel.body.clone().unwrap_or_default(),
         html_url: rel.html_url.clone(),
         asset_url: asset.map(|a| a.browser_download_url.clone()),
         sha256_url: sha.map(|a| a.browser_download_url.clone()),
-        can_self_install: can_self_install && asset.is_some() && sha.is_some(),
+        signature_url: sig.map(|a| a.browser_download_url.clone()),
+        repo: repo.to_string(),
+        tag: rel.tag_name.clone(),
+        can_self_install: can_self_install && asset.is_some() && sha.is_some() && sig.is_some(),
     }
 }
 
+/// The checksum of `filename` from a release's list, after its signature
+/// passed (`glyph_protocol::release`).
+pub fn verified_checksum(sums: &str, minisig: &str, repo: &str, tag: &str, filename: &str) -> Result<String> {
+    glyph_protocol::release::verify_checksums(sums.as_bytes(), minisig, repo, tag)
+        .map_err(|e| anyhow!("{e}; update refused"))?;
+    glyph_protocol::checksum_for_asset(sums, filename)
+        .ok_or_else(|| anyhow!("checksum manifest has no valid, unique entry for {filename}"))
+}
+
 /// Pure decision logic: picks the release for the channel and compares versions.
-fn evaluate(releases: Vec<GhRelease>, channel: &str, current: &str, target: &str, managed: bool) -> UpdateStatus {
+fn evaluate(releases: Vec<GhRelease>, repo: &str, channel: &str, current: &str, target: &str, managed: bool) -> UpdateStatus {
     let prerelease_channel = channel.eq_ignore_ascii_case("prerelease");
     let best = releases
         .into_iter()
@@ -175,7 +194,7 @@ fn evaluate(releases: Vec<GhRelease>, channel: &str, current: &str, target: &str
         .filter(|r| parse_version(&r.tag_name).is_some())
         .max_by(|a, b| parse_version(&a.tag_name).cmp(&parse_version(&b.tag_name)));
     match best {
-        Some(rel) if is_newer(current, &rel.tag_name) => UpdateStatus::Available(to_info(&rel, target, !managed)),
+        Some(rel) if is_newer(current, &rel.tag_name) => UpdateStatus::Available(to_info(&rel, repo, target, !managed)),
         _ => UpdateStatus::UpToDate { current: current.to_string() },
     }
 }
@@ -223,7 +242,7 @@ pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool)
         bail!("GitHub answered HTTP {}", resp.status());
     }
     let releases: Vec<GhRelease> = resp.json().await?;
-    Ok(evaluate(releases, &cfg.channel, current_version(), current_target(), exe_is_package_managed()))
+    Ok(evaluate(releases, repo, &cfg.channel, current_version(), current_target(), exe_is_package_managed()))
 }
 
 // ---------------------------------------------------------------- install
@@ -319,20 +338,21 @@ pub async fn install(
     progress: crate::flume_like::Sender<(u64, u64)>,
 ) -> Result<()> {
     if !info.can_self_install {
-        bail!("this installation is managed by a package manager (or the release has no matching asset); update it there");
+        bail!("this installation is managed by a package manager (or the release has no matching, signed asset); update it there");
     }
     let asset_url = info.asset_url.as_deref().ok_or_else(|| anyhow!("no asset for {}", current_target()))?;
     let sha_url = info.sha256_url.as_deref().ok_or_else(|| anyhow!("release has no checksum manifest; refusing to install"))?;
-    for u in [asset_url, sha_url] {
+    let sig_url = info.signature_url.as_deref().ok_or_else(|| anyhow!("release is not signed; refusing to install"))?;
+    for u in [asset_url, sha_url, sig_url] {
         if !u.starts_with("https://") {
             bail!("refusing non-HTTPS download URL");
         }
     }
 
     let checksum_text = http.get(sha_url).send().await?.error_for_status()?.text().await?;
+    let signature = http.get(sig_url).send().await?.error_for_status()?.text().await?;
     let filename = asset_url.rsplit('/').next().ok_or_else(|| anyhow!("invalid asset URL"))?;
-    let expected = glyph_protocol::checksum_for_asset(&checksum_text, filename)
-        .ok_or_else(|| anyhow!("checksum manifest has no valid, unique entry for {filename}"))?;
+    let expected = verified_checksum(&checksum_text, &signature, &info.repo, &info.tag, filename)?;
 
     let work = paths::data_dir().join("update").join(&info.version);
     let _ = tokio::fs::remove_dir_all(&work).await;
@@ -455,8 +475,8 @@ mod tests {
 
     #[test]
     fn android_picks_the_apk() {
-        let rel = release("v0.6.0", false, false, &["glyph-0.6.0-aarch64-linux-android.tar.gz", "glyph-0.6.0-android.apk", "SHA256SUMS.txt"]);
-        match evaluate(vec![rel], "stable", "0.5.0", "aarch64-linux-android", false) {
+        let rel = release("v0.6.0", false, false, &["glyph-0.6.0-aarch64-linux-android.tar.gz", "glyph-0.6.0-android.apk", "SHA256SUMS.txt", "SHA256SUMS.txt.minisig"]);
+        match evaluate(vec![rel], "o/glyph", "stable", "0.5.0", "aarch64-linux-android", false) {
             UpdateStatus::Available(i) => {
                 assert_eq!(i.asset_url.as_deref(), Some("https://dl/glyph-0.6.0-android.apk"));
                 assert!(i.can_self_install);
@@ -471,30 +491,32 @@ mod tests {
         let rels = || {
             vec![
                 release("v0.3.0-rc.1", true, false, &[]),
-                release("v0.2.0", false, false, &["glyph-0.2.0-x86_64-unknown-linux-gnu.tar.gz", "glyph-0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256"]),
+                release("v0.2.0", false, false, &["glyph-0.2.0-x86_64-unknown-linux-gnu.tar.gz", "SHA256SUMS.txt", "SHA256SUMS.txt.minisig"]),
                 release("v0.9.0", false, true, &[]), // draft: ignored
             ]
         };
-        match evaluate(rels(), "stable", "0.1.0", t, false) {
+        match evaluate(rels(), "o/glyph", "stable", "0.1.0", t, false) {
             UpdateStatus::Available(i) => {
                 assert_eq!(i.version, "0.2.0");
                 assert!(i.can_self_install);
-                assert_eq!(i.sha256_url.as_deref(), Some("https://dl/glyph-0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256"));
+                assert_eq!(i.sha256_url.as_deref(), Some("https://dl/SHA256SUMS.txt"));
+                assert_eq!(i.signature_url.as_deref(), Some("https://dl/SHA256SUMS.txt.minisig"));
+                assert_eq!((i.repo.as_str(), i.tag.as_str()), ("o/glyph", "v0.2.0"));
             }
             other => panic!("{other:?}"),
         }
-        match evaluate(rels(), "prerelease", "0.1.0", t, false) {
+        match evaluate(rels(), "o/glyph", "prerelease", "0.1.0", t, false) {
             UpdateStatus::Available(i) => {
                 assert_eq!(i.version, "0.3.0-rc.1");
                 assert!(!i.can_self_install, "no assets");
             }
             other => panic!("{other:?}"),
         }
-        match evaluate(rels(), "stable", "0.1.0", t, true) {
+        match evaluate(rels(), "o/glyph", "stable", "0.1.0", t, true) {
             UpdateStatus::Available(i) => assert!(!i.can_self_install, "package managed"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(evaluate(rels(), "stable", "0.2.0", t, false), UpdateStatus::UpToDate { current: "0.2.0".into() });
+        assert_eq!(evaluate(rels(), "o/glyph", "stable", "0.2.0", t, false), UpdateStatus::UpToDate { current: "0.2.0".into() });
     }
 
     #[test]
@@ -506,12 +528,29 @@ mod tests {
     }
 
     #[test]
-    fn shared_manifest_enables_updates_without_sidecars() {
+    fn unsigned_releases_are_never_installed() {
         let target = "x86_64-unknown-linux-gnu";
-        let rel = release("v0.2.2", false, false, &["glyph-0.2.2-x86_64-unknown-linux-gnu.tar.gz", "SHA256SUMS.txt"]);
-        let info = to_info(&rel, target, true);
-        assert!(info.can_self_install);
-        assert_eq!(info.sha256_url.as_deref(), Some("https://dl/SHA256SUMS.txt"));
+        for assets in [
+            &["glyph-0.2.2-x86_64-unknown-linux-gnu.tar.gz", "SHA256SUMS.txt"][..],
+            &["glyph-0.2.2-x86_64-unknown-linux-gnu.tar.gz", "glyph-0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256"][..],
+        ] {
+            let info = to_info(&release("v0.2.2", false, false, assets), "o/glyph", target, true);
+            assert!(!info.can_self_install, "{assets:?}");
+            assert_eq!(info.signature_url, None);
+        }
+    }
+
+    #[test]
+    fn release_key_matches_the_published_file() {
+        let file = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../release-key.pub")).unwrap();
+        assert_eq!(glyph_protocol::release::PUBLIC_KEYS, [file.lines().nth(1).unwrap()]);
+    }
+
+    #[test]
+    fn checksums_need_a_valid_signature() {
+        let sums = format!("{}  glyph.zip\n", "a".repeat(64));
+        assert!(verified_checksum(&sums, "", "glyphmusic/apps", "v1.0.0", "glyph.zip").is_err());
+        assert!(verified_checksum(&sums, "untrusted comment: x\nRUQ\ntrusted comment: y\nZZ\n", "glyphmusic/apps", "v1.0.0", "glyph.zip").is_err());
     }
 
     #[test]

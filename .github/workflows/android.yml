@@ -79,15 +79,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_KEY: ${{ secrets.GLYPH_RELEASE_KEY }}
         run: |
           TAG="${{ inputs.tag }}"
           # Hash every asset of the release, so the list is complete even when
           # the release workflow never got to write it.
           dir="$RUNNER_TEMP/release-assets"; mkdir -p "$dir"
-          gh release view "$TAG" --json assets -q '.assets[].name' | grep -vx SHA256SUMS.txt             | while read -r name; do gh release download "$TAG" --pattern "$name" --dir "$dir"; done
+          gh release view "$TAG" --json assets -q '.assets[].name' | grep -vx -e SHA256SUMS.txt -e SHA256SUMS.txt.minisig \
+            | while read -r name; do gh release download "$TAG" --pattern "$name" --dir "$dir"; done
           (cd "$dir" && sha256sum *) | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          gh release upload "$TAG" SHA256SUMS.txt --clobber
+          GLYPH_RELEASE_KEY="$RELEASE_KEY" sh scripts/sign-release.sh SHA256SUMS.txt "${{ github.repository }}" "$TAG"
+          gh release upload "$TAG" SHA256SUMS.txt SHA256SUMS.txt.minisig --clobber
           # A pre-release (tag with `-`, or ticked by hand on GitHub) never becomes "Latest".
           if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" = true ]; then
             gh release edit "$TAG" --draft=false --latest=false

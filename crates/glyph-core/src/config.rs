@@ -229,11 +229,14 @@ pub struct McpConfig {
     /// Bearer token clients must send (generated on first use).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
+    /// What assistants may do per area (none / read / write). The app
+    /// enforces it for the local server and the server relay alike.
+    pub access: glyph_protocol::mcp::Permissions,
 }
 
 impl Default for McpConfig {
     fn default() -> Self {
-        Self { enabled: false, mode: McpMode::Local, port: 39_571, token: String::new() }
+        Self { enabled: false, mode: McpMode::Local, port: 39_571, token: String::new(), access: Default::default() }
     }
 }
 

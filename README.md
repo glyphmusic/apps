@@ -38,7 +38,7 @@ Prebuilt builds for every platform are on the [Releases](https://github.com/glyp
 
 On macOS, open the `.dmg` and drag Glyph into Applications. Glyph is not notarized by Apple yet: on the first start, allow it under System Settings › Privacy & Security › Open Anyway. On Linux, install the package with your package manager (`sudo apt install ./glyph-<version>-linux-x64.deb` or `sudo dnf install ./glyph-<version>-linux-x64.rpm`); it removes Glyph again like any other app.
 
-New releases include one `SHA256SUMS.txt` listing every asset. Earlier releases keep individual `.sha256` files. App versions before 0.2.2 need one manual upgrade to read the new manifest.
+New releases include one `SHA256SUMS.txt` listing every asset and `SHA256SUMS.txt.minisig`, its signature by the Glyph release key (`release-key.pub`). The in-app updater installs only signed releases; check a download with `minisign -Vm SHA256SUMS.txt -p release-key.pub`. Earlier releases keep individual `.sha256` files. App versions before 0.2.2 need one manual upgrade to read the new manifest.
 
 ## Build from source
 

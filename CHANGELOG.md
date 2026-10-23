@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **What AI assistants may do**: Settings › Integrations › AI assistants now has None, Read or Write for three areas: playback and search, playlists and likes, and listening statistics. Assistants only see the tools you allow, and Glyph refuses every other call, on this computer and through the server. New installs start with Write for playback, Read for playlists and None for statistics, so a song title that tries to instruct an assistant cannot delete or change your playlists.
+
+### Changed
+
+- **Signed updates**: the in-app updater installs a release only when its checksum list carries a valid signature by the Glyph release key for this exact version. Releases without one are shown but not installed; install them by hand if you trust their source.
+- Songs that reach you from other people (a Jam host's queue, shared playlist codes, public profiles) lose covers from unknown image hosts, links outside known music sites and malformed ids before Glyph shows or plays them.
+
+### Fixed
+
+- Plugin setup and permission texts (service keys, lyrics, audio spectrum) are translated into every language Glyph speaks; outside English and German they showed in English.
+
 ## 0.7.0 - 2026-10-23
 
 Plugins and extensions, Glyph starting with your computer, real installers on macOS and Linux, and steadier playback on phones.

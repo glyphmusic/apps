@@ -10,6 +10,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod release;
+pub mod trust;
+pub use trust::{cover_cache_allowed, valid_video_id, VideoId};
+
 /// Wire protocol version. The app refuses servers with a different major value.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -171,6 +175,37 @@ pub struct HealthResponse {
     /// The cover cache (`/v1/covers/*`) is available.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub covers: bool,
+    /// Features this server offers, by name (see [`capability`]). Clients
+    /// test for a name instead of comparing versions; unknown names are
+    /// ignored and a missing list means none of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+impl HealthResponse {
+    pub fn supports(&self, name: &str) -> bool {
+        self.capabilities.iter().any(|c| c == name)
+    }
+}
+
+/// Names in [`HealthResponse::capabilities`].
+pub mod capability {
+    /// Accounts and sync (`/v1/account/*`, `/v1/sync/*`).
+    pub const ACCOUNTS: &str = "accounts";
+    /// The cover cache (`/v1/covers/*`).
+    pub const COVERS: &str = "covers";
+    /// Listening together (`/v1/jam/*`).
+    pub const JAM: &str = "jam";
+    /// AI assistants reach signed-in apps through `/mcp`.
+    pub const MCP_RELAY: &str = "mcp_relay";
+    /// Short playlist links (`/v1/share`).
+    pub const SHARE: &str = "share";
+    /// YouTube audio and downloads (`/v1/audio/youtube/*`).
+    pub const YOUTUBE_AUDIO: &str = "youtube_audio";
+    /// YouTube audio and downloads need a signed-in account on this server.
+    pub const YOUTUBE_ACCOUNT_REQUIRED: &str = "youtube_account_required";
+    /// Shared YouTube video ids (`/v1/youtube/hint`).
+    pub const YOUTUBE_HINTS: &str = "youtube_hints";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -222,17 +257,18 @@ pub struct ResolveResponse {
 /// client after its local yt-dlp matched the song with high confidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct YouTubeHintRequest {
-    /// The wanted song (title, artist, duration are checked against the video).
+    /// The wanted song. The server looks the song up in its own catalog and
+    /// checks the video against that, not against these fields.
     pub track: Track,
-    /// 11-character YouTube video id.
-    pub video_id: String,
+    /// 11-character YouTube video id; anything else fails to parse.
+    pub video_id: VideoId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct YouTubeHintResponse {
     /// The report was counted.
     pub accepted: bool,
-    /// The song's shared id is now set (verified or enough matching reports).
+    /// The song's shared id is now this video (verified by the server).
     pub confirmed: bool,
 }
 
@@ -650,21 +686,6 @@ pub struct LinkStartResponse {
     pub expires_in_s: u64,
 }
 
-/// Hosts whose images the server's cover cache will fetch. Clients route only
-/// these through `/v1/covers/`; everything else is loaded directly.
-pub fn cover_cache_allowed(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else { return false };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("").to_ascii_lowercase();
-    if host.contains(':') || host.contains('@') || host.is_empty() {
-        return false;
-    }
-    const SUFFIXES: &[&str] = &[
-        "dzcdn.net", "deezer.com", "audius.co", "jamendo.com", "archive.org", "sndcdn.com", "ytimg.com",
-        "ggpht.com", "scdn.co", "spotifycdn.com", "coverartarchive.org",
-    ];
-    host == "lastfm.freetls.fastly.net" || SUFFIXES.iter().any(|s| host == *s || host.ends_with(&format!(".{s}")))
-}
-
 #[cfg(test)]
 mod account_tests {
     use super::*;
@@ -746,6 +767,10 @@ pub mod mcp {
 
     /// MCP revision both ends speak (Streamable HTTP, JSON responses).
     pub const PROTOCOL_VERSION: &str = "2025-06-18";
+    /// Name of the call that asks the app for the tools its user allows
+    /// (`tools/list` through the server relay). The app answers
+    /// `{"tools": [...]}` with [`Permissions::tools`].
+    pub const LIST_TOOLS: &str = "tools/list";
     /// Longest wait for the app's answer to one tool call (ms).
     pub const CALL_TIMEOUT_MS: u64 = 25_000;
     /// How long one `pull` waits for a call before answering empty (ms).
@@ -847,6 +872,112 @@ pub mod mcp {
         ]
     }
 
+    /// How much assistants may do in one [`Area`] (Settings › Integrations ›
+    /// AI assistants). `Write` includes reading.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Access {
+        None,
+        Read,
+        Write,
+    }
+
+    /// Groups of tools, each with its own [`Access`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Area {
+        /// What plays, the queue, lyrics and search; writing controls playback.
+        Playback,
+        /// Playlists and liked songs; writing changes them.
+        Library,
+        /// Listening statistics (read only).
+        Stats,
+    }
+
+    impl Area {
+        pub const ALL: [Area; 3] = [Area::Playback, Area::Library, Area::Stats];
+
+        /// `false` for areas without tools that change anything.
+        pub fn has_write(self) -> bool {
+            !matches!(self, Area::Stats)
+        }
+    }
+
+    /// The area of a tool and whether it changes something; `None` for a
+    /// name that is not a tool.
+    pub fn tool_area(name: &str) -> Option<(Area, bool)> {
+        Some(match name {
+            "now_playing" | "get_queue" | "get_lyrics" | "search" => (Area::Playback, false),
+            "play" | "pause" | "toggle_play" | "next" | "previous" | "seek" | "set_volume" | "set_shuffle" | "set_repeat"
+            | "play_song" | "play_artist" | "queue_add" | "play_playlist" => (Area::Playback, true),
+            "list_playlists" | "get_playlist" => (Area::Library, false),
+            "create_playlist" | "rename_playlist" | "delete_playlist" | "add_to_playlist" | "remove_from_playlist" | "like" | "unlike" => {
+                (Area::Library, true)
+            }
+            "listening_stats" => (Area::Stats, false),
+            _ => return None,
+        })
+    }
+
+    /// What assistants may do. By default they control playback and search,
+    /// read playlists but do not change them, and see no statistics.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct Permissions {
+        pub playback: Access,
+        pub library: Access,
+        pub stats: Access,
+    }
+
+    impl Default for Permissions {
+        fn default() -> Self {
+            Self { playback: Access::Write, library: Access::Read, stats: Access::None }
+        }
+    }
+
+    impl Permissions {
+        pub fn get(&self, area: Area) -> Access {
+            match area {
+                Area::Playback => self.playback,
+                Area::Library => self.library,
+                Area::Stats => self.stats,
+            }
+        }
+
+        /// Sets `area`; `Write` on a read-only area counts as `Read`.
+        pub fn set(&mut self, area: Area, access: Access) {
+            let access = if access == Access::Write && !area.has_write() { Access::Read } else { access };
+            match area {
+                Area::Playback => self.playback = access,
+                Area::Library => self.library = access,
+                Area::Stats => self.stats = access,
+            }
+        }
+
+        pub fn allows(&self, tool: &str) -> bool {
+            match tool_area(tool) {
+                Some((area, writes)) => match self.get(area) {
+                    Access::None => false,
+                    Access::Read => !writes,
+                    Access::Write => true,
+                },
+                None => false,
+            }
+        }
+
+        /// `tools/list` entries of the allowed tools.
+        pub fn tools(&self) -> Vec<serde_json::Value> {
+            tools().into_iter().filter(|t| t["name"].as_str().is_some_and(|n| self.allows(n))).collect()
+        }
+    }
+
+    /// The tool definitions named in an app's [`LIST_TOOLS`] answer, taken
+    /// from [`tools`] (an answer can only narrow the list, never add to it).
+    /// `None` when the answer is not a tool list.
+    pub fn listed_tools(answer: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+        let names: Vec<&str> = answer.get("tools")?.as_array()?.iter().filter_map(|t| t["name"].as_str()).collect();
+        Some(tools().into_iter().filter(|t| t["name"].as_str().is_some_and(|n| names.contains(&n))).collect())
+    }
+
     /// A text `CallToolResult` (with the data as structured content too).
     pub fn text_result(value: &serde_json::Value, is_error: bool) -> serde_json::Value {
         let text = match value {
@@ -892,6 +1023,51 @@ pub mod mcp {
             assert!(super::handle_meta("tools/list", "glyph", "1").unwrap().is_ok());
             assert!(super::handle_meta("tools/call", "glyph", "1").is_none());
             assert!(super::handle_meta("nope", "glyph", "1").unwrap().is_err());
+        }
+
+        #[test]
+        fn every_tool_has_an_area() {
+            for t in super::tools() {
+                let name = t["name"].as_str().unwrap();
+                assert!(super::tool_area(name).is_some(), "{name} needs an area in tool_area");
+            }
+            assert_eq!(super::tool_area("rm_rf"), None);
+        }
+
+        #[test]
+        fn permissions_filter_tools() {
+            use super::{Access, Area, Permissions};
+            let p = Permissions::default();
+            assert!(p.allows("play") && p.allows("search") && p.allows("list_playlists"));
+            assert!(!p.allows("delete_playlist") && !p.allows("like") && !p.allows("listening_stats"));
+            assert!(!p.allows("rm_rf"));
+            let mut none = p;
+            for area in Area::ALL {
+                none.set(area, Access::None);
+            }
+            assert!(none.tools().is_empty());
+            let mut all = p;
+            for area in Area::ALL {
+                all.set(area, Access::Write);
+            }
+            assert_eq!(all.stats, Access::Read, "statistics have no write tools");
+            assert_eq!(all.tools().len(), super::tools().len());
+            let mut read = p;
+            read.set(Area::Playback, Access::Read);
+            assert!(read.allows("now_playing") && !read.allows("pause"));
+            // Old settings files without the section keep the defaults.
+            let parsed: Permissions = serde_json::from_str(r#"{"library":"write"}"#).unwrap();
+            assert_eq!((parsed.playback, parsed.library, parsed.stats), (Access::Write, Access::Write, Access::None));
+        }
+
+        #[test]
+        fn listed_tools_only_narrow() {
+            let answer = serde_json::json!({"tools":[{"name":"play"},{"name":"evil","description":"do harm"}]});
+            let listed = super::listed_tools(&answer).unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0]["name"], "play");
+            assert!(listed[0]["inputSchema"].is_object());
+            assert!(super::listed_tools(&super::text_result(&"error".into(), true)).is_none());
         }
     }
 }
@@ -1242,6 +1418,42 @@ pub mod jam {
     pub struct OpsResponse {
         #[serde(default)]
         pub ops: Vec<OpFrom>,
+    }
+
+    // Everything in a jam comes from other people's apps: the receiving app
+    // treats its tracks as claims (see `crate::trust`).
+
+    impl Now {
+        pub fn sanitize(&mut self) {
+            self.track.sanitize();
+            if let Some(t) = self.resolved.as_mut() {
+                t.sanitize();
+            }
+        }
+    }
+
+    impl State {
+        pub fn sanitize(&mut self) {
+            for item in &mut self.queue {
+                item.track.sanitize();
+            }
+            for t in &mut self.after {
+                t.sanitize();
+            }
+            if let Some(now) = self.now.as_mut() {
+                now.sanitize();
+            }
+        }
+    }
+
+    impl OpsResponse {
+        pub fn sanitize(&mut self) {
+            for op in &mut self.ops {
+                if let Op::Add { track } | Op::PlayNow { track } = &mut op.op {
+                    track.sanitize();
+                }
+            }
+        }
     }
 
     /// `POST /v1/jam/{code}/kick`: the host removes someone.

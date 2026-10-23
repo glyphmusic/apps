@@ -114,7 +114,8 @@ pub fn decode(s: &str) -> Result<(String, Vec<Track>)> {
     if code.t.len() > crate::library::playlist_track_limit() {
         return Err(anyhow!("Playlist exceeds this server's limit of {} songs", crate::library::playlist_track_limit()));
     }
-    let tracks = code
+    // Codes come from other people: their tracks are claims (`glyph_protocol::trust`).
+    let mut tracks: Vec<Track> = code
         .t
         .into_iter()
         .filter(|s| !s.t.trim().is_empty())
@@ -132,6 +133,7 @@ pub fn decode(s: &str) -> Result<(String, Vec<Track>)> {
             explicit: s.x,
         })
         .collect();
+    tracks.iter_mut().for_each(Track::sanitize);
     let name = code.n.trim().chars().take(100).collect::<String>();
     Ok((if name.is_empty() { "Playlist".into() } else { name }, tracks))
 }
