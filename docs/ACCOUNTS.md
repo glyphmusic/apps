@@ -200,23 +200,83 @@ server address, yt-dlp path, cache size, output device, volume, mini player.
 A device pushes settings only after its first full pull (`SyncState::pulled_once`),
 so a fresh install does not overwrite the account's settings with defaults.
 
-API keys sync as one `secret` item (`api_keys`), end-to-end encrypted:
-XChaCha20-Poly1305 with a key `Argon2id(password, sha256("glyph-settings-v1:" +
-account_id)[..16])` (same KDF parameters as sign-in, different salt, so it is
-not the sign-in key the server sees). The nonce is derived from key + plaintext,
-so unchanged keys give the same item and are not pushed again. Only keys from
-the config file sync, never env-provided ones. The key lives in the OS keychain
-(`settings-key:{account_id}`, file fallback) and is derived on password sign-up,
-sign-in and password change. Devices signed in without the password (browser,
-passkey, pairing code) store the encrypted item as locked and show "Unlock" in
-Settings -> Account; the typed password is first checked with
-`POST /v1/account/password/check` (403 `wrong_password`). A device without the
-key never pushes or deletes the item. After a password change elsewhere the old
-key no longer opens the item: it is dropped and the device asks again. Accounts
-without a password sync settings only.
+API keys sync as one `secret` item (`api_keys`), sealed with a key derived
+from the library's data key (section 5a) and, like every item, end-to-end
+encrypted on top. They sync only while the server cannot read the data key
+(accounts with a password). Copies from before 23.10.2026 were sealed with
+`Argon2id(password, sha256("glyph-settings-v1:" + account_id)[..16])`; a device
+that still has that key (`settings-key:{account_id}`) opens them once and
+pushes them in the new form. That old key was unsafe: it used the sign-in
+parameters, so a server could hand out its salt as sign-in salt and receive
+it as the sign-in key.
 
 On the public server the app opens the browser sign-in page by default; a plain
-text link switches to the in-app form.
+text link switches to the in-app form. On any other server sign-in stays in the
+app (password form or pairing code): that server's own page could read the
+password, so it opens only after a warning, and the transparency page records
+that it was used.
+
+### 5a. End-to-end encryption (23.10.2026)
+
+`glyph-core/src/e2e.rs` (keys), `e2e_sync.rs` (wire form), `account.rs`
+(`settle_keys`). Goal: the server stores the library without being able to
+read it, and the user does nothing they did not do before.
+
+* **Data key**: one random 32-byte key per account. Items go up as `sealed`
+  (playlists: `sealed_playlist`, with the server's revision check). The key of
+  an item is `HMAC(data key, kind, key)`, the value
+  `{v, kid, n, ct}`: XChaCha20-Poly1305 over the deflated, padded
+  `{k, key, v}`, with the blinded key as associated data, so an item cannot be
+  moved to another key. The sync engine still works on plain items; the layer
+  encrypts right before a push and decrypts right after a pull.
+* **Keyring** (`keyring` items, readable): `main` = `{kid, pw?, escrow?}`;
+  `dev:<device>` = the device's X25519 public key (with an HMAC under the data
+  key once the device has it); `env:<device>` = the data key sealed to that
+  device; `pair:<code>` = the data key for a paired device.
+* **Password copy** (`main.pw`): the data key wrapped with
+  `Argon2id(password, sha256("glyph-vault-v2:" + account_id)[..16])`, 64 MiB,
+  t=3, Argon2 secret `glyph-vault-v2` (`glyph_protocol::vault_kdf`). Different
+  parameters and secret than sign-in, so no sign-in salt makes the two equal.
+  The apps also refuse sign-in salts that are not 16 bytes and raise an alarm
+  when a salt equals a data-key salt.
+* **Escrow**: while no device has the password (an account without one, or an
+  existing account until the password is typed once), `main.escrow` holds the
+  data key in the clear. Nothing can be lost that way, and the transparency
+  page says the server can decrypt. The first device with the password writes
+  `main.pw`, drops the escrow and switches to a new data key, which it seals to
+  the other devices (`env:`) with a proof under the old key.
+* **How a device gets the key**: escrow; the password copy (password sign-in,
+  password change, "Activate"/"Unlock"); a pairing code (below); `env:` from a
+  device that has it — accepted only on the official server (trusted with
+  sign-in anyway) or as a proven rotation from a key the server never held. A
+  device without the key pushes nothing until it gets one.
+* **Pairing**: where `/v1/health` lists `pair_keys`, the new device appends
+  four characters to the server's code (`K7PX-2QMD-H4XA`) and sends a SPAKE2
+  message keyed with them in `login/start`. The approving device gets the
+  message back from `login/approve`, runs SPAKE2 with the four characters the
+  user typed and writes `pair:<code>` with the data key. The server never sees
+  the four characters and gets one guess in 2^20 per pairing; a changed message
+  makes the entry fail to open and raises an alarm.
+* **Migration**: this version reads the whole account once. Readable items are
+  replaced by encrypted ones plus a tombstone of the readable copy; such a
+  tombstone never deletes anything on a device that knows the encrypted copy.
+  Deletions from older apps still apply. Older apps do not read encrypted
+  items, so every device needs this version.
+* **Profile playlists** stay readable (`"public": true` in the readable copy),
+  because the server shows them; taking one off the profile encrypts it again.
+* **Refused**: a keyring whose key the server could read replacing a key it
+  could not; a rotation without proof (except on the official server).
+
+### 5b. Transparency (23.10.2026)
+
+Settings › Server › Transparency (`glyph-core/src/privacy.rs`) lists, per area,
+what the current server can see. The list is built from what this app sends,
+never from what the server says about itself. Notices (`privacy-events.json`,
+per server, last 100) record alarms — a suspicious or invalid sign-in salt,
+encrypted items that do not authenticate, a removed or replaced keyring,
+changed pairing messages — and information such as the key going to a new
+device or a sign-in on another server's own page. Alarms also show as a toast
+once.
 
 ## 6. Endpoints
 
@@ -252,7 +312,9 @@ handle checks 30 / min. Errors use the existing `ApiError` with codes such as
 
 Stored: handle, passkey public keys, recovery-code hash, device name/platform/
 first and last seen, the synced items above (including account listening history
-and recommendation activity), profile settings and short-lived playback state.
+and recommendation activity) end-to-end encrypted since 23.10.2026 (see 5a;
+readable while the server holds the key in escrow), profile settings and
+short-lived playback state.
 Passwords and audio files are not stored by account sync. Private listening
 history is distinct from the opt-in recent songs on the public profile.
 The Worker never returns another user's private data; handles are only

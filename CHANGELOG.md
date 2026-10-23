@@ -4,15 +4,20 @@
 
 ### Added
 
+- **End-to-end encrypted library**: liked songs, playlists, albums, artists, history, statistics, settings and API keys leave the device encrypted with a key only your devices hold, so the server stores what it cannot read. There is nothing new to remember: signing in with your password opens the library, a new device gets the key through its pairing code or, on the official server, from your other devices. While an account has no password the server keeps the key, so losing a device never loses the library; setting a password replaces that key with one the server never sees. Playlists you show on your profile stay readable, because the server shows them to others. Update every device: older versions do not read encrypted items.
+- **Transparency page**: Settings › Server › Transparency lists what the server you use can see (library, API keys, searches and playback, profile, device control, Jam, AI assistants, IP address and ids). Glyph works this out from what it sends itself, not from what the server says. Glyph warns at once when a server does something that only makes sense to read your data: a sign-in salt that would reveal a key, changed encrypted entries, a replaced or removed key, changed pairing messages.
 - **What AI assistants may do**: Settings › Integrations › AI assistants now has None, Read or Write for three areas: playback and search, playlists and likes, and listening statistics. Assistants only see the tools you allow, and Glyph refuses every other call, on this computer and through the server. New installs start with Write for playback, Read for playlists and None for statistics, so a song title that tries to instruct an assistant cannot delete or change your playlists.
 
 ### Changed
 
+- **Sign-in on other servers stays in the app**: on a server other than the official one, Glyph offers the password form and a pairing code. That server's own sign-in page opens only after a warning, because a modified server could read the password there. The official server keeps its browser page.
+- **Pairing codes have four more characters** on servers that support it. The server never sees them; they let the approving device hand the library's key to the new one.
 - **Signed updates**: the in-app updater installs a release only when its checksum list carries a valid signature by the Glyph release key for this exact version. Releases without one are shown but not installed; install them by hand if you trust their source.
 - Songs that reach you from other people (a Jam host's queue, shared playlist codes, public profiles) lose covers from unknown image hosts, links outside known music sites and malformed ids before Glyph shows or plays them.
 
 ### Fixed
 
+- **A modified server could read synced API keys**: it could hand out a sign-in salt that turned the key sent at sign-in into the key that encrypted the API keys. The key that protects your data now comes from a separate derivation that no sign-in salt can match, and Glyph warns when a server tries.
 - Plugin setup and permission texts (service keys, lyrics, audio spectrum) are translated into every language Glyph speaks; outside English and German they showed in English.
 
 ## 0.7.0 - 2026-10-23

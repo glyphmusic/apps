@@ -1,6 +1,10 @@
 //! Settings -> Account: optional sign-in (passkey in the browser or a pairing
 //! code), devices with the server's device limit, and library sync. Design:
 //! `docs/ACCOUNTS.md`. Without an account nothing here runs.
+//!
+//! On the official server the browser page is the default sign-in. On any
+//! other server sign-in stays in the app: that server's own page could read
+//! the password, so it only opens after a warning.
 
 use crate::app::Glyph;
 use crate::i18n::{t, tf};
@@ -103,11 +107,19 @@ pub struct AccountUi {
     pub pw2_input: Option<Entity<TextInput>>,
     pub newpw_input: Option<Entity<TextInput>>,
     pub newpw2_input: Option<Entity<TextInput>>,
-    /// Password to open synced API keys on a device signed in without it.
+    /// Password to open the encrypted library on a device signed in without it.
     pub unlock_input: Option<Entity<TextInput>>,
-    /// This device holds the key for the encrypted API keys (cached; the
-    /// keychain is not read on every frame).
-    pub vault_ok: bool,
+    /// Encryption state of the library here (cached; the keychain is not
+    /// read on every frame, see [`Glyph::refresh_privacy`]).
+    pub crypto: Option<glyph_core::privacy::Library>,
+    /// Playlists are shown on the profile (they stay readable).
+    pub public_playlists: bool,
+    pub privacy_events: Vec<glyph_core::privacy::Event>,
+    pub privacy_at: Option<Instant>,
+    /// Not the official server: the warning before its own sign-in page is shown.
+    pub web_warning: bool,
+    /// The running sign-in shows only a pairing code (no browser page).
+    pub pairing_only: bool,
     loop_started: bool,
 }
 
@@ -120,7 +132,8 @@ fn err_text(e: &anyhow::Error) -> String {
         "password_too_short" => return t("account.err.pw_short").to_string(),
         "password_too_long" => return t("account.err.pw_long").to_string(),
         "wrong_password" => return t("account.err.wrong_password").to_string(),
-        "no_password" => return t("account.keys.need_password").to_string(),
+        "no_password" => return t("account.library.escrow.nopw_desc").to_string(),
+        "bad_salt" => return t("privacy.event.bad_salt").to_string(),
         _ => {}
     }
     match glyph_core::server_client::server_error(e).map(|(_, c)| c) {
@@ -212,8 +225,12 @@ impl Glyph {
                         s.toast(tf("account.toast.signed_in", &[("handle", &handle)]).to_string());
                         s.account_page_opened(cx);
                         s.account_enter(cx);
+                        s.privacy_alarms();
                     }
-                    Err(e) => s.account.login = Login::Failed(err_text(&e)),
+                    Err(e) => {
+                        s.account.login = Login::Failed(err_text(&e));
+                        s.privacy_alarms();
+                    }
                 }
                 cx.notify();
             })
@@ -222,7 +239,8 @@ impl Glyph {
         .detach();
     }
 
-    /// Enter the account password once so synced API keys can be opened here.
+    /// Enter the account password once: the library's key opens here (and
+    /// a key the server kept is replaced) with the next sync round.
     pub fn account_unlock_keys(&mut self, cx: &mut Context<Self>) {
         let pw = Self::read(&self.account.unlock_input, cx);
         if pw.is_empty() {
@@ -233,14 +251,8 @@ impl Glyph {
             move |b| Box::pin(async move { b.account_unlock_keys(&pw).await }),
             |s, _, cx| {
                 Self::clear(&s.account.unlock_input, cx);
-                s.account.vault_ok = true;
-                if let Some(b) = s.backend.clone() {
-                    let mut cfg = s.config.clone();
-                    if b.sync_unlock_settings(&mut cfg) {
-                        s.adopt_synced_config(cfg, true, cx);
-                    }
-                }
-                s.account.notice = Some((t("account.keys.unlocked").to_string(), true));
+                s.account.notice = Some((t("account.library.unlocked").to_string(), true));
+                s.privacy_alarms();
                 s.sync_now(cx);
             },
         );
@@ -260,6 +272,8 @@ impl Glyph {
                 Self::clear(&s.account.newpw_input, cx);
                 Self::clear(&s.account.newpw2_input, cx);
                 s.account.notice = Some((t("account.password.saved").to_string(), true));
+                // Wraps the library's key with the new password right away.
+                s.sync_now(cx);
             },
         );
     }
@@ -283,7 +297,7 @@ impl Glyph {
     pub fn account_page_opened(&mut self, cx: &mut Context<Self>) {
         let Some(b) = self.backend.clone() else { return };
         let owner = self.signed_in();
-        self.account.vault_ok = b.settings_vault().is_some();
+        self.refresh_privacy();
         self.account.devices_error = None;
         cx.spawn(async move |this, cx| {
             let available = b.accounts_available().await;
@@ -303,11 +317,30 @@ impl Glyph {
         .detach();
     }
 
+    /// Sign in with the server's browser page (passkey, password there) or a
+    /// pairing code shown alongside.
     pub fn account_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.account_login(true, cx);
+    }
+
+    /// Only a pairing code, approved on a device that is signed in.
+    pub fn account_pair(&mut self, cx: &mut Context<Self>) {
+        self.account_login(false, cx);
+    }
+
+    /// Opens another server's own sign-in page after the warning was confirmed.
+    pub fn account_web_confirmed(&mut self, cx: &mut Context<Self>) {
+        self.account.web_warning = false;
+        glyph_core::privacy::record(self.config.effective_server_url(), "", false, "web_login", "");
+        self.account_login(true, cx);
+    }
+
+    fn account_login(&mut self, browser: bool, cx: &mut Context<Self>) {
         if !self.library_ok { self.toast_info(t("status.library_offline")); return; }
         if !self.prepare_account_sign_in(cx) { return; }
         let Some(b) = self.backend.clone() else { return };
         self.account.login = Login::Starting;
+        self.account.pairing_only = !browser;
         self.account.notice = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -326,7 +359,9 @@ impl Glyph {
             let url = start.url.clone();
             this.update(cx, |s, cx| {
                 s.account.login = Login::Waiting(start.clone());
-                cx.open_url(&url);
+                if browser {
+                    cx.open_url(&url);
+                }
                 cx.notify();
             })
             .ok();
@@ -364,6 +399,7 @@ impl Glyph {
                         let handle = session.account.handle.clone();
                         this.update(cx, |s, cx| {
                             s.account.login = Login::Idle;
+                            s.account.pairing_only = false;
                             s.toast(tf("account.toast.signed_in", &[("handle", &handle)]).to_string());
                             s.account_page_opened(cx);
                             s.account_enter(cx);
@@ -390,7 +426,26 @@ impl Glyph {
 
     pub fn account_cancel_login(&mut self, cx: &mut Context<Self>) {
         self.account.login = Login::Idle;
+        self.account.pairing_only = false;
         cx.notify();
+    }
+
+    /// Re-reads the library's encryption state and the notices about this
+    /// server (keychain and files): on page open, after a sync round, and
+    /// every few seconds while the transparency page is shown.
+    pub fn refresh_privacy(&mut self) {
+        let Some(b) = self.backend.clone() else { return };
+        self.account.crypto = Some(b.library_crypto());
+        self.account.public_playlists = b.profile_shows_playlists();
+        self.account.privacy_events = glyph_core::privacy::events(self.config.effective_server_url());
+        self.account.privacy_at = Some(Instant::now());
+    }
+
+    /// Alarms noticed since the last look: one toast each.
+    pub fn privacy_alarms(&mut self) {
+        for e in glyph_core::privacy::take_unseen_alarms(self.config.effective_server_url()) {
+            self.toast_info(event_text(&e).to_string());
+        }
     }
 
     /// Run an account call and show its outcome under the actions.
@@ -636,7 +691,8 @@ impl Glyph {
                         if st.changed {
                             s.adopt_synced_config(cfg, st.providers_changed, cx);
                         }
-                        s.account.vault_ok = b.settings_vault().is_some();
+                        s.refresh_privacy();
+                        s.privacy_alarms();
                         if applied.library_changed {
                             s.save_library(cx);
                         }
@@ -658,6 +714,15 @@ impl Glyph {
                         s.account.sync_error = merge_error;
                         s.account.sync_pending = b.sync_pending(&glyph_core::sync::snapshot(&s.library, &b.sync_wanted_downloads()));
                         if round.bootstrap || s.account.sync_gen != generation || s.account.sync_pending > 0 { s.schedule_sync(cx); }
+                        if round.retry_soon {
+                            // A pairing's key or a keyring write is on its way.
+                            let owner = s.signed_in();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(Duration::from_secs(5)).await;
+                                this.update(cx, |s, cx| if s.signed_in() == owner { s.sync_now(cx) }).ok();
+                            })
+                            .detach();
+                        }
                         if round.bootstrap { s.reload_account_feeds(cx); }
                     }
                     Err(e) => {
@@ -697,7 +762,7 @@ fn ago(i: Instant) -> SharedString {
     }
 }
 
-fn when_ms(ms: u64) -> String {
+pub(crate) fn when_ms(ms: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let d = now.saturating_sub(ms) / 1000;
     match d {
@@ -855,21 +920,77 @@ fn signed_out(app: &mut Glyph, col: Div, cx: &mut Context<Glyph>) -> Div {
         .child(div().flex_1().h(px(1.0)).bg(white(0.08)))
         .child(div().text_size(px(12.0)).text_color(white(0.45)).child(t("account.form.or")))
         .child(div().flex_1().h(px(1.0)).bg(white(0.08)));
-    let passkey = div()
-        .w(px(360.0))
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(
-            button("acct-signin", t("account.passkey.button"))
-                .justify_center()
-                .h(px(38.0))
-                .child(icon("external-link", 14.0, white(0.6)))
-                .on_click(cx.listener(|this, _, _, cx| this.account_sign_in(cx))),
-        )
-        .child(div().text_center().text_size(px(12.0)).text_color(white(0.5)).child(t("account.passkey.desc")));
+    let passkey = if public {
+        div()
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                button("acct-signin", t("account.passkey.button"))
+                    .justify_center()
+                    .h(px(38.0))
+                    .child(icon("external-link", 14.0, white(0.6)))
+                    .on_click(cx.listener(|this, _, _, cx| this.account_sign_in(cx))),
+            )
+            .child(div().text_center().text_size(px(12.0)).text_color(white(0.5)).child(t("account.passkey.desc")))
+    } else {
+        other_server_ways(app, cx)
+    };
     let back = public.then(|| sign_in_switch("acct-usebrowser", t("account.browser.back"), false, cx));
     col.child(centre.child(form).child(or).child(passkey).children(back))
+}
+
+/// Not the official server: a pairing code, and that server's own sign-in
+/// page only behind a warning (it could read the password there).
+fn other_server_ways(app: &Glyph, cx: &mut Context<Glyph>) -> Div {
+    let col = div().w(px(360.0)).flex().flex_col().gap(px(6.0));
+    if app.account.web_warning {
+        return col
+            .child(
+                div()
+                    .p(px(12.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme::warn().opacity(0.5))
+                    .text_size(px(12.5))
+                    .text_color(theme::warn())
+                    .child(t("account.web.warning")),
+            )
+            .child(
+                div()
+                    .pt(px(4.0))
+                    .flex()
+                    .gap(px(8.0))
+                    .child(danger_button("acct-web-go", t("account.web.continue")).on_click(cx.listener(|this, _, _, cx| this.account_web_confirmed(cx))))
+                    .child(button("acct-web-cancel", t("account.login.cancel")).on_click(cx.listener(|this, _, _, cx| {
+                        this.account.web_warning = false;
+                        cx.notify();
+                    }))),
+            );
+    }
+    col.child(
+        button("acct-pair", t("account.pair.button"))
+            .justify_center()
+            .h(px(38.0))
+            .on_click(cx.listener(|this, _, _, cx| this.account_pair(cx))),
+    )
+    .child(div().text_center().text_size(px(12.0)).text_color(white(0.5)).child(t("account.pair.button.desc")))
+    .child(
+        div()
+            .id("acct-web")
+            .pt(px(10.0))
+            .text_center()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(white(0.5))
+            .hover(|d| d.text_color(white(0.9)))
+            .child(t("account.web.link"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.account.web_warning = true;
+                cx.notify();
+            })),
+    )
 }
 
 /// Plain text link (no button look) between browser and in-app sign-in.
@@ -893,14 +1014,15 @@ fn passkey_waiting(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
     match app.account.login.clone() {
         Login::Waiting(l) | Login::Full(l) => {
             let full = matches!(app.account.login, Login::Full(_));
+            let pairing_only = app.account.pairing_only;
             let url = l.url.clone();
             div()
                 .w(px(420.0))
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(13.0)).text_color(white(0.75)).child(t("account.login.waiting")))
+                .child(div().text_size(px(13.0)).text_color(white(0.75)).child(if pairing_only { t("account.login.pair_waiting") } else { t("account.login.waiting") }))
                 .child(code_box(&l.user_code))
-                .child(div().text_size(px(12.5)).text_color(white(0.55)).child(t("account.login.pair_hint")))
+                .when(!pairing_only, |d| d.child(div().text_size(px(12.5)).text_color(white(0.55)).child(t("account.login.pair_hint"))))
                 .when(full, |d| d.child(div().pt(px(8.0)).text_size(px(12.5)).text_color(theme::warn()).child(t("account.login.full"))))
                 .child(
                     div()
@@ -910,7 +1032,7 @@ fn passkey_waiting(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
                         .gap(px(8.0))
                         .child(spinner_line(app.spinner(), t("account.login.polling")))
                         .child(div().flex_1())
-                        .child(button("acct-open", t("account.login.reopen")).on_click(move |_, _, cx| cx.open_url(&url)))
+                        .when(!pairing_only, |d| d.child(button("acct-open", t("account.login.reopen")).on_click(move |_, _, cx| cx.open_url(&url))))
                         .child(button("acct-cancel", t("account.login.cancel")).on_click(cx.listener(|this, _, _, cx| this.account_cancel_login(cx)))),
                 )
                 .into_any_element()
@@ -919,27 +1041,35 @@ fn passkey_waiting(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
     }
 }
 
-/// Settings sync row: API keys are end-to-end encrypted with a key from the password.
-fn keys_row(app: &Glyph, acc: &Stored, cx: &mut Context<Glyph>) -> AnyElement {
-    let label = t("account.keys");
-    let dim = |s: SharedString| div().text_size(px(13.0)).text_color(white(0.55)).child(s);
-    if !acc.account.has_password {
-        return row_status(label, Some(t("account.keys.need_password")), dim(t("account.keys.off"))).into_any_element();
-    }
-    if app.account.vault_ok {
-        return row(label, Some(t("account.keys.desc")), div().text_size(px(13.0)).text_color(white(0.85)).child(t("account.keys.on"))).into_any_element();
-    }
-    let input = app.account.unlock_input.clone().unwrap();
-    row(
-        label,
-        Some(t("account.keys.unlock_desc")),
+/// Library row: end-to-end encrypted with a key only the account's devices
+/// have, or why not (yet). API keys sync with the same key.
+fn library_row(app: &Glyph, acc: &Stored, cx: &mut Context<Glyph>) -> AnyElement {
+    use glyph_core::privacy::Library;
+    let label = t("account.library");
+    let value = |s: SharedString, ok: bool| div().text_size(px(13.0)).text_color(if ok { theme::ok() } else { white(0.55) }).child(s);
+    let unlock = |button_label: SharedString, cx: &mut Context<Glyph>| {
         div()
             .flex()
             .gap(px(8.0))
-            .child(input_box(input).w(px(180.0)))
-            .child(button("acct-unlock", t("account.keys.unlock")).on_click(cx.listener(|this, _, _, cx| this.account_unlock_keys(cx)))),
-    )
-    .into_any_element()
+            .child(input_box(app.account.unlock_input.clone().unwrap()).w(px(180.0)))
+            .child(button("acct-unlock", button_label).on_click(cx.listener(|this, _, _, cx| this.account_unlock_keys(cx))))
+    };
+    match app.account.crypto {
+        Some(Library::Encrypted) => row(label, Some(t("account.library.encrypted.desc")), value(t("account.library.encrypted"), true)).into_any_element(),
+        Some(Library::Escrow) if acc.account.has_password => row(label, Some(t("account.library.escrow.pw_desc")), unlock(t("account.library.activate"), cx)).into_any_element(),
+        Some(Library::Escrow) => row_status(label, Some(t("account.library.escrow.nopw_desc")), value(t("account.library.escrow"), false)).into_any_element(),
+        Some(Library::Locked) => {
+            let official = app.config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(glyph_core::config::DEFAULT_SERVER_URL);
+            let desc = if official { t("account.library.locked.desc") } else { t("account.library.locked.desc_pair") };
+            row(label, Some(desc), unlock(t("account.library.unlock"), cx)).into_any_element()
+        }
+        _ => row(label, Some(t("account.library.starting.desc")), value(t("account.library.starting"), false)).into_any_element(),
+    }
+}
+
+/// Text of a transparency notice.
+pub(crate) fn event_text(e: &glyph_core::privacy::Event) -> SharedString {
+    tf(&format!("privacy.event.{}", e.code), &[("detail", &e.detail)])
 }
 
 fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) -> Div {
@@ -984,7 +1114,7 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
             Some(t("account.limit.desc")),
             div().text_size(px(13.0)).text_color(white(0.85)).child(limit.to_string()),
         ),
-        keys_row(app, &acc, cx),
+        library_row(app, &acc, cx),
     ]);
 
     let devices: Vec<AnyElement> = match &a.devices {
@@ -1023,7 +1153,7 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
         div()
             .flex()
             .gap(px(8.0))
-            .child(input_box(code_in).w(px(140.0)))
+            .child(input_box(code_in).w(px(180.0)))
             .child(button("acct-approve", t("account.pair.approve")).on_click(cx.listener(|this, _, _, cx| this.account_approve(cx)))),
     )]);
 

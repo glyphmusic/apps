@@ -174,55 +174,154 @@ fn forget_refresh(device_id: &str) {
     let _ = std::fs::remove_file(fallback_path(device_id));
 }
 
-// Settings key (see `settings_sync`): keychain entry per account, file fallback.
+// Keys of an account on this device: keychain entry per account, file
+// fallback. `settings-key` is the old password-derived key of the synced API
+// keys (still opens their old copies); the others belong to `e2e`.
 
-fn vault_fallback(account_id: &str) -> PathBuf {
-    paths::data_dir().join(format!("settings_key_{account_id}"))
-}
-
-fn put_vault(account_id: &str, v: &Vault) {
-    let text = b64(v.bytes());
-    if secret_store().is_some_and(|s| s.set(&format!("settings-key:{account_id}"), &text)) {
-        let _ = std::fs::remove_file(vault_fallback(account_id));
+fn put_secret(name: &str, fallback: &str, text: &str) {
+    let path = paths::data_dir().join(fallback);
+    if secret_store().is_some_and(|s| s.set(name, text)) {
+        let _ = std::fs::remove_file(&path);
         return;
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
-        if e.set_password(&text).is_ok() {
-            let _ = std::fs::remove_file(vault_fallback(account_id));
+    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, name) {
+        if e.set_password(text).is_ok() {
+            let _ = std::fs::remove_file(&path);
             return;
         }
     }
-    if let Err(e) = paths::write_atomic(&vault_fallback(account_id), text.as_bytes()) {
-        tracing::warn!("could not store the settings key: {e}");
+    if let Err(e) = paths::write_atomic(&path, text.as_bytes()) {
+        tracing::warn!("could not store {fallback}: {e}");
     }
+}
+
+fn get_secret(name: &str, fallback: &str) -> Option<String> {
+    if let Some(t) = secret_store().and_then(|s| s.get(name)) {
+        return Some(t);
+    }
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
+    if let Some(t) = keyring::Entry::new(KEYCHAIN_SERVICE, name).ok().and_then(|e| e.get_password().ok()) {
+        return Some(t);
+    }
+    std::fs::read_to_string(paths::data_dir().join(fallback)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+fn forget_secret(name: &str, fallback: &str) {
+    if let Some(s) = secret_store() {
+        s.delete(name);
+    }
+    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
+    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, name) {
+        let _ = e.delete_credential();
+    }
+    let _ = std::fs::remove_file(paths::data_dir().join(fallback));
 }
 
 fn get_vault(account_id: &str) -> Option<Vault> {
-    if let Some(t) = secret_store().and_then(|s| s.get(&format!("settings-key:{account_id}"))) {
-        return unb64(&t).and_then(|b| Vault::from_bytes(&b));
-    }
-    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Some(t) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")).ok().and_then(|e| e.get_password().ok()) {
-        return unb64(&t).and_then(|b| Vault::from_bytes(&b));
-    }
-    let t = std::fs::read_to_string(vault_fallback(account_id)).ok()?;
-    unb64(t.trim()).and_then(|b| Vault::from_bytes(&b))
+    get_secret(&format!("settings-key:{account_id}"), &format!("settings_key_{account_id}")).and_then(|t| unb64(&t)).and_then(|b| Vault::from_bytes(&b))
 }
 
 fn forget_vault(account_id: &str) {
-    if let Some(s) = secret_store() {
-        s.delete(&format!("settings-key:{account_id}"));
-    }
-    #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &format!("settings-key:{account_id}")) {
-        let _ = e.delete_credential();
-    }
-    let _ = std::fs::remove_file(vault_fallback(account_id));
+    forget_secret(&format!("settings-key:{account_id}"), &format!("settings_key_{account_id}"));
 }
 
-async fn derive_vault(password: String, account_id: String) -> Result<Vault> {
-    tokio::task::spawn_blocking(move || Vault::derive(&password, &account_id)).await.map_err(|e| anyhow!("key derivation: {e}"))?
+/// The account's data keys on this device: the current one first, then
+/// older ones (they still open items from before a key change).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeyBox {
+    pub keys: Vec<crate::e2e::DataKey>,
+}
+
+impl KeyBox {
+    pub fn current(&self) -> Option<&crate::e2e::DataKey> {
+        self.keys.first()
+    }
+
+    /// Makes `k` current; the old current key stays for reading.
+    pub fn adopt(&mut self, k: crate::e2e::DataKey) {
+        self.keys.retain(|x| *x != k);
+        self.keys.insert(0, k);
+        self.keys.truncate(4);
+    }
+}
+
+fn load_keys(account_id: &str) -> KeyBox {
+    let keys = get_secret(&format!("data-key:{account_id}"), &format!("data_key_{account_id}"))
+        .map(|t| t.split(',').filter_map(crate::e2e::DataKey::from_b64).collect())
+        .unwrap_or_default();
+    KeyBox { keys }
+}
+
+fn save_keys(account_id: &str, b: &KeyBox) {
+    let text: Vec<String> = b.keys.iter().map(|k| k.to_b64()).collect();
+    put_secret(&format!("data-key:{account_id}"), &format!("data_key_{account_id}"), &text.join(","));
+}
+
+fn device_key(account_id: &str) -> crate::e2e::DeviceKey {
+    let (name, file) = (format!("device-key:{account_id}"), format!("device_key_{account_id}"));
+    if let Some(k) = get_secret(&name, &file).and_then(|t| crate::e2e::DeviceKey::from_b64(&t)) {
+        return k;
+    }
+    let k = crate::e2e::DeviceKey::generate();
+    put_secret(&name, &file, &k.to_b64());
+    k
+}
+
+/// The password key; `fresh` after a password change here, until the data
+/// key is wrapped with it (kept with the key, so no sync round can lose it).
+fn put_pw_key(account_id: &str, key: &[u8; 32], fresh: bool) {
+    let text = if fresh { format!("new:{}", b64(key)) } else { b64(key) };
+    put_secret(&format!("vault-key:{account_id}"), &format!("vault_key_{account_id}"), &text);
+}
+
+fn get_pw_key(account_id: &str) -> Option<([u8; 32], bool)> {
+    let t = get_secret(&format!("vault-key:{account_id}"), &format!("vault_key_{account_id}"))?;
+    let (fresh, t) = match t.strip_prefix("new:") {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, t),
+    };
+    unb64(&t).and_then(|b| b.try_into().ok()).map(|k| (k, fresh))
+}
+
+/// Forget every key of an account on this device (sign-out, deletion).
+fn forget_account_keys(account_id: &str) {
+    forget_vault(account_id);
+    forget_secret(&format!("data-key:{account_id}"), &format!("data_key_{account_id}"));
+    forget_secret(&format!("device-key:{account_id}"), &format!("device_key_{account_id}"));
+    forget_secret(&format!("vault-key:{account_id}"), &format!("vault_key_{account_id}"));
+}
+
+/// The new device's half of a pairing that is waiting for the key.
+struct PendingPair {
+    server_code: String,
+    start: crate::e2e::PairStart,
+    since: Instant,
+}
+
+fn pending_pair() -> &'static Mutex<Option<PendingPair>> {
+    static P: OnceLock<Mutex<Option<PendingPair>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
+/// How long a paired device waits for the approving device's key.
+const PAIR_WAIT: Duration = Duration::from_secs(15 * 60);
+
+/// The key that wraps the data key with the password ([`crate::e2e::password_key`]).
+async fn derive_pw_key(password: String, account_id: String) -> Result<[u8; 32]> {
+    tokio::task::spawn_blocking(move || crate::e2e::password_key(&password, &account_id)).await.map_err(|e| anyhow!("key derivation: {e}"))?
+}
+
+/// A sign-in salt from the server, checked: the right length, and after
+/// sign-in (`account_id`) not one that would reveal a data key.
+fn checked_salt(raw: &str) -> Result<Vec<u8>> {
+    unb64(raw).filter(|s| s.len() == password_kdf::SALT_LEN).ok_or_else(|| anyhow!("bad_salt"))
+}
+
+fn check_salt_after_sign_in(server: &str, salt: &[u8], account: &Account) {
+    if crate::e2e::suspicious_sign_in_salt(salt, &account.id) {
+        crate::privacy::record(server, &account.id, true, "salt_attack", "");
+    }
 }
 
 /// Store a fresh session for `server` and make it current.
@@ -255,7 +354,7 @@ fn drop_local_if_current(expected: Option<&Stored>) {
     if expected.is_some_and(|expected| current.as_ref().is_none_or(|live| live.stored != *expected)) { return; }
     if let Some(live) = current.take() {
         forget_refresh(&live.stored.device_id);
-        forget_vault(&live.stored.account.id);
+        forget_account_keys(&live.stored.account.id);
     }
     let _ = std::fs::remove_file(stored_path());
     // Keep the account's sync agreement with its private library cache.
@@ -339,6 +438,272 @@ pub struct SyncRound {
     /// Remote items to apply, in rev order.
     pub items: Vec<SyncItem>,
     pub pushed: usize,
+    /// Waiting for something another device sends soon (a pairing's key, a
+    /// keyring written at the same time): sync again in a few seconds.
+    pub retry_soon: bool,
+}
+
+/// Bumped when this version must read the whole account once.
+const E2E_VERSION: u32 = 1;
+/// How often the profile's playlists are read (they stay readable).
+const PUBLIC_EVERY_MS: u64 = 60 * 60 * 1000;
+
+fn is_official(base: &str) -> bool {
+    base.trim_end_matches('/').eq_ignore_ascii_case(crate::config::DEFAULT_SERVER_URL)
+}
+
+enum PushMode {
+    /// The keyring's key is here: items go out encrypted.
+    Encrypt,
+    /// The account is encrypted but this device lacks the current key (or
+    /// its keyring is not on the server yet): nothing leaves.
+    Hold,
+    /// No keyring yet: as before, until this round creates one.
+    Plain,
+}
+
+fn push_mode(st: &SyncState, keys: &KeyBox) -> PushMode {
+    match (keys.current(), st.e2e.main()) {
+        (Some(k), Some(m)) if m.kid == k.kid() => PushMode::Encrypt,
+        (None, None) => PushMode::Plain,
+        _ => PushMode::Hold,
+    }
+}
+
+/// A new data key: every item goes up again, encrypted with it.
+fn reseal_all(st: &mut SyncState) {
+    let known: Vec<String> = st.known.iter().filter(|(_, h)| h.as_str() != "-").map(|(j, _)| j.clone()).collect();
+    let sealed: Vec<String> = st.e2e.sealed.iter().cloned().collect();
+    st.e2e.reseal.extend(known.into_iter().chain(sealed));
+}
+
+/// Brings this device's data key in line with the account's keyring (see
+/// `e2e`): takes a key that reached it, creates the keyring, keeps the
+/// password copy and this device's entry current, and on the official server
+/// hands the key to new devices. Keyring writes go out right away.
+async fn settle_keys(c: &ServerClient, acc: &Stored, st: &mut SyncState, keys: &mut KeyBox, official: bool, now: u64, round: &mut SyncRound) -> Result<()> {
+    use crate::e2e::{self, DataKey};
+    use crate::e2e_sync::{keyring_item, Choice, Chosen, Main, Source};
+    let id = acc.account.id.as_str();
+    let me = acc.device_id.as_str();
+    let server = c.base_url().to_string();
+    let owned = id.to_string();
+    let (dk, pw) = tokio::task::spawn_blocking(move || (device_key(&owned), get_pw_key(&owned))).await?;
+    let pw_fresh = pw.is_some_and(|(_, fresh)| fresh);
+    let pw_key = pw.map(|(k, _)| k);
+    let before = keys.clone();
+    let mut writes: Vec<SyncItem> = Vec::new();
+
+    // A paired device: the approving device's entry with the key.
+    {
+        let mut g = pending_pair().lock().unwrap();
+        if g.as_ref().is_some_and(|p| p.since.elapsed() > PAIR_WAIT) {
+            *g = None;
+        }
+        let current = st.e2e.main().is_some_and(|m| keys.current().is_some_and(|k| k.kid() == m.kid));
+        let entry = g.as_ref().and_then(|p| {
+            let key = format!("{}{}", e2e::PAIR, p.server_code);
+            st.e2e.keyring.get(&key).filter(|v| p.start.is_for(v)).cloned().map(|v| (key, v))
+        });
+        match (entry, current) {
+            (Some((key, v)), false) => {
+                let p = g.take().expect("checked above");
+                match p.start.finish(&v) {
+                    Ok(Some(k)) => keys.adopt(k),
+                    Ok(None) => {}
+                    Err(_) => crate::privacy::record(&server, id, true, "pair_tampered", ""),
+                }
+                writes.push(keyring_item(&key, None, now));
+            }
+            (Some((key, _)), true) => {
+                *g = None;
+                writes.push(keyring_item(&key, None, now));
+            }
+            (None, false) if g.is_some() => round.retry_soon = true,
+            _ => {}
+        }
+    }
+
+    let choice = Choice { account_id: id, device_id: me, current: keys.current(), pw_key: pw_key.as_ref(), device: &dk, official };
+    match crate::e2e_sync::choose(&st.e2e, &choice) {
+        Chosen::Keep | Chosen::Locked => {}
+        Chosen::Take(k, source) => {
+            if source == Source::Escrow {
+                st.e2e.escrowed.insert(k.kid());
+            }
+            let had = keys.current().is_some();
+            keys.adopt(k);
+            if had {
+                reseal_all(st);
+            }
+        }
+        Chosen::Refused => {
+            crate::privacy::record(&server, id, true, "keyring_replaced", "");
+            if let Some(k) = keys.current() {
+                let pw = pw_key.map(|p| e2e::wrap_with_password(&p, id, k));
+                let escrow = st.e2e.escrowed.contains(&k.kid());
+                writes.push(keyring_item(e2e::MAIN, Some(Main::value(k, pw, escrow)), now));
+            }
+        }
+        Chosen::NoKeyring => {
+            if keys.current().is_some() && st.e2e.keyring_seen {
+                crate::privacy::record(&server, id, true, "keyring_removed", "");
+            }
+            let fresh = keys.current().is_none();
+            let k = keys.current().cloned().unwrap_or_else(DataKey::generate);
+            // Without the password here the server keeps the key, so no
+            // library can be lost; the first device with the password
+            // replaces it with a key the server never sees.
+            let escrow = pw_key.is_none() || st.e2e.escrowed.contains(&k.kid());
+            if escrow {
+                st.e2e.escrowed.insert(k.kid());
+            }
+            let pw = pw_key.map(|p| e2e::wrap_with_password(&p, id, &k));
+            writes.push(keyring_item(e2e::MAIN, Some(Main::value(&k, pw, escrow)), now));
+            if fresh {
+                keys.adopt(k);
+                // Everything on the server so far is readable: replace it.
+                let known: Vec<String> = st.known.iter().filter(|(_, h)| h.as_str() != "-").map(|(j, _)| j.clone()).collect();
+                st.e2e.mark_plain(known);
+            }
+        }
+    }
+
+    let main = writes.iter().rev().find(|w| w.key == e2e::MAIN).and_then(|w| w.value.as_ref()).and_then(Main::parse).or_else(|| st.e2e.main());
+    match (keys.current().cloned(), main) {
+        (Some(k), Some(main)) if main.kid == k.kid() => {
+            let mut k = k;
+            let pw_key = match pw_key {
+                // The password changed on another device: this key is stale
+                // and must never overwrite the current copy.
+                Some(pw) if !pw_fresh && main.pw.as_ref().is_some_and(|v| e2e::unwrap_with_password(&pw, id, &main.kid, v).is_none()) => {
+                    let owned = id.to_string();
+                    tokio::task::spawn_blocking(move || forget_secret(&format!("vault-key:{owned}"), &format!("vault_key_{owned}"))).await?;
+                    None
+                }
+                p => p,
+            };
+            if let Some(pw) = pw_key {
+                let server_knew = main.escrow.is_some() || st.e2e.escrowed.contains(&k.kid());
+                let pw_ok = !pw_fresh && main.pw.is_some();
+                if server_knew {
+                    // The password is here: a new key the server never sees.
+                    let k2 = DataKey::generate();
+                    writes.retain(|w| w.key != e2e::MAIN);
+                    writes.push(keyring_item(e2e::MAIN, Some(Main::value(&k2, Some(e2e::wrap_with_password(&pw, id, &k2)), false)), now));
+                    for (key, v) in &st.e2e.keyring {
+                        let (Some(dev), Some(pk)) = (key.strip_prefix(e2e::DEV), v["pk"].as_str()) else { continue };
+                        if dev == me {
+                            continue;
+                        }
+                        if let Some(env) = e2e::seal_to_device(dev, pk, &k2, me, Some(&k)) {
+                            writes.push(keyring_item(&format!("{}{dev}", e2e::ENV), Some(env), now));
+                        }
+                    }
+                    keys.adopt(k2.clone());
+                    k = k2;
+                    reseal_all(st);
+                    crate::privacy::record(&server, id, false, "key_replaced", "");
+                } else if !pw_ok {
+                    writes.retain(|w| w.key != e2e::MAIN);
+                    writes.push(keyring_item(e2e::MAIN, Some(Main::value(&k, Some(e2e::wrap_with_password(&pw, id, &k)), false)), now));
+                }
+            }
+            // This device's public key, proven with the data key.
+            let mine = format!("{}{me}", e2e::DEV);
+            let entry = serde_json::json!({ "pk": dk.public_b64(), "kid": k.kid(), "mac": k.device_mac(me, &dk.public()) });
+            if st.e2e.keyring.get(&mine) != Some(&entry) {
+                writes.push(keyring_item(&mine, Some(entry), now));
+            }
+            // The official server (trusted with sign-in anyway): new devices
+            // of the account get the key without anything to type.
+            if official {
+                let mut names: Option<Vec<glyph_protocol::Device>> = None;
+                let entries: Vec<(String, serde_json::Value)> = st.e2e.keyring.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+                for (key, v) in entries {
+                    let (Some(dev), Some(pk)) = (key.strip_prefix(e2e::DEV), v["pk"].as_str()) else { continue };
+                    if dev == me {
+                        continue;
+                    }
+                    let proven = unb64(pk).is_some_and(|pk| v["mac"].as_str() == Some(k.device_mac(dev, &pk).as_str()) && v["kid"].as_str() == Some(k.kid().as_str()));
+                    let env_key = format!("{}{dev}", e2e::ENV);
+                    let has_env = st.e2e.keyring.get(&env_key).is_some_and(|e| e["kid"].as_str() == Some(k.kid().as_str())) || writes.iter().any(|w| w.key == env_key);
+                    if proven || has_env {
+                        continue;
+                    }
+                    let Some(env) = e2e::seal_to_device(dev, pk, &k, me, None) else { continue };
+                    writes.push(keyring_item(&env_key, Some(env), now));
+                    if names.is_none() {
+                        names = Some(with_auth(c, |t| {
+                            let c = c.clone();
+                            async move { c.devices(&t).await }
+                        }).await.map(|d| d.devices).unwrap_or_default());
+                    }
+                    let name = names.iter().flatten().find(|d| d.id == dev).map(|d| d.name.clone()).unwrap_or_else(|| dev.chars().take(8).collect());
+                    crate::privacy::record(&server, id, false, "key_shared", &name);
+                }
+            }
+        }
+        _ => {
+            // No key here yet: publish this device's public key, so a device
+            // with the key can seal it to this one.
+            let mine = format!("{}{me}", e2e::DEV);
+            if st.e2e.keyring.get(&mine).and_then(|v| v["pk"].as_str()) != Some(dk.public_b64().as_str()) {
+                writes.push(keyring_item(&mine, Some(serde_json::json!({ "pk": dk.public_b64() })), now));
+            }
+        }
+    }
+
+    if !writes.is_empty() {
+        let rewrapped = writes.iter().any(|w| w.key == e2e::MAIN && w.value.as_ref().is_some_and(|v| v.get("pw").is_some()));
+        let r = with_auth(c, |t| {
+            let (c, items, acc) = (c.clone(), writes.clone(), acc.clone());
+            async move { require_session(&acc)?; c.sync_push(&t, items).await }
+        })
+        .await?;
+        let stale: std::collections::BTreeSet<String> = r.stale.iter().filter(|i| i.kind == glyph_protocol::sync_kind::KEYRING).map(|i| i.key.clone()).collect();
+        if let (true, false, Some(pw)) = (rewrapped && pw_fresh, stale.contains(e2e::MAIN), pw_key) {
+            let owned = id.to_string();
+            tokio::task::spawn_blocking(move || put_pw_key(&owned, &pw, false)).await?;
+        }
+        let done: Vec<SyncItem> = writes.into_iter().filter(|w| !stale.contains(&w.key)).collect();
+        st.e2e.absorb_keyring(&done);
+        st.e2e.absorb_keyring(&r.stale);
+        if stale.contains(e2e::MAIN) {
+            // Another device wrote the keyring at the same moment: decide again.
+            *keys = before.clone();
+            round.retry_soon = true;
+        }
+    }
+    if *keys != before {
+        let (owned, b) = (id.to_string(), keys.clone());
+        tokio::task::spawn_blocking(move || save_keys(&owned, &b)).await?;
+    }
+    Ok(())
+}
+
+/// The approving device's half of a pairing: the data key for the device
+/// that showed the code (see `e2e::pair_answer`).
+async fn hand_over_key(c: &ServerClient, acc: &Stored, server_code: &str, secret: &str, their_msg: &str) -> Result<()> {
+    let owned = acc.account.id.clone();
+    let keys = tokio::task::spawn_blocking(move || load_keys(&owned)).await?;
+    let k = keys.current().cloned().ok_or_else(|| anyhow!("no data key on this device"))?;
+    let main_kid = {
+        let mut g = sync_state().lock().unwrap();
+        g.get_or_insert_with(|| SyncState::load(&acc.account.id)).e2e.main().map(|m| m.kid)
+    };
+    if main_kid.as_deref() != Some(k.kid().as_str()) {
+        return Err(anyhow!("this device does not have the current data key"));
+    }
+    let v = crate::e2e::pair_answer(secret, their_msg, &k).ok_or_else(|| anyhow!("bad pairing message"))?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let item = crate::e2e_sync::keyring_item(&format!("{}{server_code}", crate::e2e::PAIR), Some(v), now);
+    with_auth(c, |t| {
+        let (c, item) = (c.clone(), item.clone());
+        async move { c.sync_push(&t, vec![item]).await }
+    })
+    .await?;
+    Ok(())
 }
 
 /// Is this an error that means "this device is no longer signed in"?
@@ -576,9 +941,22 @@ impl Backend {
         self.spawn(async move { c.health().await.map(|h| h.accounts || h.supports(glyph_protocol::capability::ACCOUNTS)).unwrap_or(false) }).await.unwrap_or(false)
     }
 
+    /// Starts a sign-in (browser page or pairing code). Where the server
+    /// relays pairing messages, the code gets a part only this device knows:
+    /// the approving device uses it to hand over the library's key.
     pub async fn account_login_start(&self) -> Result<LoginStartResponse> {
         let c = self.account_client()?;
-        self.spawn(async move { c.login_start(&device_name(), platform()).await }).await?
+        self.spawn(async move {
+            let pair = c.health().await.is_ok_and(|h| h.supports(glyph_protocol::capability::PAIR_KEYS)).then(crate::e2e::PairStart::new);
+            let mut r = c.login_start(&device_name(), platform(), pair.as_ref().map(|p| p.msg.clone())).await?;
+            if let Some(p) = pair {
+                let server_code = r.user_code.clone();
+                r.user_code = format!("{server_code}-{}", p.secret);
+                *pending_pair().lock().unwrap() = Some(PendingPair { server_code, start: p, since: Instant::now() });
+            }
+            Ok(r)
+        })
+        .await?
     }
 
     /// One poll; on success the session is stored and the tokens are not returned.
@@ -614,7 +992,7 @@ impl Backend {
             drop_local();
             adopt(c.base_url(), &r.session);
             let id = r.session.account.id.clone();
-            put_vault(&id, &derive_vault(password, id.clone()).await?);
+            put_pw_key(&id, &derive_pw_key(password, id.clone()).await?, false);
             Ok(r.recovery_code)
         })
         .await?
@@ -625,17 +1003,18 @@ impl Backend {
         let (c, handle, password) = (self.account_client()?, handle.to_string(), password.to_string());
         self.spawn(async move {
             let salt = match c.password_salt(&handle).await {
-                Ok(s) => unb64(&s.salt).ok_or_else(|| anyhow!("bad salt"))?,
+                Ok(s) => checked_salt(&s.salt).inspect_err(|_| crate::privacy::record(c.base_url(), "", true, "bad_salt", ""))?,
                 // Same answer as a wrong password: do not tell which part was wrong.
                 Err(e) if matches!(server_error(&e), Some((404, _))) => return Err(anyhow!("login_failed")),
                 Err(e) => return Err(e),
             };
-            let key = derive_async(password.clone(), salt).await?;
+            let key = derive_async(password.clone(), salt.clone()).await?;
             let body = PasswordLoginRequest { handle, key: b64(&key), device_name: device_name(), platform: platform().into() };
             let s = c.password_login(&body).await?;
             drop_local();
             adopt(c.base_url(), &s);
-            put_vault(&s.account.id, &derive_vault(password, s.account.id.clone()).await?);
+            check_salt_after_sign_in(c.base_url(), &salt, &s.account);
+            put_pw_key(&s.account.id, &derive_pw_key(password, s.account.id.clone()).await?, false);
             Ok(s.account)
         })
         .await?
@@ -660,9 +1039,9 @@ impl Backend {
                 live.stored.account = a.clone();
                 let _ = paths::write_json(&stored_path(), &live.stored);
             }
-            // New password, new settings key: the keys are re-encrypted with
-            // it on the next sync; other devices ask for the new password.
-            put_vault(&a.id, &derive_vault(password, a.id.clone()).await?);
+            // The next sync wraps the library's key with the new password
+            // (and replaces a key the server kept while there was none).
+            put_pw_key(&a.id, &derive_pw_key(password, a.id.clone()).await?, true);
             Ok(a)
         })
         .await?
@@ -744,15 +1123,24 @@ impl Backend {
         .await?
     }
 
-    /// Approve a pairing code shown on a new device.
+    /// Approve a pairing code shown on a new device. With the code's secret
+    /// part, this device also hands over the library's key (see `e2e`).
     pub async fn account_approve(&self, user_code: &str) -> Result<ApproveResponse> {
+        let acc = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let (c, code) = (self.account_client()?, user_code.to_string());
         self.spawn(async move {
-            with_auth(&c, |t| {
-                let (c, code) = (c.clone(), code.clone());
+            let (server_code, secret) = crate::e2e::split_pair_code(&code).map_or((code.clone(), None), |(s, x)| (s, x));
+            let r = with_auth(&c, |t| {
+                let (c, code) = (c.clone(), server_code.clone());
                 async move { c.approve_login(&t, &code).await }
             })
-            .await
+            .await?;
+            if let (Some(secret), Some(msg)) = (secret, r.pake.clone()) {
+                if let Err(e) = hand_over_key(&c, &acc, &server_code, &secret, &msg).await {
+                    tracing::info!("pairing key handover skipped: {e:#}");
+                }
+            }
+            Ok(r)
         })
         .await?
     }
@@ -827,11 +1215,15 @@ impl Backend {
     /// `settings` are [`settings_sync::items`]; they are only pushed once this
     /// device has pulled the account's settings, so a fresh device does not
     /// overwrite them with its defaults.
+    ///
+    /// Items go out end-to-end encrypted ([`crate::e2e_sync`]) once the
+    /// account has a keyring; until this device has the key nothing leaves it.
     pub async fn sync_exchange(&self, snap: Snapshot, settings: Vec<(Key, serde_json::Value)>) -> Result<SyncRound> {
         let acc = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let c = self.account_client()?;
         self.spawn(async move {
             require_session(&acc)?;
+            let official = is_official(c.base_url());
             let mut snap = snap;
             let mut st = {
                 let mut g = sync_state().lock().unwrap();
@@ -848,6 +1240,15 @@ impl Backend {
             let mut round = SyncRound::default();
             round.owner = Some(acc.clone());
             round.bootstrap = !st.pulled_once;
+            // Read the whole account once with this version: older versions
+            // skipped keyring entries they did not know.
+            if st.e2e.version < E2E_VERSION {
+                st.last_rev = 0;
+                st.e2e.version = E2E_VERSION;
+            }
+            let owned = acc.account.id.clone();
+            let mut keys = tokio::task::spawn_blocking(move || load_keys(&owned)).await?;
+            let mut notices = Vec::new();
 
             // Pictures first, so other devices can fetch them once the playlist arrives.
             for (sha, path) in &snap.cover_files {
@@ -876,25 +1277,36 @@ impl Backend {
             // Read the account before uploading guest/default values on a new
             // device. The following round pushes the remaining local additions.
             let changes = if st.pulled_once { st.enqueue(&snap, now) } else { Vec::new() };
+            let wires = match push_mode(&st, &keys) {
+                PushMode::Encrypt => {
+                    let mut items = changes;
+                    items.extend(crate::e2e_sync::repush(&st, &snap, now));
+                    crate::e2e_sync::outgoing(items, &keys.keys, &st.e2e)
+                }
+                PushMode::Hold => Vec::new(),
+                PushMode::Plain => crate::e2e_sync::plain_wires(changes),
+            };
             require_session(&acc)?;
             st.save().context("persist sync outbox before sending")?;
             *sync_state().lock().unwrap() = Some(st.clone());
-            for chunk in sync::chunks(changes, 200, 512 * 1024) {
+            for batch in crate::e2e_sync::batches(wires, 200, 512 * 1024) {
+                let items: Vec<SyncItem> = batch.iter().map(|w| w.item.clone()).collect();
                 let r = with_auth(&c, |t| {
-                    let (c, items, acc) = (c.clone(), chunk.clone(), acc.clone());
+                    let (c, items, acc) = (c.clone(), items.clone(), acc.clone());
                     async move { require_session(&acc)?; c.sync_push(&t, items).await }
                 })
                 .await?;
                 round.pushed += r.accepted as usize;
                 let stale: std::collections::BTreeSet<(String, String)> = r.stale.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
-                let accepted: Vec<SyncItem> = chunk.into_iter().filter(|i| !stale.contains(&(i.kind.clone(), i.key.clone()))).collect();
-                st.mark_pushed(&accepted);
+                let accepted: Vec<_> = batch.into_iter().filter(|w| !stale.contains(&(w.item.kind.clone(), w.item.key.clone()))).collect();
+                crate::e2e_sync::accepted(&mut st, &accepted);
+                round.items.extend(crate::e2e_sync::incoming(r.stale, &keys.keys, &mut st, &mut notices));
                 require_session(&acc)?;
                 st.save().context("persist sync acknowledgement")?;
                 *sync_state().lock().unwrap() = Some(st.clone());
-                round.items.extend(r.stale);
             }
 
+            let mut pulled = Vec::new();
             loop {
                 let since = st.last_rev;
                 let r = with_auth(&c, |t| {
@@ -905,15 +1317,42 @@ impl Backend {
                 if r.reset {
                     // The server forgot old deletions: agree on everything again.
                     st.reset();
+                    pulled.clear();
                     continue;
                 }
-                round.items.extend(r.items);
+                pulled.extend(r.items);
                 st.last_rev = r.rev;
                 if !r.more {
                     break;
                 }
             }
             st.pulled_once = true;
+            st.e2e.absorb_keyring(&pulled);
+
+            // Playlists on the profile stay readable for the server (it shows them).
+            if now.saturating_sub(st.e2e.public_checked) > PUBLIC_EVERY_MS {
+                match with_auth(&c, |t| {
+                    let c = c.clone();
+                    async move { c.profile_settings(&t).await }
+                })
+                .await
+                {
+                    Ok(p) => {
+                        st.e2e.public = p.playlists.into_iter().collect();
+                        st.e2e.public_checked = now;
+                    }
+                    Err(e) if is_signed_out(&e) => return Err(e),
+                    Err(e) => tracing::info!("profile playlists: {e:#}"),
+                }
+            }
+
+            settle_keys(&c, &acc, &mut st, &mut keys, official, now, &mut round).await?;
+            let mut items = if keys.current().is_some() { crate::e2e_sync::take_locked(&mut st) } else { Vec::new() };
+            items.extend(pulled);
+            round.items.extend(crate::e2e_sync::incoming(items, &keys.keys, &mut st, &mut notices));
+            if notices.contains(&crate::e2e_sync::Notice::Tampered) {
+                crate::privacy::record(c.base_url(), &acc.account.id, true, "tampered", "");
+            }
 
             // Pictures of playlists from other devices.
             let _ = std::fs::create_dir_all(sync::synced_covers_dir());
@@ -945,29 +1384,65 @@ impl Backend {
         .await?
     }
 
-    /// Key for the encrypted API keys, if this device has one.
-    pub fn settings_vault(&self) -> Option<Vault> {
-        get_vault(&self.account()?.account.id)
+    /// The profile's playlists changed: they go readable (or encrypted
+    /// again) with the next sync round.
+    pub fn sync_profile_playlists(&self, ids: &[String]) {
+        let Some(acc) = self.account() else { return };
+        let mut g = sync_state().lock().unwrap();
+        let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
+        st.e2e.public = ids.iter().cloned().collect();
+        st.e2e.public_checked = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let _ = st.save();
     }
 
-    /// Encrypted keys arrived that this device cannot open yet.
-    pub fn settings_locked(&self) -> bool {
+    /// Playlists are shown on the profile (they stay readable for the server).
+    pub fn profile_shows_playlists(&self) -> bool {
         let Some(acc) = self.account() else { return false };
         let mut g = sync_state().lock().unwrap();
-        g.get_or_insert_with(|| SyncState::load(&acc.account.id)).locked_secret.is_some()
+        !g.get_or_insert_with(|| SyncState::load(&acc.account.id)).e2e.public.is_empty()
+    }
+
+    /// Encryption state of the library on this device (for the transparency page).
+    pub fn library_crypto(&self) -> crate::privacy::Library {
+        let Some(acc) = self.account() else { return crate::privacy::Library::Guest };
+        let keys = load_keys(&acc.account.id);
+        let mut g = sync_state().lock().unwrap();
+        let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
+        match st.e2e.main() {
+            None => crate::privacy::Library::Starting,
+            Some(m) => match keys.current() {
+                Some(k) if k.kid() == m.kid => {
+                    if m.escrow.is_some() || st.e2e.escrowed.contains(&m.kid) { crate::privacy::Library::Escrow } else { crate::privacy::Library::Encrypted }
+                }
+                _ => crate::privacy::Library::Locked,
+            },
+        }
+    }
+
+    /// Key for the synced API keys: from the library's data key, and only
+    /// while the server cannot read that key (the account has a password).
+    pub fn settings_vault(&self) -> Option<Vault> {
+        (self.library_crypto() == crate::privacy::Library::Encrypted).then(|| {
+            let acc = self.account()?;
+            load_keys(&acc.account.id).current().map(|k| k.vault())
+        })?
+    }
+
+    /// The library is end-to-end encrypted and its key has not reached this device yet.
+    pub fn library_locked(&self) -> bool {
+        self.library_crypto() == crate::privacy::Library::Locked
     }
 
     /// Main-thread half for settings: apply remote settings and keys to `cfg`.
     pub fn sync_apply_settings(&self, cfg: &mut Config, round: &SyncRound) -> SettingsApplied {
         let Some(acc) = self.account() else { return SettingsApplied::default() };
         if round.owner.as_ref() != Some(&acc) { return SettingsApplied::default(); }
-        let vault = get_vault(&acc.account.id);
+        let vault = self.settings_vault();
+        // Copies from before the data key, sealed with the old password key.
+        let legacy = get_vault(&acc.account.id);
         let mut g = sync_state().lock().unwrap();
         let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
-        let r = settings_sync::apply(cfg, st, &round.items, vault.as_ref());
-        if r.vault_outdated {
-            forget_vault(&acc.account.id);
-        }
+        let r = settings_sync::apply(cfg, st, &round.items, vault.as_ref(), legacy.as_ref());
         if let Err(e) = st.save() {
             tracing::warn!("sync state: {e}");
         }
@@ -975,17 +1450,18 @@ impl Backend {
     }
 
     /// The account password on a device signed in without it: checks it with
-    /// the server, keeps the settings key and returns it so the caller can
-    /// open keys that are waiting ([`Backend::sync_unlock_settings`]).
+    /// the server and keeps the key that opens the library's data key; the
+    /// next sync round uses it (and replaces a key the server kept).
     pub async fn account_unlock_keys(&self, password: &str) -> Result<()> {
         let acc = self.account().ok_or_else(|| anyhow!(SIGNED_OUT))?;
         let (c, password) = (self.account_client()?, password.to_string());
         self.spawn(async move {
             let salt = match c.password_salt(&acc.account.handle).await {
-                Ok(s) => unb64(&s.salt).ok_or_else(|| anyhow!("bad salt"))?,
+                Ok(s) => checked_salt(&s.salt).inspect_err(|_| crate::privacy::record(c.base_url(), &acc.account.id, true, "bad_salt", ""))?,
                 Err(e) if matches!(server_error(&e), Some((404, _))) => return Err(anyhow!("no_password")),
                 Err(e) => return Err(e),
             };
+            check_salt_after_sign_in(c.base_url(), &salt, &acc.account);
             let key = b64(&derive_async(password.clone(), salt).await?);
             with_auth(&c, |t| {
                 let (c, k) = (c.clone(), key.clone());
@@ -993,29 +1469,10 @@ impl Backend {
             })
             .await
             .map_err(|e| if matches!(server_error(&e), Some((403, _))) { anyhow!("wrong_password") } else { e })?;
-            put_vault(&acc.account.id, &derive_vault(password, acc.account.id.clone()).await?);
+            put_pw_key(&acc.account.id, &derive_pw_key(password, acc.account.id.clone()).await?, false);
             Ok(())
         })
         .await?
-    }
-
-    /// After [`Backend::account_unlock_keys`]: open keys that arrived while
-    /// locked. `true` when `cfg` got new keys.
-    pub fn sync_unlock_settings(&self, cfg: &mut Config) -> bool {
-        let Some(acc) = self.account() else { return false };
-        let Some(vault) = get_vault(&acc.account.id) else { return false };
-        let mut g = sync_state().lock().unwrap();
-        let st = g.get_or_insert_with(|| SyncState::load(&acc.account.id));
-        let opened = match settings_sync::unlock(cfg, st, &vault) {
-            Ok(o) => o,
-            Err(_) => {
-                // Older blob from before a password change: the next pull brings the current one.
-                st.locked_secret = None;
-                false
-            }
-        };
-        let _ = st.save();
-        opened
     }
 
     /// Main-thread half of a sync round: apply remote items to the library.
@@ -1214,15 +1671,20 @@ impl Backend {
     }
 
     pub async fn profile_settings(&self) -> Result<ProfileSettings> {
-        self.profile_call(|c, t| async move { c.profile_settings(&t).await }).await
+        let p = self.profile_call(|c, t| async move { c.profile_settings(&t).await }).await?;
+        self.sync_profile_playlists(&p.playlists);
+        Ok(p)
     }
 
     pub async fn profile_update(&self, patch: ProfilePatch) -> Result<ProfileSettings> {
-        self.profile_call(move |c, t| {
-            let p = patch.clone();
-            async move { c.profile_patch(&t, &p).await }
-        })
-        .await
+        let p = self
+            .profile_call(move |c, t| {
+                let p = patch.clone();
+                async move { c.profile_patch(&t, &p).await }
+            })
+            .await?;
+        self.sync_profile_playlists(&p.playlists);
+        Ok(p)
     }
 
     /// Sets (or with `None` removes) the picture or the banner.

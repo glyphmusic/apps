@@ -141,7 +141,7 @@ impl Imported {
                 rev: 0,
             })
             .collect();
-        let mut r = settings_sync::apply(cfg, &mut SyncState::default(), &items, None);
+        let mut r = settings_sync::apply(cfg, &mut SyncState::default(), &items, None, None);
         r.changed |= cfg.audio.eq_user_presets != before;
         r
     }

@@ -40,6 +40,9 @@ pub(super) fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         .iter()
         .map(|(name, input)| row(t(&format!("settings.keys.{name}")), None, input_box(input.clone())))
         .collect();
+    if app.settings_sub == 2 {
+        return privacy(app, cx);
+    }
     if app.settings_sub == 1 {
         return div()
             .flex()
@@ -55,6 +58,79 @@ pub(super) fn server(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             .child(rows(keys));
     }
     rows(items)
+}
+
+/// Server > Transparency: what this server can see, from this app's own
+/// behaviour (never from what the server says), and what it noticed.
+fn privacy(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    use glyph_core::privacy::{report, Inputs, Level};
+    if app.account.privacy_at.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(3)) {
+        app.refresh_privacy();
+    }
+    let official = app.config.effective_server_url().trim_end_matches('/').eq_ignore_ascii_case(glyph_core::config::DEFAULT_SERVER_URL);
+    let library = if app.signed_in().is_none() { glyph_core::privacy::Library::Guest } else { app.account.crypto.unwrap_or(glyph_core::privacy::Library::Starting) };
+    let mcp_relay = app.config.mcp.enabled && app.config.mcp.mode == glyph_core::config::McpMode::Server && app.signed_in().is_some();
+    let has_password = app.signed_in().is_some_and(|a| a.account.has_password);
+    let lines = report(&Inputs { official, library, profile_playlists: app.account.public_playlists, mcp_relay });
+    let rows_: Vec<AnyElement> = lines
+        .into_iter()
+        .map(|l| {
+            let color = match l.level {
+                Level::Encrypted | Level::Local => theme::ok(),
+                Level::ServerCanDecrypt => theme::warn(),
+                Level::ServerSees | Level::Public => white(0.6),
+            };
+            // A password account still in escrow only needs the password once.
+            let note = match l.note {
+                Some("no_password") if has_password => Some("enter_password"),
+                n => n,
+            };
+            row(
+                t(&format!("privacy.area.{}", l.area)),
+                note.map(|n| t(&format!("privacy.note.{n}"))),
+                div().text_size(px(13.0)).text_color(color).child(t(&format!("privacy.level.{}", l.level.name()))),
+            )
+        })
+        .collect();
+    let events: Vec<AnyElement> = if app.account.privacy_events.is_empty() {
+        vec![div().px(px(2.0)).py(px(8.0)).text_size(px(12.5)).text_color(white(0.5)).child(t("privacy.events.none")).into_any_element()]
+    } else {
+        app.account
+            .privacy_events
+            .iter()
+            .take(20)
+            .map(|e| {
+                let when = crate::ui::account::when_ms(e.at);
+                row_status(
+                    crate::ui::account::event_text(e),
+                    Some(when.into()),
+                    div().text_size(px(12.5)).text_color(if e.alarm { theme::warn() } else { white(0.5) }).child(if e.alarm { t("privacy.alarm") } else { t("privacy.info") }),
+                )
+            })
+            .collect()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(section_label(t("privacy.title")))
+        .child(div().px(px(2.0)).pb(px(8.0)).text_size(px(12.5)).text_color(white(0.55)).child(t("privacy.lead")))
+        .child(rows(rows_))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(section_label(t("privacy.events")))
+                .child(div().flex_1())
+                .when(!app.account.privacy_events.is_empty(), |d| {
+                    d.child(div().pt(px(16.0)).child(button("privacy-clear", t("privacy.events.clear")).on_click(cx.listener(|this, _, _, cx| {
+                        glyph_core::privacy::clear(this.config.effective_server_url());
+                        this.refresh_privacy();
+                        cx.notify();
+                    }))))
+                }),
+        )
+        .child(rows(events))
 }
 
 /// Integrations: services on this computer that Glyph can talk to.

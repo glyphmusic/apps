@@ -776,8 +776,8 @@ impl ServerClient {
         Ok(Self::check(rb.send().await?).await?.json().await?)
     }
 
-    pub async fn login_start(&self, device_name: &str, platform: &str) -> Result<LoginStartResponse> {
-        let body = LoginStartRequest { device_name: device_name.into(), platform: platform.into() };
+    pub async fn login_start(&self, device_name: &str, platform: &str, pake: Option<String>) -> Result<LoginStartResponse> {
+        let body = LoginStartRequest { device_name: device_name.into(), platform: platform.into(), pake };
         Self::json_of(self.post("/v1/account/login/start").json(&body)).await
     }
 

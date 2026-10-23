@@ -271,13 +271,12 @@ pub struct SyncState {
     /// Cover hashes already on the server.
     #[serde(default)]
     pub uploaded_covers: BTreeSet<String>,
-    /// Encrypted API keys from another device this one cannot open yet (no
-    /// or an outdated password key); opened by `account_unlock_keys`.
-    #[serde(default)]
-    pub locked_secret: Option<Value>,
     /// A full pull finished once; only then are local settings pushed.
     #[serde(default)]
     pub pulled_once: bool,
+    /// End-to-end encryption: keyring, forms of the items on the server.
+    #[serde(default)]
+    pub e2e: crate::e2e_sync::E2eState,
 }
 
 fn joined(key: &Key) -> String {
@@ -413,6 +412,15 @@ impl SyncState {
         self.known_playlists.clear();
         self.known_playlist_revs.clear();
         self.uploaded_covers.clear();
+        // The full pull tells again which form every item has on the server.
+        let e = &mut self.e2e;
+        e.keyring.clear();
+        e.locked.clear();
+        e.plain.clear();
+        e.sealed.clear();
+        e.reseal.clear();
+        e.plain_revs.clear();
+        e.sealed_revs.clear();
     }
 }
 

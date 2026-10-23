@@ -32,7 +32,7 @@ pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
         SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources"],
         SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
         SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
-        SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
+        SettingsPage::Server => &["sp.sub.connection", "settings.keys", "privacy.tab"],
         // Installed, Browse, then one tab per plugin with its own page.
         SettingsPage::Plugins => super::plugin_ui::plugin_tabs(),
         SettingsPage::About => &["sp.sub.version", "sp.support", "sp.sub.shortcuts"],
@@ -44,6 +44,7 @@ pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
 /// key (the row's label, so the row can light up), extra search words.
 pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Playback, 0, "sp.audio.quality", "streaming quality qualität bitrate"),
+    (SettingsPage::Server, 2, "privacy.title", "privacy datenschutz transparency transparenz encryption verschlüsselung e2e end-to-end ende-zu-ende server sees sieht"),
     (SettingsPage::Playback, 0, "sp.audio.dl_quality", "download quality qualität flac"),
     (SettingsPage::Playback, 0, "sp.crossfade", "crossfade überblenden fade"),
     (SettingsPage::Playback, 0, "sp.output", "output ausgabe device gerät speaker lautsprecher headphones kopfhörer"),
@@ -74,7 +75,7 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Appearance, 0, "sp.appearance.ascii_fx", "ascii animation reveal einblenden skeleton laden loading shimmer"),
     (SettingsPage::Appearance, 0, "sp.appearance.throttle", "fps frame rate bildrate background hintergrund akku battery power energie"),
     (SettingsPage::Account, 0, "account.handle", "handle name rename umbenennen"),
-    (SettingsPage::Account, 0, "account.keys", "sync api keys schlüssel"),
+    (SettingsPage::Account, 0, "account.library", "sync api keys schlüssel encryption verschlüsselung e2e library bibliothek"),
     (SettingsPage::Account, 0, "account.limit", "device limit gerätelimit"),
     (SettingsPage::Account, 1, "account.pair", "pair koppeln code device gerät add hinzufügen"),
     (SettingsPage::Account, 2, "account.password.change", "password passwort"),

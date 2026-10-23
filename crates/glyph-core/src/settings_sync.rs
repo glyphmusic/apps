@@ -6,16 +6,15 @@
 //! downloads, cache size), output device, volume and the mini player's
 //! window (always-on-top, size); its style (bar or card) syncs.
 //!
-//! API keys sync as one `secret` item, encrypted on the device with
-//! XChaCha20-Poly1305. The key ([`Vault`]) is `Argon2id(password, salt)` with a
-//! salt derived from the account id, so every device that knows the account
-//! password derives the same key and the server only ever stores ciphertext.
-//! Devices signed in without the password (passkey, pairing code, browser)
-//! keep the item locked until the password is entered once.
+//! API keys sync as one `secret` item, sealed with XChaCha20-Poly1305 under a
+//! [`Vault`] derived from the library's data key (`e2e::DataKey::vault`), and
+//! like every item end-to-end encrypted on top. They only sync while the
+//! server cannot read the data key, i.e. on accounts with a password. Copies
+//! from older versions were sealed with a password-derived key; a device that
+//! still has that key opens them once and pushes them in the new form.
 
 use crate::config::{ApiKeys, AudioQuality, Config, IntegrationsConfig, UpdatesConfig, VisualsConfig, VolumeLevel};
 use crate::sync::{Key, SyncState};
-use anyhow::{anyhow, Result};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use glyph_protocol::{sync_kind as kind, ProviderId, SyncItem};
@@ -84,16 +83,6 @@ impl std::fmt::Debug for Vault {
 }
 
 impl Vault {
-    /// Same password + account on every device -> same key. Separate from the
-    /// sign-in key (different salt), so the server cannot derive it.
-    pub fn derive(password: &str, account_id: &str) -> Result<Self> {
-        let salt = Sha256::digest(format!("glyph-settings-v1:{account_id}").as_bytes());
-        let k = crate::account::derive_key(password, &salt[..16])?;
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&k[..32]);
-        Ok(Self(out))
-    }
-
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         <[u8; 32]>::try_from(b).ok().map(Self)
     }
@@ -200,14 +189,14 @@ pub struct SettingsApplied {
     pub changed: bool,
     /// Keys or sources changed: providers need rebuilding.
     pub providers_changed: bool,
-    /// Encrypted keys arrived that this device cannot open (ask for the password).
+    /// Keys arrived that no key on this device opens (left alone).
     pub locked: bool,
-    /// The stored vault no longer opens the keys (password changed elsewhere): drop it.
-    pub vault_outdated: bool,
 }
 
-/// Apply remote `setting` / `secret` items to `cfg` and record the result as agreed.
-pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vault: Option<&Vault>) -> SettingsApplied {
+/// Apply remote `setting` / `secret` items to `cfg` and record the result as
+/// agreed. `legacy` opens keys sealed by older versions; those are not
+/// agreed, so the next push replaces them with the current form.
+pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vault: Option<&Vault>, legacy: Option<&Vault>) -> SettingsApplied {
     let before = cfg.clone();
     let mut out = SettingsApplied::default();
     let mut touched: Vec<Key> = Vec::new();
@@ -280,21 +269,19 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
                 }
             }
             (kind::SECRET, API_KEYS) => {
-                let opened = vault.and_then(|k| k.open(v)).and_then(|p| serde_json::from_slice::<ApiKeys>(&p).ok());
-                match opened {
-                    Some(keys) => {
-                        cfg.set_persisted_keys(keys);
-                        state.locked_secret = None;
+                let open = |k: Option<&Vault>| k.and_then(|k| k.open(v)).and_then(|p| serde_json::from_slice::<ApiKeys>(&p).ok());
+                if let Some(keys) = open(vault) {
+                    cfg.set_persisted_keys(keys);
+                } else {
+                    // Not agreed either way: an old copy is pushed again in
+                    // the current form; one nothing here opens is neither
+                    // overwritten nor deleted by this device.
+                    match open(legacy) {
+                        Some(keys) => cfg.set_persisted_keys(keys),
+                        None => out.locked = true,
                     }
-                    None => {
-                        out.vault_outdated = vault.is_some();
-                        out.locked = true;
-                        state.locked_secret = Some(v.clone());
-                        // Not agreed: this device must neither push its own
-                        // keys over these nor delete them.
-                        state.forget(&key);
-                        continue;
-                    }
+                    state.forget(&key);
+                    continue;
                 }
             }
             // Sections from newer app versions are left alone.
@@ -302,7 +289,7 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
         }
         touched.push(key);
     }
-    let after = items(cfg, if out.vault_outdated { None } else { vault });
+    let after = items(cfg, vault);
     for key in touched {
         let v = after.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
         state.agree(&key, v);
@@ -317,19 +304,8 @@ pub fn restore_local_preferences(cfg: &mut Config, source: &Config) {
     let wire: Vec<_> = items(source, None).into_iter().map(|((kind, key), value)| SyncItem {
         kind, key, value: Some(value), updated_at: 0, deleted: false, rev: 0,
     }).collect();
-    apply(cfg, &mut SyncState::default(), &wire, None);
+    apply(cfg, &mut SyncState::default(), &wire, None, None);
     cfg.set_persisted_keys(source.persisted_keys());
-}
-
-/// Open keys that arrived while this device had no (current) vault.
-pub fn unlock(cfg: &mut Config, state: &mut SyncState, vault: &Vault) -> Result<bool> {
-    let Some(v) = state.locked_secret.clone() else { return Ok(false) };
-    let plain = vault.open(&v).ok_or_else(|| anyhow!("wrong_password"))?;
-    let keys: ApiKeys = serde_json::from_slice(&plain).map_err(|_| anyhow!("wrong_password"))?;
-    cfg.set_persisted_keys(keys);
-    state.locked_secret = None;
-    state.agree(&secret_key(), Some(&v));
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -361,7 +337,7 @@ mod tests {
         b.player.volume = 0.9;
         let mut st = SyncState::default();
         let remote: Vec<SyncItem> = items(&a, None).iter().map(|(k, v)| item(k, v.clone())).collect();
-        let r = apply(&mut b, &mut st, &remote, None);
+        let r = apply(&mut b, &mut st, &remote, None, None);
         assert!(r.changed && !r.locked);
         assert_eq!((b.language.as_str(), b.audio.eq_enabled, b.player.shuffle), ("de", true, true));
         // Device-bound values are untouched.
@@ -390,42 +366,33 @@ mod tests {
         // Right vault: keys arrive.
         let mut b = Config::default();
         let mut st = SyncState::default();
-        let r = apply(&mut b, &mut st, &[item(&secret_key(), blob.clone())], Some(&vault(1)));
+        let r = apply(&mut b, &mut st, &[item(&secret_key(), blob.clone())], Some(&vault(1)), None);
         assert!(r.providers_changed && !r.locked);
         assert_eq!(b.keys.lastfm.as_deref(), Some("lastfm-secret"));
 
-        // No vault: locked, nothing pushed or deleted, unlock later.
+        // No vault: left alone, nothing pushed or deleted.
         let mut c = Config::default();
         let mut st = SyncState::default();
-        let r = apply(&mut c, &mut st, &[item(&secret_key(), blob.clone())], None);
-        assert!(r.locked && !r.vault_outdated && c.keys.lastfm.is_none());
+        let r = apply(&mut c, &mut st, &[item(&secret_key(), blob.clone())], None, None);
+        assert!(r.locked && c.keys.lastfm.is_none());
         let snap = crate::sync::Snapshot { items: items(&c, None), ..Default::default() };
         assert!(st.changes(&snap, 2).iter().all(|i| i.kind != kind::SECRET));
-        assert!(unlock(&mut c, &mut st, &vault(2)).is_err());
-        assert!(unlock(&mut c, &mut st, &vault(1)).unwrap());
-        assert_eq!(c.keys.lastfm.as_deref(), Some("lastfm-secret"));
 
-        // Outdated vault (password changed elsewhere).
+        // An old copy opens with the old key and goes up again in the new form.
         let mut d = Config::default();
-        let r = apply(&mut d, &mut SyncState::default(), &[item(&secret_key(), blob.clone())], Some(&vault(3)));
-        assert!(r.locked && r.vault_outdated);
-    }
-
-    #[test]
-    fn vault_depends_on_password_and_account() {
-        let a = Vault::derive("correct horse battery", "u_1").unwrap();
-        assert_eq!(a, Vault::derive("correct horse battery", "u_1").unwrap());
-        assert_ne!(a, Vault::derive("correct horse battery", "u_2").unwrap());
-        assert_ne!(a, Vault::derive("correct horse batterz", "u_1").unwrap());
-        // Never the sign-in key (that one the server sees).
-        assert_ne!(a.bytes(), crate::account::derive_key("correct horse battery", &[1; 16]).unwrap().as_slice());
+        let mut st = SyncState::default();
+        let r = apply(&mut d, &mut st, &[item(&secret_key(), blob.clone())], Some(&vault(3)), Some(&vault(1)));
+        assert!(!r.locked);
+        assert_eq!(d.keys.lastfm.as_deref(), Some("lastfm-secret"));
+        let snap = crate::sync::Snapshot { items: items(&d, Some(&vault(3))), ..Default::default() };
+        assert!(st.changes(&snap, 2).iter().any(|i| i.kind == kind::SECRET));
     }
 
     #[test]
     fn bad_remote_values_are_ignored() {
         let mut c = Config::default();
         let mut st = SyncState::default();
-        let r = apply(&mut c, &mut st, &[item(&setting("audio"), serde_json::json!({"nonsense": 1})), item(&setting("future"), serde_json::json!({}))], None);
+        let r = apply(&mut c, &mut st, &[item(&setting("audio"), serde_json::json!({"nonsense": 1})), item(&setting("future"), serde_json::json!({}))], None, None);
         assert!(!r.changed);
         assert_eq!(c, Config::default());
     }

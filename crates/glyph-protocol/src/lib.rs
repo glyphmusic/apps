@@ -206,6 +206,14 @@ pub mod capability {
     pub const YOUTUBE_ACCOUNT_REQUIRED: &str = "youtube_account_required";
     /// Shared YouTube video ids (`/v1/youtube/hint`).
     pub const YOUTUBE_HINTS: &str = "youtube_hints";
+    /// Pairing codes may carry a part only the two devices know (the server
+    /// takes the first 8 characters) and the server relays
+    /// [`crate::LoginStartRequest::pake`], so the approving device can hand
+    /// over the account's data key without the server learning it.
+    pub const PAIR_KEYS: &str = "pair_keys";
+    /// [`crate::sync_kind::E2E_PLAYLIST`] items get the same revision check
+    /// as plain playlists, so concurrent edits are merged, not lost.
+    pub const E2E_SYNC: &str = "e2e_sync";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -342,6 +350,12 @@ pub struct LoginStartRequest {
     pub device_name: String,
     /// `windows`, `macos`, `linux`, `android`, `ios`.
     pub platform: String,
+    /// The new device's first pairing message (SPAKE2, base64url), keyed with
+    /// a part of the pairing code the server never sees. The approving
+    /// device gets it back in [`ApproveResponse::pake`] and hands over the
+    /// account's data key with it (see [`capability::PAIR_KEYS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pake: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -440,6 +454,9 @@ pub struct ApproveResponse {
     /// The account is at its device limit; the new device waits until one is removed.
     #[serde(default)]
     pub device_limit_reached: bool,
+    /// [`LoginStartRequest::pake`] of the approved device, if it sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pake: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -564,6 +581,16 @@ pub mod sync_kind {
     pub const AUTO_DOWNLOAD: &str = "autodl";
     /// End-to-end encrypted on the device; the server only stores the blob.
     pub const SECRET: &str = "secret";
+    /// Any other item, end-to-end encrypted with the account's data key: the
+    /// key is a keyed hash of the real `(kind, key)`, the value
+    /// `{v, kid, n, ct}`. The server cannot read either. (Kinds are letters
+    /// and `_` only; servers refuse anything else.)
+    pub const E2E: &str = "sealed";
+    /// An encrypted playlist; servers check its `rev` like [`PLAYLIST`].
+    pub const E2E_PLAYLIST: &str = "sealed_playlist";
+    /// Wrapped copies of the data key and device public keys (never the
+    /// data key in the clear, except `escrow` on accounts without a password).
+    pub const KEYRING: &str = "keyring";
 }
 
 /// One synced thing. Last writer (by `updated_at`, then device id) wins per
@@ -631,6 +658,20 @@ pub mod password_kdf {
     /// Random salt length in bytes (base64url on the wire).
     pub const SALT_LEN: usize = 16;
     pub const MIN_PASSWORD_CHARS: usize = 10;
+}
+
+/// Key that encrypts data with the account password, derived on the device
+/// only. It uses Argon2id with its own parameters and secret, so no salt a
+/// server hands out for [`password_kdf`] can make the sign-in key equal it.
+pub mod vault_kdf {
+    pub const M_KIB: u32 = 65_536;
+    pub const T_COST: u32 = 3;
+    pub const P_COST: u32 = 1;
+    pub const KEY_LEN: usize = 32;
+    /// Argon2 secret input: domain separation from the sign-in key.
+    pub const SECRET: &[u8] = b"glyph-vault-v2";
+    /// Salt = first 16 bytes of `SHA-256(SALT_PREFIX + account id)`.
+    pub const SALT_PREFIX: &str = "glyph-vault-v2:";
 }
 
 /// `GET /v1/account/password/salt/{handle}`
