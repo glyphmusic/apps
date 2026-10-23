@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Signature checks for updaters (`release::verify_checksums`).
+release-verify = ["dep:minisign-verify"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+minisign-verify = { version = "0.2", optional = true }

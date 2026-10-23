@@ -107,6 +107,33 @@ pub(super) fn mcp_section(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             McpMode::Server => t("sp.mcp.server.desc"),
         };
         items.push(row(t("sp.mcp.mode"), Some(mode_desc), mode));
+        // What the assistant may do, per area: none, read, or read and change.
+        {
+            use glyph_protocol::mcp::{Access, Area};
+            for (area, label, desc, id) in [
+                (Area::Playback, "sp.mcp.access.playback", "sp.mcp.access.playback.desc", "mcp-access-playback"),
+                (Area::Library, "sp.mcp.access.library", "sp.mcp.access.library.desc", "mcp-access-library"),
+                (Area::Stats, "sp.mcp.access.stats", "sp.mcp.access.stats.desc", "mcp-access-stats"),
+            ] {
+                let current = cfg.access.get(area);
+                let mut choices = vec![(Access::None, t("sp.mcp.access.none")), (Access::Read, t("sp.mcp.access.read"))];
+                if area.has_write() {
+                    choices.push((Access::Write, t("sp.mcp.access.write")));
+                }
+                let control = segmented(
+                    choices
+                        .into_iter()
+                        .map(|(access, text)| {
+                            let pick: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this: &mut Glyph, cx: &mut Context<Glyph>| this.set_mcp_access(area, access, cx));
+                            (text, current == access, pick)
+                        })
+                        .collect(),
+                    cx,
+                    id,
+                );
+                items.push(row(t(label), Some(t(desc)), control));
+            }
+        }
         let (url, token) = match cfg.mode {
             McpMode::Local => (Some(format!("http://127.0.0.1:{}/mcp", cfg.port)), Some(cfg.token.clone()).filter(|t| !t.is_empty())),
             // OAuth: the assistant only needs the address; it opens the

@@ -183,6 +183,11 @@ pub fn answer(m: &serde_json::Value, calls: &flume::Sender<McpRequest>) -> Optio
     if m.get("params").is_some_and(|p| !p.is_object()) {
         return Some(err(-32602, "params must be an object".into()));
     }
+    // The app thread answers with the tools its user allows.
+    if method == "tools/list" {
+        let listed = call(mcp::LIST_TOOLS.into(), serde_json::json!({}), calls);
+        return Some(if listed["tools"].is_array() { ok(listed) } else { err(-32603, "Glyph did not answer".into()) });
+    }
     if let Some(r) = mcp::handle_meta(method, "glyph", env!("CARGO_PKG_VERSION")) {
         return Some(match r {
             Ok(v) => ok(v),
@@ -270,9 +275,17 @@ mod tests {
         let (tx, rx) = flume::unbounded::<McpRequest>();
         std::thread::spawn(move || {
             while let Ok(r) = rx.recv() {
-                let _ = r.reply.send(glyph_protocol::mcp::text_result(&serde_json::json!({ "tool": r.name }), false));
+                let answer = if r.name == mcp::LIST_TOOLS {
+                    serde_json::json!({ "tools": mcp::Permissions::default().tools() })
+                } else {
+                    glyph_protocol::mcp::text_result(&serde_json::json!({ "tool": r.name }), false)
+                };
+                let _ = r.reply.send(answer);
             }
         });
+        let list = answer(&serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}), &tx).unwrap();
+        let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"play") && !names.contains(&"delete_playlist"), "{names:?}");
         let init = answer(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}), &tx).unwrap();
         assert_eq!(init["result"]["protocolVersion"], mcp::PROTOCOL_VERSION);
         assert!(answer(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}), &tx).is_none());

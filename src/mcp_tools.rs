@@ -93,6 +93,13 @@ impl Glyph {
         self.sync_mcp(cx);
     }
 
+    /// Settings › Integrations › AI assistants: none / read / write per area.
+    pub fn set_mcp_access(&mut self, area: glyph_protocol::mcp::Area, access: glyph_protocol::mcp::Access, cx: &mut Context<Self>) {
+        self.config.mcp.access.set(area, access);
+        self.save_config(cx);
+        cx.notify();
+    }
+
     pub fn set_mcp_mode(&mut self, mode: McpMode, cx: &mut Context<Self>) {
         self.config.mcp.mode = mode;
         self.save_config(cx);
@@ -230,6 +237,21 @@ impl Glyph {
         let reqs: Vec<McpRequest> = self.mcp.rx.try_iter().collect();
         let any = !reqs.is_empty();
         for r in reqs {
+            // Only assistants come through here (plugins call `mcp_call`
+            // directly under their own permissions).
+            let access = self.config.mcp.access;
+            if r.name == glyph_protocol::mcp::LIST_TOOLS {
+                let _ = r.reply.send(json!({ "tools": access.tools() }));
+                continue;
+            }
+            if !access.allows(&r.name) {
+                tracing::info!(tool = %r.name, "MCP tool call refused by the AI assistant settings");
+                let _ = r.reply.send(fail(format!(
+                    "The user does not allow AI assistants to use `{}` (Glyph: Settings › Integrations › AI assistants).",
+                    r.name
+                )));
+                continue;
+            }
             tracing::info!(tool = %r.name, "MCP tool call");
             let reply = r.reply.clone();
             if let Some(v) = self.mcp_call(&r.name, &r.args, r.reply, cx) {

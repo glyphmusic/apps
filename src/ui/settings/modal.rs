@@ -93,6 +93,7 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Integrations, 0, "sp.discord", "discord rich presence integration integrations status activity listening"),
     (SettingsPage::Integrations, 0, "sp.discord.id", "discord application id client id app developer"),
     (SettingsPage::Integrations, 0, "sp.mcp", "mcp model context protocol ai claude assistant ki agent"),
+    (SettingsPage::Integrations, 0, "sp.mcp.access.playback", "mcp ai assistant permissions berechtigungen rechte scopes tools read write lesen schreiben"),
     (SettingsPage::Plugins, 1, "plugins.catalog", "plugins plugin erweiterungen extensions addons add-ons themes farbschema github topic community"),
     (SettingsPage::Plugins, 0, "plugins.publish", "plugin erstellen create publish veröffentlichen developer entwickler github"),
     (SettingsPage::Storage, 0, "sp.storage.limit", "cache limit size größe"),

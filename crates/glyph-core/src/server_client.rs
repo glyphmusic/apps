@@ -282,7 +282,8 @@ impl ServerClient {
     /// `POST /v1/youtube/hint`: share "song -> video id" found by the local
     /// yt-dlp so other clients skip their search (ids only, never audio).
     pub async fn report_youtube_hint(&self, track: &Track, video_id: &str) -> Result<YouTubeHintResponse> {
-        let body = YouTubeHintRequest { track: track.clone(), video_id: video_id.to_string() };
+        let video_id = VideoId::parse(video_id).ok_or_else(|| anyhow!("not a YouTube video id"))?;
+        let body = YouTubeHintRequest { track: track.clone(), video_id };
         let resp = Self::check(self.member_request(self.post("/v1/youtube/hint")).await.timeout(Duration::from_secs(15)).json(&body).send().await?).await?;
         Ok(resp.json().await?)
     }
@@ -509,12 +510,18 @@ impl ServerClient {
     /// (long poll).
     pub async fn jam_state(&self, token: &str, code: &str, rev: u64) -> Result<glyph_protocol::jam::State> {
         let wait = Duration::from_millis(glyph_protocol::jam::WAIT_MS + 15_000);
-        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}?rev={rev}"), token).timeout(wait)).await
+        let mut state: glyph_protocol::jam::State = Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}?rev={rev}"), token).timeout(wait)).await?;
+        state.sanitize();
+        Ok(state)
     }
 
     /// In (the state), or waiting for the host to let us in.
     pub async fn jam_join(&self, token: &str, code: &str) -> Result<glyph_protocol::jam::JoinResponse> {
-        Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/join"), token)).await
+        let mut joined: glyph_protocol::jam::JoinResponse = Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/join"), token)).await?;
+        if let Some(state) = joined.state.as_mut() {
+            state.sanitize();
+        }
+        Ok(joined)
     }
 
     /// `GET /v1/jam/{code}/time`: the server clock.
@@ -531,7 +538,9 @@ impl ServerClient {
 
     /// Takes over a jam whose host is gone; answers the state.
     pub async fn jam_claim(&self, token: &str, code: &str) -> Result<glyph_protocol::jam::State> {
-        Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/claim"), token)).await
+        let mut state: glyph_protocol::jam::State = Self::json_of(self.authed(reqwest::Method::POST, &format!("/v1/jam/{code}/claim"), token)).await?;
+        state.sanitize();
+        Ok(state)
     }
 
     /// Leaves the jam; the host ends it.
@@ -548,11 +557,14 @@ impl ServerClient {
     /// `GET /v1/jam/{code}/ops`: the members' requests (host, long poll;
     /// `now`: only what is there).
     pub async fn jam_ops(&self, token: &str, code: &str, now: bool) -> Result<glyph_protocol::jam::OpsResponse> {
-        if now {
-            return Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops?wait=0"), token)).await;
-        }
-        let wait = Duration::from_millis(glyph_protocol::jam::OPS_WAIT_MS + 15_000);
-        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops"), token).timeout(wait)).await
+        let mut ops: glyph_protocol::jam::OpsResponse = if now {
+            Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops?wait=0"), token)).await?
+        } else {
+            let wait = Duration::from_millis(glyph_protocol::jam::OPS_WAIT_MS + 15_000);
+            Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/jam/{code}/ops"), token).timeout(wait)).await?
+        };
+        ops.sanitize();
+        Ok(ops)
     }
 
     /// `GET /v1/jam/{code}/live`: the server's pushes while the WebSocket
@@ -622,7 +634,12 @@ impl ServerClient {
                         heard = tokio::time::Instant::now();
                         match m {
                             Some(Ok(Message::Text(t))) => {
-                                if let Ok(live) = serde_json::from_str::<Live>(t.as_str()) {
+                                if let Ok(mut live) = serde_json::from_str::<Live>(t.as_str()) {
+                                    match &mut live {
+                                        Live::State { state } => state.sanitize(),
+                                        Live::Now { now, .. } => now.sanitize(),
+                                        _ => {}
+                                    }
                                     if tx.send(LiveEvent::Msg(live)).await.is_err() {
                                         return;
                                     }
@@ -921,7 +938,10 @@ impl ServerClient {
 
     pub async fn profile_playlist(&self, token: &str, handle: &str, id: &str) -> Result<ProfilePlaylistSongs> {
         let id: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-        Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/profiles/{}/playlists/{id}", clean_handle(handle)), token)).await
+        let mut list: ProfilePlaylistSongs = Self::json_of(self.authed(reqwest::Method::GET, &format!("/v1/profiles/{}/playlists/{id}", clean_handle(handle)), token)).await?;
+        // Another account's playlist: its tracks are claims.
+        list.tracks.iter_mut().for_each(Track::sanitize);
+        Ok(list)
     }
 
     pub async fn profile_image_bytes(&self, token: &str, handle: &str, sha256: &str) -> Result<Vec<u8>> {
