@@ -290,6 +290,9 @@ pub struct ApiError {
 
 /// Header carrying the anonymous install id used for rate limiting.
 pub const INSTALL_ID_HEADER: &str = "x-glyph-install-id";
+/// Hex SHA-256 of the device's machine id and a Glyph-only salt: survives
+/// reinstalls, so an operator can ban a device; it reveals nothing else.
+pub const HARDWARE_ID_HEADER: &str = "x-glyph-hardware-id";
 
 // ---------------------------------------------------------------- accounts & sync
 //

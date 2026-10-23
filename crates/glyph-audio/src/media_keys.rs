@@ -126,6 +126,9 @@ impl MediaKeys {
     /// Phones only (notification artwork and like button); the desktop
     /// controls take the track's cover URL.
     pub fn set_artwork(&self, _cover: Option<&std::path::Path>, _liked: bool) {}
+
+    /// Phones only (volume keys control a network device's volume).
+    pub fn set_remote_volume(&self, _volume: Option<u8>) {}
 }
 
 impl Drop for MediaKeys {

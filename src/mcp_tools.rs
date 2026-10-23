@@ -1,5 +1,6 @@
 //! The MCP tools run inside the app (see `crate::mcp` for the transport):
-//! playback, queue, search, playlists, likes, lyrics and statistics.
+//! playback, queue, search, playlists, likes, lyrics and statistics. Plugin
+//! code uses the same tools (see `app::plugin_api`).
 //!
 //! Songs travel between tools as a `ref` (the app's song key); every song an
 //! answer mentions is remembered so a later call can use its ref.
@@ -238,7 +239,7 @@ impl Glyph {
         any
     }
 
-    fn mcp_track(&mut self, t: &Track) -> Value {
+    pub(crate) fn mcp_track(&mut self, t: &Track) -> Value {
         let r = track_key(t);
         if self.mcp.refs.len() > 3000 {
             self.mcp.refs.clear();
@@ -342,7 +343,7 @@ impl Glyph {
 
     /// One tool call. `Some` answers now; `None`: the answer goes through
     /// `reply` later (searches).
-    fn mcp_call(&mut self, name: &str, args: &Value, reply: flume::Sender<Value>, cx: &mut Context<Self>) -> Option<Value> {
+    pub(crate) fn mcp_call(&mut self, name: &str, args: &Value, reply: flume::Sender<Value>, cx: &mut Context<Self>) -> Option<Value> {
         let send = move |v: Value| {
             let _ = reply.send(v);
         };

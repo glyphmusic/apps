@@ -171,6 +171,7 @@ impl AndroidPlatformState {
                 break;
             }
         }
+        input::flush_motions(&w);
     }
 }
 
@@ -203,6 +204,10 @@ impl Platform for AndroidPlatform {
 
     fn text_system(&self) -> Arc<dyn PlatformTextSystem> {
         self.0.text_system.clone()
+    }
+
+    fn gestures(&self) -> Option<Rc<dyn gpui::PlatformGestures>> {
+        Some(Rc::new(input::AndroidGestures))
     }
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {

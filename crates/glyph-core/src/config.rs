@@ -44,6 +44,11 @@ pub struct Config {
     /// Speakers, TVs and players on the local network (Chromecast,
     /// UPnP/DLNA, Sonos, MPD, AirPlay).
     pub devices: DevicesConfig,
+    /// Plugins from GitHub (Settings -> Plugins).
+    pub plugins: PluginsConfig,
+    /// Starting with the computer (desktop only; never synced or shared:
+    /// it belongs to this machine).
+    pub desktop: DesktopConfig,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -92,9 +97,10 @@ pub struct ProvidersConfig {
 #[serde(rename_all = "snake_case")]
 pub enum Extractor {
     /// yt-dlp (Python, the reference implementation).
-    #[default]
     YtDlp,
-    /// r-dlp: Glyph's own extractor in Rust; starts much faster.
+    /// r-dlp: Glyph's own extractor in Rust; starts much faster and needs
+    /// nothing installed.
+    #[default]
     RDlp,
 }
 
@@ -163,6 +169,16 @@ impl Default for DevicesConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DesktopConfig {
+    /// Glyph starts when the user signs in to the computer.
+    pub autostart: bool,
+    /// Such a start stays in the background (system tray icon) instead of
+    /// opening the window.
+    pub start_in_tray: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StatsConfig {
     /// Off until the user turns it on.
     pub enabled: bool,
@@ -178,6 +194,29 @@ pub enum McpMode {
     /// Through the Glyph server (signed in only): the server relays tool
     /// calls to this app.
     Server,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Install newer versions of installed plugins when the catalog is
+    /// loaded (start-up, at most hourly). Off: they wait for "Update".
+    pub auto_update: bool,
+    /// The user ticked "Don't show again" on the warning before a first
+    /// install (plugins come from other people, at their own risk).
+    pub skip_install_warning: bool,
+    /// Order of the catalog (remembered between visits).
+    pub sort: crate::plugins::Sort,
+    /// Installed plugins switched off (their code does not run, their texts,
+    /// hidden rows, menus and settings are gone until switched on).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self { auto_update: true, skip_install_warning: false, sort: crate::plugins::Sort::default(), disabled: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -201,8 +240,8 @@ impl Default for McpConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum YouTubeMode {
-    Local,
     #[default]
+    Local,
     Server,
 }
 
@@ -219,7 +258,7 @@ pub struct VisualsConfig {
     /// shimmer as ASCII. Off: things just appear, placeholders are plain boxes.
     pub ascii_effects: bool,
     /// Colour theme id (accent, background glow, base): see the app's
-    /// `theme::THEMES`.
+    /// `theme::THEMES`, or `plugin:<id>` for an installed theme plugin.
     pub theme: String,
     /// Lower the background animation's frame rate while Glyph is not the
     /// active window (saves power). Off: full rate all the time.
@@ -422,9 +461,11 @@ impl Default for ProvidersConfig {
             priority: vec![YouTube, Audius, Jamendo, SoundCloud],
             youtube_daily_searches: 90,
             ytdlp_path: None,
-            youtube_mode: YouTubeMode::Server,
+            // Search goes through the server (`local_search: false`), YouTube
+            // audio plays from this device with r-dlp (nothing to install).
+            youtube_mode: YouTubeMode::Local,
             youtube_only: false,
-            extractor: Extractor::YtDlp,
+            extractor: Extractor::RDlp,
             rdlp_path: None,
         }
     }
@@ -662,12 +703,17 @@ mod tests {
     }
 
     #[test]
-    fn youtube_mode_defaults_to_server_and_persists_local_choice() {
-        assert_eq!(Config::from_toml("").unwrap().providers.youtube_mode, YouTubeMode::Server);
+    fn source_defaults_search_server_play_local_with_rdlp() {
+        let p = Config::from_toml("").unwrap().providers;
+        assert!(!p.local_search);
+        assert_eq!(p.youtube_mode, YouTubeMode::Local);
+        assert_eq!(p.extractor, Extractor::RDlp);
         let mut config = Config::default();
-        config.providers.youtube_mode = YouTubeMode::Local;
+        config.providers.youtube_mode = YouTubeMode::Server;
+        config.providers.extractor = Extractor::YtDlp;
         let encoded = toml::to_string(&config).unwrap();
-        assert_eq!(Config::from_toml(&encoded).unwrap().providers.youtube_mode, YouTubeMode::Local);
+        let back = Config::from_toml(&encoded).unwrap().providers;
+        assert_eq!((back.youtube_mode, back.extractor), (YouTubeMode::Server, Extractor::YtDlp));
     }
 
     #[test]
@@ -678,7 +724,7 @@ mod tests {
         let encoded = toml::to_string(&config).unwrap();
         let decoded = Config::from_toml(&encoded).unwrap();
         assert!(decoded.providers.local_search);
-        assert_eq!(decoded.providers.youtube_mode, YouTubeMode::Server);
+        assert_eq!(decoded.providers.youtube_mode, YouTubeMode::Local);
         let shared = crate::settings_share::to_json(&config);
         assert!(!shared.contains("local_search"));
     }

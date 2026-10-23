@@ -18,6 +18,12 @@ fn main() {
         )
         .init();
     guard::install_panic_hook();
+    // The uninstaller deleting all app data: only clean up, never start.
+    #[cfg(windows)]
+    if glyph::uninstall::requested() {
+        glyph::uninstall::forget_credentials();
+        return;
+    }
     #[cfg(windows)]
     glyph::playback_qos::configure();
     // Second launch (taskbar jump list, double start): hand over and quit.
@@ -44,11 +50,21 @@ fn main() {
             glyph::instance::open_url(&url);
         }
     });
+    // macOS: a click on the Dock icon opens the window Glyph started without.
+    application.on_reopen(|_| glyph::instance::post("tray show"));
     application.run(move |cx: &mut App| {
         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: platform ready");
         let config = config.join().unwrap_or_default();
         glyph::init(cx, &config);
         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: fonts ready");
+        // Started with the computer and set to wait in the background: no
+        // window until the tray icon (macOS: the Dock icon) is clicked.
+        let background = glyph::autostart::launched_by_system() && config.desktop.start_in_tray;
+        // Keeps the entry pointing at this binary after an update or a move
+        // (debug builds would point it at `target/`).
+        if !cfg!(debug_assertions) {
+            glyph::autostart::refresh(config.desktop.autostart);
+        }
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
         let options = WindowOptions {
@@ -70,11 +86,13 @@ fn main() {
             app_owns_titlebar_drag: true,
             inactive_frame_interval: Some(Duration::from_millis(100)),
             icon: x11_icon(),
+            show: !background,
+            focus: !background,
             ..Default::default()
         };
 
         let opened = cx.open_window(options, |window, cx| glyph::root(window, config, cx));
-        let main_id = match opened {
+        let main_id = match &opened {
             Ok(h) => Some(h.window_id()),
             Err(e) => {
                 tracing::error!("failed to open window: {e:#}");
@@ -85,11 +103,28 @@ fn main() {
         // Only the main window ends the app (the mini player can close alone).
         cx.on_window_closed(move |cx, id| {
             if Some(id) == main_id || cx.windows().is_empty() {
+                glyph::tray::remove();
                 cx.quit()
             }
         })
         .detach();
-        cx.activate(true);
+        if background {
+            use glyph::i18n::t;
+            glyph::tray::show(glyph::tray::Labels {
+                open: t("tray.open").to_string(),
+                play_pause: t("dock.play_pause").to_string(),
+                next: t("dock.next").to_string(),
+                previous: t("dock.previous").to_string(),
+                quit: t("tray.quit").to_string(),
+            });
+            // Linux windows cannot start hidden; they start minimized.
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            if let Ok(h) = opened {
+                let _ = h.update(cx, |_, window, _| window.minimize_window());
+            }
+        } else {
+            cx.activate(true);
+        }
         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "startup: window opened");
     });
 }

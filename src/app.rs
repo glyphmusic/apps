@@ -43,9 +43,12 @@ mod net_devices;
 mod account_devices;
 mod account_library;
 mod jam;
+mod plugins;
+mod plugin_api;
 pub mod sleep;
 pub use jam::{reaction_label as jam_reaction_label, Jam, JamUi};
 pub use import::LinkImport;
+pub use plugins::PluginsUi;
 
 /// Typing pause before a search goes out (Enter searches at once).
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -370,7 +373,11 @@ pub enum SettingsPage {
     Migrate,
     /// Other apps on this computer (Discord Rich Presence).
     Integrations,
+    /// Themes (and later more) that people publish on GitHub.
+    Plugins,
     About,
+    /// Starting with the computer, tray (desktop only).
+    System,
 }
 
 pub struct Glyph {
@@ -535,6 +542,8 @@ pub struct Glyph {
     pub search: SearchState,
     pub lyrics: LyricsState,
     pub update: UpdateState,
+    /// Settings -> Plugins: installed plugins and the GitHub catalog.
+    pub plugins: PluginsUi,
     pub conn_test: Option<ConnTest>,
     /// yt-dlp status / install state for the settings page.
     pub ytdlp: crate::ui::ytdlp::YtDlpUi,
@@ -650,6 +659,8 @@ pub struct Glyph {
     settings_closing: Option<Instant>,
     pub settings_page: SettingsPage,
     pub settings_search: Entity<TextInput>,
+    /// Search field of Settings -> Plugins -> Browse (fuzzy).
+    pub plugins_search: Entity<TextInput>,
     /// Which dropdown in the settings modal is open.
     pub open_select: Option<&'static str>,
     /// Selected sub-tab of the settings page (see `ui::settings::subtabs`).
@@ -683,6 +694,8 @@ pub struct Glyph {
     media_keys_sent: Option<(Option<(glyph_protocol::ProviderId, String)>, bool, u64)>,
     /// Cover file + like state last sent to the phone notification.
     media_art_sent: Option<(Option<PathBuf>, bool)>,
+    /// Network device volume last sent to the phone (`None`: playing here).
+    media_remote_sent: Option<Option<u8>>,
     /// Re-render every tick while something animates (spinners).
     pub started: Instant,
     _subs: Vec<Subscription>,

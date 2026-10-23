@@ -19,7 +19,9 @@ pub fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static st
         SettingsPage::Transfer => (t("sp.transfer"), t("sp.transfer.sub"), "copy"),
         SettingsPage::Migrate => (t("sp.migrate"), t("sp.migrate.sub"), "arrow-right-left"),
         SettingsPage::Integrations => (t("sp.integrations"), t("sp.integrations.sub"), "link-2"),
+        SettingsPage::Plugins => (t("sp.plugins"), t("sp.plugins.sub"), "puzzle"),
         SettingsPage::About => (t("sp.about"), t("sp.about.sub"), "info"),
+        SettingsPage::System => (t("sp.system"), t("sp.system.sub"), "monitor"),
     }
 }
 
@@ -31,6 +33,8 @@ pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
         SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
         SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
         SettingsPage::Server => &["sp.sub.connection", "settings.keys"],
+        // Installed, Browse, then one tab per plugin with its own page.
+        SettingsPage::Plugins => super::plugin_ui::plugin_tabs(),
         SettingsPage::About => &["sp.sub.version", "sp.support", "sp.sub.shortcuts"],
         _ => &[],
     }
@@ -89,6 +93,8 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Integrations, 0, "sp.discord", "discord rich presence integration integrations status activity listening"),
     (SettingsPage::Integrations, 0, "sp.discord.id", "discord application id client id app developer"),
     (SettingsPage::Integrations, 0, "sp.mcp", "mcp model context protocol ai claude assistant ki agent"),
+    (SettingsPage::Plugins, 1, "plugins.catalog", "plugins plugin erweiterungen extensions addons add-ons themes farbschema github topic community"),
+    (SettingsPage::Plugins, 0, "plugins.publish", "plugin erstellen create publish veröffentlichen developer entwickler github"),
     (SettingsPage::Storage, 0, "sp.storage.limit", "cache limit size größe"),
     (SettingsPage::Storage, 0, "sp.storage.saver", "data saver datensparmodus mobile traffic daten sparen"),
     (SettingsPage::Storage, 0, "sp.storage.usage", "clear leeren cache downloads covers lyrics speicher"),
@@ -97,6 +103,8 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Transfer, 0, "sp.transfer.import", "import apply übernehmen paste einfügen"),
     (SettingsPage::Migrate, 0, "migrate.link", "link playlist import einfügen paste spotify soundcloud deezer apple bandcamp"),
     (SettingsPage::Migrate, 0, "migrate.file", "file datei csv m3u xspf json export"),
+    (SettingsPage::System, 0, "sp.system.autostart", "autostart start startup boot login anmelden hochfahren pc computer windows autorun"),
+    (SettingsPage::System, 0, "sp.system.start_mode", "tray systray infobereich taskleiste hintergrund background minimized minimiert hidden versteckt window fenster"),
     (SettingsPage::About, 0, "update.auto", "auto update automatisch"),
     (SettingsPage::About, 0, "update.channel", "prerelease beta channel kanal"),
     (SettingsPage::About, 1, "sp.support.issue", "bug issue report melden"),
@@ -110,7 +118,9 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
 pub fn page_body(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     select_anim_tick(app.open_select);
     PAGE_SCROLL.with(|h| *h.borrow_mut() = Some(app.settings_scroll.clone()));
-    match app.settings_page {
+    // Sections plugins add to this page (and rows they hide on it).
+    let added = super::plugin_ui::begin_page(app, cx);
+    let body = match app.settings_page {
         SettingsPage::Playback => playback(app, cx),
         SettingsPage::Audio => equalizer(app, cx),
         SettingsPage::Appearance => appearance(app, cx),
@@ -121,10 +131,15 @@ pub fn page_body(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         SettingsPage::Transfer => crate::ui::transfer::page(app, cx),
         SettingsPage::Migrate => crate::ui::migrate::page(app, cx),
         SettingsPage::Integrations => integrations(app, cx),
+        SettingsPage::Plugins if app.settings_sub >= 2 && app.plugins.detail.is_none() => super::plugin_ui::plugin_page(app, cx),
+        SettingsPage::Plugins => plugins_page(app, cx),
         SettingsPage::About if app.settings_sub == 1 => support(app, cx),
         SettingsPage::About if app.settings_sub == 2 => shortcuts(),
         SettingsPage::About => about(app, cx),
-    }
+        SettingsPage::System => system(app, cx),
+    };
+    let rest = super::plugin_ui::end_page();
+    body.children(added).children(rest)
 }
 
 pub(super) fn modal_inner(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {

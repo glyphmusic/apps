@@ -415,12 +415,75 @@ enum Job {
 
 /// Playing on a network device: a worker thread holds the connection and
 /// polls the device's state twice a second (same shape as the MPD output).
+///
+/// Commands never wait behind a poll: everything queued is taken at once
+/// (only the newest pause / volume / seek counts), pause and volume show
+/// right away, and a poll that answered while commands were waiting is
+/// dropped instead of showing the old state again.
 pub struct Output {
     pub device: Device,
     tx: flume::Sender<Job>,
     status: Arc<Mutex<Option<Status>>>,
     error: Arc<Mutex<Option<String>>>,
+    /// Pause state the user asked for, until the device reports it (some
+    /// renderers still say "playing" for a moment after Pause).
+    expect: Arc<Mutex<Option<(bool, Instant)>>>,
     files: Option<media::MediaServer>,
+}
+
+/// How long a pause / play the device has not confirmed yet is shown anyway.
+const EXPECT_FOR: Duration = Duration::from_secs(4);
+
+/// The queued jobs, merged: the newest song, then the newest of each command.
+#[derive(Default)]
+struct Batch {
+    load: Option<(Media, bool)>,
+    pause: Option<bool>,
+    seek: Option<f64>,
+    volume: Option<u8>,
+    stop: bool,
+}
+
+impl Batch {
+    fn add(&mut self, job: Job) {
+        match job {
+            Job::Load(m, start) => {
+                self.load = Some((m, start));
+                // A new song starts from its own position and play state.
+                self.seek = None;
+                self.pause = None;
+            }
+            Job::Cmd(Cmd::Play { url, start }) => {
+                let mime = media::guess_mime(&url, None);
+                self.add(Job::Load(Media { url, mime, title: String::new(), artist: String::new(), album: None, art: None, duration: None, start_at: 0.0 }, start));
+            }
+            Job::Cmd(Cmd::Pause(p)) => self.pause = Some(p),
+            Job::Cmd(Cmd::Seek(s)) => self.seek = Some(s),
+            Job::Cmd(Cmd::Volume(v)) => self.volume = Some(v),
+            Job::Cmd(Cmd::Stop) => self.stop = true,
+        }
+    }
+}
+
+/// The polled state, with a pause / play the device has not caught up with
+/// yet; `expect` is cleared once the device agrees or it took too long.
+fn with_expected(mut now: Status, expect: &mut Option<(bool, Instant)>) -> Status {
+    if let Some((paused, at)) = *expect {
+        let agrees = match now.state.as_str() {
+            "pause" => paused,
+            "play" => !paused,
+            // Ended, failed or taken over: the device's word counts.
+            "stop" | "error" | "closed" => true,
+            _ => false,
+        };
+        if agrees || at.elapsed() > EXPECT_FOR {
+            *expect = None;
+        } else {
+            // Still "playing", or "transitioning" on the way there.
+            now.state = if paused { "pause" } else { "play" }.into();
+        }
+    }
+    now
 }
 
 impl Output {
@@ -428,35 +491,28 @@ impl Output {
         let (tx, rx) = flume::unbounded::<Job>();
         let status: Arc<Mutex<Option<Status>>> = Default::default();
         let error: Arc<Mutex<Option<String>>> = Default::default();
-        let (st, err, dev) = (status.clone(), error.clone(), device.clone());
+        let expect: Arc<Mutex<Option<(bool, Instant)>>> = Default::default();
+        let (st, err, exp, dev) = (status.clone(), error.clone(), expect.clone(), device.clone());
         let _ = std::thread::Builder::new().name("glyph-device".into()).spawn(move || {
             let mut session: Option<Box<dyn Session>> = None;
-            let mut pending: Option<(Media, bool)> = None;
+            let mut batch = Batch::default();
             loop {
-                let job = match rx.recv_timeout(Duration::from_millis(500)) {
-                    Ok(j) => Some(j),
-                    Err(flume::RecvTimeoutError::Timeout) => None,
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(j) => batch.add(j),
+                    Err(flume::RecvTimeoutError::Timeout) => {}
                     Err(flume::RecvTimeoutError::Disconnected) => break,
-                };
-                // Only the newest song matters; volume / seek go through.
-                let job = match job {
-                    Some(Job::Load(m, start)) => {
-                        pending = Some((m, start));
-                        None
+                }
+                // Everything else that is waiting, so a burst of volume key
+                // presses or a pause right after a song change is one round.
+                while let Ok(j) = rx.try_recv() {
+                    batch.add(j);
+                }
+                if batch.stop {
+                    if let Some(s) = session.as_mut() {
+                        let _ = s.stop();
                     }
-                    Some(Job::Cmd(Cmd::Play { url, start })) => {
-                        let mime = media::guess_mime(&url, None);
-                        pending = Some((Media { url, mime, title: String::new(), artist: String::new(), album: None, art: None, duration: None, start_at: 0.0 }, start));
-                        None
-                    }
-                    Some(Job::Cmd(Cmd::Stop)) => {
-                        if let Some(s) = session.as_mut() {
-                            let _ = s.stop();
-                        }
-                        break;
-                    }
-                    other => other,
-                };
+                    break;
+                }
                 if session.is_none() {
                     match connect(&dev) {
                         Ok(s) => {
@@ -473,22 +529,34 @@ impl Output {
                     }
                 }
                 let s = session.as_mut().unwrap();
+                let job = std::mem::take(&mut batch);
                 let r = (|| -> std::io::Result<()> {
-                    if let Some((m, start)) = pending.take() {
+                    if let Some((m, start)) = job.load {
                         *st.lock().unwrap() = Some(Status { state: "load".into(), elapsed: Some(m.start_at), duration: m.duration, volume: None });
                         if let Err(e) = s.load(&m, start) {
                             *st.lock().unwrap() = Some(Status { state: "error".into(), elapsed: None, duration: m.duration, volume: None });
                             return Err(e);
                         }
                     }
-                    match job {
-                        Some(Job::Cmd(Cmd::Pause(p))) => s.pause(p)?,
-                        Some(Job::Cmd(Cmd::Seek(secs))) => s.seek(secs)?,
-                        Some(Job::Cmd(Cmd::Volume(v))) => s.volume(v)?,
-                        _ => {}
+                    // Pause first: it is what the user waits for.
+                    if let Some(p) = job.pause {
+                        s.pause(p)?;
+                    }
+                    if let Some(v) = job.volume {
+                        s.volume(v)?;
+                    }
+                    if let Some(secs) = job.seek {
+                        s.seek(secs)?;
+                    }
+                    // New commands came in meanwhile: do them first; this
+                    // poll's answer would be old already.
+                    if !rx.is_empty() {
+                        return Ok(());
                     }
                     let now = s.status()?;
-                    *st.lock().unwrap() = Some(now);
+                    if rx.is_empty() {
+                        *st.lock().unwrap() = Some(with_expected(now, &mut exp.lock().unwrap()));
+                    }
                     Ok(())
                 })();
                 match r {
@@ -505,10 +573,28 @@ impl Output {
                 }
             }
         });
-        Self { device, tx, status, error, files: media::MediaServer::start().ok() }
+        Self { device, tx, status, error, expect, files: media::MediaServer::start().ok() }
     }
 
+    /// Queues a command. Pause and volume show at once; the device's own
+    /// state follows with the next poll.
     pub fn send(&self, c: Cmd) {
+        match &c {
+            Cmd::Pause(p) => {
+                *self.expect.lock().unwrap() = Some((*p, Instant::now()));
+                if let Some(s) = self.status.lock().unwrap().as_mut() {
+                    if matches!(s.state.as_str(), "play" | "pause") {
+                        s.state = if *p { "pause" } else { "play" }.into();
+                    }
+                }
+            }
+            Cmd::Volume(v) => {
+                if let Some(s) = self.status.lock().unwrap().as_mut() {
+                    s.volume = Some(*v);
+                }
+            }
+            _ => {}
+        }
         let _ = self.tx.send(Job::Cmd(c));
     }
 
@@ -539,6 +625,7 @@ impl Output {
         };
         // The old song's state is stale now ("ended", "error").
         *self.status.lock().unwrap() = None;
+        *self.expect.lock().unwrap() = None;
         let _ = self.tx.send(Job::Load(m, start));
         true
     }
@@ -583,6 +670,41 @@ mod tests {
         for (d, _) in sh.devices.lock().unwrap().iter() {
             println!("{:?} {:?} {} ({}) {}:{} {:?}", d.kind, d.icon, d.name, d.model, d.addr, d.port, d.upnp.as_ref().and_then(|u| u.av_transport.clone()));
         }
+    }
+
+    #[test]
+    fn queued_jobs_merge() {
+        let mut b = Batch::default();
+        for v in [40, 45, 50] {
+            b.add(Job::Cmd(Cmd::Volume(v)));
+        }
+        b.add(Job::Cmd(Cmd::Pause(true)));
+        b.add(Job::Cmd(Cmd::Pause(false)));
+        assert_eq!((b.volume, b.pause), (Some(50), Some(false)));
+        // A new song drops seeks and pauses meant for the old one.
+        b.add(Job::Cmd(Cmd::Seek(30.0)));
+        b.add(Job::Cmd(Cmd::Play { url: "http://x/a.mp3".into(), start: true }));
+        assert!(b.seek.is_none() && b.pause.is_none() && b.load.is_some());
+        assert_eq!(b.volume, Some(50));
+    }
+
+    #[test]
+    fn pause_shows_until_the_device_agrees() {
+        let st = |s: &str| Status { state: s.into(), elapsed: None, duration: None, volume: None };
+        let mut expect = Some((true, Instant::now()));
+        // The renderer still says playing: shown paused.
+        assert_eq!(with_expected(st("play"), &mut expect).state, "pause");
+        assert_eq!(with_expected(st("load"), &mut expect).state, "pause");
+        assert!(expect.is_some());
+        assert_eq!(with_expected(st("pause"), &mut expect).state, "pause");
+        assert!(expect.is_none());
+        // Too long without agreeing: the device's state again.
+        let mut old = Some((true, Instant::now() - EXPECT_FOR - Duration::from_secs(1)));
+        assert_eq!(with_expected(st("play"), &mut old).state, "play");
+        assert!(old.is_none());
+        // A song that ended is not hidden.
+        let mut ended = Some((false, Instant::now()));
+        assert_eq!(with_expected(st("stop"), &mut ended).state, "stop");
     }
 
     #[test]

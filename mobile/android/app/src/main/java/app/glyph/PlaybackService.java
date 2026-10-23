@@ -10,13 +10,20 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioManager;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 
 import androidx.core.app.NotificationCompat;
+import androidx.media.VolumeProviderCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 import androidx.media.session.MediaButtonReceiver;
 
@@ -32,6 +39,16 @@ import java.util.Objects;
  * Spotify. Rust sends the position every few seconds; only what changed is
  * handed to the system (a new bitmap or notification on every update made
  * the system UI work for nothing).
+ *
+ * While it plays the service stays in the foreground and holds a CPU and a
+ * Wi-Fi lock: between two songs (finding and buffering the next one) and
+ * while a network device plays, no audio runs here to keep the phone
+ * awake, and a cached app gets frozen. A pause gives up the foreground only
+ * after a moment, so a short stop between songs never loses it (getting it
+ * back from the background is not allowed on newer Android).
+ *
+ * While a network device plays, the session is a remote one: the volume
+ * keys (also on the lock screen) set the device's volume.
  */
 public class PlaybackService extends Service {
 
@@ -48,9 +65,22 @@ public class PlaybackService extends Service {
 
     static native void nativeMediaKey(int code);
 
+    /** Volume 0..100 for the network device playing now. */
+    static native void nativeVolume(int volume);
+
+    /** How long a pause keeps the foreground (and the locks). */
+    private static final long PAUSE_GRACE_MS = 15_000;
+    /** Volume steps of the device (5 % each, as Android does for Cast). */
+    private static final int VOLUME_STEPS = 20, VOLUME_STEP = 100 / VOLUME_STEPS;
+    /** After a volume key, the device's echo of an older volume is ignored this long. */
+    private static final long VOLUME_SETTLE_MS = 1_500;
+
     private static String title = "", artist = "", coverPath = "";
     private static boolean playing = false, liked = false;
     private static long positionMs = 0, durationMs = 0;
+    /** Volume of the network device playing now, -1 when the phone plays. */
+    private static int remoteVolume = -1;
+    private static long volumeKeyAt;
 
     /** The running service (main thread only). */
     private static PlaybackService instance;
@@ -60,9 +90,19 @@ public class PlaybackService extends Service {
     private String artPath = "";
     private String metaKey, notificationKey;
     private boolean foreground;
+    private VolumeProviderCompat volumeProvider;
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable leaveForeground = this::leaveForeground;
 
-    /** From Rust (MainActivity.gpuiNowPlaying), on the main thread: start, update or stop the service. */
-    static void update(Context ctx, String t, String a, boolean p, long pos, long dur, String cover, boolean like) {
+    /**
+     * From Rust (MainActivity.gpuiNowPlaying), on the main thread: start,
+     * update or stop the service. remote: the network device's volume, -1
+     * when the phone plays.
+     */
+    static void update(Context ctx, String t, String a, boolean p, long pos, long dur, String cover, boolean like,
+                       int remote) {
         boolean has = t != null && !t.isEmpty();
         title = has ? t : "";
         artist = a == null ? "" : a;
@@ -71,6 +111,9 @@ public class PlaybackService extends Service {
         durationMs = dur;
         coverPath = cover == null ? "" : cover;
         liked = like;
+        if (remote < 0 || SystemClock.uptimeMillis() - volumeKeyAt > VOLUME_SETTLE_MS) {
+            remoteVolume = remote;
+        }
         Intent i = new Intent(ctx, PlaybackService.class);
         if (!has) {
             ctx.stopService(i);
@@ -91,6 +134,37 @@ public class PlaybackService extends Service {
             // allowed on newer Android; the next update from the foreground
             // starts it.
         }
+    }
+
+    /** The volume keys control a network device right now. */
+    static boolean remoteVolumeActive() {
+        return remoteVolume >= 0;
+    }
+
+    /**
+     * A volume key while the activity is in front (direction +1 / -1). Goes
+     * through the session, so the system shows its volume panel for the
+     * device; without the service the device gets the new volume directly.
+     */
+    static void volumeKey(int direction) {
+        if (remoteVolume < 0) {
+            return;
+        }
+        if (instance != null && instance.volumeProvider != null) {
+            instance.session.getController().adjustVolume(direction, AudioManager.FLAG_SHOW_UI);
+        } else {
+            setRemoteStep(Math.round(remoteVolume / (float) VOLUME_STEP) + direction);
+        }
+    }
+
+    private static void setRemoteStep(int step) {
+        int s = Math.max(0, Math.min(VOLUME_STEPS, step));
+        remoteVolume = s * VOLUME_STEP;
+        volumeKeyAt = SystemClock.uptimeMillis();
+        if (instance != null && instance.volumeProvider != null) {
+            instance.volumeProvider.setCurrentVolume(s);
+        }
+        nativeVolume(remoteVolume);
     }
 
     @Override
@@ -133,6 +207,7 @@ public class PlaybackService extends Service {
 
     /** Hands the current state to the session and the notification. */
     private void apply(boolean mustStartForeground) {
+        applyVolume();
         String meta = title + '\u0000' + artist + '\u0000' + durationMs + '\u0000' + coverPath;
         if (!meta.equals(metaKey)) {
             metaKey = meta;
@@ -159,12 +234,14 @@ public class PlaybackService extends Service {
                 .build());
 
         String key = meta + '\u0000' + playing + '\u0000' + liked;
-        if (!mustStartForeground && key.equals(notificationKey) && foreground == playing) {
+        // Paused: the grace timer already runs (or the foreground is gone).
+        if (!mustStartForeground && key.equals(notificationKey) && (foreground || !playing)) {
             return;
         }
         notificationKey = key;
         Notification n = buildNotification(likeIcon, likeLabel);
         if (playing || mustStartForeground) {
+            handler.removeCallbacks(leaveForeground);
             try {
                 if (Build.VERSION.SDK_INT >= 29) {
                     startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
@@ -177,14 +254,96 @@ public class PlaybackService extends Service {
                 // keep the notification current.
                 getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, n);
             }
+            holdLocks(true);
         }
         if (!playing) {
-            if (foreground) {
-                // Paused: the notification may be swiped away, the process may sleep.
-                stopForeground(STOP_FOREGROUND_DETACH);
-                foreground = false;
-            }
             getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, n);
+            if (foreground) {
+                // Paused, or between two songs: let go a bit later.
+                handler.removeCallbacks(leaveForeground);
+                handler.postDelayed(leaveForeground, PAUSE_GRACE_MS);
+            } else {
+                holdLocks(false);
+            }
+        }
+    }
+
+    /** Still paused after the grace time: the notification may be swiped away, the phone may sleep. */
+    private void leaveForeground() {
+        if (playing) {
+            return;
+        }
+        if (foreground) {
+            stopForeground(STOP_FOREGROUND_DETACH);
+            foreground = false;
+        }
+        holdLocks(false);
+    }
+
+    /** Keeps the CPU and Wi-Fi awake while playing (network streams, device control). */
+    @SuppressWarnings("deprecation")
+    private void holdLocks(boolean hold) {
+        try {
+            if (hold) {
+                if (wakeLock == null) {
+                    wakeLock = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "glyph:playback");
+                    wakeLock.setReferenceCounted(false);
+                }
+                if (!wakeLock.isHeld()) {
+                    wakeLock.acquire();
+                }
+                if (wifiLock == null) {
+                    WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                    if (wm != null) {
+                        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "glyph:playback");
+                        wifiLock.setReferenceCounted(false);
+                    }
+                }
+                if (wifiLock != null && !wifiLock.isHeld()) {
+                    wifiLock.acquire();
+                }
+            } else {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+                if (wifiLock != null && wifiLock.isHeld()) {
+                    wifiLock.release();
+                }
+            }
+        } catch (Exception ignored) {
+            // Locks are a help, not a must.
+        }
+    }
+
+    /** A network device plays: a remote session whose volume is the device's. */
+    private void applyVolume() {
+        if (remoteVolume < 0) {
+            if (volumeProvider != null) {
+                volumeProvider = null;
+                session.setPlaybackToLocal(AudioManager.STREAM_MUSIC);
+            }
+            return;
+        }
+        int step = Math.round(remoteVolume / (float) VOLUME_STEP);
+        if (volumeProvider == null) {
+            volumeProvider = new VolumeProviderCompat(VolumeProviderCompat.VOLUME_CONTROL_ABSOLUTE, VOLUME_STEPS, step) {
+                @Override
+                public void onSetVolumeTo(int volume) {
+                    setRemoteStep(volume);
+                }
+
+                @Override
+                public void onAdjustVolume(int direction) {
+                    if (direction == AudioManager.ADJUST_RAISE || direction == AudioManager.ADJUST_LOWER) {
+                        setRemoteStep(getCurrentVolume() + direction);
+                    } else if (direction == AudioManager.ADJUST_MUTE) {
+                        setRemoteStep(0);
+                    }
+                }
+            };
+            session.setPlaybackToRemote(volumeProvider);
+        } else if (step != volumeProvider.getCurrentVolume()) {
+            volumeProvider.setCurrentVolume(step);
         }
     }
 
@@ -259,6 +418,8 @@ public class PlaybackService extends Service {
     @Override
     public void onDestroy() {
         instance = null;
+        handler.removeCallbacks(leaveForeground);
+        holdLocks(false);
         session.setActive(false);
         session.release();
         super.onDestroy();

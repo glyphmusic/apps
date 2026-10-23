@@ -115,7 +115,7 @@ pub(super) fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         row(t("update.channel"), Some(t("sp.about.channel.desc")), channel),
     ];
     if let Some(i) = avail.filter(|i| !i.can_self_install) {
-        items.push(div().py(px(12.0)).text_size(px(12.5)).text_color(white(0.55)).child(tf("update.package_manager", &[("url", &i.html_url)])).into_any_element());
+        items.push(div().py(px(12.0)).text_size(px(12.5)).text_color(white(0.55)).child(tf(if glyph_core::updater::is_release_package() { "update.release_package" } else { "update.package_manager" }, &[("url", &i.html_url)])).into_any_element());
     }
     div().flex().flex_col().gap(px(10.0)).child(card).child(rows(items))
 }

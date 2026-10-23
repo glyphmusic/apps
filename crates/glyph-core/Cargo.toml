@@ -46,10 +46,19 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 chacha20poly1305 = "0.10"
 # Glyph's own YouTube audio resolver (in process: no Python start-up).
 r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.1.1" }
+# Plugin code: WebAssembly in an interpreter (no JIT, so it runs on phones
+# too), with fuel and memory limits (see src/plugin_host.rs).
+wasmi = { version = "1.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Plugin host tests write their modules as text.
+wat = "1"
 
 # Account refresh token in the OS keychain (same backends as glyph-server).
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# MachineGuid for the hardware id servers can ban (see src/hardware.rs).
+winreg = "0.56"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

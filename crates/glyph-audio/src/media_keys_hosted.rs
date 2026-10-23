@@ -20,6 +20,9 @@ pub struct NowPlaying<'a> {
     pub cover: Option<&'a Path>,
     /// The song is in Liked Songs (the add button shows a check).
     pub liked: bool,
+    /// A network device plays at this volume (0..=100): the volume keys
+    /// set it and send [`MediaKeyEvent::Volume`]. `None`: playing here.
+    pub remote_volume: Option<u8>,
 }
 
 pub type NowPlayingSink = Box<dyn Fn(&NowPlaying<'_>) + Send>;
@@ -46,6 +49,7 @@ struct Shown {
     position: Duration,
     cover: Option<PathBuf>,
     liked: bool,
+    remote_volume: Option<u8>,
 }
 
 pub struct MediaKeys {
@@ -85,6 +89,16 @@ impl MediaKeys {
             send(&shown);
         }
     }
+
+    /// Volume of the network device playing now (`None`: this phone plays).
+    pub fn set_remote_volume(&self, volume: Option<u8>) {
+        let mut shown = self.shown.lock().unwrap();
+        if shown.remote_volume == volume {
+            return;
+        }
+        shown.remote_volume = volume;
+        send(&shown);
+    }
 }
 
 fn send(shown: &Shown) {
@@ -95,6 +109,7 @@ fn send(shown: &Shown) {
             position: shown.position,
             cover: shown.cover.as_deref(),
             liked: shown.liked,
+            remote_volume: shown.remote_volume,
         });
     }
 }

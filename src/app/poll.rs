@@ -23,6 +23,10 @@ impl Glyph {
         if self.poll_jam(cx) {
             dirty = true;
         }
+        // Plugin code: its calls, and what changed for it.
+        if self.poll_plugins(cx) {
+            dirty = true;
+        }
         if self.mcp_checked.elapsed() > Duration::from_secs(5) && self.config_loaded {
             self.mcp_checked = Instant::now();
             if self.config.mcp.enabled || self.mcp.relay_running {
@@ -83,22 +87,6 @@ impl Glyph {
                             }
                         }
                         self.glow.update(cx, |g, _| g.set_playing(playing));
-                        if let Some(mk) = &self.media_keys {
-                            // The OS media controls only need track, play state
-                            // and a coarse position; pushing every state change
-                            // (~60/s) means needless OS calls on the UI thread.
-                            let key = (
-                                st.track.as_ref().map(|t| (t.source, t.id.clone())),
-                                playing,
-                                st.position.as_secs() / 5,
-                            );
-                            if self.media_keys_sent.as_ref() != Some(&key) {
-                                let pos = st.position;
-                                let track = st.track.clone();
-                                guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
-                                self.media_keys_sent = Some(key);
-                            }
-                        }
                         if self.discord.is_some() {
                             // Discord already counts the elapsed time from the
                             // start timestamp; a coarse position (and a resend on
@@ -235,8 +223,15 @@ impl Glyph {
                         self.toggle_like(&cur, cx);
                     }
                 }
+                // The phone's volume keys while a network device plays.
+                MediaKeyEvent::Volume(v) => {
+                    if self.remote_on() {
+                        self.set_volume(v as f32 / 100.0);
+                    }
+                }
             }
         }
+        self.publish_now_playing();
         // Phones: the notification shows the cover behind the controls and
         // an add button for Liked Songs.
         if crate::ui::compact::TOUCH && self.media_keys.is_some() {
@@ -297,11 +292,35 @@ impl Glyph {
             }
         }
         while let Some(req) = crate::instance::try_recv() {
+            // Tray menu: only "Open" brings the window up.
+            if let Some(cmd) = req.strip_prefix("tray ") {
+                match cmd {
+                    "show" => self.show_window(cx),
+                    "quit" => {
+                        crate::tray::remove();
+                        cx.quit();
+                    }
+                    _ => {
+                        if let Some(n) = cmd.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
+                            self.dock_action(n, cx);
+                        }
+                    }
+                }
+                dirty = true;
+                continue;
+            }
+            // Glyph started again (e.g. while it waits in the tray).
+            if req == "activate" {
+                self.show_window(cx);
+            }
             if let Some(n) = req.strip_prefix("dock ").and_then(|n| n.parse::<usize>().ok()) {
                 self.dock_action(n, cx);
             }
             if let Some(code) = req.strip_prefix("jam ") {
                 self.jam_open_link(code, cx);
+            }
+            if let Some(id) = req.strip_prefix("plugin ") {
+                self.open_plugin(id.to_string(), cx);
             }
             if let Some(link) = req.strip_prefix("open ") {
                 if self.backend.is_some() { self.import_share_code(link, cx); }
@@ -543,6 +562,36 @@ impl Glyph {
         self.config.mpd.enabled = on;
         self.save_config(cx);
         self.sync_mpd(cx);
+    }
+
+    /// Track, play state and position for the OS media controls (phone
+    /// notification, SMTC, MPRIS), from this player or the network device.
+    /// Finding or opening the next song still counts as playing: the phone
+    /// keeps its background service (and with it network and CPU) between
+    /// songs instead of being frozen before the next one starts.
+    fn publish_now_playing(&mut self) {
+        let Some(mk) = &self.media_keys else { return };
+        // Another device of the account or the jam host plays: not here.
+        if self.account.output_target.is_some() || self.jam_listen_remote() {
+            return;
+        }
+        let Some(st) = &self.player_state else { return };
+        let track = if self.resolving { self.current.clone() } else { st.track.clone() };
+        let playing = self.is_playing() || (self.is_loading() && !self.hold_play);
+        let pos = self.position();
+        // Only track, play state and a coarse position: pushing every state
+        // change (~60/s) means needless OS calls on the UI thread.
+        let key = (track.as_ref().map(|t| (t.source, t.id.clone())), playing, pos.as_secs() / 5);
+        if self.media_keys_sent.as_ref() != Some(&key) {
+            guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
+            self.media_keys_sent = Some(key);
+        }
+        // A network device plays: the phone's volume keys set its volume.
+        let remote = self.remote_on().then(|| (self.volume() * 100.0).round().clamp(0.0, 100.0) as u8);
+        if self.media_remote_sent != Some(remote) {
+            guard(|| mk.set_remote_volume(remote));
+            self.media_remote_sent = Some(remote);
+        }
     }
 
     /// Player state from MPD's (or the network device's) status; its song

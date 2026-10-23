@@ -2,6 +2,13 @@
 //! into taps, scrolls and long presses), hardware keys, and the soft keyboard
 //! through GameActivity's text input state.
 //!
+//! Touches are copied out of GameActivity's buffer and handed over once per
+//! run-loop pass, with the moves in between merged into the newest one.
+//! GPUI's recognizers time every touch sample on arrival: the moves that
+//! piled up while a frame was drawn, delivered back to back, looked like a
+//! finger crossing the screen in no time, and a short swipe flung the list
+//! at full speed.
+//!
 //! GameTextInput keeps its own copy of the edited text. We mirror the focused
 //! GPUI input into it (`push_ime_state`) and apply its edits back as the
 //! smallest replacement (`apply_text_event`). GameTextInput counts in UTF-8
@@ -13,11 +20,30 @@ use android_activity::input::{
     TextInputAction, TextInputState, TextSpan,
 };
 use gpui::{
-    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformInput, Point, TouchEvent, TouchId,
-    TouchPhase, px,
+    GestureTuning, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformGestures, PlatformInput, Pixels,
+    Point, ScrollPhysics, TouchEvent, TouchId, TouchPhase, px,
 };
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::Duration;
+
+/// Android's feel for GPUI's recognizers (`ViewConfiguration` defaults, in
+/// dp, which are GPUI's logical pixels here): `OverScroller` flings instead
+/// of iOS's long glide, the stock long-press and double-tap timeouts.
+pub(crate) struct AndroidGestures;
+
+impl PlatformGestures for AndroidGestures {
+    fn tuning(&self) -> GestureTuning {
+        GestureTuning {
+            touch_slop: px(8.),
+            multi_tap_interval: Duration::from_millis(300),
+            multi_tap_slop: px(100.),
+            long_press_duration: Duration::from_millis(400),
+            scroll_physics: ScrollPhysics::android(),
+            min_fling_velocity: 50.,
+        }
+    }
+}
 
 /// Android reuses pointer ids for later touches; GPUI must never see a
 /// reused `TouchId`.
@@ -47,7 +73,85 @@ impl TouchIds {
         self.live.remove(&pointer);
         id
     }
+
+    /// Touches still open when a new gesture starts: their release got lost.
+    fn take_stale(&mut self) -> Vec<TouchId> {
+        let mut ids: Vec<TouchId> = self.live.drain().map(|(_, id)| TouchId(id)).collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
 }
+
+/// What a motion event did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    /// First finger down (a new gesture).
+    Down,
+    /// Another finger down.
+    PointerDown,
+    Move,
+    /// A finger up (the last one or another one).
+    Up,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Pointer {
+    id: i32,
+    position: Point<Pixels>,
+    force: Option<f32>,
+}
+
+/// One motion event, copied out of GameActivity's input buffer.
+#[derive(Clone, Debug)]
+pub(crate) struct Motion {
+    act: Act,
+    /// The pointer that went down or up.
+    index: usize,
+    pointers: Vec<Pointer>,
+}
+
+impl Motion {
+    fn read(event: &MotionEvent, scale: f32) -> Option<Self> {
+        let act = match event.action() {
+            MotionAction::Down => Act::Down,
+            MotionAction::PointerDown => Act::PointerDown,
+            MotionAction::Move => Act::Move,
+            MotionAction::Up | MotionAction::PointerUp => Act::Up,
+            MotionAction::Cancel => Act::Cancel,
+            _ => return None,
+        };
+        let pointers = (0..event.pointer_count())
+            .map(|i| {
+                let p = event.pointer_at_index(i);
+                let pressure = p.pressure();
+                Pointer {
+                    id: p.pointer_id(),
+                    position: Point::new(px(p.x() / scale), px(p.y() / scale)),
+                    force: (pressure > 0.0).then(|| pressure.clamp(0.0, 1.0)),
+                }
+            })
+            .collect();
+        Some(Self { act, index: event.pointer_index(), pointers })
+    }
+}
+
+/// Drops every move that a later move of the same run supersedes (a move
+/// carries all fingers' positions). Downs, ups and cancels all stay.
+fn coalesce(motions: Vec<Motion>) -> Vec<Motion> {
+    let mut out: Vec<Motion> = Vec::with_capacity(motions.len());
+    for m in motions {
+        if m.act == Act::Move && out.last().is_some_and(|l| l.act == Act::Move) {
+            out.pop();
+        }
+        out.push(m);
+    }
+    out
+}
+
+/// Motions copied during one run-loop pass, until [`flush_motions`].
+#[derive(Default)]
+pub(crate) struct PendingMotions(Vec<Motion>);
 
 /// What GameTextInput was last told, so its echo of our own state is not
 /// applied a second time.
@@ -70,10 +174,18 @@ impl ImeSync {
     }
 }
 
-/// Handles one event; `true` when GPUI used it.
+/// Handles one event; `true` when GPUI used it. Motions are only copied
+/// (see [`flush_motions`]); anything else first delivers the motions before
+/// it, so the order stays.
 pub(crate) fn handle(state: &AndroidWindowState, event: &InputEvent) -> bool {
+    if let InputEvent::MotionEvent(m) = event {
+        if let Some(m) = Motion::read(m, state.scale()) {
+            state.motions.borrow_mut().0.push(m);
+        }
+        return true;
+    }
+    flush_motions(state);
     match event {
-        InputEvent::MotionEvent(m) => motion(state, m),
         InputEvent::KeyEvent(k) => key(state, k),
         InputEvent::TextEvent(t) => {
             apply_text_event(state, t.clone());
@@ -84,53 +196,56 @@ pub(crate) fn handle(state: &AndroidWindowState, event: &InputEvent) -> bool {
     }
 }
 
-fn motion(state: &AndroidWindowState, event: &MotionEvent) -> bool {
-    let scale = state.scale();
-    let position = |i: usize| {
-        let p = event.pointer_at_index(i);
-        Point::new(px(p.x() / scale), px(p.y() / scale))
-    };
-    let force = |i: usize| {
-        let p = event.pointer_at_index(i).pressure();
-        (p > 0.0).then(|| p.clamp(0.0, 1.0))
-    };
-    let send = |id: TouchId, phase: TouchPhase, i: usize| {
+/// Delivers the copied motions, the moves merged (see the module docs).
+pub(crate) fn flush_motions(state: &AndroidWindowState) {
+    let motions = std::mem::take(&mut state.motions.borrow_mut().0);
+    for m in coalesce(motions) {
+        motion(state, &m);
+    }
+}
+
+fn motion(state: &AndroidWindowState, m: &Motion) {
+    let send = |id: TouchId, phase: TouchPhase, p: &Pointer| {
         state.dispatch(PlatformInput::Touch(TouchEvent {
             id,
             phase,
-            position: position(i),
+            position: p.position,
             predicted_position: None,
-            force: force(i),
-        }))
+            force: p.force,
+        }));
     };
-    match event.action() {
-        MotionAction::Down | MotionAction::PointerDown => {
-            let i = event.pointer_index();
-            let id = state.touches.borrow_mut().start(event.pointer_at_index(i).pointer_id());
-            send(id, TouchPhase::Started, i)
-        }
-        MotionAction::Move => {
-            let mut handled = false;
-            for i in 0..event.pointer_count() {
-                let id = state.touches.borrow_mut().get(event.pointer_at_index(i).pointer_id());
-                handled |= send(id, TouchPhase::Moved, i);
+    let Some(at) = m.pointers.get(m.index).or(m.pointers.first()) else { return };
+    match m.act {
+        Act::Down | Act::PointerDown => {
+            if m.act == Act::Down {
+                // A new gesture while touches are still open: their up got
+                // lost (e.g. a surface change). GPUI ignores new touches
+                // while one is being recognized, so close them first, or
+                // every tap and scroll after it would go nowhere.
+                let stale = state.touches.borrow_mut().take_stale();
+                for id in stale {
+                    send(id, TouchPhase::Cancelled, at);
+                }
             }
-            handled
+            let id = state.touches.borrow_mut().start(at.id);
+            send(id, TouchPhase::Started, at);
         }
-        MotionAction::Up | MotionAction::PointerUp => {
-            let i = event.pointer_index();
-            let id = state.touches.borrow_mut().end(event.pointer_at_index(i).pointer_id());
-            send(id, TouchPhase::Ended, i)
-        }
-        MotionAction::Cancel => {
-            let mut handled = false;
-            for i in 0..event.pointer_count() {
-                let id = state.touches.borrow_mut().end(event.pointer_at_index(i).pointer_id());
-                handled |= send(id, TouchPhase::Cancelled, i);
+        Act::Move => {
+            for p in &m.pointers {
+                let id = state.touches.borrow_mut().get(p.id);
+                send(id, TouchPhase::Moved, p);
             }
-            handled
         }
-        _ => false,
+        Act::Up => {
+            let id = state.touches.borrow_mut().end(at.id);
+            send(id, TouchPhase::Ended, at);
+        }
+        Act::Cancel => {
+            for p in &m.pointers {
+                let id = state.touches.borrow_mut().end(p.id);
+                send(id, TouchPhase::Cancelled, p);
+            }
+        }
     }
 }
 
@@ -382,5 +497,33 @@ mod tests {
         let a = ids.start(0);
         assert_eq!(ids.end(0), a);
         assert_ne!(ids.start(0), a);
+    }
+
+    #[test]
+    fn lost_releases_are_found() {
+        let mut ids = TouchIds::default();
+        let a = ids.start(0);
+        let b = ids.start(1);
+        assert_eq!(ids.take_stale(), vec![a, b]);
+        assert!(ids.take_stale().is_empty());
+    }
+
+    fn mo(act: Act, y: f32) -> Motion {
+        Motion { act, index: 0, pointers: vec![Pointer { id: 0, position: Point::new(px(0.), px(y)), force: None }] }
+    }
+
+    #[test]
+    fn piled_up_moves_merge_into_the_newest() {
+        let out = coalesce(vec![
+            mo(Act::Down, 0.),
+            mo(Act::Move, 10.),
+            mo(Act::Move, 20.),
+            mo(Act::Move, 30.),
+            mo(Act::Up, 30.),
+            mo(Act::Down, 50.),
+            mo(Act::Move, 60.),
+        ]);
+        let got: Vec<(Act, f32)> = out.iter().map(|m| (m.act, f32::from(m.pointers[0].position.y))).collect();
+        assert_eq!(got, vec![(Act::Down, 0.), (Act::Move, 30.), (Act::Up, 30.), (Act::Down, 50.), (Act::Move, 60.)]);
     }
 }

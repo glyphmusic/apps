@@ -51,6 +51,17 @@ fn shared(cfg: &Config) -> Shared {
     Shared { glyph_settings: 1, app_version: env!("CARGO_PKG_VERSION").to_string(), sections }
 }
 
+/// The shareable settings by section (what plugins with the `settings`
+/// permission read): never keys, server address or device-bound values.
+pub fn sections(cfg: &Config) -> Map<String, Value> {
+    shared(cfg).sections
+}
+
+/// Applies sections shaped like [`sections`] to `cfg`.
+pub fn apply_sections(cfg: &mut Config, sections: Map<String, Value>) -> SettingsApplied {
+    Imported { sections: sections.into_iter().collect() }.apply(cfg)
+}
+
 /// The settings as a readable JSON file.
 pub fn to_json(cfg: &Config) -> String {
     serde_json::to_string_pretty(&shared(cfg)).unwrap_or_default()

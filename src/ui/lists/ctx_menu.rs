@@ -628,6 +628,23 @@ pub fn ctx_menu(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
                     .into_any_element(),
             );
         }
+        // Entries of running plugins (their code hears which song).
+        let from_plugins = app.plugin_menu_entries();
+        if !from_plugins.is_empty() {
+            body.push(sep().into_any_element());
+            for (pid, entry, label) in from_plugins {
+                let song = tr.clone();
+                body.push(
+                    ctx_item(format!("ctx-plugin-{pid}-{entry}").into(), "puzzle", label, white(0.7), true, cx)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.begin_ctx_close();
+                            this.plugin_menu(&pid, &entry, &song);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
         body.push(sep().into_any_element());
         let artist = tr.artist.clone();
         body.push(

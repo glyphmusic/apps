@@ -353,6 +353,9 @@ pub enum MediaKeyEvent {
     SeekBackward,
     /// Like / unlike the current song (the phone notification's add button).
     Like,
+    /// Volume 0..=100 from the phone's volume keys while a network device
+    /// plays (see `MediaKeys::set_remote_volume`).
+    Volume(u8),
 }
 
 #[cfg(test)]

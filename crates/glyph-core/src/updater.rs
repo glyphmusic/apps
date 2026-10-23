@@ -1,7 +1,8 @@
 //! "Check for updates" + auto-update from GitHub releases.
 //!
-//! * `GET https://api.github.com/repos/{repo}/releases/latest` (channel
-//!   "prerelease": `/releases`, first non-draft).
+//! * `GET https://api.github.com/repos/{repo}/releases`: highest SemVer
+//!   non-draft; channel "stable" also skips pre-releases. GitHub's "Latest"
+//!   flag is not used, so a pre-release wrongly marked Latest stays out.
 //! * SemVer compare with `env!("CARGO_PKG_VERSION")`.
 //! * Asset naming: `glyph-{version}-{target}.zip` (Windows) / `.tar.gz`
 //!   (macOS, Linux), `glyph-{version}-android.apk` (Android) plus
@@ -90,6 +91,12 @@ pub fn is_package_managed_path(path: &Path) -> bool {
     }
     // Distro packages live under /usr (but /usr/local is a manual install).
     lower.starts_with("/usr/") && !lower.starts_with("/usr/local/") || lower.starts_with("/app/")
+}
+
+/// Glyph's own .deb / .rpm from a GitHub release: the package manager owns
+/// the files, but new versions come as a download, not from a distro repository.
+pub fn is_release_package() -> bool {
+    cfg!(target_os = "linux") && Path::new("/usr/share/glyph/release-package").exists()
 }
 
 fn exe_is_package_managed() -> bool {
@@ -199,12 +206,7 @@ pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool)
     if repo.is_empty() || repo.starts_with("OWNER/") || repo.split('/').count() != 2 {
         bail!("updates.repo is not configured (expected `owner/repo` in config.toml)");
     }
-    let prerelease = cfg.channel.eq_ignore_ascii_case("prerelease");
-    let url = if prerelease {
-        format!("https://api.github.com/repos/{repo}/releases?per_page=15")
-    } else {
-        format!("https://api.github.com/repos/{repo}/releases/latest")
-    };
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=15");
     let resp = http
         .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
@@ -220,11 +222,7 @@ pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool)
     if !resp.status().is_success() {
         bail!("GitHub answered HTTP {}", resp.status());
     }
-    let releases: Vec<GhRelease> = if prerelease {
-        resp.json().await?
-    } else {
-        vec![resp.json().await?]
-    };
+    let releases: Vec<GhRelease> = resp.json().await?;
     Ok(evaluate(releases, &cfg.channel, current_version(), current_target(), exe_is_package_managed()))
 }
 

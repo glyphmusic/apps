@@ -9,6 +9,7 @@ impl Glyph {
         let server_bearer_input = cx.new(|cx| TextInput::new("settings.server.bearer.placeholder", cx).masked());
         let discord_id_input = cx.new(|cx| TextInput::new("sp.discord.id.placeholder", cx));
         let settings_search = cx.new(|cx| TextInput::new("settings.search", cx));
+        let plugins_search = cx.new(|cx| TextInput::new("plugins.search", cx));
         let playlist_name = cx.new(|cx| TextInput::new("dialog.playlist.placeholder", cx));
         let playlist_link = cx.new(|cx| TextInput::new("dialog.playlist.link", cx));
         let add_input = cx.new(|cx| TextInput::new("add.search", cx));
@@ -254,6 +255,7 @@ impl Glyph {
             search: SearchState::default(),
             lyrics: LyricsState::default(),
             update: UpdateState::default(),
+            plugins: Default::default(),
             conn_test: None,
             ytdlp: Default::default(),
             show_queue: false,
@@ -324,6 +326,7 @@ impl Glyph {
             transfer: Default::default(),
             migrate: Default::default(),
             settings_search,
+            plugins_search,
             open_select: None,
             settings_sub: 0,
             settings_collapsed: HashSet::new(),
@@ -344,6 +347,7 @@ impl Glyph {
             embed: crate::embed::EmbedHost::new(raw_handle(window)),
             media_keys_sent: None,
             media_art_sent: None,
+            media_remote_sent: None,
             started: Instant::now(),
             _subs: subs,
             _poll: poll,
@@ -371,7 +375,12 @@ impl Glyph {
                 }
             }),
         };
+        // Plugin themes must be known before the config picks one; texts
+        // and code follow the config (switched-off plugins).
+        this.load_plugins();
         this.apply_config(config.clone(), cx);
+        this.apply_plugin_extras();
+        this.sync_plugin_code(cx);
         this.boot(config, cx);
         this
     }
@@ -662,6 +671,10 @@ impl Glyph {
                 self.ascii_covers.clear();
                 if self.config.updates.check_on_start {
                     self.check_updates(false, cx);
+                }
+                // Plugin updates (installed only when auto-update is on).
+                if !self.plugins.installed.is_empty() {
+                    self.refresh_plugin_catalog(false, cx);
                 }
                 self.start_sync_loop(cx);
             }

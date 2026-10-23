@@ -2,14 +2,15 @@
 //! in the Start menu / Windows search, the Linux app launcher and macOS
 //! Launchpad / Spotlight, instead of as a bare `glyph.exe`.
 //!
-//! The releases are plain archives without an installer, so the app does it
-//! itself on start, once per location of the binary:
+//! Started from one of the plain release archives, the app does it itself on
+//! start, once per location of the binary:
 //! - Windows: a `Glyph.lnk` shortcut in the user's Start menu programs folder.
 //! - Linux: `glyph.desktop` plus icons under `~/.local/share`.
 //! - macOS: a small `~/Applications/Glyph.app` bundle around the binary.
 //!
-//! Skipped for debug builds and for installs a package manager owns (those
-//! bring their own entry).
+//! Skipped for debug builds and for real installs (Windows setup, Glyph.app
+//! from the .dmg, .deb / .rpm), which bring their own entry; a wrapper made
+//! earlier for an archive is then removed so the app is not listed twice.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,7 @@ pub fn register() {
     let _ = std::thread::Builder::new().name("glyph-integrate".into()).spawn(|| {
         let Some(exe) = std::env::current_exe().ok().map(|p| std::fs::canonicalize(&p).unwrap_or(p)) else { return };
         if glyph_core::updater::is_package_managed_path(&exe) {
+            platform::retire_wrapper();
             return;
         }
         if let Err(e) = platform::register(&exe) {
@@ -53,6 +55,9 @@ mod platform {
     use windows::core::{Interface, HSTRING};
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    /// The installer writes the same `Glyph.lnk`, nothing to retire.
+    pub fn retire_wrapper() {}
 
     pub fn register(exe: &Path) -> anyhow::Result<()> {
         // Shell links expect ordinary Win32 paths, not canonicalize's extended prefix.
@@ -133,12 +138,23 @@ mod platform {
         s
     }
 
+    /// A .deb / .rpm brings `/usr/share/applications/glyph.desktop`; the user
+    /// entry written for an earlier archive would shadow it.
+    pub fn retire_wrapper() {
+        let Some(entry) = data_home().map(|s| s.join("applications/glyph.desktop")) else { return };
+        if Path::new("/usr/share/applications/glyph.desktop").exists() && entry.exists() && marker().exists() {
+            let _ = std::fs::remove_file(&entry);
+            let _ = std::fs::remove_file(marker());
+        }
+    }
+
     pub fn register(exe: &Path) -> anyhow::Result<()> {
         // Sandboxed or system-wide installs have their own entry.
         if std::env::var_os("FLATPAK_ID").is_some() || std::env::var_os("SNAP").is_some() {
             return Ok(());
         }
         if Path::new("/usr/share/applications/glyph.desktop").exists() {
+            retire_wrapper();
             return Ok(());
         }
         // An AppImage runs from a temporary mount; the image file is what stays.
@@ -190,13 +206,29 @@ mod platform {
 
     const ICNS: &[u8] = include_bytes!("../assets/icons/glyph.icns");
 
+    fn wrapper() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications/Glyph.app"))
+    }
+
+    /// Removes the `~/Applications/Glyph.app` made for an earlier archive
+    /// (only when the marker proves it is ours) once the real app runs.
+    pub fn retire_wrapper() {
+        let Some(app) = wrapper() else { return };
+        if app.exists() && marker().exists() {
+            let _ = std::fs::remove_dir_all(&app);
+            let _ = std::fs::remove_file(marker());
+        }
+    }
+
     pub fn register(exe: &Path) -> anyhow::Result<()> {
-        // Already started from an app bundle: nothing to do.
-        if exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
+        let app = wrapper().ok_or_else(|| anyhow::anyhow!("no HOME"))?;
+        // Started from an app bundle (Glyph.app from the .dmg): nothing to make.
+        if let Some(bundle) = exe.ancestors().find(|a| a.extension().is_some_and(|e| e == "app")) {
+            if bundle != app {
+                retire_wrapper();
+            }
             return Ok(());
         }
-        let home = std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("no HOME"))?;
-        let app = PathBuf::from(home).join("Applications/Glyph.app");
         let bin = app.join("Contents/MacOS/glyph");
         if up_to_date(exe, &bin) {
             return Ok(());
@@ -259,6 +291,8 @@ mod platform {
 #[cfg(not(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos")))]
 mod platform {
     use super::*;
+
+    pub fn retire_wrapper() {}
 
     pub fn register(_exe: &Path) -> anyhow::Result<()> {
         Ok(())

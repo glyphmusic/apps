@@ -134,6 +134,11 @@ impl ServerClient {
         } else { fallback }
     }
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Lets the server's operator ban this device (see `hardware`).
+        let request = match crate::hardware::id() {
+            Some(id) => request.header(glyph_protocol::HARDWARE_ID_HEADER, id),
+            None => request,
+        };
         // Account authorization is owned by member_request/authed. Appending
         // it here as well creates duplicate Authorization headers (HTTP 400).
         if let Some(token) = &self.bearer {
@@ -566,6 +571,9 @@ impl ServerClient {
         let h = req.headers_mut();
         h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
         h.insert(INSTALL_ID_HEADER, self.install_id.parse()?);
+        if let Some(id) = crate::hardware::id() {
+            h.insert(glyph_protocol::HARDWARE_ID_HEADER, id.parse()?);
+        }
         if let Some(b) = &self.bearer {
             let mut v: reqwest::header::HeaderValue = format!("Bearer {b}").parse()?;
             v.set_sensitive(true);
@@ -645,6 +653,9 @@ impl ServerClient {
         let h = req.headers_mut();
         h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {token}").parse()?);
         h.insert(INSTALL_ID_HEADER, self.install_id.parse()?);
+        if let Some(id) = crate::hardware::id() {
+            h.insert(glyph_protocol::HARDWARE_ID_HEADER, id.parse()?);
+        }
         if let Some(b) = &self.bearer {
             let mut v: reqwest::header::HeaderValue = format!("Bearer {b}").parse()?;
             v.set_sensitive(true);

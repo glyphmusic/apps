@@ -23,7 +23,20 @@ pub fn request_for_url(url: &str) -> Option<String> {
         // `glyph://jam/<code>` (the jam invite page and QR code).
         return glyph_protocol::jam::normalize_code(url).map(|code| format!("jam {code}"));
     }
+    if let Some(id) = plugin_id(url) {
+        return Some(format!("plugin {id}"));
+    }
     glyph_core::share::link_id(url).map(|id| format!("open https://glyph.my/p/{id}"))
+}
+
+/// `glyph://plugin/<id>` (the "Install in Glyph" button on
+/// glyph.my/plugins) or the plugin page itself, `https://glyph.my/plugins/<id>`.
+fn plugin_id(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("glyph://plugin/")
+        .or_else(|| url.strip_prefix("https://glyph.my/plugins/"))?;
+    let id = rest.split(['?', '#', '/']).next()?.to_ascii_lowercase();
+    glyph_core::plugins::valid_id(&id).then_some(id)
 }
 
 /// A link the system opened Glyph with while it runs (macOS hands URLs to
@@ -34,6 +47,15 @@ pub fn open_url(url: &str) {
         if let Ok(mut v) = OPENED.lock() {
             v.push(req);
         }
+    }
+}
+
+/// A request from inside this process (the tray menu), handled by the
+/// app's poll like one of a second launch. Never reachable from other
+/// processes: the listener only forwards its own short list.
+pub fn post(request: &str) {
+    if let Ok(mut v) = OPENED.lock() {
+        v.push(request.to_string());
     }
 }
 
@@ -68,7 +90,7 @@ pub fn claim_or_forward(request: &str) -> bool {
                         let mut line = String::new();
                         if BufReader::new(stream).read_line(&mut line).is_ok() {
                             let line = line.trim();
-                            if line == "activate" || line.starts_with("dock ") || line.strip_prefix("jam ").is_some_and(|c| glyph_protocol::jam::normalize_code(c).as_deref() == Some(c)) || line.strip_prefix("open ").is_some_and(|s| glyph_core::share::link_id(s).is_some()) {
+                            if line == "activate" || line.starts_with("dock ") || line.strip_prefix("jam ").is_some_and(|c| glyph_protocol::jam::normalize_code(c).as_deref() == Some(c)) || line.strip_prefix("open ").is_some_and(|s| glyph_core::share::link_id(s).is_some()) || line.strip_prefix("plugin ").is_some_and(glyph_core::plugins::valid_id) {
                                 let _ = tx.send(line.to_string());
                             }
                         }
@@ -108,6 +130,10 @@ mod tests {
         assert_eq!(request_for_url("glyph://jam/nope"), None);
         assert_eq!(request_for_url("glyph://p/AbC123xy").as_deref(), Some("open https://glyph.my/p/AbC123xy"));
         assert_eq!(request_for_url("https://example.com"), None);
+        assert_eq!(request_for_url("glyph://plugin/sakura").as_deref(), Some("plugin sakura"));
+        assert_eq!(request_for_url("glyph://plugin/Sakura/").as_deref(), Some("plugin sakura"));
+        assert_eq!(request_for_url("https://glyph.my/plugins/sakura?ref=x").as_deref(), Some("plugin sakura"));
+        assert_eq!(request_for_url("glyph://plugin/../x"), None);
         open_url("glyph://jam/K7P2QX");
         assert_eq!(try_recv().as_deref(), Some("jam K7P2QX"));
     }

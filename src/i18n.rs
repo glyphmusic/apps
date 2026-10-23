@@ -8,7 +8,7 @@
 use gpui::SharedString;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -77,6 +77,23 @@ impl Lang {
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 static TABLES: [OnceLock<HashMap<String, String>>; 11] = [const { OnceLock::new() }; 11];
+/// Texts from plugins by language code: their own keys and replacements
+/// for Glyph's (see [`set_overrides`]).
+static OVERRIDES: RwLock<Option<HashMap<String, HashMap<String, String>>>> = RwLock::new(None);
+
+/// Replaces the plugin texts (after start-up, install, removal, switching
+/// a plugin on or off). A plugin text wins over Glyph's in its language;
+/// its English text also fills keys Glyph has in no language.
+pub fn set_overrides(texts: HashMap<String, HashMap<String, String>>) {
+    if let Ok(mut o) = OVERRIDES.write() {
+        *o = (!texts.is_empty()).then_some(texts);
+    }
+}
+
+fn overridden(lang: Lang, key: &str) -> Option<String> {
+    let o = OVERRIDES.read().ok()?;
+    o.as_ref()?.get(lang.code())?.get(key).cloned()
+}
 
 fn parse(src: &str, name: &str) -> HashMap<String, String> {
     match toml::from_str::<toml::Table>(src) {
@@ -122,10 +139,15 @@ pub fn lang() -> Lang {
 }
 
 fn lookup(key: &str) -> String {
-    table(lang())
+    let l = lang();
+    if let Some(s) = overridden(l, key) {
+        return s;
+    }
+    table(l)
         .get(key)
-        .or_else(|| table(Lang::En).get(key))
         .cloned()
+        .or_else(|| overridden(Lang::En, key))
+        .or_else(|| table(Lang::En).get(key).cloned())
         .unwrap_or_else(|| key.to_string())
 }
 

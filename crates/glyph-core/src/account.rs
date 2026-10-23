@@ -121,7 +121,7 @@ pub fn set_secret_store(store: std::sync::Arc<dyn SecretStore>) {
     *SECRET_STORE.write().unwrap() = Some(store);
 }
 
-fn secret_store() -> Option<std::sync::Arc<dyn SecretStore>> {
+pub(crate) fn secret_store() -> Option<std::sync::Arc<dyn SecretStore>> {
     SECRET_STORE.read().unwrap().clone()
 }
 

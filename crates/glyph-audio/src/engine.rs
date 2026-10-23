@@ -8,7 +8,7 @@ use crate::spectrum::Analyzer;
 use crate::{BackendKind, Cmd, MiniPlayerOptions, PlayerEvent, PlayerState, Shared, Status};
 use flume::{Receiver, Sender};
 use glyph_protocol::{PlaybackSource, ProviderId, Track};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -134,6 +134,9 @@ pub(crate) struct Engine {
     opened_device: Option<String>,
     device_checked: Instant,
     use_default_buffer: bool,
+    /// Set by the output's error callback when the stream died (Bluetooth
+    /// or headphones gone, Android rerouting): the next tick reopens it.
+    device_lost: Arc<AtomicBool>,
     player: Option<rodio::Player>,
     cur: Option<Slot>,
     next: Option<Slot>,
@@ -186,6 +189,7 @@ impl Engine {
             opened_device: None,
             device_checked: Instant::now(),
             use_default_buffer: false,
+            device_lost: Arc::new(AtomicBool::new(false)),
             player: None,
             cur: None,
             next: None,
@@ -428,6 +432,20 @@ impl Engine {
         if self.device.is_some() {
             return true;
         }
+        // A stream that dies (device unplugged, Bluetooth gone, Android
+        // rerouting the output) stops calling for samples without any other
+        // sign: playback would hang silently. The tick reopens it instead.
+        self.device_lost.store(false, Ordering::Relaxed);
+        let lost = self.device_lost.clone();
+        let on_error = move |e: rodio::cpal::Error| {
+            use rodio::cpal::ErrorKind;
+            if matches!(e.kind(), ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated | ErrorKind::HostUnavailable) {
+                tracing::warn!("audio output lost: {e}");
+                lost.store(true, Ordering::Relaxed);
+            } else if !matches!(e.kind(), ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged) {
+                tracing::debug!("audio output: {e}");
+            }
+        };
         // A fixed ~45 ms output buffer first: the OS default (about 10 ms on
         // Windows) runs dry, and crackles, whenever the machine is busy for a
         // moment. Falls back to the device defaults if it is refused.
@@ -436,8 +454,10 @@ impl Engine {
             None => rodio::DeviceSinkBuilder::from_default_device(),
         };
         let opened = builder()
+            .map(|b| b.with_error_callback(on_error.clone()))
             .and_then(|b| if self.use_default_buffer { b.open_sink_or_fallback() }
                 else { b.with_buffer_size(rodio::cpal::BufferSize::Fixed(2048)).open_stream() })
+            .or_else(|_| builder().and_then(|b| b.with_error_callback(on_error.clone()).open_sink_or_fallback()))
             .or_else(|_| match self.out_device.as_deref().and_then(Self::find_device) {
                 Some(dev) => rodio::DeviceSinkBuilder::from_device(dev).and_then(|b| b.open_sink_or_fallback()),
                 None => rodio::DeviceSinkBuilder::open_default_sink(),
@@ -961,6 +981,13 @@ impl Engine {
     }
 
     fn tick(&mut self) {
+        // At most once a second: an output that fails again right away must
+        // not turn into a reopen loop.
+        if self.device.is_some() && self.device_checked.elapsed() >= Duration::from_secs(1) && self.device_lost.swap(false, Ordering::Relaxed) {
+            tracing::info!(device = ?self.opened_device, "reopening the audio output");
+            self.device_checked = Instant::now();
+            self.reopen_device();
+        }
         self.check_default_device();
         // A driver can accept a fixed buffer and then never request samples.
         // Retrying the same device with its negotiated settings avoids an

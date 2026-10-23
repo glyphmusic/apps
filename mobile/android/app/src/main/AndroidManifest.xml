@@ -32,13 +32,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- glyph://jam/<code> (jam invite page, QR code) and glyph://p/<id> (playlist links). -->
+            <!-- glyph://jam/<code> (jam invite page, QR code), glyph://p/<id> (playlist links) and glyph://plugin/<id> (glyph.my/plugins). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="glyph" android:host="jam" />
                 <data android:scheme="glyph" android:host="p" />
+                <data android:scheme="glyph" android:host="plugin" />
             </intent-filter>
         </activity>
 

@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod autostart;
 pub mod config_ext;
 pub mod devices;
 pub mod discord;
@@ -23,7 +24,10 @@ pub mod playback_qos;
 pub mod theme;
 #[cfg(windows)]
 pub mod thumbbar;
+pub mod tray;
 pub mod ui;
+#[cfg(windows)]
+pub mod uninstall;
 pub mod visuals;
 
 use gpui::{App, AppContext, Entity, Window};

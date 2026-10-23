@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio", "crates/glyph-gpui-android", "crates/glyph-android"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/glyphmusic/apps"
@@ -72,6 +72,9 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_System_Variant",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
@@ -79,6 +82,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
 ] }
+
+# Tray icon while Glyph runs in the background (src/tray.rs): a
+# StatusNotifierItem over D-Bus (zbus, as the media keys).
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"

@@ -53,6 +53,9 @@ async fn configured_server_handles_known_tracks_and_errors_without_direct_fallba
     });
     let mut config = Config::default();
     config.server_url = base.clone();
+    // Server-side YouTube with yt-dlp (not the r-dlp local default).
+    config.providers.youtube_mode = crate::config::YouTubeMode::Server;
+    config.providers.extractor = crate::config::Extractor::YtDlp;
     let backend = Backend::new(config).await.unwrap();
     assert!(backend.active_providers().contains(&ProviderId::YouTube));
     let result = backend.resolve(&track).await.unwrap().unwrap();
@@ -82,6 +85,8 @@ async fn set_config_reevaluates_providers_priority_and_server() {
 
     let mut direct = Config::default();
     direct.server_url = "off".into();
+    direct.providers.youtube_mode = crate::config::YouTubeMode::Server;
+    direct.providers.extractor = crate::config::Extractor::YtDlp;
     let b = Backend::new(direct.clone()).await.unwrap();
     assert_eq!(b.mode(), BackendMode::Direct);
     assert_eq!(b.active_providers().contains(&ProviderId::YouTube), ytdlp::locate(None).is_some());

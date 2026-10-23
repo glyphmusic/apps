@@ -39,14 +39,16 @@ fn android_main(app: AndroidApp) {
 
     // Background playback: now playing goes to MainActivity.gpuiNowPlaying,
     // which runs the media notification service (PlaybackService.java).
-    // The cover file becomes the notification's artwork ("" for none), and
-    // `liked` the state of its add button.
+    // The cover file becomes the notification's artwork ("" for none),
+    // `liked` the state of its add button, and the remote volume (-1: none)
+    // hands the volume keys to a network device.
     glyph_audio::media_keys::set_now_playing_sink(Box::new(|now: &glyph_audio::media_keys::NowPlaying<'_>| {
         let (title, artist, dur) = match now.track {
             Some(t) => (t.title.clone(), t.artist.clone(), t.duration_ms.unwrap_or(0)),
             None => (String::new(), String::new(), 0),
         };
         let cover = now.cover.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let remote_volume = now.remote_volume.map_or(-1, i32::from);
         gpui_android::java::with_activity("now playing", |env, activity| {
             let title = env.new_string(&title)?;
             let artist = env.new_string(&artist)?;
@@ -54,7 +56,7 @@ fn android_main(app: AndroidApp) {
             env.call_method(
                 activity,
                 jni_str!("gpuiNowPlaying"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJJLjava/lang/String;Z)V"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJJLjava/lang/String;ZI)V"),
                 &[
                     JValue::Object(&title),
                     JValue::Object(&artist),
@@ -63,6 +65,7 @@ fn android_main(app: AndroidApp) {
                     JValue::Long(dur as i64),
                     JValue::Object(&cover),
                     JValue::Bool(now.liked.into()),
+                    JValue::Int(remote_volume),
                 ],
             )?;
             Ok(())
@@ -80,6 +83,26 @@ fn android_main(app: AndroidApp) {
         })
         .is_some()
     }));
+
+    // ANDROID_ID for the hardware id servers can ban (glyph_core::hardware).
+    std::thread::spawn(|| {
+        for _ in 0..100 {
+            let id = gpui_android::java::with_activity("android id", |env, activity| {
+                let value = env.call_method(activity, jni_str!("gpuiAndroidId"), jni_sig!("()Ljava/lang/String;"), &[])?.l()?;
+                if value.is_null() {
+                    return Ok(None);
+                }
+                let value = env.cast_local::<JString>(value)?;
+                Ok(Some(value.try_to_string(env)?))
+            });
+            match id {
+                Some(Some(id)) => return glyph_core::hardware::set_platform_id(&id),
+                Some(None) => return,
+                // No activity yet.
+                None => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+    });
 
     let config = glyph_core::Config::load().unwrap_or_default();
     glyph::i18n::set_lang(glyph::i18n::Lang::system());
@@ -160,5 +183,13 @@ extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(_env: E
         _ => return,
     };
     glyph_audio::media_keys::push_event(ev);
+    gpui_android::wake();
+}
+
+/// `PlaybackService.nativeVolume`: the volume keys (or the system's volume
+/// panel) while a network device plays; 0..=100.
+#[unsafe(no_mangle)]
+extern "system" fn Java_app_glyph_PlaybackService_nativeVolume<'local>(_env: EnvUnowned<'local>, _class: JClass<'local>, volume: jint) {
+    glyph_audio::media_keys::push_event(MediaKeyEvent::Volume(volume.clamp(0, 100) as u8));
     gpui_android::wake();
 }

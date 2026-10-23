@@ -287,9 +287,14 @@ pub struct Downloads {
 
 impl Downloads {
     /// Called by maintenance, never by playback. Claiming also backs off errors.
+    /// YouTube songs are never checked: their lookup alone fetches the whole
+    /// audio again (r-dlp / yt-dlp, the server's conversion), and the audio
+    /// of a video does not change.
     pub fn claim_refresh(&self, limit: usize) -> Vec<Entry> {
         let mut map = self.map.lock().unwrap();
-        let mut due: Vec<_> = map.values_mut().filter(|e| now().saturating_sub(e.revision.checked_at.max(e.ts)) >= 86400).collect();
+        let mut due: Vec<_> = map.values_mut()
+            .filter(|e| e.provider != ProviderId::YouTube && now().saturating_sub(e.revision.checked_at.max(e.ts)) >= 86400)
+            .collect();
         due.sort_by_key(|e| e.revision.checked_at.max(e.ts));
         let entries: Vec<Entry> = due.into_iter().take(limit).map(|e| { e.revision.checked_at = now(); e.clone() }).collect();
         drop(map);
@@ -315,7 +320,9 @@ impl Downloads {
         let matched = supported && (old.revision.etag.as_ref().zip(etag.as_ref()).is_some_and(|(a,b)| a == b)
             || old.revision.modified.as_ref().zip(modified.as_ref()).is_some_and(|(a,b)| a == b));
         let new_validator = old.revision.etag.is_none() && etag.is_some() || old.revision.modified.is_none() && modified.is_some();
-        if !changed && (matched || !new_validator && now().saturating_sub(old.revision.hashed_at) < 7 * 86400) { return Ok(()); }
+        // Without a validator there is nothing cheap to compare: an unchanged
+        // size counts as unchanged instead of fetching the whole file again.
+        if !changed && (matched || !new_validator) { return Ok(()); }
         drop(response);
         // A disposable download cannot replace the index or the playing file.
         let temp = tempfile::tempdir_in(&self.dir)?;
@@ -767,6 +774,24 @@ mod tests {
         d.install_refresh(&changed, changed.clone(), &source).unwrap();
         assert_eq!(d.map.lock().unwrap()[&track_key(&t)].file, changed.file);
         drop(held);
+    }
+
+    #[test]
+    fn refresh_never_claims_youtube_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.m4a");
+        std::fs::write(&source, b"audio").unwrap();
+        let d = Downloads::load(dir.path().join("downloads"));
+        let (yt, archive) = (track("Video"), track("Archived"));
+        d.store_copy(&yt, ProviderId::YouTube, &source).unwrap();
+        d.store_copy(&archive, ProviderId::Archive, &source).unwrap();
+        for e in d.map.lock().unwrap().values_mut() {
+            e.ts = 0;
+            e.revision.checked_at = 0;
+        }
+        let claimed = d.claim_refresh(10);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].provider, ProviderId::Archive);
     }
 
     #[test]

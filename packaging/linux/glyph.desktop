@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Glyph
+GenericName=Music Player
+Comment=Search everywhere, play from free sources
+Exec=glyph %u
+MimeType=x-scheme-handler/glyph;
+Icon=glyph
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;audio;songs;playlist;
+StartupWMClass=glyph

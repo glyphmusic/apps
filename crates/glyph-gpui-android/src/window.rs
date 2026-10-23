@@ -89,6 +89,8 @@ pub(crate) struct AndroidWindowState {
     mouse_position: Cell<Point<Pixels>>,
     modifiers: Cell<Modifiers>,
     pub(crate) touches: RefCell<input::TouchIds>,
+    /// Touches copied this run-loop pass, delivered merged (see `input`).
+    pub(crate) motions: RefCell<input::PendingMotions>,
     pub(crate) ime: RefCell<ImeSync>,
     back_enabled: Cell<bool>,
     /// The last back press went to GPUI (so its release does too).
@@ -142,6 +144,7 @@ impl AndroidWindow {
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             touches: RefCell::default(),
+            motions: RefCell::default(),
             ime: RefCell::default(),
             back_enabled: Cell::new(false),
             back_taken: Cell::new(false),

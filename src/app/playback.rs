@@ -218,6 +218,7 @@ impl Glyph {
                     Ok(l) => s.lyrics.lyrics = l,
                     Err(e) => s.lyrics.error = Some(e),
                 }
+                s.refresh_plugin_lyrics();
                 cx.notify();
             })
             .ok();
@@ -389,7 +390,11 @@ impl Glyph {
             Some(Some(t)) => {
                 // Ended on its own and the player already runs the preloaded
                 // next song: follow it instead of resolving and loading again.
-                let playing = self.player.as_ref().and_then(|p| guard(|| p.state().track)).flatten();
+                // A player that ended without taking the next song still names
+                // the old one, which on repeat one is this very song: load it.
+                let playing = self.player.as_ref().and_then(|p| guard(|| p.state()))
+                    .filter(|s| !matches!(s.status, Status::Ended | Status::Idle))
+                    .and_then(|s| s.track);
                 let adopted = preloaded.filter(|(k, r)| {
                     auto && *k == track_key(&t) && playing.as_ref().is_some_and(|p| p.id == r.id && p.source == r.source)
                 });

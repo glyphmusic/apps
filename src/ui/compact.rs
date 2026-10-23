@@ -923,6 +923,7 @@ fn settings_pages(signed_in: bool) -> Vec<SettingsPage> {
         SettingsPage::Migrate,
         SettingsPage::Transfer,
         SettingsPage::Server,
+        SettingsPage::Plugins,
         // Integrations (Discord, MPD, MCP) talk to apps on a computer.
         SettingsPage::About,
     ]);

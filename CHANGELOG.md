@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.0 - 2026-10-23
+
+Plugins and extensions, Glyph starting with your computer, real installers on macOS and Linux, and steadier playback on phones.
+
+### Added
+
+- **Plugin extensions** can supply song lyrics, read the audio spectrum, adjust the local equalizer, edit the local queue and show live progress rows. Service keys are set up per plugin and saved in secure storage; plugins that require a key wait for setup. Plugin calls and queues are bounded, direct access to Glyph servers and private networks is blocked, and account, server, provider and update policies remain controlled by Glyph.
+
+- **Plugins**: Settings › Plugins installs colour themes that people publish on GitHub. Listed themes come from the glyphmusic/plugins index, community themes from every repository with the topic glyph-plugin. Plugins are made by other people, not by Glyph, so before the first install of a plugin Glyph asks you to confirm that you install it at your own risk. Glyph loads both straight from GitHub on your device, without the Glyph server. Search the catalog (forgiving, so typos still match), order it by most stars, recently updated or name, and see each plugin's GitHub stars. Installed themes appear in Settings › Appearance. Click a plugin to see its details and colours. Plugins update automatically when the same repository publishes a newer version (Settings › Plugins › Update automatically, on by default). **Install in Glyph** on glyph.my/plugins opens Glyph on that plugin, ready to install (`glyph://plugin/<id>`).
+- **Extensions**: plugins can now change far more than colours. An extension can rename any text in Glyph, hide settings rows, add its own page under Settings › Plugins, add sections to Glyph's settings pages and entries to the song menu, and run its own code. The code runs in a sandbox (WebAssembly, with a time and memory budget, stopped after repeated errors) and uses only what its permissions allow: playback and the queue, your library, search, Glyph's settings (never keys, passwords or the server address) and the web hosts it names. Before installing, Glyph lists everything a plugin may do, and asks again when an update wants more. Plugins with code install only from the listed index. Switch any extension off without removing it; anything a plugin adds to Glyph names the plugin.
+- **For plugin makers**: drop a folder with a `glyph-plugin.json` (and its `.wasm`) into Glyph's plugins folder and press Settings › Plugins › Plugins folder › Reload to try it before publishing; Reload also restarts its code, and the plugin's page shows what the code logged. Guide and API reference: docs.glyph.my/plugins.
+- **Start with your computer** (Windows, macOS, Linux): Settings › System starts Glyph when you sign in. Choose whether it opens its window or waits in the background with an icon in the system tray (macOS: in the Dock). Click the tray icon to open Glyph; its menu also has Play / Pause, Next, Previous and Quit.
+- **Glyph installs as a real app on macOS and Linux**: macOS gets a `.dmg` with Glyph.app to drag into Applications, Linux a `.deb` and an `.rpm` that put Glyph into the app launcher and uninstall through the package manager. The portable archives stay. Glyph.app updates itself in place; with the Linux packages, Settings › About links to the new package. If you used an archive before, the launcher entry Glyph made for it is removed, so Glyph is not listed twice.
+- **Uninstalling on Windows asks about your data**: delete all app data (downloaded songs, library, playlists, settings, sign-in, caches), only the downloaded songs and caches, or keep everything. The installer also comes in German now.
+
+### Changed
+
+- **Device bans on servers**: the app sends a hardware id, a SHA-256 of the computer's or phone's machine id with a Glyph-only salt, so a server operator can ban a device and the ban survives reinstalling. The machine id itself never leaves the device.
+- **New installs play YouTube from this computer with r-dlp**: search still goes through the Glyph server, but YouTube playback starts on "Local" with r-dlp, which needs nothing installed. Existing settings stay as they are.
+- **Phone volume keys control the speaker you play on**: while a network device (TV, speaker, Cast, AirPlay, MPD) plays, volume up and down set its volume, also from the lock screen.
+- **Pause and volume on network devices react at once**: commands no longer wait behind the device's status checks, and a burst of volume presses goes out as one change.
+
+### Fixed
+
+- **Phone playback in the background no longer stops between songs**: the app stays awake while it finds and loads the next song, and while a network device plays.
+- **Scrolling and dragging on phones follow your finger**: a short swipe no longer flings the list at full speed, scrolling stops and coasts like in other Android apps, and taps and swipes no longer stop working after a touch got lost.
+- **Playback goes on after the sound output changes**: plugging headphones in or out, or Bluetooth connecting, used to leave the player silently stuck.
+
 ## 0.6.1 - 2026-10-22
 
 Devices that follow each other at once, a player that skips songs it cannot play, and a phone app that handles more like one.

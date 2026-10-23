@@ -58,6 +58,43 @@ pub fn theme_by_id(id: &str) -> &'static Theme {
     THEMES.iter().find(|t| t.id == id).unwrap_or(&THEMES[0])
 }
 
+/// A theme from an installed plugin (Settings -> Plugins); its config id is
+/// `plugin:<plugin id>`.
+#[derive(Clone)]
+pub struct PluginTheme {
+    pub id: String,
+    pub name: String,
+    pub colors: glyph_core::plugins::ThemeColors,
+}
+
+static PLUGIN_THEMES: std::sync::RwLock<Vec<PluginTheme>> = std::sync::RwLock::new(Vec::new());
+
+/// Replaces the plugin themes (after start-up, install, update, removal).
+pub fn set_plugin_themes(themes: Vec<PluginTheme>) {
+    *PLUGIN_THEMES.write().unwrap_or_else(|e| e.into_inner()) = themes;
+}
+
+pub fn plugin_themes() -> Vec<PluginTheme> {
+    PLUGIN_THEMES.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Colours of theme `id`, built-in or from a plugin (unknown: the default,
+/// e.g. a plugin theme synced from a device that has the plugin).
+pub fn colors(id: &str) -> glyph_core::plugins::ThemeColors {
+    if id.starts_with("plugin:") {
+        if let Some(t) = PLUGIN_THEMES.read().unwrap_or_else(|e| e.into_inner()).iter().find(|t| t.id == id) {
+            return t.colors;
+        }
+    }
+    let t = theme_by_id(id);
+    glyph_core::plugins::ThemeColors { accent: t.accent, glow: t.glow, base: t.base }
+}
+
+/// `id` names a built-in or an installed plugin theme.
+pub fn known_theme(id: &str) -> bool {
+    THEMES.iter().any(|t| t.id == id) || PLUGIN_THEMES.read().unwrap_or_else(|e| e.into_inner()).iter().any(|t| t.id == id)
+}
+
 #[derive(Default)]
 struct Scope {
     bounds: Option<Bounds<Pixels>>,
@@ -96,12 +133,12 @@ thread_local! {
 
 /// The theme's glow colours as a palette for the background.
 pub fn glow_palette(id: &str) -> Option<crate::visuals::Palette> {
-    theme_by_id(id).glow.map(|[a, b, c]| crate::visuals::Palette([Rgb::hex(a), Rgb::hex(b), Rgb::hex(c)]))
+    colors(id).glow.map(|[a, b, c]| crate::visuals::Palette([Rgb::hex(a), Rgb::hex(b), Rgb::hex(c)]))
 }
 
 /// Makes `id` the current theme (set before each frame).
 pub fn set_theme(id: &str) {
-    let t = theme_by_id(id);
+    let t = colors(id);
     THEME_RT.with(|rt| {
         let mut rt = rt.borrow_mut();
         rt.accent = gpui::rgb(t.accent).into();

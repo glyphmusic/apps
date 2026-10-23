@@ -19,6 +19,7 @@ pub mod cover;
 pub mod dedupe;
 pub mod downloads;
 pub mod eq;
+pub mod hardware;
 pub mod import;
 pub mod jam;
 pub mod library;
@@ -26,6 +27,10 @@ pub mod lyrics;
 pub mod lyricsearch;
 pub mod outage;
 pub mod paths;
+pub mod plugins;
+pub mod plugin_host;
+pub mod plugin_credentials;
+pub mod plugin_policy;
 pub mod profile_images;
 pub mod provider;
 pub mod providers;
@@ -1154,6 +1159,20 @@ impl Backend {
     pub async fn check_for_update_auto(&self) -> anyhow::Result<UpdateStatus> {
         let inner = self.cur();
         self.spawn(async move { updater::check(&inner.http, &inner.config.updates, true).await }).await?
+    }
+
+    /// Plugin catalog straight from GitHub (see [`plugins`]): cached for an
+    /// hour unless `force`.
+    pub async fn plugin_catalog(&self, force: bool) -> anyhow::Result<plugins::Catalog> {
+        let inner = self.cur();
+        self.spawn(async move { plugins::catalog(&inner.http, force).await }).await?
+    }
+
+    /// Code of a plugin (its WebAssembly module from GitHub); `None` when it
+    /// has none.
+    pub async fn plugin_code(&self, listing: plugins::Listing) -> anyhow::Result<Option<Vec<u8>>> {
+        let inner = self.cur();
+        self.spawn(async move { plugins::fetch_code(&inner.http, &listing).await }).await?
     }
 
     /// Downloads, verifies (SHA-256) and installs the update. Restart is up to the UI.

@@ -27,6 +27,7 @@ impl Glyph {
                     }
                 }
                 s.lyrics.alts = alts;
+                s.refresh_plugin_lyrics();
                 cx.notify();
             })
             .ok();
@@ -46,8 +47,10 @@ impl Glyph {
     /// Shows version `i` and keeps it for this song.
     pub fn pick_lyrics(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(l) = self.lyrics.alts.get(i).cloned() else { return };
-        if let (Some(b), Some(t)) = (self.backend.clone(), self.current.clone()) {
-            guard(|| b.pin_lyrics(&t, &l));
+        if !l.source_id.starts_with("plugin:") {
+            if let (Some(b), Some(t)) = (self.backend.clone(), self.current.clone()) {
+                guard(|| b.pin_lyrics(&t, &l));
+            }
         }
         self.lyrics.lyrics = Some(l);
         self.lyrics.last_line = None;

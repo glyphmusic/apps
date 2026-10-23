@@ -88,4 +88,9 @@ jobs:
           (cd "$dir" && sha256sum *) | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$TAG" SHA256SUMS.txt --clobber
-          gh release edit "$TAG" --draft=false --latest
+          # A pre-release (tag with `-`, or ticked by hand on GitHub) never becomes "Latest".
+          if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" = true ]; then
+            gh release edit "$TAG" --draft=false --latest=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi

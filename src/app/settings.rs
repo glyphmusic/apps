@@ -34,6 +34,9 @@ impl Glyph {
         if self.settings_page == SettingsPage::Storage {
             self.refresh_storage(cx);
         }
+        if self.settings_page == SettingsPage::Plugins {
+            self.refresh_plugin_catalog(false, cx);
+        }
         self.refresh_output_devices(cx);
         cx.notify();
     }
@@ -66,6 +69,9 @@ impl Glyph {
         if (page, sub) != (self.settings_page, self.settings_sub) {
             self.settings_scroll.set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         }
+        // Any tab click leaves a plugin's detail view (and its warning).
+        self.plugins.detail = None;
+        self.plugins.confirm = None;
         if page != self.settings_page {
             // The page being left folds its sub-tabs away instead of vanishing.
             let old = self.settings_page;
@@ -87,6 +93,9 @@ impl Glyph {
         }
         if page == SettingsPage::Profile {
             self.profile_page_opened(cx);
+        }
+        if page == SettingsPage::Plugins {
+            self.refresh_plugin_catalog(false, cx);
         }
         cx.notify();
     }
@@ -437,6 +446,34 @@ Language: {}",
         self.glow.update(cx, |g, _| g.set_throttle_inactive(on));
         self.save_config(cx);
         cx.notify();
+    }
+
+    /// Start with the computer on / off (Settings > System, desktop only).
+    pub fn set_autostart(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Err(e) = crate::autostart::set(on) {
+            tracing::warn!("autostart: {e:#}");
+            self.toast(tf("sp.system.autostart.error", &[("e", &e)]));
+            return;
+        }
+        self.config.desktop.autostart = on;
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// A start with the computer opens the window (false) or stays in the tray.
+    pub fn set_start_in_tray(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.config.desktop.start_in_tray = on;
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Brings the main window up (tray "Open", a second start of Glyph);
+    /// it may never have been shown after a start in the background.
+    pub(super) fn show_window(&mut self, cx: &mut Context<Self>) {
+        let handle = self.window_handle;
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        });
     }
 
     pub fn set_intensity(&mut self, v: f32, cx: &mut Context<Self>) {

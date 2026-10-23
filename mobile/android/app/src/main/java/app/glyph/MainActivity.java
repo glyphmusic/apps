@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
+import android.view.KeyEvent;
 import android.view.View;
 
 import java.io.File;
@@ -151,6 +152,23 @@ public class MainActivity extends GameActivity {
         nativeUrlWaiting();
     }
 
+    /**
+     * While a network device plays, the volume keys set its volume instead
+     * of the phone's (in the background the remote media session does it).
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int code = event.getKeyCode();
+        if ((code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN)
+                && PlaybackService.remoteVolumeActive()) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                PlaybackService.volumeKey(code == KeyEvent.KEYCODE_VOLUME_UP ? 1 : -1);
+            }
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     /** Back that the app did not take: keep running (and playing) in the background. */
     @Override
     @SuppressWarnings("deprecation")
@@ -207,11 +225,20 @@ public class MainActivity extends GameActivity {
     /**
      * Now playing from Rust: drives the background playback service. The
      * cover is a cached image file ("" for none); liked: the song is in
-     * Liked Songs (the notification's add button shows a check).
+     * Liked Songs (the notification's add button shows a check); playing
+     * also covers finding and buffering the next song. remoteVolume: a
+     * network device plays at this volume (0..100) and the volume keys go
+     * to it; -1 when the phone plays.
      */
     public void gpuiNowPlaying(String title, String artist, boolean playing, long positionMs, long durationMs,
-                               String coverPath, boolean liked) {
-        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, positionMs, durationMs, coverPath, liked));
+                               String coverPath, boolean liked, int remoteVolume) {
+        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, positionMs, durationMs, coverPath, liked,
+                remoteVolume));
+    }
+
+    /** ANDROID_ID; Rust only sends a salted hash of it (glyph_core::hardware). */
+    public String gpuiAndroidId() {
+        return Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
     }
 
     /** The link the app was opened with, once (null when there is none). */

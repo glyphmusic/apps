@@ -27,14 +27,16 @@ Server: [glyphmusic/server](https://github.com/glyphmusic/server) — the app us
 
 Prebuilt builds for every platform are on the [Releases](https://github.com/glyphmusic/apps/releases) page:
 
-| Platform | Asset |
-|---|---|
-| Windows x64 | `glyph-<version>-x86_64-pc-windows-msvc.zip` |
-| macOS Apple Silicon | `glyph-<version>-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `glyph-<version>-x86_64-apple-darwin.tar.gz` |
-| Linux x64 | `glyph-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `glyph-<version>-aarch64-unknown-linux-gnu.tar.gz` |
-| Android (preview) | `glyph-<version>-android.apk` |
+| Platform | Install as an app | Portable archive |
+|---|---|---|
+| Windows x64 | `glyph-<version>-windows-x64-setup.exe` | `glyph-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS Apple Silicon | `glyph-<version>-macos-arm64.dmg` | `glyph-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `glyph-<version>-macos-x64.dmg` | `glyph-<version>-x86_64-apple-darwin.tar.gz` |
+| Linux x64 | `glyph-<version>-linux-x64.deb` / `.rpm` | `glyph-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `glyph-<version>-linux-arm64.deb` / `.rpm` | `glyph-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Android (preview) | `glyph-<version>-android.apk` | |
+
+On macOS, open the `.dmg` and drag Glyph into Applications. Glyph is not notarized by Apple yet: on the first start, allow it under System Settings › Privacy & Security › Open Anyway. On Linux, install the package with your package manager (`sudo apt install ./glyph-<version>-linux-x64.deb` or `sudo dnf install ./glyph-<version>-linux-x64.rpm`); it removes Glyph again like any other app.
 
 New releases include one `SHA256SUMS.txt` listing every asset. Earlier releases keep individual `.sha256` files. App versions before 0.2.2 need one manual upgrade to read the new manifest.
 

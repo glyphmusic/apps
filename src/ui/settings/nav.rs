@@ -20,7 +20,9 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
                 (SettingsPage::Account, "account konto login sign in anmelden sync devices geräte handle passkey"),
                 (SettingsPage::Profile, "profile profil privacy privatsphäre picture bild banner public öffentlich"),
                 (SettingsPage::Server, "url api key keys schlüssel"),
+                (SettingsPage::System, "system autostart startup start boot tray systray hintergrund background"),
                 (SettingsPage::Integrations, "discord rich presence integration integrations status activity listening mcp ai assistant claude"),
+                (SettingsPage::Plugins, "plugin plugins erweiterungen extensions addons themes github community"),
                 (SettingsPage::Storage, "cache download downloads speicher"),
                 (SettingsPage::Migrate, "transfer übertragen umzug move import spotify youtube soundcloud deezer last.fm lastfm apple bandcamp tidal library bibliothek playlists"),
                 (SettingsPage::Transfer, "backup export import share teilen code datei file"),
@@ -37,6 +39,7 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
         OPTIONS
             .iter()
             .filter(|(p, _, _, _)| !matches!(p, SettingsPage::Account | SettingsPage::Profile) || signed_in)
+            .filter(|(p, _, _, _)| *p != SettingsPage::System || crate::autostart::SUPPORTED)
             .filter(|(_, _, key, words)| hit(&t(key)) || words.contains(&q))
             .map(|(p, s, key, _)| (*p, *s, t(key)))
             .take(14)
@@ -74,6 +77,10 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
         let mut visible = Vec::new();
         for (page, words) in items {
             if page == SettingsPage::Profile && !signed_in {
+                continue;
+            }
+            // Phones have no autostart or tray.
+            if page == SettingsPage::System && !crate::autostart::SUPPORTED {
                 continue;
             }
             let (label, _, icon_name) = page_info(page);
@@ -147,7 +154,7 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
                             let sel = on && current_sub as usize == i;
                             let sub = i as u8;
                             div()
-                                .id(("sp-sub", page as usize * 8 + i))
+                                .id(("sp-sub", page as usize * 64 + i))
                                 .flex_none()
                                 .flex()
                                 .items_center()
@@ -158,7 +165,7 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
                                 .text_size(px(13.5))
                                 .when(sel, |d| d.bg(white(0.08)).text_color(gpui::white()).font_weight(FontWeight::MEDIUM))
                                 .when(!sel, |d| {
-                                    let key = format!("sp-sub-{}", page as usize * 8 + i);
+                                    let key = format!("sp-sub-{}", page as usize * 64 + i);
                                     d.text_color(mix(white(0.6), gpui::white(), hover_k(&key))).relative().child(hover_fill(key, white(0.04), 7.0))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| this.set_settings_tab(page, sub, cx)))

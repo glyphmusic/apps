@@ -89,15 +89,19 @@ pub(super) fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
 }
 
 /// One round swatch per colour theme (accent inside, glow colour as ring),
-/// the picked one outlined.
+/// the picked one outlined. Themes from plugins follow the built-in ones.
 pub(super) fn theme_swatches(app: &Glyph, cx: &mut Context<Glyph>) -> Div {
-    let cur = crate::theme::theme_by_id(&app.config.visuals.theme).id;
-    div().flex().items_center().gap(px(6.0)).children(crate::theme::THEMES.iter().enumerate().map(|(i, th)| {
-        let on = th.id == cur;
-        let id = th.id;
-        let accent: Hsla = gpui::rgb(th.accent).into();
-        let ring: Hsla = th.glow.map_or(gpui::rgb(0x1d5cff).into(), |g| gpui::rgb(g[1]).into());
-        with_tip(div().id(("theme", i)), Some(t(th.name)))
+    let picked = &app.config.visuals.theme;
+    let cur: String = if crate::theme::known_theme(picked) { picked.clone() } else { crate::theme::THEMES[0].id.to_string() };
+    let builtin = crate::theme::THEMES.iter().map(|th| (th.id.to_string(), t(th.name), crate::theme::colors(th.id)));
+    let plugins = crate::theme::plugin_themes().into_iter().map(|th| (th.id, SharedString::from(th.name), th.colors));
+    let all: Vec<_> = builtin.chain(plugins).collect();
+    // Wraps once plugins add more swatches than fit beside the label.
+    div().flex().flex_wrap().justify_end().max_w(px(360.0)).items_center().gap(px(6.0)).children(all.into_iter().enumerate().map(|(i, (id, name, c))| {
+        let on = id == cur;
+        let accent: Hsla = gpui::rgb(c.accent).into();
+        let ring: Hsla = c.glow.map_or(gpui::rgb(0x1d5cff).into(), |g| gpui::rgb(g[1]).into());
+        with_tip(div().id(("theme", i)), Some(name))
             .flex_none()
             .size(px(28.0))
             .rounded_full()
@@ -107,7 +111,7 @@ pub(super) fn theme_swatches(app: &Glyph, cx: &mut Context<Glyph>) -> Div {
             .cursor_pointer()
             .border_2()
             .border_color(if on { gpui::white() } else { gpui::transparent_black() })
-            .on_click(cx.listener(move |this, _, _, cx| this.set_theme(id, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.set_theme(&id, cx)))
             .child(div().size(px(20.0)).rounded_full().bg(ring).flex().items_center().justify_center().child(div().size(px(12.0)).rounded_full().bg(accent)))
     }))
 }

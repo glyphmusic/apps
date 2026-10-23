@@ -1,5 +1,6 @@
-# On tag v*: build Glyph for every target and attach archives + SHA256SUMS.txt
-# to the GitHub release. The in-app updater (glyph-core/src/updater.rs) relies on
+# On tag v*: build Glyph for every target and attach archives, installable apps
+# (Windows setup, macOS .dmg, Linux .deb/.rpm) + SHA256SUMS.txt to the GitHub
+# release. The in-app updater (glyph-core/src/updater.rs) relies on
 # the asset names `glyph-{version}-{target}.zip|.tar.gz` and exact manifest filenames.
 name: Release
 
@@ -69,6 +70,30 @@ jobs:
           $asset = Get-Item "dist/glyph-$version-windows-x64-setup.exe"
           $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLower()
           [IO.File]::WriteAllText($asset.FullName + '.sha256', "$hash  $($asset.Name)`n")
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH=arm64; [ "${{ matrix.target }}" = x86_64-apple-darwin ] && ARCH=x64
+          ASSET="glyph-$VERSION-macos-$ARCH.dmg"
+          bash packaging/macos/build-dmg.sh "target/${{ matrix.target }}/release/glyph" "$VERSION" "dist/$ASSET"
+          cd dist && shasum -a 256 "$ASSET" > "$ASSET.sha256"
+      - name: Build Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+          export VERSION="${GITHUB_REF_NAME#v}" BINARY="target/${{ matrix.target }}/release/glyph"
+          export NFPM_ARCH=amd64; ARCH=x64
+          if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then NFPM_ARCH=arm64; ARCH=arm64; fi
+          for p in deb rpm; do
+            ASSET="glyph-$VERSION-linux-$ARCH.$p"
+            nfpm pkg -f packaging/linux/nfpm.yaml -p "$p" -t "dist/$ASSET"
+            (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
+          done
       - uses: softprops/action-gh-release@v2
         with:
           # v1.2.0-beta.1 & co. are pre-releases: only the pre-release channel sees them.
@@ -79,6 +104,9 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*-setup.exe
+            dist/*.dmg
+            dist/*.deb
+            dist/*.rpm
       - uses: actions/upload-artifact@v4
         with:
           name: checksums-${{ matrix.target }}
@@ -107,5 +135,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
-          gh release edit "${{ github.ref_name }}" --draft=false --latest
+          TAG="${{ github.ref_name }}"
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+          # A pre-release (tag with `-`, or ticked by hand on GitHub) never becomes "Latest".
+          if [ "$(gh release view "$TAG" --json isPrerelease -q .isPrerelease)" = true ]; then
+            gh release edit "$TAG" --draft=false --latest=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi

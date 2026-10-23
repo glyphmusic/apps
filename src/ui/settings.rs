@@ -28,6 +28,9 @@ mod appearance;
 mod server;
 mod storage;
 mod about;
+mod plugins;
+mod plugin_ui;
+mod system;
 pub use eq::*;
 pub use controls::*;
 pub use modal::*;
@@ -38,6 +41,9 @@ pub use appearance::*;
 pub use server::*;
 pub use storage::*;
 pub use about::*;
+use plugins::plugins_page;
+pub use plugin_ui::set_plugin_tabs;
+use system::system;
 
 pub const REPO_URL: &str = "https://github.com/glyphmusic/apps";
 const DOCS_URL: &str = "https://docs.glyph.my";
@@ -144,8 +150,13 @@ pub(crate) fn row_full(
     control: impl IntoElement,
 ) -> AnyElement {
     let label: SharedString = label.into();
+    // Plugins can hide Glyph's rows and add sections under them.
+    if plugin_ui::row_hidden(&label) {
+        return gpui::Empty.into_any_element();
+    }
+    let added = plugin_ui::sections_after(&label);
     let lit = flash_k(&label);
-    div()
+    let row = div()
         .when_some(lit, |d, k| {
             d.relative()
                 .mx(px(-10.0))
@@ -189,8 +200,11 @@ pub(crate) fn row_full(
                 .when(TOUCH, |d| d.flex_grow(1.0).justify_end().flex_wrap().max_w_full())
                 .when(!TOUCH, |d| d.flex_none())
                 .child(control),
-        )
-        .into_any_element()
+        );
+    if added.is_empty() {
+        return row.into_any_element();
+    }
+    div().flex().flex_col().child(row).children(added).into_any_element()
 }
 
 /// Rows separated by hairlines.
