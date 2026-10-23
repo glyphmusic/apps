@@ -86,7 +86,8 @@ jobs:
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update
           sudo apt-get install -y nfpm
-          export VERSION="${GITHUB_REF_NAME#v}" BINARY="target/${{ matrix.target }}/release/glyph"
+          export VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p target/package && cp "target/${{ matrix.target }}/release/glyph" target/package/glyph
           export NFPM_ARCH=amd64; ARCH=x64
           if [ "${{ matrix.target }}" = aarch64-unknown-linux-gnu ]; then NFPM_ARCH=arm64; ARCH=arm64; fi
           for p in deb rpm; do

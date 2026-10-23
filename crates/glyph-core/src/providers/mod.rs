@@ -141,7 +141,9 @@ mod tests {
         // yt-dlp lookup reads GLYPH_DATA_DIR, which other tests change.
         let _g = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let http = reqwest::Client::new();
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // With yt-dlp, not the r-dlp default (which needs nothing installed).
+        cfg.providers.extractor = crate::config::Extractor::YtDlp;
         let p = Providers::build(&cfg, &http);
         let ids = p.ids();
         assert!(ids.contains(&ProviderId::Audius));

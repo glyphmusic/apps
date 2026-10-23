@@ -1,5 +1,6 @@
 # .deb and .rpm for the release (see .github/workflows/release.yml):
-#   VERSION=0.6.1 NFPM_ARCH=amd64 BINARY=target/.../glyph nfpm pkg -f packaging/linux/nfpm.yaml -p deb
+#   (the binary is copied to target/package/glyph first)
+#   VERSION=0.7.0 NFPM_ARCH=amd64 nfpm pkg -f packaging/linux/nfpm.yaml -p deb
 # Installs system-wide, so Glyph shows up in the app launcher and is removed
 # with the package manager like any other app.
 name: glyph
@@ -15,7 +16,8 @@ license: MIT OR Apache-2.0
 description: Native music app - search everywhere, play only from legal free sources.
 
 contents:
-  - src: ${BINARY}
+  # nfpm does not expand variables in src.
+  - src: target/package/glyph
     dst: /usr/bin/glyph
     file_info:
       mode: 0755
