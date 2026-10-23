@@ -1039,7 +1039,7 @@ impl Engine {
                 }
                 let desired = if !self.want_play {
                     Status::Paused
-                } else if !started {
+                } else if !started || cur.shared.buffering.load(Ordering::Relaxed) {
                     Status::Loading
                 } else {
                     Status::Playing

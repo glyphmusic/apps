@@ -652,7 +652,7 @@ pub fn mini_bar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
         .map(|d| (app.position().as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0))
         .unwrap_or(0.0);
     let art = cover(app, &tr, crate::ui::player_bar::COVER, 6.0, cx);
-    let title = song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM);
+    let title = song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM);
     let artist = div().truncate().text_size(theme::text_sm()).text_color(theme::text_dim()).child(tr.artist.clone());
 
     let pk = press_k("mini-play");
@@ -1309,7 +1309,7 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
+                    .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
                     .child(
                         div()
                             .flex()
@@ -1486,7 +1486,7 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
+                .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
                 .child(
                     div()
                         .flex()

@@ -368,7 +368,7 @@ impl Render for SongDrag {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(song_title(self.track.title.clone(), self.track.explicit).text_size(theme::text_md()))
+                        .child(song_title(self.track.title.clone(), crate::ui::widgets::rating(&self.track)).text_size(theme::text_md()))
                         .child(div().truncate().text_size(theme::text_sm()).text_color(theme::text_dim()).child(self.track.artist.clone())),
                 )
         })

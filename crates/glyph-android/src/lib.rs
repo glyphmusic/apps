@@ -56,11 +56,12 @@ fn android_main(app: AndroidApp) {
             env.call_method(
                 activity,
                 jni_str!("gpuiNowPlaying"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJJLjava/lang/String;ZI)V"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZZJJLjava/lang/String;ZI)V"),
                 &[
                     JValue::Object(&title),
                     JValue::Object(&artist),
                     JValue::Bool(now.playing.into()),
+                    JValue::Bool(now.buffering.into()),
                     JValue::Long(now.position.as_millis() as i64),
                     JValue::Long(dur as i64),
                     JValue::Object(&cover),

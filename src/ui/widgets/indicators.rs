@@ -1,30 +1,54 @@
 use super::*;
 
-/// Small "E" box in front of explicit song titles.
-pub fn explicit_badge() -> Div {
-    // Hover says what the "E" means.
-    div().flex_none().child(with_tip(div().id("explicit-badge"), Some(t("tip.explicit")))
+/// What the box in front of a song title says about explicit content.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Rating {
+    Clean,
+    Explicit,
+    /// No source can tell (YouTube noise): "?".
+    Unknown,
+}
+
+pub fn rating(t: &Track) -> Rating {
+    if t.explicit {
+        Rating::Explicit
+    } else if t.explicit_unknown() {
+        Rating::Unknown
+    } else {
+        Rating::Clean
+    }
+}
+
+/// Small "E" box in front of explicit song titles ("?" when unknown).
+pub fn explicit_badge(r: Rating) -> Option<Div> {
+    let (id, tip, label) = match r {
+        Rating::Clean => return None,
+        Rating::Explicit => ("explicit-badge", "tip.explicit", "E"),
+        Rating::Unknown => ("explicit-unknown-badge", "tip.explicit_unknown", "?"),
+    };
+    // Hover says what the letter means.
+    Some(div().flex_none().child(with_tip(div().id(id), Some(t(tip)))
         .flex_none()
         .size(px(15.0))
         .rounded(px(3.0))
-        .bg(gpui::hsla(0.0, 0.0, 1.0, 0.22))
+        .bg(gpui::hsla(0.0, 0.0, 1.0, if r == Rating::Unknown { 0.12 } else { 0.22 }))
         .flex()
         .items_center()
         .justify_center()
         .text_size(px(9.5))
         .font_weight(FontWeight::BOLD)
-        .text_color(gpui::hsla(0.0, 0.0, 0.0, 0.85))
-        .child("E"))
+        .text_color(if r == Rating::Unknown { gpui::hsla(0.0, 0.0, 1.0, 0.6) } else { gpui::hsla(0.0, 0.0, 0.0, 0.85) })
+        .child(label)))
 }
 
-/// A song title with the "E" box in front when it is explicit (truncates).
-pub fn song_title(title: impl Into<SharedString>, explicit: bool) -> Div {
+/// A song title with the "E" / "?" box in front (truncates).
+pub fn song_title(title: impl Into<SharedString>, r: Rating) -> Div {
     div()
         .flex()
         .items_center()
         .gap(px(6.0))
         .min_w_0()
-        .when(explicit, |d| d.child(explicit_badge()))
+        .children(explicit_badge(r))
         .child(div().min_w_0().truncate().child(title.into()))
 }
 

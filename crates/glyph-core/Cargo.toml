@@ -51,7 +51,7 @@ hmac = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 spake2 = "0.4"
 # Glyph's own YouTube audio resolver (in process: no Python start-up).
-r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.1.1" }
+r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.2.0" }
 # Plugin code: WebAssembly in an interpreter (no JIT, so it runs on phones
 # too), with fuel and memory limits (see src/plugin_host.rs).
 wasmi = { version = "1.1", default-features = false, features = ["std"] }

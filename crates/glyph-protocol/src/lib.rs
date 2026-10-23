@@ -124,6 +124,18 @@ impl Track {
         v.extend(self.external_ids.keys().copied().filter(|p| *p != self.source));
         v
     }
+
+    /// A YouTube upload no rating source (Deezer, Spotify) knows: whether it
+    /// is explicit cannot be told (videos, live recordings, other noise).
+    pub fn explicit_unknown(&self) -> bool {
+        const RATED: [ProviderId; 2] = [ProviderId::Deezer, ProviderId::Spotify];
+        !self.explicit && self.source == ProviderId::YouTube && !self.sources().iter().any(|p| RATED.contains(p))
+    }
+
+    /// Explicit, or not known to be clean ("Hide explicit songs" leaves both out).
+    pub fn maybe_explicit(&self) -> bool {
+        self.explicit || self.explicit_unknown()
+    }
 }
 
 /// How to actually play a track.
@@ -214,6 +226,9 @@ pub mod capability {
     /// [`crate::sync_kind::E2E_PLAYLIST`] items get the same revision check
     /// as plain playlists, so concurrent edits are merged, not lost.
     pub const E2E_SYNC: &str = "e2e_sync";
+    /// Search rates YouTube uploads at Deezer itself (cached on the server),
+    /// so the app does not look them up again.
+    pub const RATINGS: &str = "ratings";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -730,6 +745,20 @@ pub struct LinkStartResponse {
 #[cfg(test)]
 mod account_tests {
     use super::*;
+
+    #[test]
+    fn only_unrated_youtube_uploads_have_unknown_explicit() {
+        let mut t: Track = serde_json::from_str(r#"{"id":"v","source":"youtube","title":"t","artist":"a"}"#).unwrap();
+        assert!(t.explicit_unknown() && t.maybe_explicit());
+        t.external_ids.insert(ProviderId::Deezer, "1".into());
+        assert!(!t.explicit_unknown() && !t.maybe_explicit());
+        t.external_ids.clear();
+        t.explicit = true;
+        assert!(!t.explicit_unknown() && t.maybe_explicit());
+        t.explicit = false;
+        t.source = ProviderId::SoundCloud;
+        assert!(!t.maybe_explicit());
+    }
 
     #[test]
     fn old_health_without_account_fields_parses() {

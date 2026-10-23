@@ -94,7 +94,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
         .ok();
     });
 
-    let explicit = app.current.as_ref().is_some_and(|t| t.explicit);
+    let explicit = app.current.as_ref().map_or(crate::ui::widgets::Rating::Clean, crate::ui::widgets::rating);
     let title_lines = move |title: gpui::SharedString, sub: gpui::AnyElement| {
         div()
             .flex()

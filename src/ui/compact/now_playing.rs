@@ -391,7 +391,7 @@ fn header(app: &mut Glyph, tr: &glyph_protocol::Track, sk: f32, scroll: &gpui::S
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
+                    .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                     .child(sub),
             )
             .child(
@@ -558,7 +558,7 @@ fn sheet(app: &mut Glyph, top: f32, window: &mut Window, cx: &mut Context<Glyph>
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(21.0)).font_weight(FontWeight::BOLD))
+                .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(px(21.0)).font_weight(FontWeight::BOLD))
                 .child(
                     div()
                         .id("np-artist")
@@ -901,7 +901,7 @@ fn queue_list(app: &mut Glyph, cx: &mut Context<Glyph>) -> (AnyElement, AnyEleme
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .child(song_title(SharedString::from(tr.title.clone()), tr.explicit).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
+                    .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
                     .child(div().truncate().text_size(px(12.5)).text_color(theme::text_dim()).child(tr.artist.clone())),
             )
     };

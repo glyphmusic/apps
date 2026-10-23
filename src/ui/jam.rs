@@ -246,7 +246,7 @@ fn now_card(app: &mut Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(song_title(now.track.title.clone(), now.track.explicit).text_size(theme::text_sm()).text_color(theme::text()))
+                            .child(song_title(now.track.title.clone(), crate::ui::widgets::rating(&now.track)).text_size(theme::text_sm()).text_color(theme::text()))
                             .child(div().truncate().text_size(theme::text_xs()).text_color(theme::text_dim()).child(now.track.artist.clone())),
                     )
                     .child(icon(if now.playing { "audio-lines" } else { "pause" }, 14.0, if now.playing { theme::pink() } else { theme::text_dim() })),
@@ -530,7 +530,7 @@ fn song_row(app: &mut Glyph, i: usize, item: &Item, voted: bool, sha: Option<Str
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(song_title(item.track.title.clone(), item.track.explicit).text_size(theme::text_sm()).text_color(theme::text()))
+                .child(song_title(item.track.title.clone(), crate::ui::widgets::rating(&item.track)).text_size(theme::text_sm()).text_color(theme::text()))
                 .child(div().truncate().text_size(theme::text_xs()).text_color(theme::text_dim()).child(item.track.artist.clone())),
         )
         .child(with_tip(div().id(("jam-by", i)).flex_none().child(pic), Some(tf("jam.added_by", &[("who", &format!("@{}", item.by))]))))

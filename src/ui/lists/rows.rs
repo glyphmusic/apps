@@ -124,7 +124,7 @@ pub fn song_row(
                         .items_center()
                         .gap(px(6.0))
                         .min_w_0()
-                        .when(tr.explicit, |d| d.child(explicit_badge()))
+                        .children(explicit_badge(crate::ui::widgets::rating(&tr)))
                         .child(
                             div()
                                 .truncate()

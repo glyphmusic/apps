@@ -566,9 +566,8 @@ impl Glyph {
 
     /// Track, play state and position for the OS media controls (phone
     /// notification, SMTC, MPRIS), from this player or the network device.
-    /// Finding or opening the next song still counts as playing: the phone
-    /// keeps its background service (and with it network and CPU) between
-    /// songs instead of being frozen before the next one starts.
+    /// Phones publish buffering separately: keep the background service and
+    /// its CPU/network locks between songs without advancing the OS position.
     fn publish_now_playing(&mut self) {
         let Some(mk) = &self.media_keys else { return };
         // Another device of the account or the jam host plays: not here.
@@ -579,10 +578,13 @@ impl Glyph {
         let track = if self.resolving { self.current.clone() } else { st.track.clone() };
         let playing = self.is_playing() || (self.is_loading() && !self.hold_play);
         let pos = self.position();
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        guard(|| mk.set_playback_state(track.as_ref(), self.is_playing(), self.is_loading() && !self.hold_play, pos));
         // Only track, play state and a coarse position: pushing every state
         // change (~60/s) means needless OS calls on the UI thread.
         let key = (track.as_ref().map(|t| (t.source, t.id.clone())), playing, pos.as_secs() / 5);
         if self.media_keys_sent.as_ref() != Some(&key) {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             guard(|| mk.set_now_playing(track.as_ref(), playing, pos));
             self.media_keys_sent = Some(key);
         }

@@ -346,7 +346,7 @@ impl Glyph {
 
     /// Not filtered out by "Hide explicit songs".
     pub fn allowed(&self, t: &Track) -> bool {
-        !(t.explicit && self.config.audio.hide_explicit)
+        !(t.maybe_explicit() && self.config.audio.hide_explicit)
     }
 
     /// Loads "New from artists you follow" for Home: releases of the last

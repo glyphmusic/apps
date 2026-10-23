@@ -120,7 +120,7 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
                 .flex_col()
                 .items_center()
                 .gap(px(4.0))
-                .child(song_title(track.title.clone(), track.explicit).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
+                .child(song_title(track.title.clone(), crate::ui::widgets::rating(&track)).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
                 .child(
                     div()
                         .flex()

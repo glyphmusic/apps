@@ -76,7 +76,7 @@ public class PlaybackService extends Service {
     private static final long VOLUME_SETTLE_MS = 1_500;
 
     private static String title = "", artist = "", coverPath = "";
-    private static boolean playing = false, liked = false;
+    private static boolean playing = false, buffering = false, liked = false;
     private static long positionMs = 0, durationMs = 0;
     /** Volume of the network device playing now, -1 when the phone plays. */
     private static int remoteVolume = -1;
@@ -101,12 +101,13 @@ public class PlaybackService extends Service {
      * update or stop the service. remote: the network device's volume, -1
      * when the phone plays.
      */
-    static void update(Context ctx, String t, String a, boolean p, long pos, long dur, String cover, boolean like,
+    static void update(Context ctx, String t, String a, boolean p, boolean loading, long pos, long dur, String cover, boolean like,
                        int remote) {
         boolean has = t != null && !t.isEmpty();
         title = has ? t : "";
         artist = a == null ? "" : a;
         playing = p;
+        buffering = loading;
         positionMs = pos;
         durationMs = dur;
         coverPath = cover == null ? "" : cover;
@@ -230,17 +231,20 @@ public class PlaybackService extends Service {
                 // Android 13+ draws its media controls from the session: the
                 // custom action is the add button left of "previous".
                 .addCustomAction(new PlaybackStateCompat.CustomAction.Builder(ACTION_LIKE, likeLabel, likeIcon).build())
-                .setState(playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, positionMs, playing ? 1f : 0f)
+                .setState(buffering ? PlaybackStateCompat.STATE_BUFFERING
+                        : playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
+                        positionMs, playing && !buffering ? 1f : 0f)
                 .build());
 
-        String key = meta + '\u0000' + playing + '\u0000' + liked;
+        boolean active = playing || buffering;
+        String key = meta + '\u0000' + playing + '\u0000' + buffering + '\u0000' + liked;
         // Paused: the grace timer already runs (or the foreground is gone).
-        if (!mustStartForeground && key.equals(notificationKey) && (foreground || !playing)) {
+        if (!mustStartForeground && key.equals(notificationKey) && (foreground || !active)) {
             return;
         }
         notificationKey = key;
         Notification n = buildNotification(likeIcon, likeLabel);
-        if (playing || mustStartForeground) {
+        if (active || mustStartForeground) {
             handler.removeCallbacks(leaveForeground);
             try {
                 if (Build.VERSION.SDK_INT >= 29) {
@@ -256,7 +260,7 @@ public class PlaybackService extends Service {
             }
             holdLocks(true);
         }
-        if (!playing) {
+        if (!active) {
             getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, n);
             if (foreground) {
                 // Paused, or between two songs: let go a bit later.
@@ -270,7 +274,7 @@ public class PlaybackService extends Service {
 
     /** Still paused after the grace time: the notification may be swiped away, the phone may sleep. */
     private void leaveForeground() {
-        if (playing) {
+        if (playing || buffering) {
             return;
         }
         if (foreground) {
@@ -391,7 +395,7 @@ public class PlaybackService extends Service {
                 PendingIntent.getService(this, 1, likeIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
         NotificationCompat.Action prev = new NotificationCompat.Action(android.R.drawable.ic_media_previous, "Previous",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS));
-        NotificationCompat.Action toggle = playing
+        NotificationCompat.Action toggle = playing || buffering
                 ? new NotificationCompat.Action(android.R.drawable.ic_media_pause, "Pause",
                         MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PAUSE))
                 : new NotificationCompat.Action(android.R.drawable.ic_media_play, "Play",
@@ -404,7 +408,7 @@ public class PlaybackService extends Service {
                 .setContentText(artist)
                 .setLargeIcon(artwork())
                 .setContentIntent(content)
-                .setOngoing(playing)
+                .setOngoing(playing || buffering)
                 .setOnlyAlertOnce(true)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .addAction(like)

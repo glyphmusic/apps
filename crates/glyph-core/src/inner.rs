@@ -27,6 +27,7 @@ impl Inner {
         let mut mode = BackendMode::Direct;
         let mut server = None;
         let mut server_providers = None;
+        let mut server_rates = false;
         let url = server_client::normalize_base_url(config.effective_server_url());
         if !url.is_empty() {
             let key_url = url.clone();
@@ -36,6 +37,7 @@ impl Inner {
                 Ok(Compat::Compatible(h)) => {
                     if crate::outage::is_official(&url) { crate::outage::clear(); }
                     library::set_playlist_track_limit(h.playlist_max_tracks);
+                    server_rates = h.supports(glyph_protocol::capability::RATINGS);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
                     server = Some(client);
@@ -58,7 +60,7 @@ impl Inner {
             }
         }
         let covers = covers.with_server(server.clone());
-        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, covers, lyrics_cache })
+        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, covers, lyrics_cache })
     }
 
     /// The server, unless it is the official one and that is out (see

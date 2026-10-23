@@ -15,6 +15,7 @@ pub struct NowPlaying<'a> {
     /// `None`: nothing loaded.
     pub track: Option<&'a Track>,
     pub playing: bool,
+    pub buffering: bool,
     pub position: Duration,
     /// Cached cover file (the notification's artwork).
     pub cover: Option<&'a Path>,
@@ -46,6 +47,7 @@ pub fn push_event(ev: MediaKeyEvent) {
 struct Shown {
     track: Option<Track>,
     playing: bool,
+    buffering: bool,
     position: Duration,
     cover: Option<PathBuf>,
     liked: bool,
@@ -70,9 +72,19 @@ impl MediaKeys {
     }
 
     pub fn set_now_playing(&self, track: Option<&Track>, playing: bool, position: Duration) {
+        self.set_playback_state(track, playing, false, position);
+    }
+
+    /// Keep background playback alive while loading without claiming audio is playing.
+    pub fn set_playback_state(&self, track: Option<&Track>, playing: bool, buffering: bool, position: Duration) {
         let mut shown = self.shown.lock().unwrap();
+        if shown.track.as_ref() == track && shown.playing == playing
+            && shown.buffering == buffering && shown.position.as_secs() / 5 == position.as_secs() / 5 {
+            return;
+        }
         shown.track = track.cloned();
         shown.playing = playing;
+        shown.buffering = buffering;
         shown.position = position;
         send(&shown);
     }
@@ -106,10 +118,32 @@ fn send(shown: &Shown) {
         sink(&NowPlaying {
             track: shown.track.as_ref(),
             playing: shown.playing,
+            buffering: shown.buffering,
             position: shown.position,
             cover: shown.cover.as_deref(),
             liked: shown.liked,
             remote_volume: shown.remote_volume,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffering_to_playing_is_published_even_at_the_same_position() {
+        let states = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured = states.clone();
+        set_now_playing_sink(Box::new(move |now| {
+            captured.lock().unwrap().push((now.playing, now.buffering));
+        }));
+        let keys = MediaKeys::new(None).unwrap();
+        keys.set_playback_state(None, false, true, Duration::ZERO);
+        keys.set_playback_state(None, false, true, Duration::from_millis(100));
+        keys.set_playback_state(None, true, false, Duration::from_millis(200));
+        keys.set_playback_state(None, false, false, Duration::from_millis(200));
+        assert_eq!(*states.lock().unwrap(), [(false, true), (true, false), (false, false)]);
+        *SINK.lock().unwrap() = None;
     }
 }

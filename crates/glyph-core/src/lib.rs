@@ -38,6 +38,7 @@ pub mod profile_images;
 pub mod provider;
 pub mod providers;
 pub mod queue;
+pub mod rating;
 pub mod resolver;
 pub mod search_ops;
 pub mod server_client;
@@ -295,6 +296,8 @@ struct Inner {
     /// Only set in `BackendMode::Server`.
     server: Option<ServerClient>,
     server_providers: Option<Vec<ProviderId>>,
+    /// The server rates YouTube uploads in its search (`capability::RATINGS`).
+    server_rates: bool,
     covers: CoverCache,
     lyrics_cache: LyricsCache,
 }
@@ -308,6 +311,8 @@ pub struct Backend {
     /// Recent search results (query -> when, songs): repeated searches do
     /// not hit the sources again for 10 minutes.
     search_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<Track>)>>>,
+    /// Deezer ratings of YouTube uploads (see [`rating`]).
+    ratings: rating::RatingCache,
     /// Sources found ahead of time (mouse resting on a song, top search
     /// hits): song key -> when, result. A click then starts without waiting
     /// for the resolve round trip. `None` while it is still being looked up.
@@ -342,6 +347,7 @@ impl Backend {
             downloads,
             imports,
             search_cache: Default::default(),
+            ratings: Default::default(),
             warm: Default::default(),
             dl_progress: Default::default(),
             rt: Some(rt),
@@ -445,16 +451,47 @@ impl Backend {
                 }
             }
         });
+        // Cleared when the search falls back to the local sources.
+        let server_rated = Arc::new(std::sync::atomic::AtomicBool::new(route == "server" && inner.server_rates));
         let tx = {
             let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<SearchEvent>();
             let fwd = tx.clone();
+            let (http, ratings) = (inner.http.clone(), self.ratings.clone());
+            let server_rated = server_rated.clone();
             self.rt.as_ref().expect("runtime alive").spawn(async move {
+                let mut seen: Vec<Track> = Vec::new();
                 loop {
                     let ev = tokio::select! {
                         biased;
                         _ = fwd.closed() => break,
                         ev = out_rx.recv() => match ev { Some(ev) => ev, None => break },
                     };
+                    match &ev {
+                        SearchEvent::Results { tracks, .. } => {
+                            for t in tracks {
+                                match seen.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
+                                    Some(x) => *x = t.clone(),
+                                    None => seen.push(t.clone()),
+                                }
+                            }
+                        }
+                        // Before the end: ask Deezer about the YouTube songs
+                        // nothing rated yet; each answer replaces its song.
+                        // A server that rates has done this already.
+                        SearchEvent::Done if !server_rated.load(std::sync::atomic::Ordering::Relaxed) => {
+                            let send = |t: Track| {
+                                let ev = SearchEvent::Results { provider: ProviderId::Deezer, tracks: vec![t] };
+                                let _ = tap_tx.send(ev.clone());
+                                let _ = fwd.send(ev);
+                            };
+                            tokio::select! {
+                                biased;
+                                _ = fwd.closed() => break,
+                                _ = rating::rate_unknown(&http, &ratings, &seen, send) => {}
+                            }
+                        }
+                        _ => {}
+                    }
                     let _ = tap_tx.send(ev.clone());
                     if fwd.send(ev).is_err() {
                         break;
@@ -476,6 +513,7 @@ impl Backend {
                             // The official server is out: search from here instead.
                             if outage::note(server.base_url(), &e).await.is_some() {
                                 tracing::warn!("server search failed, searching locally: {e}");
+                                server_rated.store(false, std::sync::atomic::Ordering::Relaxed);
                             } else {
                                 tracing::warn!("server search failed: {e}");
                                 let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });

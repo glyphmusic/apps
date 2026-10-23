@@ -115,6 +115,8 @@ pub struct TrackShared {
     /// Generation of the last audible position; older positions cannot undo a seek.
     pub playback_gen: AtomicU64,
     pub started: AtomicBool,
+    /// The callback is supplying silence because decoded audio ran out.
+    pub buffering: AtomicBool,
     pub finished: AtomicBool,
     /// Decoder starvation events; consumed and logged by the engine, never the callback.
     pub underruns: AtomicU64,
@@ -591,6 +593,7 @@ impl TrackSource {
                             continue;
                         }
                         self.starving = false;
+                        self.shared.buffering.store(false, Ordering::Relaxed);
                         let old = std::mem::replace(&mut self.cur, c.samples);
                         self.ctl.recycle(old);
                         self.idx = 0;
@@ -606,6 +609,7 @@ impl TrackSource {
                             #[cfg(test)]
                             TEST_UNDERRUNS.fetch_add(1, Ordering::Relaxed);
                             self.starving = true;
+                            self.shared.buffering.store(true, Ordering::Relaxed);
                         }
                         self.silence_remaining = self.channels.get() as usize - 1;
                         return Some(0.0);
@@ -802,9 +806,11 @@ mod tests {
         src.eq = crate::eq::Equalizer::bypass();
         src = src.with_renderer(crate::spatial::Renderer::bypass(2));
         assert_eq!(src.next(), Some(0.0)); // missing left channel
+        assert!(shared.buffering.load(Ordering::Relaxed));
         tx.send(Chunk { gen: 0, start_frame: 0, samples: vec![0.75,-0.25] }).unwrap();
         assert_eq!(src.next(), Some(0.0)); // finish the silent stereo frame
         assert_eq!(src.next(), Some(0.75));
+        assert!(!shared.buffering.load(Ordering::Relaxed));
         assert_eq!(src.next(), Some(-0.25));
         assert_eq!(shared.underruns.load(Ordering::Relaxed),1);
     }

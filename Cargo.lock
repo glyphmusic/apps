@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "glyph"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-android"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "android_logger",
  "glyph",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-audio"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-gpui-android"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "android-activity",
  "anyhow",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "minisign-verify",
  "serde",
@@ -5692,8 +5692,8 @@ dependencies = [
 
 [[package]]
 name = "r-dlp"
-version = "0.1.1"
-source = "git+https://github.com/glyphmusic/r-dlp?tag=v0.1.1#de6123bec833a94295abdec35e8b511e3d08c2a1"
+version = "0.2.0"
+source = "git+https://github.com/glyphmusic/r-dlp?tag=v0.2.0#e1a683de464b0e4bada270a07f1c01482c5487d9"
 dependencies = [
  "reqwest",
  "serde",
@@ -7363,7 +7363,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand 2.5.0",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
@@ -8680,7 +8680,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

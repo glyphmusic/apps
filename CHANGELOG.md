@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-23
+
+### Security
+
+- Release files are verified and signed together before publication. Concurrent builds cannot overwrite archives or checksums of a published release.
+
 ### Added
+
+- **"?" for songs nobody rated**: YouTube does not say whether a song is explicit. Glyph now looks YouTube results up at Deezer (on the server when search runs there, otherwise from this device); a song found there shows its "E" or nothing, a song found nowhere shows "?" (hover: whether it is explicit cannot be told). "Hide explicit songs" also hides the "?" songs.
 
 - **End-to-end encrypted library**: liked songs, playlists, albums, artists, history, statistics, settings and API keys leave the device encrypted with a key only your devices hold, so the server stores what it cannot read. There is nothing new to remember: signing in with your password opens the library, a new device gets the key through its pairing code or, on the official server, from your other devices. While an account has no password the server keeps the key, so losing a device never loses the library; setting a password replaces that key with one the server never sees. Playlists you show on your profile stay readable, because the server shows them to others. Update every device: older versions do not read encrypted items.
 - **Transparency page**: Settings › Server › Transparency lists what the server you use can see (library, API keys, searches and playback, profile, device control, Jam, AI assistants, IP address and ids). Glyph works this out from what it sends itself, not from what the server says. Glyph warns at once when a server does something that only makes sense to read your data: a sign-in salt that would reveal a key, changed encrypted entries, a replaced or removed key, changed pairing messages.

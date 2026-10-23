@@ -223,7 +223,7 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
                         .flex_col()
                         .min_w_0()
                         .gap(px(2.0))
-                        .child(song_title(tr.title.clone(), tr.explicit).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
+                        .child(song_title(tr.title.clone(), crate::ui::widgets::rating(&tr)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                         .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist)),
                 )
                 .into_any_element(),
@@ -279,7 +279,7 @@ fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, rec
                 .child(hover_fill(format!("{prefix}-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.05), 10.0))
                 .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)))
                 .child(art)
-                .child(song_title(tr.title.clone(), tr.explicit).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
+                .child(song_title(tr.title.clone(), crate::ui::widgets::rating(&tr)).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                 .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist));
             with_menu(el, tr, recent.then_some((ListRef::Recent, i)), cx)
         })
@@ -365,7 +365,7 @@ fn recent_row(app: &mut Glyph, items: Vec<RecentItem>, prefix: &'static str, cx:
                     .child(hover_fill(format!("{prefix}-{i}"), gpui::hsla(0.0, 0.0, 1.0, 0.05), 10.0))
                     .on_click(cx.listener(move |this, _, _, cx| this.play_recent_item(i, cx)))
                     .child(art)
-                    .child(song_title(tr.title.clone(), tr.explicit).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
+                    .child(song_title(tr.title.clone(), crate::ui::widgets::rating(&tr)).pt(px(4.0)).text_size(theme::text_md()).font_weight(FontWeight::MEDIUM))
                     .child(div().flex().min_w_0().text_size(theme::text_sm()).text_color(theme::text_dim()).child(artist));
                 with_menu(el, tr, Some((ListRef::Recent, 0)), cx).into_any_element()
             }
@@ -787,7 +787,7 @@ fn queue_row_inner(i: usize, tr: &Track, art: Option<std::path::PathBuf>, group:
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(song_title(tr.title.clone(), tr.explicit).text_size(theme::text_sm()))
+                .child(song_title(tr.title.clone(), crate::ui::widgets::rating(&tr)).text_size(theme::text_sm()))
                 .child(div().truncate().text_size(theme::text_xs()).text_color(theme::text_dim()).child(tr.artist.clone())),
         )
 }
@@ -1082,7 +1082,7 @@ pub fn add_songs_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(song_title(tr.title.clone(), tr.explicit).text_size(theme::text_sm()))
+                            .child(song_title(tr.title.clone(), crate::ui::widgets::rating(&tr)).text_size(theme::text_sm()))
                             .child(div().truncate().text_size(theme::text_xs()).text_color(theme::text_dim()).child(tr.artist.clone())),
                     )
                     .child(

@@ -74,7 +74,7 @@ pub fn track_row(
                         .gap(px(6.0))
                         .min_w_0()
                         .when(playing, |d| d.child(playing_bars(app, 13.0, theme::pink())))
-                        .when(t.explicit, |d| d.child(explicit_badge()))
+                        .children(explicit_badge(rating(&t)))
                         .child(
                             div()
                                 .truncate()

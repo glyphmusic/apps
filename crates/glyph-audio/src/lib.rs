@@ -51,6 +51,9 @@ mod media_keys;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[path = "media_keys_hosted.rs"]
 pub mod media_keys;
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[path = "media_keys_hosted.rs"]
+mod media_keys_hosted_tests;
 mod native;
 pub mod spatial;
 pub mod spectrum;

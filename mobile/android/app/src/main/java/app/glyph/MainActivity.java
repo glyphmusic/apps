@@ -230,9 +230,9 @@ public class MainActivity extends GameActivity {
      * network device plays at this volume (0..100) and the volume keys go
      * to it; -1 when the phone plays.
      */
-    public void gpuiNowPlaying(String title, String artist, boolean playing, long positionMs, long durationMs,
+    public void gpuiNowPlaying(String title, String artist, boolean playing, boolean buffering, long positionMs, long durationMs,
                                String coverPath, boolean liked, int remoteVolume) {
-        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, positionMs, durationMs, coverPath, liked,
+        runOnUiThread(() -> PlaybackService.update(this, title, artist, playing, buffering, positionMs, durationMs, coverPath, liked,
                 remoteVolume));
     }
 
