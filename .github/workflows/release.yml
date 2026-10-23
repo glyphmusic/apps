@@ -36,6 +36,7 @@ jobs:
         with:
           save-if: false
       - name: Linux system packages
+        timeout-minutes: 15
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update

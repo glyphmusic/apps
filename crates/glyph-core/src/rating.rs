@@ -56,10 +56,11 @@ pub async fn rate_unknown(http: &reqwest::Client, cache: &RatingCache, tracks: &
         return;
     }
     let dz = Deezer::new(http.clone());
-    let mut lookups = stream::iter(todo).map(|(key, t)| {
+    let pending: Vec<_> = todo.into_iter().map(|(key, t)| {
         let dz = &dz;
         async move { (key, t, look_up(dz, t).await) }
-    }).buffer_unordered(PARALLEL);
+    }).collect();
+    let mut lookups = stream::iter(pending).buffer_unordered(PARALLEL);
     // The search only ends after this: give up on what is still open.
     let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
     while let Ok(Some((key, t, res))) = tokio::time::timeout_at(deadline, lookups.next()).await {
