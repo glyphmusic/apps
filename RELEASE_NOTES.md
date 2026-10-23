@@ -7,3 +7,4 @@
 See CHANGELOG.md for the complete changes and compatibility details.
 
 - YouTube results get an explicit-content rating from Deezer where available; unknown ratings show a question mark.
+- Android keeps the playback service active while buffering and reports the correct media state.

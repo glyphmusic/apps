@@ -28,6 +28,10 @@
 - **A modified server could read synced API keys**: it could hand out a sign-in salt that turned the key sent at sign-in into the key that encrypted the API keys. The key that protects your data now comes from a separate derivation that no sign-in salt can match, and Glyph warns when a server tries.
 - Plugin setup and permission texts (service keys, lyrics, audio spectrum) are translated into every language Glyph speaks; outside English and German they showed in English.
 
+### Fixed
+
+- Android keeps background playback active while buffering, reports loading separately from playback and avoids redundant media-notification updates.
+
 ## 0.7.0 - 2026-10-23
 
 Plugins and extensions, Glyph starting with your computer, real installers on macOS and Linux, and steadier playback on phones.
