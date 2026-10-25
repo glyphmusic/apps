@@ -9,9 +9,9 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
         (
             t("sp.group.prefs"),
             vec![
-                (SettingsPage::Playback, "sources source quelle youtube soundcloud priority radio quality qualität audio"),
+                (SettingsPage::Playback, "sources source quelle youtube soundcloud priority radio quality qualität audio player mausrad wheel zen hotkey"),
                 (SettingsPage::Audio, "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file"),
-                (SettingsPage::Appearance, "language sprache theme ascii cover glow"),
+                (SettingsPage::Appearance, "language sprache theme ascii cover glow visualizer textgröße text size"),
             ],
         ),
         (
@@ -23,7 +23,7 @@ pub(super) fn nav(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Stateful<Di
                 (SettingsPage::System, "system autostart startup start boot tray systray hintergrund background"),
                 (SettingsPage::Integrations, "discord rich presence integration integrations status activity listening mcp ai assistant claude"),
                 (SettingsPage::Plugins, "plugin plugins erweiterungen extensions addons themes github community"),
-                (SettingsPage::Storage, "cache download downloads speicher"),
+                (SettingsPage::Storage, "cache download downloads speicher ordner folder lokal local"),
                 (SettingsPage::Migrate, "transfer übertragen umzug move import spotify youtube soundcloud deezer last.fm lastfm apple bandcamp tidal library bibliothek playlists"),
                 (SettingsPage::Transfer, "backup export import share teilen code datei file"),
                 (SettingsPage::About, "update version support hilfe help"),

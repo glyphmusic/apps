@@ -49,6 +49,11 @@ pub struct Config {
     /// Starting with the computer (desktop only; never synced or shared:
     /// it belongs to this machine).
     pub desktop: DesktopConfig,
+    /// Player bar, Now Playing and shortcuts on this device (never synced:
+    /// screens and keyboards differ between devices).
+    pub ui: UiConfig,
+    /// Music folders on this computer (never synced or shared).
+    pub local: LocalConfig,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -177,6 +182,59 @@ pub struct DesktopConfig {
     pub start_in_tray: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Seconds one mouse-wheel notch over the seek bar jumps (0 = off).
+    pub wheel_seek_s: u32,
+    /// Volume change per mouse-wheel notch over the volume bar, in
+    /// percent (0 = off).
+    pub wheel_volume_pct: u32,
+    /// Download button for the playing song in Now Playing.
+    pub np_download: bool,
+    /// Lyrics next to the cover in Now Playing (Ctrl+L switches too).
+    pub np_lyrics: bool,
+    /// Shortcuts the user changed: action id (the app's shortcut list) ->
+    /// key in GPUI syntax ("ctrl-shift-z"), "" = no key. Actions not named
+    /// keep their default key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
+    /// "Show in folder" button on the toast of a finished download.
+    pub reveal_downloads: bool,
+    /// Text size factor (0.9 ..= 1.3).
+    pub text_scale: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            wheel_seek_s: 5,
+            wheel_volume_pct: 5,
+            np_download: true,
+            np_lyrics: true,
+            keys: BTreeMap::new(),
+            reveal_downloads: true,
+            text_scale: 1.0,
+        }
+    }
+}
+
+impl UiConfig {
+    /// Text size factor within the supported range.
+    pub fn text_scale(&self) -> f32 {
+        if self.text_scale.is_finite() { self.text_scale.clamp(0.9, 1.3) } else { 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalConfig {
+    /// Folders whose audio files show under "Local files" (read in place,
+    /// never copied or uploaded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatsConfig {
@@ -266,6 +324,10 @@ pub struct VisualsConfig {
     /// Lower the background animation's frame rate while Glyph is not the
     /// active window (saves power). Off: full rate all the time.
     pub throttle_unfocused: bool,
+    /// Shape of the background glow: "" = a new one with every song, else
+    /// one shape always ("strahl", "band", "sonnenaufgang", "horizont").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub glow_shape: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -341,6 +403,12 @@ pub struct AudioConfig {
     /// Equalizer presets the user saved (selected as `user:<name>`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub eq_user_presets: Vec<crate::eq::EqPreset>,
+    /// Extra bass (low shelf around 90 Hz) on top of the curve, in dB
+    /// (-12 ..= 12).
+    pub eq_bass_db: f32,
+    /// Level taken off before the equalizer so boosts do not clip, in dB
+    /// (0 ..= 12), on top of the room Glyph leaves by itself.
+    pub eq_headroom_db: f32,
     /// Output device name; None = system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
@@ -362,6 +430,8 @@ impl Default for AudioConfig {
             eq_preset: "flat".into(),
             eq_gains: vec![0.0; 10],
             eq_user_presets: Vec::new(),
+            eq_bass_db: 0.0,
+            eq_headroom_db: 0.0,
             output_device: None,
         }
     }
@@ -399,6 +469,9 @@ pub struct StorageConfig {
     pub cache_limit_mb: u64,
     /// Data saver: small covers, feeds kept for hours, slower sync.
     pub data_saver: bool,
+    /// Folder for downloads; `None` = Glyph's data folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
 }
 
 /// Player controls as the user left them.
@@ -429,7 +502,7 @@ impl Default for PlayerPrefs {
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { cache_limit_mb: 1024, data_saver: false }
+        Self { cache_limit_mb: 1024, data_saver: false, download_dir: None }
     }
 }
 
@@ -476,7 +549,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new() }
     }
 }
 
@@ -693,6 +766,24 @@ mod tests {
         assert_eq!(edited.audio.download_parallelism, 7);
         assert!(!edited.audio.download_adaptive);
         assert!(edited.providers.youtube_only);
+    }
+
+    #[test]
+    fn player_ui_and_local_folders_have_defaults_and_stay_local() {
+        let c = Config::from_toml("").unwrap();
+        assert_eq!(c.ui, UiConfig::default());
+        assert_eq!((c.ui.wheel_seek_s, c.ui.wheel_volume_pct), (5, 5));
+        assert!(c.ui.np_lyrics && c.ui.np_download && c.ui.reveal_downloads);
+        assert!(c.ui.keys.is_empty());
+        assert!(c.local.folders.is_empty() && c.storage.download_dir.is_none());
+        assert_eq!((c.audio.eq_bass_db, c.audio.eq_headroom_db), (0.0, 0.0));
+        let c = Config::from_toml("[ui]\ntext_scale = 9.0\n[ui.keys]\nzen = \"f11\"\n[local]\nfolders = [\"/m\"]\n").unwrap();
+        assert_eq!(c.ui.text_scale(), 1.3);
+        assert_eq!(c.ui.keys.get("zen").map(String::as_str), Some("f11"));
+        assert_eq!(c.local.folders, vec!["/m".to_string()]);
+        // Device-bound: never in shared settings.
+        let shared = crate::settings_share::to_json(&c);
+        assert!(!shared.contains("folders") && !shared.contains("text_scale"));
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub mod hardware;
 pub mod import;
 pub mod jam;
 pub mod library;
+pub mod local_library;
 pub mod lyrics;
 pub mod lyricsearch;
 pub mod outage;
@@ -308,6 +309,8 @@ pub struct Backend {
     downloads: Arc<downloads::Downloads>,
     /// Audio files dropped onto playlists (same index format as downloads).
     imports: Arc<downloads::Downloads>,
+    /// Music folders on this computer, read in place.
+    local: Arc<local_library::LocalLibrary>,
     /// Recent search results (query -> when, songs): repeated searches do
     /// not hit the sources again for 10 minutes.
     search_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<Track>)>>>,
@@ -336,9 +339,11 @@ impl Backend {
             .thread_name("glyph-core")
             .enable_all()
             .build()?;
+        storage::set_downloads_dir(config.storage.download_dir.as_deref().map(PathBuf::from));
         let inner = rt.spawn(Inner::build(config, None)).await.map_err(|e| anyhow!("backend start failed: {e}"))??;
         let downloads = Arc::new(downloads::Downloads::load(storage::downloads_dir()));
         let imports = Arc::new(downloads::Downloads::load(storage::imports_dir()));
+        let local = Arc::new(rt.spawn_blocking(local_library::LocalLibrary::load).await.unwrap_or_default());
         let download_queue = Arc::new(downloads::DownloadQueue::default());
         download_queue.configure(if inner.config.storage.data_saver { 1 } else { inner.config.audio.download_parallelism }, inner.config.audio.download_adaptive);
         Ok(Self {
@@ -346,6 +351,7 @@ impl Backend {
             inner: std::sync::RwLock::new(Arc::new(inner)),
             downloads,
             imports,
+            local,
             search_cache: Default::default(),
             ratings: Default::default(),
             warm: Default::default(),
@@ -767,6 +773,7 @@ impl Backend {
         let queue = self.download_queue.clone();
         let res = self
             .spawn(downloads::run_job(job, async move {
+                let _location = dl.relocation.read().await;
                 let _permit = queue.acquire().await;
                 let Some((provider, url)) = inner.download_url(&track).await? else { return Ok(None) };
                 // YouTube songs already sit in the audio cache: copy the file.
@@ -808,7 +815,7 @@ impl Backend {
     /// Index lookup only (cheap enough for every rendered row). Imported
     /// files count as downloaded.
     pub fn is_downloaded(&self, track: &Track) -> bool {
-        self.downloads.contains(track) || self.imports.contains(track)
+        self.downloads.contains(track) || self.imports.contains(track) || self.local.contains(track)
     }
 
     /// Slow maintenance stays entirely separate from the local playback path.
@@ -823,6 +830,7 @@ impl Backend {
             struct Running;
             impl Drop for Running { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
             let _running = Running;
+            let _location = downloads.relocation.read().await;
             for entry in downloads.claim_refresh(2) {
                 let job = downloads::Job { progress: Arc::default(), quality: entry.revision.quality };
                 downloads::run_job(job, async {
@@ -838,9 +846,87 @@ impl Backend {
         });
     }
 
-    /// The downloaded or imported file of `track`.
+    /// The downloaded or imported file of `track`, or its file in a music
+    /// folder.
     fn local_file(&self, track: &Track) -> Option<(PathBuf, ProviderId)> {
-        self.downloads.local(track).or_else(|| self.imports.local(track))
+        self.downloads
+            .local(track)
+            .or_else(|| self.imports.local(track))
+            .or_else(|| self.local.local(track).map(|p| (p, ProviderId::MusicBrainz)))
+    }
+
+    /// Calls a tool of the docs' MCP server (`search_docs`, `read_doc`,
+    /// `list_docs` at [`glyph_protocol::mcp::DOCS_MCP_URL`]) and returns its
+    /// `CallToolResult`. The docs are public: nothing of the user's is sent
+    /// besides the arguments.
+    pub async fn docs_tool(&self, tool: &str, arguments: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let (inner, tool) = (self.cur(), tool.to_string());
+        self.spawn(async move {
+            let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": arguments } });
+            let resp = inner
+                .http
+                .post(glyph_protocol::mcp::DOCS_MCP_URL)
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", glyph_protocol::mcp::PROTOCOL_VERSION)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(20))
+                .send()
+                .await?
+                .error_for_status()?;
+            let v: serde_json::Value = resp.json().await?;
+            match (v.get("result"), v.get("error")) {
+                (Some(r), _) => Ok(r.clone()),
+                (None, Some(e)) => Err(anyhow!("{}", e["message"].as_str().unwrap_or("docs error"))),
+                _ => Err(anyhow!("the docs answered nothing")),
+            }
+        })
+        .await?
+    }
+
+    /// The music folders on this computer ("Local files").
+    pub fn local_library(&self) -> Arc<local_library::LocalLibrary> {
+        self.local.clone()
+    }
+
+    /// Reads the music folders again (new, changed and removed files).
+    pub async fn scan_local(&self, folders: Vec<PathBuf>) -> anyhow::Result<local_library::ScanReport> {
+        let local = self.local.clone();
+        self.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                if folders.is_empty() {
+                    local.clear();
+                    return local_library::ScanReport::default();
+                }
+                local.scan(&folders)
+            })
+            .await
+        })
+        .await?
+        .map_err(|e| anyhow!("scan failed: {e}"))
+    }
+
+    /// Moves the downloads into `dir` (`None`: Glyph's own folder) and keeps
+    /// saving there.
+    pub async fn set_download_dir(&self, dir: Option<PathBuf>) -> anyhow::Result<downloads::MoveReport> {
+        let downloads = self.downloads.clone();
+        let target = dir.clone().unwrap_or_else(storage::default_downloads_dir);
+        let report = self
+            .spawn(async move {
+                let location = downloads.relocation.write().await;
+                let files = downloads.clone();
+                let result = tokio::task::spawn_blocking(move || files.move_to(target)).await;
+                drop(location);
+                result
+            })
+            .await?
+            .map_err(|e| anyhow!("move failed: {e}"))??;
+        storage::set_downloads_dir(dir);
+        Ok(report)
+    }
+
+    /// The folder downloads go to now.
+    pub fn download_dir(&self) -> PathBuf {
+        self.downloads.dir()
     }
 
     /// Imports dropped audio files / folders (tags, embedded cover, copy
@@ -873,7 +959,7 @@ impl Backend {
         if self.downloads.local(track).is_some() {
             return self.downloads.remove(track).then_some(BrokenFile::Download);
         }
-        if self.imports.local(track).is_some() {
+        if self.imports.local(track).is_some() || self.local.local(track).is_some() {
             return None;
         }
         let p = stream_cached(track)?;
@@ -1014,6 +1100,9 @@ impl Backend {
     /// fallback chain provider → Spotify/Deezer → Cover Art Archive.
     /// `None` = UI draws a generated ASCII pattern.
     pub async fn cover(&self, track: &Track) -> anyhow::Result<Option<PathBuf>> {
+        if let Some(p) = self.local.cover(track) {
+            return Ok(Some(p));
+        }
         if self.imports.contains(track) {
             let p = import::local::cover_path(&self.imports, track);
             if p.is_file() {

@@ -37,13 +37,33 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
         .on_click(cx.listener(|this, _, _, cx| this.open_migrate(cx)))
         .child(icon("arrow-right-left", 14.0, white(0.9)))
         .child(t("library.migrate"));
+    // Music folders on this computer (desktop: phones have no folders to pick).
+    let local_btn = (!crate::ui::compact::TOUCH).then(|| {
+        div()
+            .id("lib-local")
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(32.0))
+            .px(px(14.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme::border())
+            .cursor_pointer()
+            .text_size(theme::text_sm())
+            .text_color(white(0.9))
+            .hover(|s| s.bg(theme::card_hover()))
+            .on_click(cx.listener(|this, _, _, cx| this.open_local(cx)))
+            .child(icon("hard-drive", 14.0, white(0.9)))
+            .child(t("local.title"))
+    });
     let banner = crate::ui::migrate::library_banner(app, cx);
     let head = div()
         .flex()
         .items_center()
         .justify_between()
         .child(heading(t("nav.library")))
-        .child(div().flex().gap(px(8.0)).child(migrate_btn).child(stats_btn).child(
+        .child(div().flex().gap(px(8.0)).children(local_btn).child(migrate_btn).child(stats_btn).child(
             div()
                 .id("lib-new")
                 .flex()

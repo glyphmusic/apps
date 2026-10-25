@@ -31,7 +31,9 @@ impl Glyph {
                 View::List => Preset::Horizont,
                 View::Artist | View::Profile | View::Releases | View::Similar | View::Stats => Preset::Sonnenaufgang,
                 View::Section => Preset::Strahl,
+                View::Local => Preset::Horizont,
             };
+            let preset = self.glow_shape(preset);
             self.glow.update(cx, |g, _| g.set_preset(preset));
         }
         cx.notify();

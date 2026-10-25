@@ -157,43 +157,114 @@ pub(super) fn key_combo(keys: &str) -> Div {
     d
 }
 
-/// Settings -> About -> Shortcuts: every keyboard shortcut, grouped.
-pub(super) fn shortcuts() -> Div {
-    let m = if cfg!(target_os = "macos") { "\u{2318}" } else { "Ctrl" };
-    let alt = if cfg!(target_os = "macos") { "\u{2325}" } else { "Alt" };
-    let groups: [(&str, Vec<(&str, String)>); 3] = [
-        (
-            "sp.keys.group.playback",
-            vec![
-                ("sp.keys.play", "Space".into()),
-                ("sp.keys.seek", "\u{2190} / \u{2192}".into()),
-                ("sp.keys.prev", format!("{m}+\u{2190}")),
-                ("sp.keys.next", format!("{m}+\u{2192}")),
-                ("sp.keys.loop_start", format!("{alt}+1")),
-                ("sp.keys.loop_end", format!("{alt}+2")),
-                ("sp.keys.loop_clear", format!("{alt}+0")),
-            ],
-        ),
-        (
-            "sp.keys.group.nav",
-            vec![
-                ("sp.keys.search", format!("{m}+K")),
-                ("sp.keys.lyrics", format!("{m}+L")),
-                ("sp.keys.sidebar", format!("{m}+1 / 9")),
-                ("sp.keys.settings", format!("{m}+0")),
-                ("sp.keys.close", "Esc".into()),
-            ],
-        ),
-        ("sp.keys.group.app", vec![("sp.keys.quit", format!("{m}+Q"))]),
-    ];
+/// Settings -> About -> Shortcuts: every keyboard shortcut and mouse
+/// gesture, grouped. A click on a shortcut's keys records a new key
+/// (desktop); fixed keys (lists, sidebar, closing) only show.
+pub(super) fn shortcuts(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    use crate::ui::keys::{self, Group, SHORTCUTS};
+    let editable = !crate::ui::compact::TOUCH;
+    let capture = app.key_capture;
+    let changed = !app.config.ui.keys.is_empty();
     let mut col = div().flex().flex_col().gap(px(14.0));
-    for (title, items) in groups {
+    if editable {
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(white(0.55)).child(t("sp.keys.hint")))
+                .when(changed, |d| d.child(button("keys-reset-all", t("sp.keys.reset_all")).on_click(cx.listener(|this, _, _, cx| this.reset_keys(None, cx))))),
+        );
+    }
+    for (group, title) in [(Group::Playback, "sp.keys.group.playback"), (Group::Navigation, "sp.keys.group.nav"), (Group::App, "sp.keys.group.app")] {
+        let items: Vec<AnyElement> = SHORTCUTS
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.group == group)
+            .map(|(i, s)| {
+                let label = keys::label_of(&app.config.ui, s.id);
+                let recording = capture == Some(s.id);
+                let custom = app.config.ui.keys.contains_key(s.id);
+                let shown: AnyElement = if recording {
+                    div().text_size(px(12.5)).text_color(theme::pink()).child(t("sp.keys.press")).into_any_element()
+                } else if label.is_empty() {
+                    div().text_size(px(12.5)).text_color(white(0.4)).child(t("sp.keys.none")).into_any_element()
+                } else {
+                    key_combo(&label).into_any_element()
+                };
+                let id = s.id;
+                let keys_el = div()
+                    .id(("key-edit", i))
+                    .flex()
+                    .items_center()
+                    .h(px(32.0))
+                    .px(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if recording { theme::pink() } else { gpui::transparent_black() })
+                    .child(shown);
+                let keys_el = if editable {
+                    with_tip(keys_el.cursor_pointer().hover(|s| s.bg(white(0.05))), Some(t("sp.keys.change")))
+                        .on_click(cx.listener(move |this, _, w, cx| this.start_key_capture(id, w, cx)))
+                } else {
+                    keys_el
+                };
+                let control = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .when(editable && custom && !recording, |d| {
+                        d.child(
+                            with_tip(icon_button_plain(("key-reset", i), "rotate-ccw", 14.0, white(0.6)), Some(t("sp.keys.reset")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.reset_keys(Some(id), cx))),
+                        )
+                    })
+                    .child(keys_el);
+                row(t(s.label), None, control)
+            })
+            .collect();
+        col = col.child(div().flex().flex_col().child(section_label(t(title))).child(rows(items)));
+    }
+    // Fixed keys: lists, the sidebar, closing.
+    let m = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
+    let fixed: Vec<(&str, String)> = vec![
+        ("sp.keys.list_move", "↑ / ↓".into()),
+        ("sp.keys.list_play", "Enter".into()),
+        ("sp.keys.list_remove", format!("{} / ⌫", t("sp.keys.del"))),
+        ("sp.keys.sidebar", format!("{m}+1 / 9")),
+        ("sp.keys.close", "Esc".into()),
+    ];
+    col = col.child(
+        div()
+            .flex()
+            .flex_col()
+            .child(section_label(t("sp.keys.group.fixed")))
+            .child(rows(fixed.into_iter().map(|(label, keys)| row(t(label), None, key_combo(&keys))).collect())),
+    );
+    // Mouse: the wheel over the player bar (steps set under Player).
+    if editable {
+        let ui = &app.config.ui;
+        let wheel = |on: bool, value: SharedString| -> AnyElement {
+            div().text_size(px(12.5)).text_color(if on { white(0.85) } else { white(0.4) }).child(value).into_any_element()
+        };
+        let seek: SharedString = if ui.wheel_seek_s == 0 { t("sp.player.off") } else { tf("sp.keys.wheel_seek.value", &[("n", &ui.wheel_seek_s)]) };
+        let vol: SharedString = if ui.wheel_volume_pct == 0 { t("sp.player.off") } else { tf("sp.keys.wheel_volume.value", &[("n", &ui.wheel_volume_pct)]) };
+        let (seek_on, vol_on) = (ui.wheel_seek_s > 0, ui.wheel_volume_pct > 0);
         col = col.child(
             div()
                 .flex()
                 .flex_col()
-                .child(section_label(t(title)))
-                .child(rows(items.into_iter().map(|(label, keys)| row(t(label), None, key_combo(&keys))).collect())),
+                .child(section_label(t("sp.keys.group.mouse")))
+                .child(rows(vec![
+                    row(t("sp.keys.wheel_seek"), None, wheel(seek_on, seek)),
+                    row(t("sp.keys.wheel_volume"), None, wheel(vol_on, vol)),
+                    row(
+                        t("sp.keys.wheel_settings"),
+                        None,
+                        button("keys-wheel", t("sp.keys.wheel_open")).on_click(cx.listener(|this, _, _, cx| this.set_settings_tab(SettingsPage::Playback, 3, cx))),
+                    ),
+                ])),
         );
     }
     col

@@ -244,6 +244,10 @@ impl PlayerController {
     pub fn set_equalizer(&self, enabled: bool, gains: [f32; 10]) {
         eq::set(enabled, gains);
     }
+    /// Bass shelf and headroom of the equalizer (dB), see [`eq::set_extras`].
+    pub fn set_eq_extras(&self, bass_db: f32, headroom_db: f32) {
+        eq::set_extras(bass_db, headroom_db);
+    }
 
     /// Loudness target and per-song levelling (native playback).
     pub fn set_loudness(&self, level: loudness::Level, normalize: bool) {

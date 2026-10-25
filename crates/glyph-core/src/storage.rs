@@ -59,8 +59,49 @@ pub fn covers_dir() -> PathBuf {
     paths::cache_dir().join("covers")
 }
 
-pub fn downloads_dir() -> PathBuf {
+/// Folder the user picked for downloads (Settings > Storage).
+static DOWNLOADS_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Sets the folder for downloads; `None` = [`default_downloads_dir`].
+pub fn set_downloads_dir(dir: Option<PathBuf>) {
+    *DOWNLOADS_OVERRIDE.write().unwrap() = dir.filter(|d| !d.as_os_str().is_empty());
+}
+
+/// Glyph's own downloads folder (in its data folder).
+pub fn default_downloads_dir() -> PathBuf {
     paths::data_dir().join("downloads")
+}
+
+/// The downloads folder in use.
+pub fn downloads_dir() -> PathBuf {
+    custom_downloads_dir().unwrap_or_else(default_downloads_dir)
+}
+
+/// The folder the user picked, if any. It may hold their own files too, so
+/// only what the download index names is ever counted or deleted there.
+fn custom_downloads_dir() -> Option<PathBuf> {
+    DOWNLOADS_OVERRIDE.read().unwrap().clone()
+}
+
+/// Files the download index of `dir` names (and the index itself).
+fn indexed_files(dir: &Path) -> Vec<PathBuf> {
+    let index: std::collections::HashMap<String, serde_json::Value> = paths::read_json(&dir.join("index.json")).unwrap_or_default();
+    let mut files: Vec<PathBuf> = index
+        .values()
+        .filter_map(|e| e.get("file").and_then(|f| f.as_str()))
+        // Only plain names inside the folder.
+        .filter(|f| !f.contains(['/', '\\']) && *f != ".." && *f != ".")
+        .map(|f| dir.join(f))
+        .collect();
+    files.push(dir.join("index.json"));
+    files
+}
+
+fn downloads_size() -> u64 {
+    match custom_downloads_dir() {
+        Some(dir) => indexed_files(&dir).iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum(),
+        None => dir_size(&default_downloads_dir()),
+    }
 }
 
 /// Audio files the user imported (dropped onto a playlist). Not part of
@@ -100,7 +141,7 @@ fn dir_size(dir: &Path) -> u64 {
 pub fn stats() -> StorageStats {
     StorageStats {
         covers: dir_size(&covers_dir()),
-        downloads: dir_size(&downloads_dir()),
+        downloads: downloads_size(),
         lyrics: dir_size(&lyrics_dir()),
         catalog: catalog_files().iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum(),
         audio_ranges: dir_size(&audio_ranges_dir()) + dir_size(&streams_dir()),
@@ -119,7 +160,16 @@ pub fn clear(kind: StorageKind) -> anyhow::Result<()> {
     };
     match kind {
         StorageKind::Covers => remove_dir(covers_dir()),
-        StorageKind::Downloads => remove_dir(downloads_dir()),
+        StorageKind::Downloads => match custom_downloads_dir() {
+            // The user's own folder: only Glyph's downloads go.
+            Some(dir) => {
+                for f in indexed_files(&dir) {
+                    let _ = std::fs::remove_file(f);
+                }
+                Ok(())
+            }
+            None => remove_dir(default_downloads_dir()),
+        },
         StorageKind::Lyrics => remove_dir(lyrics_dir()),
         StorageKind::Catalog => {
             for f in catalog_files() {
@@ -155,6 +205,18 @@ pub fn format_bytes(b: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_names_only_files_inside_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            r#"{"a":{"file":"A - B.mp3"},"b":{"file":"../evil.mp3"},"c":{"file":"sub/x.mp3"}}"#,
+        )
+        .unwrap();
+        let files = indexed_files(dir.path());
+        assert_eq!(files, vec![dir.path().join("A - B.mp3"), dir.path().join("index.json")]);
+    }
 
     #[test]
     fn formats_bytes() {

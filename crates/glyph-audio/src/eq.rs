@@ -1,6 +1,7 @@
 //! 10-band graphic equalizer for natively decoded songs (biquads: low shelf,
-//! eight peaking bands, high shelf). Settings are global and apply live;
-//! each song's processor picks up changes within a few milliseconds.
+//! eight peaking bands, high shelf), plus a bass shelf and a headroom cut
+//! before it. Settings are global and apply live; each song's processor
+//! picks up changes within a few milliseconds.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -13,11 +14,23 @@ pub const MAX_DB: f32 = 12.0;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static GEN: AtomicU32 = AtomicU32::new(0);
 static GAINS: Mutex<[f32; 10]> = Mutex::new([0.0; 10]);
+/// Bass shelf gain and extra headroom (dB).
+static EXTRAS: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
+/// Corner of the bass shelf (Hz).
+pub const BASS_HZ: f32 = 90.0;
 
 /// Applies immediately to everything playing.
 pub fn set(enabled: bool, gains: [f32; 10]) {
     *GAINS.lock().unwrap() = gains.map(|g| if g.is_finite() { g.clamp(-MAX_DB, MAX_DB) } else { 0.0 });
     ENABLED.store(enabled, Ordering::Relaxed);
+    GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bass shelf (-12 ..= 12 dB) and headroom taken off before the equalizer
+/// (0 ..= 12 dB). Both only act while the equalizer is on.
+pub fn set_extras(bass_db: f32, headroom_db: f32) {
+    let clean = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
+    *EXTRAS.lock().unwrap() = (clean(bass_db, -MAX_DB, MAX_DB), clean(headroom_db, 0.0, MAX_DB));
     GEN.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -125,7 +138,9 @@ impl Equalizer {
         self.gen = gen;
         self.on = ENABLED.load(Ordering::Relaxed);
         let gains = *GAINS.lock().unwrap();
+        let (bass, headroom) = *EXTRAS.lock().unwrap();
         self.coefs.clear();
+        self.pre = 1.0;
         if self.on {
             for (i, (&f, &g)) in BANDS.iter().zip(gains.iter()).enumerate() {
                 if g.abs() < 0.05 || f >= self.rate * 0.45 {
@@ -138,11 +153,15 @@ impl Equalizer {
                 };
                 self.coefs.push(design(kind, f, g, self.rate));
             }
-            // Headroom for boosts (the limiter after this catches the rest).
-            let boost = gains.iter().cloned().fold(0.0f32, f32::max);
-            self.pre = 10f32.powf(-boost * 0.6 / 20.0);
+            if bass.abs() >= 0.05 {
+                self.coefs.push(design(Kind::LowShelf, BASS_HZ, bass, self.rate));
+            }
+            // Headroom for boosts (the limiter after this catches the rest),
+            // plus what the user takes off on top.
+            let boost = gains.iter().cloned().fold(0.0f32, f32::max).max(bass.max(0.0) + gains[0].max(0.0) * 0.5);
+            self.pre = 10f32.powf(-(boost * 0.6 + headroom) / 20.0);
         }
-        if self.coefs.is_empty() {
+        if self.coefs.is_empty() && self.pre >= 0.9999 {
             self.on = false;
         }
         let n = self.coefs.len() * self.channels;
@@ -214,6 +233,15 @@ mod tests {
         let mut cut = [0.0; 10];
         cut[2] = -12.0;
         assert!(rms_through(125.0, cut) < 0.4);
+        // Bass shelf lifts the lows, not the highs; headroom lowers all.
+        set_extras(9.0, 0.0);
+        let low = rms_through(50.0, [0.0; 10]);
+        let high = rms_through(4000.0, [0.0; 10]);
+        assert!(low > high * 1.5, "bass {low} vs 4k {high}");
+        set_extras(0.0, 6.0);
+        let quiet = rms_through(1000.0, [0.0; 10]);
+        assert!((quiet - 0.5).abs() < 0.03, "6 dB headroom gave {quiet}");
+        set_extras(0.0, 0.0);
         set(false, [0.0; 10]);
     }
 }

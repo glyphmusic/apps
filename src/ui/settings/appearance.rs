@@ -30,8 +30,30 @@ pub(super) fn appearance(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     );
     let reactivity = app.config.visuals.music_reactivity;
     let intensity = app.config.visuals.intensity;
+    // Background shape: a new one with every song, or always one.
+    let shape = app.config.visuals.glow_shape.clone();
+    let shape_label = |name: &str| -> SharedString { if name.is_empty() { t("sp.appearance.shape.auto") } else { t(&format!("sp.appearance.shape.{name}")) } };
+    let shapes = std::iter::once("")
+        .chain(crate::visuals::Preset::ALL.iter().map(|p| p.name()))
+        .map(|name| {
+            let f: Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)> = Rc::new(move |this, cx| this.set_glow_shape(name, cx));
+            (shape_label(name), shape == name, f)
+        })
+        .collect();
+    let shape_select = select(app, "sel-glow-shape", shape_label(&shape), shapes, cx);
+    let scale = app.config.ui.text_scale();
+    let text_size = segmented(
+        [(0.9f32, "sp.appearance.text.small"), (1.0, "sp.appearance.text.normal"), (1.15, "sp.appearance.text.large"), (1.3, "sp.appearance.text.huge")]
+            .into_iter()
+            .map(|(k, key)| (t(key), (scale - k).abs() < 0.02, Rc::new(move |this: &mut Glyph, cx: &mut Context<Glyph>| this.set_text_scale(k, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>))
+            .collect(),
+        cx,
+        "text-size",
+    );
     rows(vec![
         row(t("settings.language"), Some(t("sp.appearance.lang.desc")), language),
+        row(t("sp.appearance.text"), Some(t("sp.appearance.text.desc")), text_size),
+        row(t("sp.appearance.shape"), Some(t("sp.appearance.shape.desc")), shape_select),
         row(
             t("settings.visuals.intensity"),
             Some(t("sp.appearance.intensity.desc")),

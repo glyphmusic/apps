@@ -89,6 +89,11 @@ impl Glyph {
         let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id && t.gone.is_none()) else { return };
         let Some(undo) = toast.undo.take() else { return };
         toast.gone = Some(Instant::now());
+        if let Undo::Reveal(path) = undo {
+            cx.reveal_path(&path);
+            cx.notify();
+            return;
+        }
         if let Undo::Downloads(tracks) = undo {
             self.download_tracks(tracks, cx);
             return;
@@ -107,7 +112,7 @@ impl Glyph {
             Undo::Playlist(id) => {
                 self.library.restore_playlist(&id);
             }
-            Undo::Downloads(_) => {}
+            Undo::Downloads(_) | Undo::Reveal(_) => {}
         }
         self.save_library(cx);
         cx.notify();

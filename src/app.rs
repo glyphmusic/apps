@@ -43,11 +43,13 @@ mod net_devices;
 mod account_devices;
 mod account_library;
 mod jam;
+mod local;
 mod plugins;
 mod plugin_api;
 pub mod sleep;
 pub use jam::{reaction_label as jam_reaction_label, Jam, JamUi};
 pub use import::LinkImport;
+pub use local::{LocalPage, LocalView, LOCAL_ALBUMS, LOCAL_ARTISTS, LOCAL_FOLDERS, LOCAL_SONGS};
 pub use plugins::PluginsUi;
 
 /// Typing pause before a search goes out (Enter searches at once).
@@ -80,6 +82,8 @@ pub enum View {
     Similar,
     /// Listening statistics (opt-in): `Glyph::open_stats`.
     Stats,
+    /// Music folders on this computer: `Glyph::open_local`.
+    Local,
 }
 
 /// Which song list the list view shows.
@@ -557,6 +561,16 @@ pub struct Glyph {
     pub show_lyrics: bool,
     /// Now Playing shows only the lyrics (global player bar stays visible).
     pub lyrics_only: bool,
+    /// Zen mode: Now Playing shows only the cover, with the player bar
+    /// (no sidebar, no lyrics). Leaving Now Playing ends it.
+    pub zen: bool,
+    /// "Local files" page (music folders on this computer).
+    pub local: LocalView,
+    /// Filter field of the "Local files" page.
+    pub local_search: Entity<TextInput>,
+    /// Shortcut waiting for its new key (Settings › About › Shortcuts);
+    /// the keymap is empty meanwhile, so the press reaches the page.
+    pub key_capture: Option<&'static str>,
     /// Slide state of the player bar.
     pub bar_slide: Slide,
     /// Queue panel sliding in from the right.
@@ -786,7 +800,7 @@ fn load_releases_cache(scope: &PathBuf, artists: &[String], max_age_s: u64) -> O
 
 /// The song is (co-)credited to `name`.
 fn by_artist(name: &str, credit: &str) -> bool {
-    glyph_core::dedupe::by_artist(name, credit)
+    glyph_core::dedupe::by_artist(credit, name)
 }
 
 /// How long a toast stays.
@@ -846,6 +860,18 @@ pub enum Undo {
     Downloads(Vec<Track>),
     /// A deleted playlist, back from the bin.
     Playlist(String),
+    /// Not an undo: shows a finished download in its folder.
+    Reveal(PathBuf),
+}
+
+impl Undo {
+    /// Label key of the toast's button.
+    pub fn label_key(&self) -> &'static str {
+        match self {
+            Undo::Reveal(_) => "toast.show_folder",
+            _ => "toast.undo",
+        }
+    }
 }
 
 pub fn eq_gains(v: &[f32]) -> [f32; 10] {

@@ -14,6 +14,7 @@ impl Glyph {
         let playlist_link = cx.new(|cx| TextInput::new("dialog.playlist.link", cx));
         let add_input = cx.new(|cx| TextInput::new("add.search", cx));
         let mpd_input = cx.new(|cx| TextInput::new("sp.mpd.placeholder", cx));
+        let local_search = cx.new(|cx| TextInput::new("local.search", cx));
         let key_inputs: Vec<(&'static str, Entity<TextInput>)> = [
             "youtube",
             "jamendo_client_id",
@@ -75,6 +76,13 @@ impl Glyph {
                     this.save_config(cx);
                 }
             }
+        }));
+        subs.push(cx.subscribe(&local_search, |this, _, ev: &InputEvent, cx| match ev {
+            InputEvent::Changed(q) | InputEvent::Submit(q) => {
+                this.local.query = q.trim().to_lowercase();
+                cx.notify();
+            }
+            InputEvent::Cancel => {}
         }));
         subs.push(cx.subscribe(&mpd_input, |this, _, ev: &InputEvent, cx| {
             if let InputEvent::Changed(v) | InputEvent::Submit(v) = ev {
@@ -262,8 +270,12 @@ impl Glyph {
             show_devices: false,
             devices_jam: false,
             devices_scroll: gpui::ScrollHandle::new(),
-            show_lyrics: true,
+            show_lyrics: config.ui.np_lyrics,
             lyrics_only: false,
+            zen: false,
+            local: Default::default(),
+            local_search,
+            key_capture: None,
             bar_slide: Slide::default(),
             queue_slide: Slide::default(),
             loop_ab: (None, None),
@@ -432,6 +444,7 @@ impl Glyph {
                         p.set_crossfade(Duration::from_secs(s.config.audio.crossfade_s as u64));
                         p.set_loudness(level_of(s.config.audio.level), s.config.audio.normalize);
                         p.set_equalizer(s.config.audio.eq_enabled, eq_gains(&s.config.audio.eq_gains));
+                        p.set_eq_extras(s.config.audio.eq_bass_db, s.config.audio.eq_headroom_db);
                         p.set_channel_mode(channels_of(s.config.audio.channels));
                         p.set_output_device(s.config.audio.output_device.clone());
                         p.set_volume(s.config.player.volume);
@@ -631,11 +644,13 @@ impl Glyph {
         let glow = crate::theme::glow_palette(&config.visuals.theme);
         self.glow.update(cx, |g, _| g.set_theme(glow));
         self.config = config;
+        crate::theme::set_text_scale(self.config.ui.text_scale());
         self.restore_player_prefs();
         if let Some(p) = &self.player {
             p.set_crossfade(Duration::from_secs(self.config.audio.crossfade_s as u64));
             p.set_loudness(level_of(self.config.audio.level), self.config.audio.normalize);
             p.set_equalizer(self.config.audio.eq_enabled, eq_gains(&self.config.audio.eq_gains));
+            p.set_eq_extras(self.config.audio.eq_bass_db, self.config.audio.eq_headroom_db);
             p.set_channel_mode(channels_of(self.config.audio.channels));
         }
         self.sync_discord();

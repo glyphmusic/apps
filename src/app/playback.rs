@@ -113,9 +113,10 @@ impl Glyph {
         let seed = format!("{}{}", track.artist, track.title);
         let palette = Palette::from_seed(&seed);
         self.palette = Some(palette);
+        let preset = self.glow_shape(Preset::from_seed(&seed));
         self.glow.update(cx, |g, _| {
             g.set_palette(Some(palette));
-            g.set_preset(Preset::from_seed(&seed));
+            g.set_preset(preset);
         });
         // The player bar and Now Playing cover "ASCII in" again with every new
         // song, also when that cover was already shown somewhere before.

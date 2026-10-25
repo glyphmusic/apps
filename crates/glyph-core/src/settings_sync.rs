@@ -56,6 +56,11 @@ struct Audio {
     eq_enabled: bool,
     eq_preset: String,
     eq_gains: Vec<f32>,
+    /// `None`: sent by an older version (left as it is here).
+    #[serde(default)]
+    eq_bass_db: Option<f32>,
+    #[serde(default)]
+    eq_headroom_db: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,6 +164,8 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
                 eq_enabled: a.eq_enabled,
                 eq_preset: a.eq_preset.clone(),
                 eq_gains: a.eq_gains.clone(),
+                eq_bass_db: Some(a.eq_bass_db),
+                eq_headroom_db: Some(a.eq_headroom_db),
             }),
         ),
         (
@@ -257,6 +264,12 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
                 a.eq_preset = x.eq_preset;
                 if x.eq_gains.len() == 10 {
                     a.eq_gains = x.eq_gains.into_iter().map(|g| g.clamp(-12.0, 12.0)).collect();
+                }
+                if let Some(b) = x.eq_bass_db.filter(|b| b.is_finite()) {
+                    a.eq_bass_db = b.clamp(-12.0, 12.0);
+                }
+                if let Some(h) = x.eq_headroom_db.filter(|h| h.is_finite()) {
+                    a.eq_headroom_db = h.clamp(0.0, 12.0);
                 }
             }
             (kind::SETTING, "player") => {

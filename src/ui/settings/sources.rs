@@ -96,8 +96,8 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     ], cx, "youtube-mode");
     let mut top = vec![
         row(t("sp.search.mode"), Some(t("sp.search.mode.desc")), segmented(vec![
-            (t("ytdlp.mode.local"), app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(true, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
-            (t("ytdlp.mode.server"), !app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(false, cx))),
+            (t("sp.search.mode.device"), app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(true, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
+            (t("sp.search.mode.server"), !app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(false, cx))),
         ], cx, "search-mode")),
         row(t("ytdlp.mode"), Some(t("ytdlp.mode.hint")), youtube_mode),
         row(t("ytdlp.only"), Some(t("ytdlp.only.hint")),

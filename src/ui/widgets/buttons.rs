@@ -286,7 +286,7 @@ pub fn heading(text: impl Into<SharedString>) -> AnyElement {
     theme::adaptive(("heading", text.clone()), || {
         div()
             .self_start()
-            .text_size(px(24.0))
+            .text_size(px(24.0 * theme::text_scale()))
             .font_weight(FontWeight::BOLD)
             .text_color(theme::text())
             .child(text)
@@ -308,7 +308,7 @@ pub fn section_title(icon_name: &str, title: impl Into<SharedString>) -> AnyElem
             .child(icon(&icon_name, 18.0, theme::text()))
             .child(
                 div()
-                    .text_size(px(16.0))
+                    .text_size(theme::text_lg())
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title),
             )

@@ -278,6 +278,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                     .inset_0();
                     div()
                         .relative()
+                        .on_scroll_wheel(seek_wheel(cx))
                         .child(thin_bar("seek", SEEK_W, frac, seek, app.duration().map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
                         .child(track)
                         .when_some(la.zip(lb), |d, (a, b)| {
@@ -335,6 +336,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                 let k = hover_k("vol-btn").max(hover_k("vol-pop"));
                 div()
                     .relative()
+                    .on_scroll_wheel(volume_wheel(cx))
                     .child(mute)
                     .when(k > 0.0, |d| {
                         // Deferred: the bar's slot clips its contents.
@@ -352,6 +354,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                                 .pb(px(14.0))
                                 .opacity(k)
                                 .occlude()
+                                .on_scroll_wheel(volume_wheel(cx))
                                 .flex()
                                 .justify_center()
                                 .child(div().absolute().top_0().left_0().right_0().bottom(px(4.0)).rounded(px(8.0)).bg(hsla(0.0, 0.0, 0.1, 0.98)))
@@ -377,7 +380,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                     })
                     .child(hover_fill("vol-btn", gpui::transparent_black(), 0.0))
             } else {
-                div().flex().items_center().gap(px(6.0)).px(px(4.0)).child(mute).child(thin_bar("vol", 80.0, app.volume(), vol, vol_label, cx))
+                div().flex().items_center().gap(px(6.0)).px(px(4.0)).on_scroll_wheel(volume_wheel(cx)).child(mute).child(thin_bar("vol", 80.0, app.volume(), vol, vol_label, cx))
             }
         })
         // Sleep timer: a click opens its menu (lengths, end of song, off).

@@ -29,7 +29,7 @@ pub fn page_info(page: SettingsPage) -> (SharedString, SharedString, &'static st
 /// `app.settings_sub` indexes this list.
 pub fn subtabs(app: &Glyph, page: SettingsPage) -> &'static [&'static str] {
     match page {
-        SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources"],
+        SettingsPage::Playback => &["sp.sub.general", "sp.sub.content", "settings.sources", "sp.sub.player"],
         SettingsPage::Account if app.signed_in().is_some() => &["sp.sub.overview", "sp.sub.devices", "account.security"],
         SettingsPage::Profile => &["sp.sub.profile", "sp.sub.privacy"],
         SettingsPage::Server => &["sp.sub.connection", "settings.keys", "privacy.tab"],
@@ -62,6 +62,18 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Playback, 2, "settings.sources.fallback", "youtube soundcloud embed fallback"),
     (SettingsPage::Playback, 2, "ytdlp.title", "yt-dlp ytdlp youtube"),
     (SettingsPage::Playback, 2, "settings.priority", "priority priorität order reihenfolge audius jamendo archive"),
+    (SettingsPage::Playback, 3, "sp.player.wheel_seek", "mouse maus wheel mausrad scroll scrollen seek spulen vorspulen progress fortschritt"),
+    (SettingsPage::Playback, 3, "sp.player.wheel_volume", "mouse maus wheel mausrad scroll scrollen volume lautstärke"),
+    (SettingsPage::Playback, 3, "sp.player.lyrics", "lyrics songtext liedtext now playing hide ausblenden"),
+    (SettingsPage::Playback, 3, "sp.player.np_download", "download herunterladen now playing button"),
+    (SettingsPage::Playback, 3, "sp.player.keys", "hotkey shortcut tastenkürzel taste ändern change rebind belegen zen download"),
+    (SettingsPage::Audio, 0, "sp.eq.bass", "bass boost tiefen low"),
+    (SettingsPage::Audio, 0, "sp.eq.headroom", "headroom preamp clipping übersteuern verzerrung distortion pegel gain"),
+    (SettingsPage::Appearance, 0, "sp.appearance.shape", "visualizer visualisierer hintergrund background shape form glow standard default favorite liebling"),
+    (SettingsPage::Appearance, 0, "sp.appearance.text", "text size schrift größe ui scale skalierung zoom font"),
+    (SettingsPage::Storage, 0, "sp.storage.dl_dir", "download folder ordner pfad path speicherort location"),
+    (SettingsPage::Storage, 0, "sp.storage.reveal", "download folder ordner öffnen show reveal explorer finder"),
+    (SettingsPage::Storage, 0, "sp.storage.local", "local lokal files dateien folder ordner mp3 flac music musik bibliothek library"),
     (SettingsPage::Audio, 0, "sp.eq.enable", "equalizer eq"),
     (SettingsPage::Audio, 0, "sp.eq.preset", "preset bass treble höhen tiefen"),
     (SettingsPage::Audio, 0, "sp.eq.share", "share teilen export import code datei file"),
@@ -112,7 +124,10 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::About, 1, "sp.support.issue", "bug issue report melden"),
     (SettingsPage::About, 1, "sp.support.diag", "diagnostics diagnose"),
     (SettingsPage::About, 1, "sp.support.data", "data daten folder ordner"),
-    (SettingsPage::About, 2, "sp.keys.play", "keyboard shortcuts tastenkürzel tastatur hotkeys keys tasten"),
+    (SettingsPage::About, 2, "sp.keys.play", "keyboard shortcuts tastenkürzel tastatur hotkeys keys tasten ändern change rebind belegen"),
+    (SettingsPage::About, 2, "sp.keys.zen", "zen cover vollbild fullscreen focus hotkey"),
+    (SettingsPage::About, 2, "sp.keys.download", "download herunterladen hotkey"),
+    (SettingsPage::About, 2, "sp.keys.wheel_seek", "mouse maus wheel mausrad scroll"),
 ];
 
 /// Content of the current settings page and sub-tab (shared by the desktop
@@ -136,7 +151,7 @@ pub fn page_body(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         SettingsPage::Plugins if app.settings_sub >= 2 && app.plugins.detail.is_none() => super::plugin_ui::plugin_page(app, cx),
         SettingsPage::Plugins => plugins_page(app, cx),
         SettingsPage::About if app.settings_sub == 1 => support(app, cx),
-        SettingsPage::About if app.settings_sub == 2 => shortcuts(),
+        SettingsPage::About if app.settings_sub == 2 => shortcuts(app, cx),
         SettingsPage::About => about(app, cx),
         SettingsPage::System => system(app, cx),
     };

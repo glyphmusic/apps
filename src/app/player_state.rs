@@ -275,6 +275,7 @@ impl Glyph {
             View::Artist | View::Releases | View::Similar => self.open_artist.clone(),
             View::Search if !self.search.query.trim().is_empty() => Some(format!("\u{201c}{}\u{201d}", self.search.query.trim())),
             View::Section => self.section.as_ref().map(|(title, _)| title.clone()),
+            View::Local => Some(t("local.title").to_string()),
             View::Profile => self.open_profile.clone().map(|h| format!("@{}", h.trim_start_matches('@'))),
             _ => None,
         }

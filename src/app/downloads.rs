@@ -121,6 +121,8 @@ impl Glyph {
         }
         let total = todo.len();
         let first_title = todo[0].title.clone();
+        // "Show in folder" on the closing toast (desktop, when wanted).
+        let reveal = self.config.ui.reveal_downloads && !crate::ui::compact::TOUCH;
         if !auto {
             self.toast(if total == 1 {
                 tf("toast.dl_started_one", &[("title", &first_title)]).to_string()
@@ -131,6 +133,7 @@ impl Glyph {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
+            let mut saved_at: Option<PathBuf> = None;
             use futures::StreamExt;
             let mut pending = futures::stream::iter(todo).map(|tr| {
                 let b = b.clone();
@@ -138,8 +141,9 @@ impl Glyph {
             }).buffer_unordered(10);
             while let Some((tr, result)) = pending.next().await {
                 let saved = match result {
-                    Ok(Some(_)) => {
+                    Ok(Some(path)) => {
                         ok += 1;
+                        saved_at = Some(path);
                         true
                     }
                     Ok(None) => {
@@ -186,12 +190,40 @@ impl Glyph {
                 parts.join(" · ")
             };
             this.update(cx, |s, cx| {
-                s.toast(msg);
+                match saved_at.filter(|_| reveal && ok > 0) {
+                    Some(path) => s.toast_undo(msg, Undo::Reveal(path)),
+                    None => s.toast(msg),
+                }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Downloads the playing song (shortcut, Now Playing button).
+    pub fn download_current(&mut self, cx: &mut Context<Self>) {
+        let Some(tr) = self.current.clone() else { return };
+        self.download_tracks(vec![tr], cx);
+    }
+
+    /// Zen mode on / off: Now Playing with only the cover and the player
+    /// bar (desktop).
+    pub fn toggle_zen(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        if self.current.is_none() || crate::ui::compact::TOUCH {
+            return;
+        }
+        if self.zen {
+            self.zen = false;
+        } else {
+            if self.view != View::NowPlaying {
+                self.navigate(View::NowPlaying, w, cx);
+            }
+            self.zen = true;
+            self.ctx_menu = None;
+            self.open_select = None;
+        }
+        cx.notify();
     }
 
     /// Deletes the downloaded files of `tracks`.

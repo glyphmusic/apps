@@ -365,17 +365,31 @@ pub fn warn() -> Hsla {
     hsla(40.0 / 360.0, 0.9, 0.62, 1.0)
 }
 
+/// Text size factor (Settings > Appearance), as f32 bits.
+static TEXT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Sets the text size factor (1.0 = normal).
+pub fn set_text_scale(k: f32) {
+    let k = if k.is_finite() { k.clamp(0.9, 1.3) } else { 1.0 };
+    TEXT_SCALE.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The text size factor (1.0 = normal).
+pub fn text_scale() -> f32 {
+    f32::from_bits(TEXT_SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 pub fn text_xs() -> Pixels {
-    px(11.5)
+    px(11.5 * text_scale())
 }
 pub fn text_sm() -> Pixels {
-    px(12.5)
+    px(12.5 * text_scale())
 }
 pub fn text_md() -> Pixels {
-    px(13.5)
+    px(13.5 * text_scale())
 }
 pub fn text_lg() -> Pixels {
-    px(16.0)
+    px(16.0 * text_scale())
 }
 
 /// The accent colour of the theme (Glyph pink by default).

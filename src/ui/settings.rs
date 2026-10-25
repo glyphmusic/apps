@@ -31,6 +31,7 @@ mod about;
 mod plugins;
 mod plugin_ui;
 mod system;
+mod player;
 pub use eq::*;
 pub use controls::*;
 pub use modal::*;
@@ -44,6 +45,7 @@ pub use about::*;
 use plugins::plugins_page;
 pub use plugin_ui::set_plugin_tabs;
 use system::system;
+use player::player;
 
 pub const REPO_URL: &str = "https://github.com/glyphmusic/apps";
 const DOCS_URL: &str = "https://docs.glyph.my";

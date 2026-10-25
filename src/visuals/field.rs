@@ -34,6 +34,11 @@ impl Preset {
         }
     }
 
+    /// The preset called `name` (see [`Preset::name`]).
+    pub fn from_name(name: &str) -> Option<Preset> {
+        Self::ALL.into_iter().find(|p| p.name() == name.trim())
+    }
+
     pub fn from_seed(seed: &str) -> Preset {
         let h = seed.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
         Self::ALL[(h % 4) as usize]

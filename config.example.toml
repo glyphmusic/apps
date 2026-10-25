@@ -55,6 +55,9 @@ youtube_only = false
 intensity = 0.8
 # Draw covers as ASCII art
 ascii_covers = false
+# Background shape: "" = a new one per song, or "strahl" | "band" |
+# "sonnenaufgang" | "horizont" always.
+# glow_shape = ""
 
 [updates]
 # GitHub repository (owner/repo) that publishes releases.
@@ -70,6 +73,40 @@ channel = "stable"
 download_parallelism = 5
 # Slow: 1; unknown/standard: up to 3; fast: configured maximum.
 download_adaptive = true
+# Equalizer extras (only while the equalizer is on): bass shelf around 90 Hz
+# (-12..12 dB) and headroom taken off before the equalizer (0..12 dB).
+# eq_bass_db = 0.0
+# eq_headroom_db = 0.0
+
+[storage]
+# Folder for downloads; leave out for Glyph's data folder. Device-specific.
+# download_dir = "D:/Music/Glyph"
+
+# Player bar, Now Playing and shortcuts on this device (never synced).
+[ui]
+# Mouse wheel over the seek bar: seconds per notch (0 = off).
+wheel_seek_s = 5
+# Mouse wheel over the volume: percent per notch (0 = off).
+wheel_volume_pct = 5
+# Lyrics next to the cover in Now Playing.
+np_lyrics = true
+# Download button in Now Playing.
+np_download = true
+# "Show in folder" button after a download.
+reveal_downloads = true
+# Text size factor, 0.9 .. 1.3.
+text_scale = 1.0
+
+# Changed shortcuts (Settings > About > Shortcuts); "" = no key. Names: play,
+# seek_back, seek_forward, prev, next, volume_up, volume_down, mute, like,
+# shuffle, repeat, download, loop_start, loop_end, loop_clear, search, lyrics,
+# zen, queue, settings, quit.
+# [ui.keys]
+# zen = "f11"
+
+# Music folders for Library > Local files (read in place, never uploaded).
+# [local]
+# folders = ["D:/Music"]
 
 [integrations]
 # Show the song playing in Glyph in your Discord profile (Rich Presence).

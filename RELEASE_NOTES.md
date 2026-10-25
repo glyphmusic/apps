@@ -1,10 +1,9 @@
-# Glyph 0.8.0 - security patch
+# Glyph 0.9.0 - 2026-10-25
 
-- End-to-end encrypted account synchronization and device pairing. Update all devices to read encrypted library items.
-- Signed update manifests bound to the repository and version.
-- Release archives, desktop installers and Android APKs are verified together before publication; published releases cannot be overwritten.
+- Browse and play local music folders without copying or uploading files.
+- Zen mode, configurable shortcuts, player scroll controls and downloads in Now Playing.
+- Choose a download folder; failed transfers preserve the originals.
+- Equalizer bass and headroom, text size and a favourite background visualizer.
+- Public documentation tools for AI assistants and more reliable artist pages.
 
-See CHANGELOG.md for the complete changes and compatibility details.
-
-- YouTube results get an explicit-content rating from Deezer where available; unknown ratings show a question mark.
-- Android keeps the playback service active while buffering and reports the correct media state.
+See CHANGELOG.md for the complete changes.

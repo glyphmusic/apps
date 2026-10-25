@@ -11,7 +11,9 @@ pub mod connect;
 pub mod controls;
 pub mod input;
 pub mod jam;
+pub mod keys;
 pub mod lists;
+pub mod local;
 pub mod migrate;
 pub mod mini;
 pub mod now_playing;
@@ -66,30 +68,35 @@ actions!(
         PlayRecent1,
         PlayRecent2,
         PlayRecent3,
-        PlayRecent4
+        PlayRecent4,
+        ToggleZen,
+        DownloadCurrent,
+        VolumeUp,
+        VolumeDown,
+        ToggleMute,
+        LikeCurrent,
+        ToggleShuffle,
+        CycleRepeat
     ]
 );
 
 const MAIN: &str = "Glyph && !TextInput";
 
-pub fn bind_keys(cx: &mut App) {
+/// All key bindings: the text fields', the fixed ones (lists, sidebar,
+/// closing) and every shortcut with the key `ui` gives it (see
+/// [`keys::SHORTCUTS`]). Changing a shortcut clears the keymap and calls
+/// this again.
+pub fn bind_keys(cx: &mut App, ui: &glyph_core::config::UiConfig) {
     input::bind_keys(cx);
+    cx.bind_keys(keys::bindings(ui));
     cx.bind_keys([
-        KeyBinding::new("space", TogglePlay, Some(MAIN)),
-        KeyBinding::new("left", SeekBack, Some(MAIN)),
-        KeyBinding::new("right", SeekForward, Some(MAIN)),
         KeyBinding::new("up", ListUp, Some(MAIN)),
         KeyBinding::new("down", ListDown, Some(MAIN)),
         KeyBinding::new("enter", ListActivate, Some(MAIN)),
         KeyBinding::new("delete", ListRemove, Some(MAIN)),
         KeyBinding::new("backspace", ListRemove, Some(MAIN)),
-        KeyBinding::new("secondary-left", PrevTrack, Some("Glyph")),
-        KeyBinding::new("secondary-right", NextTrack, Some("Glyph")),
-        KeyBinding::new("secondary-k", FocusSearch, None),
-        KeyBinding::new("secondary-l", ToggleLyrics, None),
-        KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("escape", CloseOverlay, Some("Glyph")),
-        // Ctrl+1..9 pick sidebar entries top to bottom, Ctrl+0 is Settings.
+        // Ctrl+1..9 pick sidebar entries top to bottom (Settings is a shortcut).
         KeyBinding::new("secondary-1", Nav1, None),
         KeyBinding::new("secondary-2", Nav2, None),
         KeyBinding::new("secondary-3", Nav3, None),
@@ -99,14 +106,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-7", Nav7, None),
         KeyBinding::new("secondary-8", Nav8, None),
         KeyBinding::new("secondary-9", Nav9, None),
-        KeyBinding::new("secondary-0", Nav0, None),
-        // A-B loop: Alt+1 start, Alt+2 end, Alt+0 off.
-        KeyBinding::new("alt-1", LoopStart, None),
-        KeyBinding::new("alt-2", LoopEnd, None),
-        KeyBinding::new("alt-0", LoopClear, None),
     ]);
+}
+
+/// Global actions (once at start-up).
+pub fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
+
+pub use keys::key_label;
 
 /// Window root: the glow field behind everything, the (cached) app on top,
 /// so the 30 fps field never re-renders the UI tree.
@@ -188,8 +196,18 @@ impl Render for Glyph {
         widgets::set_ascii_effects(self.config.visuals.ascii_effects);
         theme::set_theme(&self.config.visuals.theme);
         theme::set_zone(Some(0));
+        // Recording a shortcut's key belongs to the shortcuts page; leaving
+        // it gives the keymap back.
+        if self.key_capture.is_some() && !(self.settings_open && self.settings_page == crate::app::SettingsPage::About && self.settings_sub == 2) {
+            self.cancel_key_capture(cx);
+        }
+        // Zen mode belongs to Now Playing with a song.
+        if self.zen && (self.view != View::NowPlaying || self.current.is_none() || self.settings_open) {
+            self.zen = false;
+        }
         // Phones: Spotify-like layout (see `compact`); the desktop is unchanged.
         let compact = compact::is_compact(window);
+        let zen = self.zen && !compact;
         // Phones: Now Playing is a sheet over the page (see
         // `compact::now_playing`); while it covers the screen the page is not
         // built at all.
@@ -212,11 +230,14 @@ impl Render for Glyph {
                 _ if compact::floating_back(self) => div().into_any_element(),
                 _ => compact::back_bar(self, window, cx),
             }
+        } else if zen {
+            // Only the window's own buttons stay (they live in `Shell`).
+            div().h(px(theme::TITLEBAR_H)).into_any_element()
         } else {
             chrome::titlebar(self, window, cx).into_any_element()
         };
         theme::set_zone(Some(1));
-        let sidebar = chrome::sidebar(self, window, cx).into_any_element();
+        let sidebar = (!zen).then(|| chrome::sidebar(self, window, cx).into_any_element());
         // Settings is built from cards: panel ink throughout.
         theme::set_zone((self.view != View::Settings).then_some(2));
         let main = if np_covers {
@@ -235,6 +256,7 @@ impl Render for Glyph {
                 View::Releases => lists::releases_view(self, window, cx).into_any_element(),
                 View::Similar => lists::similar_view(self, window, cx).into_any_element(),
                 View::Stats => stats::view(self, window, cx),
+                View::Local => local::view(self, window, cx),
                 // Phones: never the view (`adopt_view` above), always the sheet.
                 View::NowPlaying if compact => div().into_any_element(),
                 View::NowPlaying => now_playing::now_playing(self, window, cx).into_any_element(),
@@ -254,6 +276,7 @@ impl Render for Glyph {
             self.lib_filter,
             self.view == View::NowPlaying && self.show_lyrics,
             self.view == View::NowPlaying && self.lyrics_only,
+            zen,
         ));
         let main = if np_covers { main } else { widgets::fade_in("page-fade", page_key, true, main) };
         // Content floats directly on the background (Liner): no big panel.
@@ -267,6 +290,10 @@ impl Render for Glyph {
                 .into_any_element()
         };
         let main_bar = (self.view != View::NowPlaying && !compact).then(|| widgets::scrollbar(&self.main_scroll, !self.settings_open, cx));
+        if zen {
+            self.show_queue = false;
+            self.show_devices = false;
+        }
         if self.show_queue {
             self.show_devices = false;
             if let Some(a) = self.add_songs.as_mut() {
@@ -329,7 +356,7 @@ impl Render for Glyph {
         });
         // Song + lyrics in Now Playing carries its own transport (Liner):
         // no second player bar there. Lyrics-only keeps the bar.
-        let full_np = self.view == View::NowPlaying && self.current.is_some() && !(self.show_lyrics && self.lyrics_only);
+        let full_np = self.view == View::NowPlaying && self.current.is_some() && !(self.show_lyrics && self.lyrics_only) && !zen;
         // The bar slides in when something starts playing and out when it is
         // not needed (nothing loaded, or Now Playing with its own transport).
         let want_bar = !full_np && self.current.is_some();
@@ -445,7 +472,7 @@ impl Render for Glyph {
                     .mb(px(-theme::GAP * shown))
                     .when(dim, |d| d.opacity(dim_a))
                     // Side panels keep their gap to the bar.
-                    .when(!compact, |d| d.child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar)))
+                    .when_some(sidebar.filter(|_| !compact), |d, sidebar| d.child(div().flex_none().h_full().pb(px(theme::GAP * shown)).child(sidebar)))
                     .child(main_panel)
                     // Always one gap above the bottom: the player bar's when it
                     // is there, the window edge's when it is not (Now Playing).
@@ -501,6 +528,7 @@ impl Render for Glyph {
             .on_action(cx.listener(|this, _: &PlayRecent4, _, cx| this.play_recent(4, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, w, cx| this.focus_search(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleLyrics, w, cx| {
+                this.zen = false;
                 if this.view == View::NowPlaying {
                     this.show_lyrics = !this.show_lyrics;
                     cx.notify();
@@ -508,7 +536,38 @@ impl Render for Glyph {
                     this.show_lyrics = true;
                     this.navigate(View::NowPlaying, w, cx);
                 }
+                // Remembered for the next start (Settings > Player shows it).
+                this.config.ui.np_lyrics = this.show_lyrics;
+                this.save_config(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleZen, w, cx| this.toggle_zen(w, cx)))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.set_volume(this.volume() + 0.05);
+                cx.notify()
+            }))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.set_volume(this.volume() - 0.05);
+                cx.notify()
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMute, _, cx| {
+                this.toggle_mute();
+                cx.notify()
+            }))
+            .on_action(cx.listener(|this, _: &LikeCurrent, _, cx| {
+                if let Some(t) = this.current.clone() {
+                    this.toggle_like(&t, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleShuffle, _, cx| this.toggle_shuffle(cx)))
+            .on_action(cx.listener(|this, _: &CycleRepeat, _, cx| this.cycle_repeat(cx)))
+            // Recording a new key for a shortcut (Settings › About › Shortcuts).
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                if this.key_capture.is_some() {
+                    cx.stop_propagation();
+                    this.capture_key(&e.keystroke, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DownloadCurrent, _, cx| this.download_current(cx)))
             .on_action(cx.listener(|this, _: &CloseOverlay, w, cx| {
                 // Phones: Escape is the system back gesture.
                 if compact::TOUCH && this.name_dialog.is_none() && this.control_menu.is_none() && this.ctx_menu.is_none() && this.open_select.is_none() {
@@ -541,6 +600,9 @@ impl Render for Glyph {
                     cx.notify();
                 } else if this.settings_open {
                     this.close_settings(w, cx);
+                } else if this.zen {
+                    this.zen = false;
+                    cx.notify();
                 } else {
                     // Closes the search dropdown (focus leaves the input).
                     let f = this.focus.clone();

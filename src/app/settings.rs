@@ -42,6 +42,7 @@ impl Glyph {
     }
 
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_key_capture(cx);
         if self.settings_open {
             self.settings_closing = Some(Instant::now());
         }
@@ -193,6 +194,21 @@ impl Glyph {
         self.open_select = None;
         if let Some(p) = &self.player {
             p.set_equalizer(enabled, gains);
+        }
+        if save {
+            self.save_config(cx);
+        }
+        cx.notify();
+    }
+
+    /// Bass shelf and headroom of the equalizer (dB); like [`Self::set_eq`]
+    /// they apply live and are written when asked.
+    pub fn set_eq_extras(&mut self, bass_db: f32, headroom_db: f32, save: bool, cx: &mut Context<Self>) {
+        let a = &mut self.config.audio;
+        a.eq_bass_db = (bass_db.clamp(-12.0, 12.0) * 2.0).round() / 2.0;
+        a.eq_headroom_db = (headroom_db.clamp(0.0, 12.0) * 2.0).round() / 2.0;
+        if let Some(p) = &self.player {
+            p.set_eq_extras(a.eq_bass_db, a.eq_headroom_db);
         }
         if save {
             self.save_config(cx);
@@ -437,6 +453,181 @@ Language: {}",
         let glow = crate::theme::glow_palette(id);
         self.glow.update(cx, |g, _| g.set_theme(glow));
         self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Background shape: the one picked in Settings > Appearance, else
+    /// `fallback` (the song's or the page's own).
+    pub(super) fn glow_shape(&self, fallback: Preset) -> Preset {
+        Preset::from_name(&self.config.visuals.glow_shape).unwrap_or(fallback)
+    }
+
+    /// Settings > Appearance: one background shape always ("" = a new one
+    /// with every song).
+    pub fn set_glow_shape(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.config.visuals.glow_shape = name.to_string();
+        let seed = self.current.as_ref().map(|t| format!("{}{}", t.artist, t.title));
+        let preset = self.glow_shape(seed.map(|s| Preset::from_seed(&s)).unwrap_or(Preset::Strahl));
+        self.glow.update(cx, |g, _| g.set_preset(preset));
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Settings > Appearance: text size factor (0.9 ..= 1.3).
+    pub fn set_text_scale(&mut self, v: f32, cx: &mut Context<Self>) {
+        self.config.ui.text_scale = ((v.clamp(0.9, 1.3)) * 20.0).round() / 20.0;
+        crate::theme::set_text_scale(self.config.ui.text_scale());
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Settings > Player: one of the device-local player options changed.
+    pub fn set_ui(&mut self, f: impl FnOnce(&mut glyph_core::config::UiConfig), cx: &mut Context<Self>) {
+        let before = self.config.ui.keys.clone();
+        f(&mut self.config.ui);
+        if before != self.config.ui.keys {
+            self.rebind_keys(cx);
+        }
+        self.show_lyrics = self.config.ui.np_lyrics;
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Shortcuts live in GPUI's keymap: bind everything again.
+    fn rebind_keys(&mut self, cx: &mut Context<Self>) {
+        cx.clear_key_bindings();
+        crate::ui::bind_keys(cx, &self.config.ui);
+    }
+
+    /// Settings › About › Shortcuts: the next key pressed becomes the key of
+    /// shortcut `id` (Esc cancels, Delete / Backspace removes it).
+    pub fn start_key_capture(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_capture = Some(id);
+        // Nothing may fire while the key is recorded.
+        cx.clear_key_bindings();
+        let f = self.focus.clone();
+        window.focus(&f, cx);
+        cx.notify();
+    }
+
+    /// Stops recording (no change).
+    pub fn cancel_key_capture(&mut self, cx: &mut Context<Self>) {
+        if self.key_capture.take().is_some() {
+            self.rebind_keys(cx);
+            cx.notify();
+        }
+    }
+
+    /// A key pressed while recording.
+    pub fn capture_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        use crate::ui::keys;
+        let Some(id) = self.key_capture else { return };
+        let plain = !(k.modifiers.control || k.modifiers.alt || k.modifiers.platform || k.modifiers.shift || k.modifiers.function);
+        if plain && k.key == "escape" {
+            self.cancel_key_capture(cx);
+            return;
+        }
+        let key = if plain && matches!(k.key.as_str(), "delete" | "backspace") {
+            String::new()
+        } else {
+            // A modifier on its own: wait for the key that goes with it.
+            let Some(key) = keys::from_keystroke(k) else { return };
+            if keys::FIXED.iter().any(|f| keys::same_key(f, &key)) {
+                self.toast_info(tf("toast.key_fixed", &[("key", &keys::key_label(&key))]));
+                cx.notify();
+                return;
+            }
+            key
+        };
+        // Another shortcut had this key: it gives it up.
+        if !key.is_empty() {
+            for s in keys::SHORTCUTS.iter().filter(|s| s.id != id) {
+                if keys::same_key(&keys::key_of(&self.config.ui, s.id), &key) {
+                    self.config.ui.keys.insert(s.id.to_string(), String::new());
+                    self.toast_info(tf("toast.key_moved", &[("key", &keys::key_label(&key)), ("other", &t(s.label))]));
+                }
+            }
+        }
+        let default = keys::shortcut(id).map_or("", |s| s.default);
+        if keys::same_key(&key, default) || (key.is_empty() && default.is_empty()) {
+            self.config.ui.keys.remove(id);
+        } else {
+            self.config.ui.keys.insert(id.to_string(), key);
+        }
+        self.key_capture = None;
+        self.rebind_keys(cx);
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Puts one shortcut (or, with `None`, all) back to its default key.
+    pub fn reset_keys(&mut self, id: Option<&str>, cx: &mut Context<Self>) {
+        match id {
+            Some(id) => {
+                self.config.ui.keys.remove(id);
+                // A shortcut that took this key meanwhile gives it up.
+                let key = crate::ui::keys::key_of(&self.config.ui, id);
+                for s in crate::ui::keys::SHORTCUTS.iter().filter(|s| s.id != id) {
+                    if crate::ui::keys::same_key(&crate::ui::keys::key_of(&self.config.ui, s.id), &key) {
+                        self.config.ui.keys.insert(s.id.to_string(), String::new());
+                    }
+                }
+            }
+            None => self.config.ui.keys.clear(),
+        }
+        self.key_capture = None;
+        self.rebind_keys(cx);
+        self.save_config(cx);
+        cx.notify();
+    }
+
+    /// Settings > Storage: move the downloads to a folder the user picks.
+    pub fn pick_download_dir(&mut self, cx: &mut Context<Self>) {
+        self.open_select = None;
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(t("sp.storage.dl_dir.pick").into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(dir) = paths.into_iter().next() else { return };
+            this.update(cx, |s, cx| s.set_download_dir(Some(dir), cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Moves the downloads to `dir` (`None`: back to Glyph's own folder).
+    pub fn set_download_dir(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else { return };
+        if !self.downloading.is_empty() {
+            self.toast_info(t("toast.dl_dir_busy"));
+            cx.notify();
+            return;
+        }
+        self.toast(t("toast.dl_dir_moving"));
+        cx.spawn(async move |this, cx| {
+            let res = guard_async(b.set_download_dir(dir.clone())).await;
+            this.update(cx, |s, cx| {
+                match res {
+                    Ok(r) => {
+                        s.config.storage.download_dir = dir.map(|d| d.to_string_lossy().into_owned());
+                        s.save_config(cx);
+                        if r.failed > 0 {
+                            s.toast_info(tf("toast.dl_dir_failed", &[("n", &r.failed)]));
+                        } else {
+                            s.toast(tf("toast.dl_dir_done", &[("n", &r.moved)]).to_string());
+                        }
+                        s.refresh_storage(cx);
+                    }
+                    Err(e) => s.toast_info(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 

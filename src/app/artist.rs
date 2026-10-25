@@ -144,8 +144,30 @@ impl Glyph {
                         }
                     }
                 }
+                // The search knows no song under this exact name (other
+                // scripts, channel names): the songs of the latest releases
+                // stand in, so the page is never empty next to its albums.
+                if found.is_empty() {
+                    if let Ok(releases) = guard_async(b.artist_releases(&name)).await {
+                        for r in releases.iter().take(6) {
+                            let Ok(tracks) = guard_async(b.release_tracks(r)).await else { continue };
+                            for tr in tracks {
+                                let n = glyph_core::dedupe::normalize_title(&tr.title);
+                                if !found.iter().any(|x| glyph_core::dedupe::normalize_title(&x.title) == n) {
+                                    found.push(tr);
+                                }
+                            }
+                            if found.len() >= 10 {
+                                break;
+                            }
+                        }
+                    }
+                }
                 this.update(cx, |s, cx| {
                     if let Some(p) = s.artists.get_mut(&name) {
+                        if p.tracks.is_empty() && !found.is_empty() {
+                            p.tracks = found;
+                        }
                         p.loading = false;
                     }
                     cx.notify();

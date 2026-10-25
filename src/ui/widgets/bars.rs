@@ -19,6 +19,64 @@ pub fn bar_hover(id: &str) -> Option<f32> {
     })
 }
 
+thread_local! {
+    /// Touchpad scrolling over a bar: pixels not yet turned into a step.
+    static WHEEL_REST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// Steps of one scroll event over a bar: +1 per wheel notch up, -1 down;
+/// touchpads make a step every 40 px.
+pub fn wheel_steps(e: &gpui::ScrollWheelEvent) -> i32 {
+    match e.delta {
+        gpui::ScrollDelta::Lines(p) => {
+            if p.y.abs() < 0.01 { 0 } else { p.y.signum() as i32 }
+        }
+        gpui::ScrollDelta::Pixels(p) => WHEEL_REST.with(|r| {
+            let total = r.get() + f32::from(p.y);
+            let steps = (total / 40.0).trunc();
+            r.set(total - steps * 40.0);
+            steps as i32
+        }),
+    }
+}
+
+/// Mouse wheel over a seek bar: jumps by the seconds set in Settings >
+/// Player per notch (nothing when that is off).
+pub fn seek_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+        let step = this.config.ui.wheel_seek_s;
+        if step == 0 || this.duration().is_none() {
+            return;
+        }
+        let n = wheel_steps(e);
+        if n != 0 {
+            this.seek_relative(n as f32 * step as f32);
+            cx.notify();
+        }
+        cx.stop_propagation();
+    })
+}
+
+/// Mouse wheel over a volume bar: louder / quieter by the percent set in
+/// Settings > Player per notch (nothing when that is off).
+pub fn volume_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static {
+    cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+        let step = this.config.ui.wheel_volume_pct;
+        if step == 0 {
+            return;
+        }
+        let n = wheel_steps(e);
+        if n != 0 {
+            let v = this.volume() + n as f32 * step as f32 / 100.0;
+            // Lands on the steps (5 %, 10 %, ...), not in between.
+            let k = step as f32 / 100.0;
+            this.set_volume(((v / k).round() * k).clamp(0.0, 1.0));
+            cx.notify();
+        }
+        cx.stop_propagation();
+    })
+}
+
 /// Formats a bar fraction for the little label above it ("1:23", "64%").
 pub type BarLabel = Rc<dyn Fn(f32) -> String>;
 

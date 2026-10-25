@@ -18,7 +18,10 @@ pub(crate) const COVER: f32 = 280.0;
 pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> impl IntoElement {
     // The cover grows with tall windows (280 px at most window sizes, up to
     // 360 on large screens) instead of a small square in a big empty page.
-    let cover_size = (f32::from(w.viewport_size().height) * 0.36).clamp(COVER, 360.0);
+    // Zen mode: as big as the window allows above the player bar.
+    let zen = app.zen;
+    let (vw, vh) = (f32::from(w.viewport_size().width), f32::from(w.viewport_size().height));
+    let cover_size = if zen { (vh - 290.0).min(vw * 0.6).clamp(240.0, 640.0) } else { (vh * 0.36).clamp(COVER, 360.0) };
     let Some(track) = app.current.clone() else {
         return div()
             .size_full()
@@ -90,6 +93,40 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
         cover(app, &track, cover_size, 12.0, cx).into_any_element()
     };
 
+    let meta = div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.0))
+        .child(song_title(track.title.clone(), crate::ui::widgets::rating(&track)).text_size(px(if zen { 20.0 } else { 16.0 })).font_weight(FontWeight::SEMIBOLD))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(badges(&track))
+                .child(div().flex().text_size(theme::text_md()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link("np-artist", &track.artist, cx)))
+                .when(app.current_preview, |d| d.child(mono().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))),
+        );
+    if zen {
+        // Only the cover (and the global player bar under it).
+        let exit = with_tip(icon_button_plain("np-zen-exit", "minimize-2", 16.0, theme::text_dim()), Some(zen_tip(app)))
+            .on_click(cx.listener(|this, _, w, cx| this.toggle_zen(w, cx)));
+        return div()
+            .id("np-root")
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(20.0))
+            .child(slot)
+            .child(meta)
+            .child(div().absolute().top(px(8.0)).right(px(16.0)).child(exit))
+            .into_any_element();
+    }
+
     let t_like = track.clone();
     let repeat = app.repeat();
     let on = |b: bool| if b { theme::text() } else { theme::text_dim() };
@@ -114,28 +151,13 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
         .w(px(380.0))
         .gap(px(16.0))
         .child(slot)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .child(song_title(track.title.clone(), crate::ui::widgets::rating(&track)).text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(badges(&track))
-                        .child(div().flex().text_size(theme::text_md()).text_color(theme::text_dim()).child(crate::ui::lists::artist_link("np-artist", &track.artist, cx)))
-                        .when(app.current_preview, |d| d.child(mono().text_size(theme::text_xs()).text_color(theme::warn()).child("[PREVIEW 0:30]"))),
-                ),
-        )
+        .child(meta)
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(10.0))
+                .on_scroll_wheel(seek_wheel(cx))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(fmt_time(pos)))
                 .child(thin_bar("np-seek", cover_size - 30.0, frac, seek, dur.map(|d| Rc::new(move |f: f32| fmt_time(d.mul_f32(f))) as BarLabel), cx))
                 .child(mono().text_size(theme::text_xs()).text_color(theme::text_dim()).child(dur.map(fmt_time).unwrap_or_else(|| "-:--".into()))),
@@ -166,6 +188,7 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
                 .flex()
                 .items_center()
                 .gap(px(10.0))
+                .on_scroll_wheel(volume_wheel(cx))
                 .child(
                     icon_button("np-vol-icon", if app.volume() <= 0.001 { "volume-x" } else { "volume-2" }, 16.0, theme::text_dim())
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -186,6 +209,11 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
                     toggle_button("np-sleep", "timer", 16.0, app.sleep.is_some(), None)
                         .on_mouse_down(gpui::MouseButton::Left, on_right_click(ControlMenu::Sleep, cx))
                         .on_mouse_down(gpui::MouseButton::Right, on_right_click(ControlMenu::Sleep, cx)),
+                )
+                .when(app.config.ui.np_download, |d| d.child(download_button(app, &track, cx)))
+                .child(
+                    with_tip(icon_button_plain("np-zen", "maximize-2", 15.0, theme::text_dim()), Some(zen_tip(app)))
+                        .on_click(cx.listener(|this, _, w, cx| this.toggle_zen(w, cx))),
                 ),
         );
 
@@ -220,6 +248,40 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
                 .when(app.show_lyrics, |d| d.child(lyrics(app, cx, false))),
         )
         .into_any_element()
+}
+
+/// Tooltip of the zen mode buttons, with its shortcut when there is one.
+fn zen_tip(app: &Glyph) -> SharedString {
+    let key = crate::ui::keys::label_of(&app.config.ui, "zen");
+    match (app.zen, key.is_empty()) {
+        (true, true) => t("np.zen.exit"),
+        (true, false) => tf("np.zen.exit_key", &[("key", &key)]),
+        (false, true) => t("np.zen"),
+        (false, false) => tf("np.zen.key", &[("key", &key)]),
+    }
+}
+
+/// Download button of the playing song: a ring while it downloads, the
+/// pink check once it is saved.
+fn download_button(app: &Glyph, track: &glyph_protocol::Track, cx: &mut Context<Glyph>) -> gpui::Stateful<gpui::Div> {
+    let tip = app.download_tip_one(track).unwrap_or_else(|| {
+        let key = crate::ui::keys::label_of(&app.config.ui, "download");
+        if key.is_empty() { t("tip.download") } else { tf("np.download.key", &[("key", &key)]) }
+    });
+    let el = match download_badge(app.download_view(track), 16.0, "arrow-down") {
+        Some(badge) => with_tip(div().id("np-download"), Some(tip))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(30.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover()))
+            .child(badge),
+        None => with_tip(icon_button_plain("np-download", "download", 16.0, theme::text_dim()), Some(tip)),
+    };
+    el.on_click(cx.listener(|this, _, _, cx| this.download_current(cx)))
 }
 
 /// One segment of the view switch: icon + label, the active one filled white.
@@ -264,6 +326,7 @@ fn mode_switch(app: &Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
             this.lyrics_only = true;
             cx.notify();
         })))
+        .child(mode_segment("np-mode-zen", "maximize-2", t("np.mode.zen"), false).on_click(cx.listener(|this, _, w, cx| this.toggle_zen(w, cx))))
 }
 
 thread_local! {

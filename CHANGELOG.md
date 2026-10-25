@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-10-25
+
+### Added
+
+- **Local files**: Library › Local files plays music from folders on your computer (MP3, FLAC, OGG, M4A, WAV), browsable by folder, artist, album or as one list with its own search. Files play where they are; nothing is copied or uploaded. Tags and embedded covers are read once and only read again when a file changes.
+- **Zen mode**: only the cover and the player bar, without sidebar and lyrics. Z, the new button in Now Playing or its view switch turn it on; Esc or the same key ends it.
+- **Change every keyboard shortcut**: Settings › About › Shortcuts lists all shortcuts and mouse gestures; click one and press the new key (Esc cancels, Del removes the key, a key another shortcut had moves over). New shortcuts: volume up / down (Ctrl+↑ / ↓), mute (M), like the playing song (Ctrl+Shift+L), shuffle (Ctrl+S), repeat (Ctrl+R), queue (Ctrl+J).
+- **Mouse wheel on the player bar**: scrolling over the seek bar jumps 5 s per notch, over the volume 5 %; both steps can be changed or switched off in Settings › Playback › Player.
+- **Download button and shortcut in Now Playing**: saves the playing song (Ctrl+D by default); the button can be switched off, the key changed.
+- **Choose the download folder** in Settings › Storage. Existing downloads move along; your own files in that folder are never touched or deleted. A finished download's message has a "Show in folder" button (can be switched off).
+- **Equalizer: bass and headroom**: an extra bass shelf around 90 Hz and a headroom slider that lowers the level before the equalizer so boosts do not clip.
+- **Favourite background visualizer**: Settings › Appearance › Background visualizer keeps one glow shape instead of a new one per song.
+- **Text size**: Settings › Appearance › Text size (small to extra large).
+- **AI assistants can look things up in the docs**: Glyph's MCP server has two more tools, `docs_search` and `docs_read`, that search and read docs.glyph.my. They are always allowed, whatever the assistant may do otherwise, because they read nothing of yours.
+
+### Changed
+
+- Settings › Sources › "Search" is now "Online search via: This device / Glyph server", so it no longer reads as a search of your own files.
+- Lyrics hidden with Ctrl+L stay hidden after a restart (Settings › Playback › Player › Lyrics in Now Playing).
+
+### Fixed
+
+- Changing the download folder preserves the originals until the new index is saved and waits for downloads and freshness checks.
+- Closing Settings cancels shortcut recording; local-file playback follows the selected folder and filter, and folder changes during a scan trigger a fresh scan.
+- Artist pages said "No songs found" while their albums could be opened and played: songs credited as "Artist - Topic" or together with other artists were not matched, and an artist the search does not know now shows the songs of their latest releases.
+
 ## 0.8.0 - 2026-10-23
 
 ### Security

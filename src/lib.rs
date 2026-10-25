@@ -35,7 +35,9 @@ use gpui::{App, AppContext, Entity, Window};
 /// Startup work once the platform runs: fonts, key bindings, language.
 pub fn init(cx: &mut App, config: &glyph_core::Config) {
     theme::load_fonts(cx);
-    ui::bind_keys(cx);
+    theme::set_text_scale(config.ui.text_scale());
+    ui::bind_keys(cx, &config.ui);
+    ui::register_actions(cx);
     i18n::set_lang(config_ext::language(config));
 }
 

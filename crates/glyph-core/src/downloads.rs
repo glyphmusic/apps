@@ -280,7 +280,9 @@ pub struct Entry {
 
 /// The downloads folder and its index.
 pub struct Downloads {
-    dir: PathBuf,
+    pub(crate) relocation: tokio::sync::RwLock<()>,
+    /// Changes when the user picks another folder ([`Downloads::move_to`]).
+    dir: std::sync::RwLock<PathBuf>,
     map: Mutex<HashMap<String, Entry>>,
     index_io: Mutex<()>,
 }
@@ -325,7 +327,7 @@ impl Downloads {
         if !changed && (matched || !new_validator) { return Ok(()); }
         drop(response);
         // A disposable download cannot replace the index or the playing file.
-        let temp = tempfile::tempdir_in(&self.dir)?;
+        let temp = tempfile::tempdir_in(self.path())?;
         let staged = Downloads::load(temp.path().to_path_buf());
         let path = staged.fetch(http, &old.track, old.provider, url, server).await?;
         let fresh = staged.map.lock().unwrap().get(&track_key(&old.track)).cloned().unwrap();
@@ -338,13 +340,13 @@ impl Downloads {
     }
 
     fn install_refresh(&self, old: &Entry, mut fresh: Entry, source: &Path) -> Result<()> {
-        let old_path = self.dir.join(&old.file);
+        let old_path = self.path().join(&old.file);
         let old_hash = match &old.revision.sha256 { Some(hash) => hash.clone(), None => digest_file(&old_path)? };
         let changed = fresh.revision.sha256.as_ref() != Some(&old_hash);
         let replacement = if changed {
             let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
             let name = format!("{}-{nonce}.{}", paths::hash_hex(&track_key(&old.track)), extension("", &source.to_string_lossy()));
-            let path = self.dir.join(&name);
+            let path = self.path().join(&name);
             std::fs::copy(source, &path)?;
             fresh.file = name;
             Some(path)
@@ -357,7 +359,7 @@ impl Downloads {
         }
         let mut snapshot = map.clone();
         snapshot.insert(track_key(&old.track), fresh);
-        if let Err(e) = paths::write_json(&self.dir.join(INDEX), &snapshot) {
+        if let Err(e) = paths::write_json(&self.path().join(INDEX), &snapshot) {
             if let Some(path) = replacement { let _ = std::fs::remove_file(path); }
             return Err(e);
         }
@@ -370,7 +372,7 @@ impl Downloads {
 
     }
     pub fn load(dir: PathBuf) -> Self {
-        let d = Self { dir, map: Mutex::new(HashMap::new()), index_io: Mutex::new(()) };
+        let d = Self { relocation: Default::default(), dir: std::sync::RwLock::new(dir), map: Mutex::new(HashMap::new()), index_io: Mutex::new(()) };
         d.reload();
         d
     }
@@ -378,22 +380,96 @@ impl Downloads {
     /// Re-reads the index (after the folder was cleared in settings). Entries
     /// whose file is gone are dropped.
     pub fn reload(&self) {
-        let mut map: HashMap<String, Entry> = paths::read_json(&self.dir.join(INDEX)).unwrap_or_default();
-        map.retain(|_, e| self.dir.join(&e.file).is_file());
+        let dir = self.path();
+        let mut map: HashMap<String, Entry> = paths::read_json(&dir.join(INDEX)).unwrap_or_default();
+        map.retain(|_, e| dir.join(&e.file).is_file());
         *self.map.lock().unwrap() = map;
+    }
+
+    /// Moves every downloaded file and the index into `new_dir` and saves
+    /// there from now on. Files already in `new_dir` are never overwritten
+    /// (a moved file gets a free name); songs `new_dir` already has stay as
+    /// they are there. On failure the originals and their index stay intact.
+    /// Blocking: run off the UI thread while holding `relocation` exclusively.
+    pub fn move_to(&self, new_dir: PathBuf) -> Result<MoveReport> {
+        let _index_io = self.index_io.lock().unwrap();
+        let old_dir = self.path();
+        let mut report = MoveReport::default();
+        if same_dir(&old_dir, &new_dir) {
+            return Ok(report);
+        }
+        std::fs::create_dir_all(&new_dir)?;
+        let mut map = self.map.lock().unwrap();
+        let index = new_dir.join(INDEX);
+        let mut merged: HashMap<String, Entry> = match std::fs::read(&index) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e.into()),
+        };
+        merged.retain(|_, e| new_dir.join(&e.file).is_file());
+        let mut copied = Vec::new();
+        for (key, mut e) in map.clone() {
+            if merged.contains_key(&key) {
+                continue;
+            }
+            let from = old_dir.join(&e.file);
+            let (stem, ext) = match e.file.rsplit_once('.') {
+                Some((a, b)) => (a.to_string(), format!(".{b}")),
+                None => (e.file.clone(), String::new()),
+            };
+            let mut name = e.file.clone();
+            let mut i = 2;
+            while new_dir.join(&name).exists() {
+                name = format!("{stem} ({i}){ext}");
+                i += 1;
+            }
+            let to = new_dir.join(&name);
+            // Keep the originals until the complete destination index is durable.
+            // create_new also protects a file created after the name check.
+            let moved = (|| -> std::io::Result<()> {
+                let mut dest = std::fs::OpenOptions::new().write(true).create_new(true).open(&to)?;
+                copied.push((from.clone(), to.clone()));
+                let mut source = std::fs::File::open(&from)?;
+                std::io::copy(&mut source, &mut dest)?;
+                dest.sync_all()
+            })();
+            if moved.is_ok() {
+                e.file = name;
+                merged.insert(key, e);
+                report.moved += 1;
+            } else {
+                for (_, path) in &copied { let _ = std::fs::remove_file(path); }
+                return Err(moved.unwrap_err().into());
+            }
+        }
+        if let Err(e) = paths::write_json(&new_dir.join(INDEX), &merged) {
+            for (_, path) in &copied { let _ = std::fs::remove_file(path); }
+            return Err(e);
+        }
+        *map = merged;
+        drop(map);
+        *self.dir.write().unwrap() = new_dir;
+        for (from, _) in copied { let _ = std::fs::remove_file(from); }
+        // The old index points at files that are gone now.
+        let _ = std::fs::remove_file(old_dir.join(INDEX));
+        Ok(report)
     }
 
     fn save(&self) {
         let _index_io = self.index_io.lock().unwrap();
         let snapshot = self.map.lock().unwrap().clone();
-        let _ = std::fs::create_dir_all(&self.dir);
-        if let Err(e) = paths::write_json(&self.dir.join(INDEX), &snapshot) {
+        let _ = std::fs::create_dir_all(self.path());
+        if let Err(e) = paths::write_json(&self.path().join(INDEX), &snapshot) {
             tracing::warn!("could not save download index: {e}");
         }
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn dir(&self) -> PathBuf {
+        self.path()
+    }
+
+    fn path(&self) -> PathBuf {
+        self.dir.read().unwrap().clone()
     }
 
     pub fn saved_bytes(&self, tracks: &[Track]) -> u64 {
@@ -410,7 +486,7 @@ impl Downloads {
     /// The local file of `t` (checked on disk) and the source it came from.
     pub fn local(&self, t: &Track) -> Option<(PathBuf, ProviderId)> {
         let e = self.map.lock().unwrap().get(&track_key(t)).cloned()?;
-        let p = self.dir.join(&e.file);
+        let p = self.path().join(&e.file);
         p.is_file().then_some((p, e.provider))
     }
 
@@ -426,7 +502,7 @@ impl Downloads {
         let gone = self.map.lock().unwrap().remove(&track_key(t));
         match gone {
             Some(e) => {
-                let _ = std::fs::remove_file(self.dir.join(&e.file));
+                let _ = std::fs::remove_file(self.path().join(&e.file));
                 self.save();
                 true
             }
@@ -446,14 +522,14 @@ impl Downloads {
         if len == 0 || len > MAX_BYTES {
             bail!("unusable source file");
         }
-        std::fs::create_dir_all(&self.dir)?;
+        std::fs::create_dir_all(self.path())?;
         let (name, part, reservation) = self.reserve_name(t, ext)?;
         drop(reservation);
         if let Err(e) = std::fs::copy(src, &part) {
             let _ = std::fs::remove_file(&part);
             return Err(e.into());
         }
-        let path = self.dir.join(&name);
+        let path = self.path().join(&name);
         std::fs::rename(&part, &path)?;
         let entry = Entry { track: t.clone(), file: name, provider, bytes: len, ts: now(),
             revision: Revision { sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality(), ..Default::default() } };
@@ -467,7 +543,7 @@ impl Downloads {
         if !url.starts_with("https://") {
             bail!("refusing non-HTTPS download URL");
         }
-        std::fs::create_dir_all(&self.dir)?;
+        std::fs::create_dir_all(self.path())?;
         let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
         let resp = request.timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
         self.save_response(resp, t, provider).await
@@ -518,7 +594,7 @@ impl Downloads {
             bail!("empty file");
         }
         glyph_protocol::network::observe(bytes, started.elapsed());
-        let path = self.dir.join(&name);
+        let path = self.path().join(&name);
         out.commit(&path)?;
         let entry = Entry { track: t.clone(), file: name, provider, bytes, ts: now(),
             revision: Revision { etag, modified, sha256: Some(format!("{:x}", digest.finalize())), checked_at: now(), hashed_at: now(), quality } };
@@ -531,7 +607,7 @@ impl Downloads {
         let _lock = self.index_io.lock().unwrap();
         loop {
             let name = self.free_name(t, ext);
-            let part = self.dir.join(format!("{name}.part"));
+            let part = self.path().join(format!("{name}.part"));
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&part) {
                 Ok(file) => return Ok((name, part, file)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -543,7 +619,8 @@ impl Downloads {
     /// "Artist - Title.ext", numbered if taken by another song.
     fn free_name(&self, t: &Track, ext: &str) -> String {
         let base = sanitize(&format!("{} - {}", t.artist, t.title));
-        let taken = |n: &str| self.dir.join(n).exists() || self.dir.join(format!("{n}.part")).exists();
+        let dir = self.path();
+        let taken = |n: &str| dir.join(n).exists() || dir.join(format!("{n}.part")).exists();
         let mut name = format!("{base}.{ext}");
         let mut i = 2;
         while taken(&name) {
@@ -551,6 +628,21 @@ impl Downloads {
             i += 1;
         }
         name
+    }
+}
+
+/// What [`Downloads::move_to`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MoveReport {
+    pub moved: usize,
+    pub failed: usize,
+}
+
+/// The same folder (also when spelled differently).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
     }
 }
 
@@ -636,6 +728,42 @@ mod tests {
         drop(second);
         let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await.unwrap().unwrap();
         drop(permit);
+    }
+
+    #[test]
+    fn failed_folder_move_keeps_original_index_and_files() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let downloads = super::Downloads::load(a.path().to_path_buf());
+        let src = a.path().join("src.mp3");
+        std::fs::write(&src, b"abc").unwrap();
+        let song = crate::dedupe::test_track(glyph_protocol::ProviderId::Archive, "1", "Song", "Band", Some(200));
+        let stored = downloads.store_file(&song, glyph_protocol::ProviderId::Archive, &src, "mp3").unwrap();
+        std::fs::create_dir(b.path().join(super::INDEX)).unwrap();
+        assert!(downloads.move_to(b.path().to_path_buf()).is_err());
+        assert_eq!(downloads.dir(), a.path());
+        assert_eq!(std::fs::read(stored).unwrap(), b"abc");
+        assert!(super::Downloads::load(a.path().to_path_buf()).contains(&song));
+    }
+
+    #[test]
+    fn moving_the_folder_keeps_songs_and_never_overwrites() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let downloads = super::Downloads::load(a.path().to_path_buf());
+        let src = a.path().join("src.mp3");
+        std::fs::write(&src, b"abc").unwrap();
+        let song = crate::dedupe::test_track(glyph_protocol::ProviderId::Archive, "1", "Song", "Band", Some(200));
+        let stored = downloads.store_file(&song, glyph_protocol::ProviderId::Archive, &src, "mp3").unwrap();
+        let name = stored.file_name().unwrap().to_owned();
+        // Someone else's file with the same name already lives in the new folder.
+        std::fs::write(b.path().join(&name), b"mine").unwrap();
+        let report = downloads.move_to(b.path().to_path_buf()).unwrap();
+        assert_eq!(report, super::MoveReport { moved: 1, failed: 0 });
+        assert_eq!(std::fs::read(b.path().join(&name)).unwrap(), b"mine");
+        let (path, _) = downloads.local(&song).unwrap();
+        assert!(path.starts_with(b.path()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+        // A fresh load of the new folder finds the song again.
+        assert!(super::Downloads::load(b.path().to_path_buf()).contains(&song));
     }
 
     #[test]
@@ -762,7 +890,7 @@ mod tests {
         let t = track("Refresh");
         d.store_copy(&t, ProviderId::Archive, &source).unwrap();
         let old = d.map.lock().unwrap()[&track_key(&t)].clone();
-        let held = std::fs::File::open(d.dir.join(&old.file)).unwrap();
+        let held = std::fs::File::open(d.dir().join(&old.file)).unwrap();
         std::fs::write(&source, b"new complete audio").unwrap();
         let mut fresh = old.clone();
         fresh.bytes = 18;

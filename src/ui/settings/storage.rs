@@ -342,5 +342,46 @@ pub(super) fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 switch("data-saver", on).on_click(cx.listener(move |this, _, _, cx| this.set_data_saver(!on, cx))),
             ))
         })
+        .when(!crate::ui::compact::TOUCH, |d| d.child(folders(app, cx)))
         .child(div().pt(px(6.0)).flex().gap(px(10.0)).child(clear).child(open))
+}
+
+/// Where downloads go, the "Show in folder" button, and the music folders
+/// on this computer (desktop).
+fn folders(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
+    let custom = app.config.storage.download_dir.clone();
+    let shown: SharedString = custom.clone().unwrap_or_else(|| glyph_core::storage::default_downloads_dir().to_string_lossy().into_owned()).into();
+    let reveal = app.config.ui.reveal_downloads;
+    let n_folders = app.config.local.folders.len();
+    let n_songs = app.backend.as_ref().map_or(0, |b| b.local_library().len());
+    let local_status: SharedString = if n_folders == 0 { t("sp.storage.local.none") } else { tf("local.info", &[("n", &n_songs), ("folders", &n_folders)]) };
+    surface().py(px(4.0)).child(rows(vec![
+        row_full(
+            t("sp.storage.dl_dir"),
+            Some(t("sp.storage.dl_dir.desc")),
+            Some(shown),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .when(custom.is_some(), |d| {
+                    d.child(button("dl-dir-reset", t("sp.storage.dl_dir.reset")).on_click(cx.listener(|this, _, _, cx| this.set_download_dir(None, cx))))
+                })
+                .child(button("dl-dir-pick", t("sp.storage.dl_dir.change")).on_click(cx.listener(|this, _, _, cx| this.pick_download_dir(cx)))),
+        ),
+        row(
+            t("sp.storage.reveal"),
+            Some(t("sp.storage.reveal.desc")),
+            switch("dl-reveal", reveal).on_click(cx.listener(|this, _, _, cx| this.set_ui(|u| u.reveal_downloads = !u.reveal_downloads, cx))),
+        ),
+        row_full(
+            t("sp.storage.local"),
+            Some(t("sp.storage.local.desc")),
+            Some(local_status),
+            button("local-manage", t("sp.storage.local.open")).on_click(cx.listener(|this, _, w, cx| {
+                this.close_settings(w, cx);
+                this.open_local(cx);
+            })),
+        ),
+    ]))
 }

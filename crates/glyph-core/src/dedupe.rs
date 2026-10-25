@@ -120,6 +120,9 @@ pub fn by_artist(track_artist: &str, name: &str) -> bool {
     if n.is_empty() {
         return false;
     }
+    // YouTube's auto-generated artist channels: "Artist - Topic".
+    let t = track_artist.trim();
+    let track_artist = t.strip_suffix(" - Topic").or_else(|| t.strip_suffix(" - topic")).unwrap_or(t);
     if track_artist.trim().eq_ignore_ascii_case(n) {
         return true;
     }
@@ -411,6 +414,8 @@ mod tests {
         assert!(by_artist("Баста и Гуф", "Гуф"));
         assert!(by_artist("Баста и Гуф", "гуф"));
         assert!(!by_artist("Кино", "К"));
+        assert!(by_artist("Rory in early 20s - Topic", "Rory in early 20s"));
+        assert!(by_artist("Band feat. Rory in early 20s", "rory in early 20s"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub(super) fn playback(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     match app.settings_sub {
         1 => return content(app, cx),
         2 => return sources(app, cx),
+        3 => return player(app, cx),
         _ => {}
     }
     let cur = app.config.audio.quality;

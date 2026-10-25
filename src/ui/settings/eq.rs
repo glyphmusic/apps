@@ -45,6 +45,44 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             })),
         ),
         row(t("sp.eq.preset"), Some(t("sp.eq.preset.desc")), select(app, "sel-eq", eq_preset_label(&preset), options, cx)),
+        row(t("sp.eq.bass"), Some(t("sp.eq.bass.desc")), {
+            let cur = app.config.audio.eq_bass_db;
+            let weak = cx.entity().downgrade();
+            let pick: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
+                weak.update(cx, |this, cx| {
+                    let h = this.config.audio.eq_headroom_db;
+                    this.set_eq_extras(f * 24.0 - 12.0, h, true, cx)
+                })
+                .ok();
+            });
+            let label: crate::ui::widgets::BarLabel = Rc::new(|f: f32| db_label(((f * 24.0 - 12.0) * 2.0).round() / 2.0));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .when(!on, |d| d.opacity(0.45))
+                .child(thin_bar("eq-bass", 180.0, (cur + 12.0) / 24.0, pick, Some(label), cx))
+                .child(mono().w(px(56.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(db_label(cur)))
+        }),
+        row(t("sp.eq.headroom"), Some(t("sp.eq.headroom.desc")), {
+            let cur = app.config.audio.eq_headroom_db;
+            let weak = cx.entity().downgrade();
+            let pick: crate::ui::widgets::Pick = Rc::new(move |f, _, cx| {
+                weak.update(cx, |this, cx| {
+                    let b = this.config.audio.eq_bass_db;
+                    this.set_eq_extras(b, f * 12.0, true, cx)
+                })
+                .ok();
+            });
+            let label: crate::ui::widgets::BarLabel = Rc::new(|f: f32| db_label(-((f * 12.0) * 2.0).round() / 2.0));
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .when(!on, |d| d.opacity(0.45))
+                .child(thin_bar("eq-headroom", 180.0, cur / 12.0, pick, Some(label), cx))
+                .child(mono().w(px(56.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(db_label(-cur)))
+        }),
         row(t("sp.eq.share"), Some(t("sp.eq.share.desc")), select(app, "sel-eq-share", t("sp.eq.share.button"), share, cx)),
     ]);
     div()
@@ -67,7 +105,8 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                         .gap(px(8.0))
                         .child(button("eq-reset", t("sp.eq.reset")).on_click(cx.listener(|this, _, _, cx| {
                             let on = this.config.audio.eq_enabled;
-                            this.set_eq(on, "flat", [0.0; 10], true, cx)
+                            this.set_eq(on, "flat", [0.0; 10], true, cx);
+                            this.set_eq_extras(0.0, 0.0, true, cx)
                         })))
                         .when_some(own, |d, name| {
                             d.child(button("eq-delete", t("sp.eq.delete")).on_click(cx.listener(move |this, _, _, cx| this.delete_eq_preset(&name, cx))))
@@ -75,6 +114,11 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                         .child(primary_button("eq-save", t("sp.eq.save")).on_click(cx.listener(|this, _, w, cx| this.open_eq_save_dialog(w, cx)))),
                 ),
         )
+}
+
+/// "+4.5 dB" / "0 dB" / "-3 dB".
+fn db_label(db: f32) -> String {
+    if db.abs() < 0.05 { "0 dB".into() } else { format!("{db:+.1} dB") }
 }
 
 thread_local! {

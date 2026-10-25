@@ -843,6 +843,8 @@ pub mod mcp {
     pub const LIST_TOOLS: &str = "tools/list";
     /// Longest wait for the app's answer to one tool call (ms).
     pub const CALL_TIMEOUT_MS: u64 = 25_000;
+    /// The docs' own MCP server; the app's `docs_search` / `docs_read` ask it.
+    pub const DOCS_MCP_URL: &str = "https://docs.glyph.my/mcp";
     /// How long one `pull` waits for a call before answering empty (ms).
     pub const PULL_WAIT_MS: u64 = 20_000;
 
@@ -939,7 +941,23 @@ pub mod mcp {
             tool("unlike", "Remove a song from Liked Songs (the current one without ref).", obj(json!({ "ref": song }), &[])),
             tool("get_lyrics", "Lyrics of the current song (plain text).", none()),
             tool("listening_stats", "Listening statistics, if the user turned them on.", obj(json!({ "range": { "type": "string", "enum": ["month", "last_month", "year", "all"] } }), &[])),
+            tool(
+                "docs_search",
+                "Search Glyph's documentation for how to do something in Glyph (settings, keyboard shortcuts, local files, downloads, equalizer, accounts, devices, plugins, self-hosting). Returns the best sections with their address and the path for docs_read. Use a few English keywords.",
+                obj(json!({ "query": { "type": "string" }, "limit": { "type": "integer", "minimum": 1, "maximum": 10 } }), &["query"]),
+            ),
+            tool(
+                "docs_read",
+                "Read one page of Glyph's documentation (or one section) as Markdown; `path` comes from docs_search, e.g. `using-glyph/local-files.md#add-a-folder`.",
+                obj(json!({ "path": { "type": "string" }, "section": { "type": "string" } }), &["path"]),
+            ),
         ]
+    }
+
+    /// Tools every assistant may use whatever the settings say: they read
+    /// the public docs, nothing of the user's.
+    pub fn always_allowed(name: &str) -> bool {
+        matches!(name, "docs_search" | "docs_read")
     }
 
     /// How much assistants may do in one [`Area`] (Settings › Integrations ›
@@ -1030,7 +1048,7 @@ pub mod mcp {
                     Access::Read => !writes,
                     Access::Write => true,
                 },
-                None => false,
+                None => always_allowed(tool),
             }
         }
 
@@ -1069,7 +1087,7 @@ pub mod mcp {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": server_name, "title": "Glyph", "version": version },
-                "instructions": "Controls the Glyph music app: playback, queue, search, playlists, likes, lyrics. Songs are passed between tools by their `ref`."
+                "instructions": "Controls the Glyph music app: playback, queue, search, playlists, likes, lyrics. Songs are passed between tools by their `ref`. For how-to questions about Glyph itself (settings, shortcuts, features) use docs_search, then docs_read."
             }))),
             "ping" => Some(Ok(serde_json::json!({}))),
             "tools/list" => Some(Ok(serde_json::json!({ "tools": tools() }))),
@@ -1099,7 +1117,7 @@ pub mod mcp {
         fn every_tool_has_an_area() {
             for t in super::tools() {
                 let name = t["name"].as_str().unwrap();
-                assert!(super::tool_area(name).is_some(), "{name} needs an area in tool_area");
+                assert!(super::tool_area(name).is_some() || super::always_allowed(name), "{name} needs an area in tool_area");
             }
             assert_eq!(super::tool_area("rm_rf"), None);
         }
@@ -1115,7 +1133,9 @@ pub mod mcp {
             for area in Area::ALL {
                 none.set(area, Access::None);
             }
-            assert!(none.tools().is_empty());
+            // Only the docs stay: they hold nothing of the user's.
+            assert!(none.tools().iter().all(|t| super::always_allowed(t["name"].as_str().unwrap())));
+            assert!(none.allows("docs_search") && none.allows("docs_read") && !none.allows("now_playing"));
             let mut all = p;
             for area in Area::ALL {
                 all.set(area, Access::Write);

@@ -618,6 +618,21 @@ impl Glyph {
                 let songs: Vec<Value> = stats::top_tracks(&s, 10).into_iter().map(|x| json!({ "title": x.track.title, "artist": x.track.artist, "minutes": x.ms / 60_000, "plays": x.plays })).collect();
                 ok(json!({ "minutes": s.ms / 60_000, "plays": s.plays, "skips": s.skips, "top_artists": artists, "top_songs": songs }))
             }
+            // The docs: answered by their own MCP server (docs.glyph.my).
+            "docs_search" | "docs_read" => {
+                let Some(b) = self.backend.clone() else {
+                    return Some(fail("Glyph is still starting; try again in a moment."));
+                };
+                let tool = if name == "docs_search" { "search_docs" } else { "read_doc" };
+                let args = args.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let r = guard_async(b.docs_tool(tool, args)).await;
+                        send(r.unwrap_or_else(|e| fail(format!("The Glyph docs could not be reached ({e}). They are also at https://docs.glyph.my"))));
+                    })
+                    .detach();
+                return None;
+            }
             other => fail(format!("unknown tool {other}")),
         };
         // Changes made by an assistant show right away.

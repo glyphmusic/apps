@@ -316,7 +316,7 @@ fn pill(t: &Toast, text_width: f32, undo_w: f32, marquee_t: Option<f32>, cx: &mu
                                 cx.stop_propagation();
                                 this.run_undo(id, cx);
                             }))
-                            .child(crate::i18n::t("toast.undo")),
+                            .child(crate::i18n::t(t.undo.as_ref().map_or("toast.undo", |u| u.label_key()))),
                     )
                 }),
         );
@@ -353,11 +353,12 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
     // Oldest drawn first so the newer ones lie on top.
     let marquee_t = app.toast_hover.then(|| app.toast_hover_at.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0));
     let toasts: Vec<Toast> = app.toasts.iter().rev().cloned().collect();
-    let undo_w = if toasts.iter().any(|t| t.undo.is_some()) {
-        text_w(window, &crate::i18n::t("toast.undo"), 13.0, FontWeight::SEMIBOLD) + UNDO_PAD * 2.0
-    } else {
-        0.0
-    };
+    // As wide as the widest button label among the toasts.
+    let undo_w = toasts
+        .iter()
+        .filter_map(|t| t.undo.as_ref())
+        .map(|u| text_w(window, &crate::i18n::t(u.label_key()), 13.0, FontWeight::SEMIBOLD) + UNDO_PAD * 2.0)
+        .fold(0.0, f32::max);
     let pills: Vec<AnyElement> = toasts
         .iter()
         .map(|t| {
