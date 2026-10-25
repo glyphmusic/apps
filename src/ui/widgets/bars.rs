@@ -43,7 +43,9 @@ pub fn wheel_steps(e: &gpui::ScrollWheelEvent) -> i32 {
 /// Mouse wheel over a seek bar: jumps by the seconds set in Settings >
 /// Player per notch (nothing when that is off).
 pub fn seek_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static {
-    cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+    let weak = cx.entity().downgrade();
+    move |e, _, cx| {
+      weak.update(cx, |this, cx| {
         let step = this.config.ui.wheel_seek_s;
         if step == 0 || this.duration().is_none() {
             return;
@@ -54,13 +56,16 @@ pub fn seek_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::ScrollW
             cx.notify();
         }
         cx.stop_propagation();
-    })
+      }).ok();
+    }
 }
 
 /// Mouse wheel over a volume bar: louder / quieter by the percent set in
 /// Settings > Player per notch (nothing when that is off).
 pub fn volume_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static {
-    cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+    let weak = cx.entity().downgrade();
+    move |e, _, cx| {
+      weak.update(cx, |this, cx| {
         let step = this.config.ui.wheel_volume_pct;
         if step == 0 {
             return;
@@ -74,7 +79,8 @@ pub fn volume_wheel(cx: &mut Context<crate::app::Glyph>) -> impl Fn(&gpui::Scrol
             cx.notify();
         }
         cx.stop_propagation();
-    })
+      }).ok();
+    }
 }
 
 /// Formats a bar fraction for the little label above it ("1:23", "64%").
