@@ -139,7 +139,7 @@ fn classify(error: &anyhow::Error) -> Option<(Kind, bool)> {
 }
 
 /// Any of [`PROBES`] answering (any status) means the internet works.
-async fn internet_up() -> bool {
+pub(crate) async fn internet_up() -> bool {
     let Ok(http) = reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() else { return true };
     let mut probes: futures::stream::FuturesUnordered<_> = PROBES.iter().map(|url| http.head(*url).send()).collect();
     use futures::StreamExt;

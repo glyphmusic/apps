@@ -11,6 +11,7 @@ impl Glyph {
             return;
         }
         let Some(track) = tracks.get(index).cloned() else { return };
+        if self.blocked_offline(&track, cx) { return; }
         self.skip_streak = 0;
         if self.jam_request(&track, true) {
             return;
@@ -18,8 +19,8 @@ impl Glyph {
         if self.blocked_explicit(&track, cx) {
             return;
         }
-        let index = tracks[..index].iter().filter(|t| self.allowed(t)).count();
-        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
+        let index = tracks[..index].iter().filter(|t| self.playable(t)).count();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.playable(t)).collect();
         let recent = self.recent_keys();
         if guard(|| {
             self.queue.set_recent(recent);
@@ -63,6 +64,7 @@ impl Glyph {
         if self.jam_request(&track, true) {
             return;
         }
+        if self.blocked_offline(&track, cx) { return; }
         if self.blocked_explicit(&track, cx) {
             return;
         }
@@ -387,7 +389,18 @@ impl Glyph {
             }
         }
         let preloaded = self.preloaded.take();
-        match guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() }) {
+        let mut next = guard(|| if auto { self.queue.next().cloned() } else { self.queue.skip_next().cloned() });
+        // A queue created online can still contain unavailable songs after a
+        // network loss. Bound the scan even when repeat-all wraps around.
+        if self.offline() {
+            let limit = self.queue.upcoming().len() + 1;
+            for _ in 0..limit {
+                if !matches!(&next, Some(Some(t)) if !self.playable(t)) { break; }
+                next = guard(|| self.queue.skip_next().cloned());
+            }
+            if matches!(&next, Some(Some(t)) if !self.playable(t)) { next = Some(None); }
+        }
+        match next {
             Some(Some(t)) => {
                 // Ended on its own and the player already runs the preloaded
                 // next song: follow it instead of resolving and loading again.
@@ -572,6 +585,7 @@ impl Glyph {
             return;
         }
         let Some(Some(next)) = guard(|| self.queue.peek_next().cloned()) else { return };
+        if !self.playable(&next) { return; }
         let Some(b) = self.backend.clone() else { return };
         let cur = self.current.as_ref().map(track_key);
         let want = track_key(&next);
@@ -587,6 +601,7 @@ impl Glyph {
                     // Resolving can take a while: if another song started or
                     // the queue changed meanwhile, this one is not next anymore.
                     if s.current.as_ref().map(track_key) != cur || s.next_key().as_deref() != Some(want.as_str())
+                        || !s.playable(&next)
                         || s.preload_attempt.as_ref().map(|(_, _, at)| *at) != Some(attempt) {
                         return;
                     }
@@ -875,6 +890,7 @@ impl Glyph {
     }
 
     pub fn queue_add(&mut self, t: Track, next: bool, cx: &mut Context<Self>) {
+        if self.blocked_offline(&t, cx) { return; }
         if self.jam_request(&t, false) {
             return;
         }

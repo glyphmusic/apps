@@ -222,7 +222,7 @@ fn item_row(app: &mut Glyph, pid: &str, item: &SettingItem, cx: &mut Context<Gly
                 .items_center()
                 .gap(px(10.0))
                 .when(disabled, |d| d.opacity(0.5))
-                .child(if disabled { div().w(px(160.0)).into_any_element() } else { thin_bar(static_str(key), 160.0, frac, pick, None, cx).into_any_element() })
+                .child(if disabled { div().w(px(160.0)).into_any_element() } else { thin_bar_with_step(static_str(key), 160.0, frac, (item.step.unwrap_or(1.0) / (max - min)) as f32, pick, None, cx).into_any_element() })
                 .child(mono().w(px(48.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(shown))
                 .into_any_element()
         }

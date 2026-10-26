@@ -285,6 +285,7 @@ pub struct Downloads {
     dir: std::sync::RwLock<PathBuf>,
     map: Mutex<HashMap<String, Entry>>,
     index_io: Mutex<()>,
+    tracks_snapshot: Mutex<Option<Arc<Vec<Track>>>>,
 }
 
 impl Downloads {
@@ -372,7 +373,7 @@ impl Downloads {
 
     }
     pub fn load(dir: PathBuf) -> Self {
-        let d = Self { relocation: Default::default(), dir: std::sync::RwLock::new(dir), map: Mutex::new(HashMap::new()), index_io: Mutex::new(()) };
+        let d = Self { relocation: Default::default(), dir: std::sync::RwLock::new(dir), map: Mutex::new(HashMap::new()), index_io: Mutex::new(()), tracks_snapshot: Mutex::new(None) };
         d.reload();
         d
     }
@@ -384,6 +385,7 @@ impl Downloads {
         let mut map: HashMap<String, Entry> = paths::read_json(&dir.join(INDEX)).unwrap_or_default();
         map.retain(|_, e| dir.join(&e.file).is_file());
         *self.map.lock().unwrap() = map;
+        *self.tracks_snapshot.lock().unwrap() = None;
     }
 
     /// Moves every downloaded file and the index into `new_dir` and saves
@@ -449,6 +451,7 @@ impl Downloads {
         *map = merged;
         drop(map);
         *self.dir.write().unwrap() = new_dir;
+        *self.tracks_snapshot.lock().unwrap() = None;
         for (from, _) in copied { let _ = std::fs::remove_file(from); }
         // The old index points at files that are gone now.
         let _ = std::fs::remove_file(old_dir.join(INDEX));
@@ -456,6 +459,7 @@ impl Downloads {
     }
 
     fn save(&self) {
+        *self.tracks_snapshot.lock().unwrap() = None;
         let _index_io = self.index_io.lock().unwrap();
         let snapshot = self.map.lock().unwrap().clone();
         let _ = std::fs::create_dir_all(self.path());
@@ -492,9 +496,18 @@ impl Downloads {
 
     /// Downloaded songs, newest first.
     pub fn tracks(&self) -> Vec<Track> {
+        (*self.tracks_snapshot()).clone()
+    }
+
+    /// Sorting and cloning are paid once per index change, not per UI frame.
+    pub fn tracks_snapshot(&self) -> Arc<Vec<Track>> {
+        let mut cached = self.tracks_snapshot.lock().unwrap();
+        if let Some(tracks) = cached.as_ref() { return tracks.clone(); }
         let mut v: Vec<Entry> = self.map.lock().unwrap().values().cloned().collect();
-        v.sort_by(|a, b| b.ts.cmp(&a.ts));
-        v.into_iter().map(|e| e.track).collect()
+        v.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| track_key(&a.track).cmp(&track_key(&b.track))));
+        let tracks: Arc<Vec<Track>> = Arc::new(v.into_iter().map(|e| e.track).collect());
+        *cached = Some(tracks.clone());
+        tracks
     }
 
     /// Deletes the file of `t`. `true` if there was one.
@@ -728,6 +741,30 @@ mod tests {
         drop(second);
         let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiting).await.unwrap().unwrap();
         drop(permit);
+    }
+
+    #[test]
+    fn download_snapshot_is_reused_and_invalidated_after_store_remove_and_move() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let downloads = super::Downloads::load(dir.path().to_path_buf());
+        let empty = downloads.tracks_snapshot();
+        assert!(Arc::ptr_eq(&empty, &downloads.tracks_snapshot()));
+        let src = dir.path().join("src.mp3");
+        std::fs::write(&src, b"abc").unwrap();
+        let song = crate::dedupe::test_track(glyph_protocol::ProviderId::Archive, "1", "Song", "Band", Some(200));
+        downloads.store_file(&song, glyph_protocol::ProviderId::Archive, &src, "mp3").unwrap();
+        let saved = downloads.tracks_snapshot();
+        assert_eq!(saved.len(), 1);
+        assert!(Arc::ptr_eq(&saved, &downloads.tracks_snapshot()));
+        downloads.move_to(dest.path().to_path_buf()).unwrap();
+        assert_eq!(downloads.tracks_snapshot().len(), 1);
+        assert!(downloads.local(&song).is_some());
+        assert!(downloads.remove(&song));
+        assert!(downloads.tracks_snapshot().is_empty());
+        // A previously handed-out snapshot remains immutable.
+        assert_eq!(saved.len(), 1);
     }
 
     #[test]

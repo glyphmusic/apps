@@ -136,6 +136,17 @@ impl Glyph {
         }
         self.search.loading = true;
         cx.notify();
+        if self.offline() {
+            self.search.task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+                this.update(cx, |s, cx| {
+                    if s.search.seq != seq { return; }
+                    s.search_offline(&q);
+                    cx.notify();
+                }).ok();
+            }));
+            return;
+        }
         // Lines of lyrics also find songs (separate section, own request).
         self.search.lyric_task = None;
         let lq = glyph_core::search_ops::SearchOps::parse(&q).text;
@@ -262,6 +273,7 @@ impl Glyph {
     /// Scrolled near the end of the results: fetch the next page and append
     /// it (sources that can page; stops when a page brings nothing new).
     pub fn search_load_more(&mut self, cx: &mut Context<Self>) {
+        if self.offline() { return; }
         let s = &self.search;
         if s.loading || s.loading_more || s.exhausted || s.query.trim().is_empty() || s.results.is_empty() || s.page >= 20 {
             return;

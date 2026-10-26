@@ -4,6 +4,7 @@ impl Glyph {
     // ------------------------------------------------------------ polling
 
     pub(super) fn poll(&mut self, cx: &mut Context<Self>) {
+        self.poll_connectivity(cx);
         self.ensure_account_library(cx);
         self.poll_account_outputs(cx);
         if self.download_check_at.elapsed() >= Duration::from_secs(60) {

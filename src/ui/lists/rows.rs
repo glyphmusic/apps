@@ -33,7 +33,7 @@ pub fn song_row(
     let playing = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
     let liked = app.is_liked(&tr);
     // Hidden explicit song: shown dimmed, does not play.
-    let blocked = !app.allowed(&tr);
+    let blocked = !app.playable(&tr);
     let dl_badge = crate::ui::widgets::download_badge(app.download_view(&tr), 14.0, "arrow-down");
     let dl_tip = app.download_tip_one(&tr);
     let group: SharedString = format!("{prefix}-g-{i}").into();

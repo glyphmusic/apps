@@ -1448,3 +1448,14 @@
 "sp.player.keys.open" = "Verander kortpaaie"
 "toast.key_fixed" = "{key} is ’n vaste sleutel (lyste, kantbalk, toemaak)"
 "toast.key_moved" = "{key} hoort nou hier · “{other}” het nie meer ’n sleutel nie"
+
+# Offline playback and source availability
+"offline.title" = "Jy is vanlyn"
+"offline.downloads" = "Maak aflaaie oop · liedjies in die kas bly ook speelbaar"
+"offline.unavailable" = "Hierdie liedjie is nie vanlyn beskikbaar nie. Maak Aflaaie oop om na gestoorde musiek te luister."
+"offline.download_online" = "Koppel aan die internet om liedjies af te laai."
+"offline.search" = "Soek gestoorde musiek of maak Aflaaie oop. Aanlyn resultate keer terug wanneer jy weer koppel."
+"offline.cached" = "In die kas"
+"search.unavailable" = "Soek is tans nie beskikbaar nie"
+"search.retry_sources" = "Die musiekbronne kon nie bereik word nie. Probeer weer."
+"search.partial_sources" = "Sommige resultate kan ontbreek. Bronne wat nie beskikbaar is nie: {names}"

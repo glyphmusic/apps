@@ -100,6 +100,10 @@ impl Glyph {
     /// `auto`: started by a playlist that downloads new songs by itself, so
     /// it starts silently and only reports what was saved or failed.
     pub(super) fn download_tracks_with(&mut self, tracks: Vec<Track>, auto: bool, cx: &mut Context<Self>) {
+        if self.offline() {
+            if !auto { self.toast_info(t("offline.download_online")); cx.notify(); }
+            return;
+        }
         let Some(b) = self.backend.clone() else {
             if !auto {
                 self.toast_info(t("toast.dl_unready"));

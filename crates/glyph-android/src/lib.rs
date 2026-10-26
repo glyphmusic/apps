@@ -11,6 +11,13 @@ use jni::sys::jint;
 use jni::{jni_sig, jni_str, EnvUnowned, JValue};
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeConnectivity(
+    _env: EnvUnowned, _class: JClass, online: jni::sys::jboolean,
+) {
+    glyph_core::connectivity::set_platform_online(online);
+}
+
+#[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("glyph"),

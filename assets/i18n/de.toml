@@ -1450,3 +1450,14 @@
 "sp.player.keys.open" = "Tastenkürzel ändern"
 "toast.key_fixed" = "{key} ist fest belegt (Listen, Seitenleiste, Schließen)"
 "toast.key_moved" = "{key} gehört jetzt hierher · „{other}“ hat keine Taste mehr"
+
+# Offline playback
+"offline.title" = "Du bist offline"
+"offline.downloads" = "Downloads öffnen · gecachte Songs bleiben ebenfalls abspielbar"
+"offline.unavailable" = "Dieser Song ist offline nicht verfügbar. Unter Downloads findest du gespeicherte Musik."
+"offline.download_online" = "Verbinde dich mit dem Internet, um Songs herunterzuladen."
+"offline.search" = "Durchsuche gespeicherte Musik oder öffne Downloads. Online-Ergebnisse sind nach dem Verbinden wieder verfügbar."
+"offline.cached" = "Im Cache"
+"search.unavailable" = "Die Suche ist gerade nicht verfügbar"
+"search.retry_sources" = "Die Musikquellen sind nicht erreichbar. Versuche es erneut."
+"search.partial_sources" = "Einige Ergebnisse fehlen möglicherweise. Nicht erreichbare Quellen: {names}"

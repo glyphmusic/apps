@@ -835,7 +835,10 @@ fn sheet(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         // Pulled down from the top of its list: follows the finger, closes
         // when let go far enough down.
-        .when(live, |d| d.on_scroll_wheel(crate::ui::compact::pull(SHEET_PULL, Some(h.clone()), |this, cx| this.close_ctx(cx), cx)))
+        .when(live, |d| {
+            use crate::ui::compact::SwipeCapture;
+            d.on_swipe(SHEET_PULL, crate::ui::compact::pull(SHEET_PULL, Some(h.clone()), |this, cx| this.close_ctx(cx), cx))
+        })
         // Grab handle.
         .child(div().flex().justify_center().pb(px(10.0)).child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
         .children(back)

@@ -13,6 +13,7 @@
 
 pub mod account;
 pub mod config;
+pub mod connectivity;
 pub mod artist;
 pub mod catalog;
 pub mod cover;
@@ -121,6 +122,40 @@ fn stream_cache_name(t: &Track) -> String {
 pub enum BrokenFile {
     Download,
     CachedStream,
+}
+
+/// Complete cache files only; scanned off the UI thread. Partial downloads
+/// and cached metadata never make a song available offline.
+#[derive(Default)]
+pub struct OfflineAudio {
+    streams: std::collections::HashSet<String>,
+    youtube: std::collections::HashSet<String>,
+}
+
+impl OfflineAudio {
+    pub fn scan() -> Self {
+        Self::scan_dirs(stream_cache_dir(), ytdlp::audio_cache_dir())
+    }
+
+    fn scan_dirs(streams: PathBuf, youtube: PathBuf) -> Self {
+        fn names(dir: PathBuf, extensions: &[&str]) -> std::collections::HashSet<String> {
+            std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+                let p = e.path();
+                let meta = e.metadata().ok()?;
+                if !meta.is_file() || meta.len() == 0 || !extensions.contains(&p.extension()?.to_str()?) { return None; }
+                Some(p.file_stem()?.to_str()?.to_owned())
+            }).collect()
+        }
+        Self {
+            streams: names(streams, &["mp3", "m4a", "ogg", "flac", "opus", "wav", "aac"]),
+            youtube: names(youtube, &["m4a", "mp3", "webm"]),
+        }
+    }
+
+    pub fn contains(&self, track: &Track) -> bool {
+        self.streams.contains(&stream_cache_name(track))
+            || (track.source == ProviderId::YouTube && self.youtube.contains(&track.id))
+    }
 }
 
 /// The cached file of a song played lately (touched so it stays).
@@ -552,11 +587,12 @@ impl Backend {
             return Ok(Some(Resolved { track: track.clone(), source, confidence: 1.0 }));
         }
         // Played lately: straight from the disk cache.
-        if let Some(path) = stream_cached(track) {
+        if let Some(path) = stream_cached(track).or_else(|| (track.source == ProviderId::YouTube).then(|| ytdlp::cached_audio(&track.id)).flatten()) {
             let mime = Some(downloads::mime_of(&path).to_string());
             let source = PlaybackSource::Stream { provider: track.source, url: path.to_string_lossy().into_owned(), mime };
             return Ok(Some(Resolved { track: track.clone(), source, confidence: 1.0 }));
         }
+        if connectivity::platform_online() == Some(false) { return Ok(None); }
         let (inner, track, warm) = (self.cur(), track.clone(), self.warm.clone());
         self.spawn(async move {
             // An in-flight prefetch from before a mode switch must not send
@@ -818,6 +854,12 @@ impl Backend {
         self.downloads.contains(track) || self.imports.contains(track) || self.local.contains(track)
     }
 
+    /// Run network probes on the backend's runtime, never GPUI's executor.
+    pub async fn internet_available(&self) -> bool {
+        if let Some(online) = connectivity::platform_online() { return online; }
+        self.spawn(async { outage::internet_up().await }).await.unwrap_or(true)
+    }
+
     /// Slow maintenance stays entirely separate from the local playback path.
     pub fn refresh_downloads(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -943,6 +985,10 @@ impl Backend {
     /// Downloaded songs, newest first.
     pub fn downloaded_tracks(&self) -> Vec<Track> {
         self.downloads.tracks()
+    }
+
+    pub fn downloaded_snapshot(&self) -> Arc<Vec<Track>> {
+        self.downloads.tracks_snapshot()
     }
 
     pub fn downloaded_bytes(&self, tracks: &[Track]) -> u64 { self.downloads.saved_bytes(tracks) }

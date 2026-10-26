@@ -203,7 +203,7 @@ impl AndroidWindowState {
     /// no frame is wanted (it then sleeps until an event or a wake).
     pub(crate) fn next_frame_in(&self) -> Option<Duration> {
         let wanted = self.force_next_frame.get() || self.frame_wanted.get();
-        (wanted && self.has_surface()).then(|| self.frame_wait())
+        (wanted && self.active.get() && self.has_surface()).then(|| self.frame_wait())
     }
 
     fn frame_wait(&self) -> Duration {
@@ -264,6 +264,7 @@ impl AndroidWindowState {
 
     pub(crate) fn set_active(&self, active: bool) {
         if self.active.replace(active) != active {
+            if active { self.force_next_frame.set(true); }
             self.active_status_callback.with(|cb| cb(active));
         }
     }
@@ -300,7 +301,10 @@ impl AndroidWindowState {
 
     /// Draws if a frame is wanted and its slot has come.
     pub(crate) fn request_frame(&self) {
-        if !self.has_surface() || !self.frame_wait().is_zero() {
+        // A background surface can remain attached while Android stops
+        // consuming frames. Presenting then blocks the GPUI thread, starving
+        // queue/preload and media-control tasks even though audio still runs.
+        if !self.active.get() || !self.has_surface() || !self.frame_wait().is_zero() {
             return;
         }
         let force_render = self.force_next_frame.replace(false);

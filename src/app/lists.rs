@@ -170,6 +170,29 @@ impl Glyph {
         }
     }
 
+    /// Cover mosaics need at most twelve songs, never a copy of the full list.
+    pub fn list_preview(&self, l: &ListRef, limit: usize) -> Vec<Track> {
+        match l {
+            ListRef::Liked => self.library.liked.iter().take(limit).cloned().collect(),
+            ListRef::User(id) => self.library.playlist(id).map(|p| p.tracks.iter().take(limit).cloned().collect()).unwrap_or_default(),
+            ListRef::Album { tracks, .. } => tracks.iter().take(limit).cloned().collect(),
+            ListRef::Recent => self.library.recent_tracks().take(limit).cloned().collect(),
+            ListRef::ArtistLiked(name) => self.library.liked.iter().filter(|t| by_artist(name, &t.artist)).take(limit).cloned().collect(),
+            ListRef::Downloads => self.backend.as_ref().map(|b| b.downloaded_snapshot().iter().take(limit).cloned().collect()).unwrap_or_default(),
+        }
+    }
+
+    pub fn list_len(&self, l: &ListRef) -> usize {
+        match l {
+            ListRef::Liked => self.library.liked.len(),
+            ListRef::User(id) => self.library.playlist(id).map_or(0, |p| p.tracks.len()),
+            ListRef::Album { tracks, .. } => tracks.len(),
+            ListRef::Recent => self.library.recent_tracks().count(),
+            ListRef::ArtistLiked(name) => self.library.liked.iter().filter(|t| by_artist(name, &t.artist)).count(),
+            ListRef::Downloads => self.backend.as_ref().map_or(0, |b| b.downloaded_snapshot().len()),
+        }
+    }
+
     /// Copies a short link for the list (public server) or its share code
     /// (songs, name) to the clipboard.
     pub fn share_list(&mut self, l: &ListRef, cx: &mut Context<Self>) {

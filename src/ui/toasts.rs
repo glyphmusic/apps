@@ -202,7 +202,7 @@ fn pill(t: &Toast, text_width: f32, undo_w: f32, marquee_t: Option<f32>, cx: &mu
         .font_family(theme::FONT)
         // Phones: swipe down (or up) to dismiss.
         .when(crate::ui::compact::TOUCH, |d| {
-            d.on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
+            let on = std::rc::Rc::new(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
                 cx.stop_propagation();
                 let Some(t) = this.toasts.iter_mut().find(|t| t.id == id && t.gone.is_none()) else { return };
                 match e.touch_phase {
@@ -221,7 +221,18 @@ fn pill(t: &Toast, text_width: f32, undo_w: f32, marquee_t: Option<f32>, cx: &mu
                     }
                 }
                 cx.notify();
-            }))
+            }));
+            let start = on.clone();
+            d.on_scroll_wheel(move |e, window, cx| start(e, window, cx))
+                .child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+                    let on = on.clone();
+                    window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, window, cx| {
+                        if phase != gpui::DispatchPhase::Capture || e.touch_phase == gpui::TouchPhase::Started { return; }
+                        if TOUCH_DRAG.with(|d| d.get().is_some_and(|(active, _)| active == id)) {
+                            on(e, window, cx);
+                        }
+                    });
+                }).absolute().size_0())
         })
         .on_mouse_down(
             MouseButton::Left,

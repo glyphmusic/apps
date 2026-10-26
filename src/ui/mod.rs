@@ -459,6 +459,7 @@ impl Render for Glyph {
             // Behind the settings modal only the (already soft) glow stays
             // visible: GPUI has no backdrop blur, so the UI fades out instead.
             .child(div().flex_none().when(dim, |d| d.opacity(dim_a)).child(titlebar))
+            .children(if compact { compact::offline_banner(self, cx) } else { None })
             .child(
                 div()
                     .flex_1()

@@ -1422,3 +1422,14 @@
 "sp.player.keys.open" = "Cambia scorciatoie"
 "toast.key_fixed" = "{key} è un tasto fisso (elenchi, barra laterale, chiudere)"
 "toast.key_moved" = "{key} ora appartiene a questa scorciatoia · “{other}” non ha più un tasto"
+
+# Offline playback and source availability
+"offline.title" = "Sei offline"
+"offline.downloads" = "Apri i download · anche i brani nella cache restano riproducibili"
+"offline.unavailable" = "Questo brano non è disponibile offline. Apri Download per ascoltare la musica salvata."
+"offline.download_online" = "Connettiti a Internet per scaricare brani."
+"offline.search" = "Cerca la musica salvata o apri Download. I risultati online torneranno dopo la riconnessione."
+"offline.cached" = "Nella cache"
+"search.unavailable" = "La ricerca non è disponibile"
+"search.retry_sources" = "Impossibile raggiungere le fonti musicali. Riprova."
+"search.partial_sources" = "Alcuni risultati potrebbero mancare. Fonti non disponibili: {names}"

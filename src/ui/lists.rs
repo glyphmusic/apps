@@ -244,7 +244,7 @@ pub fn list_cover(app: &mut Glyph, l: &ListRef, size: f32, cx: &mut Context<Glyp
             .child(icon(name, (size * 0.3).clamp(16.0, 72.0), fg))
             .into_any_element()
     };
-    let tracks = app.list_tracks(l);
+    let tracks = app.list_preview(l, 12);
     // Own playlists and public ones from a profile (author `@handle`) get the
     // automatic mosaic from their songs' covers.
     let mosaic = matches!(l, ListRef::User(_)) || matches!(l, ListRef::Album { artist, .. } if artist.starts_with('@'));

@@ -9,6 +9,9 @@ import android.content.Intent;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -40,6 +43,15 @@ public class MainActivity extends GameActivity {
 
     /** A glyph:// link is waiting; Rust takes it with gpuiTakeOpenUrl. */
     private native void nativeUrlWaiting();
+    private native void nativeConnectivity(boolean online);
+    private ConnectivityManager connectivity;
+    private ConnectivityManager.NetworkCallback networkCallback;
+
+    private void reportConnectivity() {
+        NetworkCapabilities caps = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
+        nativeConnectivity(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED));
+    }
 
     /** Link the app was opened with (jam invite, playlist), until Rust takes it. */
     private String openUrl;
@@ -56,6 +68,14 @@ public class MainActivity extends GameActivity {
         // the safe area from the insets below.
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         super.onCreate(savedInstanceState);
+        connectivity = getSystemService(ConnectivityManager.class);
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) { reportConnectivity(); }
+            @Override public void onLost(Network network) { reportConnectivity(); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) { reportConnectivity(); }
+        };
+        connectivity.registerDefaultNetworkCallback(networkCallback);
+        reportConnectivity();
         takeLink(getIntent());
         // The playback notification needs this on Android 13+.
         if (android.os.Build.VERSION.SDK_INT >= 33
@@ -88,11 +108,20 @@ public class MainActivity extends GameActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (connectivity != null) { reportConnectivity(); }
         if (pendingApk != null && getPackageManager().canRequestPackageInstalls()) {
             String path = pendingApk;
             pendingApk = null;
             installApk(path);
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (connectivity != null && networkCallback != null) {
+            connectivity.unregisterNetworkCallback(networkCallback);
+        }
+        super.onDestroy();
     }
 
     /** Writes the APK into an installer session; the system then asks the user. */

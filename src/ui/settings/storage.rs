@@ -273,7 +273,19 @@ pub(super) fn storage(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child(t("sp.storage.limit")))
                 .child(info_tip("info-storage-limit", t("sp.storage.limit.desc"))),
         )
-        .child(div().pt(px(20.0)).flex().children(stops));
+        .child(div().relative().pt(px(20.0)).flex().children(stops).child(canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            |_, hitbox, window, _| wheel_control(window, hitbox),
+        ).absolute().inset_0()).on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, window, cx| {
+            if window.last_input_was_touch() { return; }
+            let n = wheel_steps(e);
+            if n != 0 {
+                let at = LIMITS_MB.iter().position(|m| *m == this.config.storage.cache_limit_mb).unwrap_or(0);
+                let next = (at as i32 + n).clamp(0, LIMITS_MB.len() as i32 - 1) as usize;
+                this.set_cache_limit(LIMITS_MB[next], cx);
+            }
+            cx.stop_propagation();
+        })));
 
     // Bottom actions: clear the checked kinds, open the cache folder.
     let sel_bytes: u64 = StorageKind::ALL

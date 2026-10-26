@@ -1422,3 +1422,14 @@
 "sp.player.keys.open" = "Zmień skróty"
 "toast.key_fixed" = "{key} to stały klawisz (listy, pasek boczny, zamykanie)"
 "toast.key_moved" = "{key} należy teraz do tego skrótu · „{other}” nie ma już klawisza"
+
+# Offline playback and source availability
+"offline.title" = "Jesteś offline"
+"offline.downloads" = "Otwórz pobrane · utwory w pamięci podręcznej też są dostępne"
+"offline.unavailable" = "Ten utwór jest niedostępny offline. Otwórz Pobrane, aby słuchać zapisanej muzyki."
+"offline.download_online" = "Połącz się z internetem, aby pobierać utwory."
+"offline.search" = "Przeszukaj zapisaną muzykę lub otwórz Pobrane. Wyniki online wrócą po połączeniu z internetem."
+"offline.cached" = "W pamięci podręcznej"
+"search.unavailable" = "Wyszukiwanie jest niedostępne"
+"search.retry_sources" = "Nie można połączyć się ze źródłami muzyki. Spróbuj ponownie."
+"search.partial_sources" = "Niektórych wyników może brakować. Niedostępne źródła: {names}"

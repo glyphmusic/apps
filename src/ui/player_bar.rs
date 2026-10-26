@@ -366,6 +366,7 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
                                         app.volume(),
                                         hsla(0.0, 0.0, 1.0, 0.2),
                                         theme::pink(),
+                                        app.config.ui.wheel_volume_pct as f32 / 100.0,
                                         Rc::new(move |f, cx| {
                                             w.update(cx, |g, cx| {
                                                 g.set_volume(f);

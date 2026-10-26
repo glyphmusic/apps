@@ -221,7 +221,7 @@ pub fn fit_window(window: &mut Window, sz: gpui::Size<Pixels>, cx: &mut App) {
 
 /// A clickable / draggable bar: `frac` filled, `on` gets the fraction under
 /// the mouse (0 at the left, or at the bottom when `vertical`).
-pub(crate) fn frac_bar(id: &'static str, vertical: bool, frac: f32, track: gpui::Hsla, fill: gpui::Hsla, on: Rc<dyn Fn(f32, &mut App)>) -> gpui::AnyElement {
+pub(crate) fn frac_bar(id: &'static str, vertical: bool, frac: f32, track: gpui::Hsla, fill: gpui::Hsla, wheel_step: f32, on: Rc<dyn Fn(f32, &mut App)>) -> gpui::AnyElement {
     let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
     let b1 = bounds.clone();
     let at = move |p: gpui::Point<Pixels>| -> Option<f32> {
@@ -235,6 +235,9 @@ pub(crate) fn frac_bar(id: &'static str, vertical: bool, frac: f32, track: gpui:
     };
     let at2 = at.clone();
     let on2 = on.clone();
+    let on_touch = on.clone();
+    let on_wheel = on.clone();
+    let wheel_value = Cell::new(frac);
     let frac = frac.clamp(0.0, 1.0);
     let filled = if vertical {
         div().absolute().left_0().right_0().bottom_0().h(gpui::relative(frac)).rounded_full().bg(fill)
@@ -255,6 +258,16 @@ pub(crate) fn frac_bar(id: &'static str, vertical: bool, frac: f32, track: gpui:
             on(f, cx);
         }
     })
+    .on_scroll_wheel(move |e, window, cx| {
+        if window.last_input_was_touch() || wheel_step <= 0.0 { return; }
+        let n = crate::ui::widgets::wheel_steps(e);
+        if n != 0 {
+            let next = (wheel_value.get() + n as f32 * wheel_step).clamp(0.0, 1.0);
+            wheel_value.set(next);
+            on_wheel(next, cx);
+        }
+        cx.stop_propagation();
+    })
     .on_mouse_move(move |e, _, cx| {
         if e.pressed_button == Some(gpui::MouseButton::Left) {
             if let Some(f) = at2(e.position) {
@@ -271,7 +284,22 @@ pub(crate) fn frac_bar(id: &'static str, vertical: bool, frac: f32, track: gpui:
             .bg(track)
             .child(filled)
             .child(knob)
-            .child(gpui::canvas(move |b, _, _| b1.set(Some(b)), |_, _, _, _| {}).absolute().inset_0()),
+            .child(gpui::canvas(move |b, window, _| {
+                b1.set(Some(b));
+                window.insert_hitbox(b.dilate(px(6.0)), gpui::HitboxBehavior::Normal)
+            }, move |b, hitbox, window, _| {
+                crate::ui::widgets::wheel_control(window, hitbox.clone());
+                let on = on_touch.clone();
+                crate::ui::widgets::touch_drag(window, id, hitbox, move |e, _, cx| {
+                    if e.phase == gpui::TouchPhase::Cancelled { return; }
+                    let f = if vertical {
+                        1.0 - f32::from(e.position.y - b.origin.y) / f32::from(b.size.height).max(1.0)
+                    } else {
+                        f32::from(e.position.x - b.origin.x) / f32::from(b.size.width).max(1.0)
+                    };
+                    on(f.clamp(0.0, 1.0), cx);
+                });
+            }).absolute().inset_0()),
     )
     .into_any_element()
 }
@@ -373,6 +401,7 @@ impl MiniPlayer {
                             volume,
                             gpui::hsla(0.0, 0.0, 1.0, 0.2),
                             theme::pink(),
+                            self.app.read(cx).config.ui.wheel_volume_pct as f32 / 100.0,
                             Rc::new(move |f, cx| a.update(cx, |g, cx| {
                                 g.set_volume(f);
                                 cx.notify();
@@ -446,6 +475,7 @@ impl MiniPlayer {
                 frac,
                 gpui::hsla(0.0, 0.0, 1.0, 0.25),
                 gpui::white(),
+                dur.filter(|d| !d.is_zero()).map_or(0.0, |d| self.app.read(cx).config.ui.wheel_seek_s as f32 / d.as_secs_f32()),
                 Rc::new(move |f, cx| {
                     a7.update(cx, |g, cx| {
                         if let Some(d) = g.duration() {

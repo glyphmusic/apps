@@ -114,3 +114,28 @@ async fn set_config_reevaluates_providers_priority_and_server() {
     std::env::remove_var("GLYPH_DATA_DIR");
     std::env::remove_var("GLYPH_CACHE_DIR");
 }
+
+#[test]
+fn offline_audio_excludes_partial_empty_and_metadata_cache_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let streams = dir.path().join("streams");
+    let youtube = dir.path().join("youtube");
+    std::fs::create_dir_all(&streams).unwrap();
+    std::fs::create_dir_all(&youtube).unwrap();
+    let song = dedupe::test_track(ProviderId::Archive, "saved", "Saved", "Artist", Some(200));
+    let partial = dedupe::test_track(ProviderId::Archive, "partial", "Partial", "Artist", Some(200));
+    let empty = dedupe::test_track(ProviderId::Archive, "empty", "Empty", "Artist", Some(200));
+    std::fs::write(streams.join(format!("{}.mp3", stream_cache_name(&song))), b"audio").unwrap();
+    std::fs::write(streams.join(format!("{}.part", stream_cache_name(&partial))), b"partial").unwrap();
+    std::fs::write(streams.join(format!("{}.mp3", stream_cache_name(&empty))), b"").unwrap();
+    let video = dedupe::test_track(ProviderId::YouTube, "abcdefghijk", "Video", "Artist", Some(200));
+    std::fs::write(youtube.join("abcdefghijk.webm"), b"audio").unwrap();
+    let cached = OfflineAudio::scan_dirs(streams, youtube);
+    assert!(cached.contains(&song));
+    assert!(cached.contains(&video));
+    assert!(!cached.contains(&partial));
+    assert!(!cached.contains(&empty));
+    let mut other_provider = video;
+    other_provider.source = ProviderId::Archive;
+    assert!(!cached.contains(&other_provider));
+}

@@ -1422,3 +1422,14 @@
 "sp.player.keys.open" = "Changer les raccourcis"
 "toast.key_fixed" = "{key} est une touche fixe (listes, barre latérale, fermer)"
 "toast.key_moved" = "{key} appartient maintenant à ce raccourci · « {other} » n’a plus de touche"
+
+# Offline playback and source availability
+"offline.title" = "Vous êtes hors ligne"
+"offline.downloads" = "Ouvrir les téléchargements · les titres en cache restent disponibles"
+"offline.unavailable" = "Ce titre est indisponible hors ligne. Ouvrez les téléchargements pour écouter la musique enregistrée."
+"offline.download_online" = "Connectez-vous à Internet pour télécharger des titres."
+"offline.search" = "Recherchez la musique enregistrée ou ouvrez les téléchargements. Les résultats en ligne reviendront après la reconnexion."
+"offline.cached" = "En cache"
+"search.unavailable" = "La recherche est indisponible"
+"search.retry_sources" = "Les sources musicales sont inaccessibles. Réessayez."
+"search.partial_sources" = "Certains résultats peuvent manquer. Sources indisponibles : {names}"

@@ -222,6 +222,8 @@ impl Glyph {
             server_auth_required: false,
             server_probe_seq: 0,
             outage_seen: 0,
+            offline: Default::default(),
+            compact_list: None,
             key_inputs,
             config: Config::default(),
             backend: None,

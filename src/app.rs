@@ -32,7 +32,9 @@ mod playback;
 mod library;
 mod lyrics;
 mod lists;
+pub(crate) use lists::sort_order;
 mod downloads;
+mod offline;
 mod navigation;
 mod artist;
 mod menus;
@@ -473,6 +475,8 @@ pub struct Glyph {
     server_probe_seq: u64,
     /// Last official-server outage announced (see `glyph_core::outage`).
     outage_seen: u64,
+    pub offline: offline::OfflineState,
+    pub compact_list: Option<crate::ui::compact::ListSnapshot>,
     pub key_inputs: Vec<(&'static str, Entity<TextInput>)>,
 
     pub config: Config,

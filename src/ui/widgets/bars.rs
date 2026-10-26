@@ -1,5 +1,16 @@
 use super::*;
 
+/// Parent smooth-scroll capture handlers must leave wheel input to controls.
+pub fn wheel_control(window: &Window, hitbox: gpui::Hitbox) {
+    let win = window.window_handle().window_id();
+    UI_RT.with(|rt| rt.borrow_mut().win_mut(win).wheel_controls.push(hitbox));
+}
+
+pub(super) fn over_wheel_control(window: &Window, position: gpui::Point<gpui::Pixels>) -> bool {
+    let win = window.window_handle().window_id();
+    UI_RT.with(|rt| rt.borrow().win(win).is_some_and(|w| w.wheel_controls.iter().any(|h| h.is_hovered_at(position, window))))
+}
+
 pub fn fmt_time(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
@@ -90,12 +101,34 @@ pub type BarLabel = Rc<dyn Fn(f32) -> String>;
 /// apply while dragging; seek bars (`id` contains "seek") show the dragged
 /// position and seek once on release.
 pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: Option<BarLabel>, cx: &mut Context<crate::app::Glyph>) -> Div {
+    thin_bar_with_step(id, width, frac, 0.05, on_pick, label, cx)
+}
+
+pub fn thin_bar_with_step(id: &'static str, width: f32, frac: f32, step: f32, on_pick: Pick, label: Option<BarLabel>, cx: &mut Context<crate::app::Glyph>) -> Div {
     let view = cx.entity().downgrade();
     let live = !id.contains("seek");
-    div().flex_none().w(px(width)).h(px(14.0)).child(
+    let wheel_pick = on_pick.clone();
+    let wheel_value = std::cell::Cell::new(frac);
+    let wheel: Rc<dyn Fn(&gpui::ScrollWheelEvent, &mut Window, &mut gpui::App)> = if !live { Rc::new(seek_wheel(cx)) }
+        else if matches!(id, "vol" | "np-vol") { Rc::new(volume_wheel(cx)) }
+        else { Rc::new(move |e: &gpui::ScrollWheelEvent, window: &mut Window, cx: &mut gpui::App| {
+            // Touch-generated scrolls belong to the page, never to a slider.
+            if window.last_input_was_touch() { return; }
+            let n = wheel_steps(e);
+            if n != 0 {
+                let next = (wheel_value.get() + n as f32 * step).clamp(0.0, 1.0);
+                wheel_value.set(next);
+                wheel_pick(next, window, cx);
+            }
+            cx.stop_propagation();
+        }) };
+    div().flex_none().w(px(width)).h(px(14.0)).on_scroll_wheel(move |e, window, cx| {
+        if !window.last_input_was_touch() { wheel(e, window, cx); }
+    }).child(
         gpui::canvas(
-            |_, _, _| (),
-            move |bounds, _, window, app_cx| {
+            |bounds, window, _| window.insert_hitbox(bounds.dilate(px(4.0)), gpui::HitboxBehavior::Normal),
+            move |bounds, hitbox, window, app_cx| {
+                wheel_control(window, hitbox.clone());
                 let win = window.window_handle().window_id();
                 let (drag, bar_hover, bar_hover_at) = UI_RT.with(|rt| {
                     let rt = rt.borrow();
@@ -148,12 +181,23 @@ pub fn thin_bar(id: &'static str, width: f32, frac: f32, on_pick: Pick, label: O
                     let _ = line.paint(gpui::point(px(lx + 6.0), px(ly + 2.0)), px(15.0), gpui::TextAlign::Left, None, window, app_cx);
                 }
                 let frac_at = move |x: f32| ((x - x0) / w.max(1.0)).clamp(0.0, 1.0);
+                let touch_pick = on_pick.clone();
+                let touch_view = view.clone();
+                touch_drag(window, id, hitbox.clone(), move |e, window, cx| {
+                    let f = frac_at(f32::from(e.position.x));
+                    let finished = matches!(e.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled);
+                    UI_RT.with(|rt| rt.borrow_mut().win_mut(win).bar_drag = if finished { None } else { Some((id, f)) });
+                    if e.phase != gpui::TouchPhase::Cancelled && (live || e.phase == gpui::TouchPhase::Ended) {
+                        touch_pick(f, window, cx);
+                    }
+                    touch_view.update(cx, |_, cx| cx.notify()).ok();
+                });
                 let (p1, p2, p3) = (on_pick.clone(), on_pick.clone(), on_pick.clone());
                 let (v1, v2, v3) = (view.clone(), view.clone(), view.clone());
                 // A little taller hit area than the drawn bar.
                 let hit = bounds.dilate(px(4.0));
                 window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, window, cx| {
-                    if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hit.contains(&e.position) {
+                    if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hitbox.is_hovered_at(e.position, window) {
                         return;
                     }
                     let f = frac_at(f32::from(e.position.x));

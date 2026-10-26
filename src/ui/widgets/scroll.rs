@@ -89,7 +89,8 @@ pub fn handle_for(key: &str) -> gpui::ScrollHandle {
 }
 
 /// One wheel notch: glide the frame there. `false` if it cannot move that way.
-pub(super) fn wheel_step(win: gpui::WindowId, hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: bool) -> bool {
+pub(super) fn wheel_step(win: gpui::WindowId, hs: &gpui::ScrollHandle, e: &gpui::ScrollWheelEvent, horizontal: bool, window: &Window) -> bool {
+    if over_wheel_control(window, e.position) { return false; }
     let gpui::ScrollDelta::Lines(lines) = e.delta else { return false };
     // Shift turns the wheel sideways for horizontal rows.
     let d = if horizontal { if lines.x != 0.0 { lines.x } else if e.modifiers.shift { lines.y } else { 0.0 } } else { lines.y };
@@ -144,14 +145,14 @@ pub fn smooth_wheel(handle: &gpui::ScrollHandle, horizontal: bool, cx: &mut Cont
             let win = window.window_handle().window_id();
             let idx = register_wheel(win, handle.bounds(), horizontal);
             let (hs, vs) = (handle.clone(), view.clone());
-            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, window, cx| {
                 if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
                     return;
                 }
                 if topmost_wheel(win, e.position, horizontal) != Some(idx) {
                     return;
                 }
-                if wheel_step(win, &hs, e, horizontal) {
+                if wheel_step(win, &hs, e, horizontal, window) {
                     cx.stop_propagation();
                     vs.update(cx, |_, cx| cx.notify()).ok();
                 }
@@ -190,8 +191,8 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
         .w(px(8.0))
         .child(
             gpui::canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
+                |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+                move |bounds, hitbox, window, cx| {
                     let win = window.window_handle().window_id();
                     let max = f32::from(handle.max_offset().y);
                     // A page shorter than the one before can be left scrolled
@@ -212,7 +213,8 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                         if max > 0.0 {
                             let hs = handle.clone();
                             let vs = view.clone();
-                            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, window, cx| {
+                                if over_wheel_control(window, e.position) { return; }
                                 if overlay_open(&vs, cx) {
                                     return;
                                 }
@@ -229,7 +231,7 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                         let hs = handle.clone();
                         let vs = view.clone();
                         let idx = register_wheel(win, handle.bounds(), false);
-                        window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, _, cx| {
+                        window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, window, cx| {
                             if phase != gpui::DispatchPhase::Capture || !hs.bounds().contains(&e.position) {
                                 return;
                             }
@@ -237,7 +239,7 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                             if topmost_wheel(win, e.position, false) != Some(idx) || overlay_open(&vs, cx) {
                                 return;
                             }
-                            if wheel_step(win, &hs, e, false) {
+                            if wheel_step(win, &hs, e, false, window) {
                                 cx.stop_propagation();
                                 vs.update(cx, |_, cx| cx.notify()).ok();
                             }
@@ -288,6 +290,31 @@ pub fn scrollbar(handle: &gpui::ScrollHandle, smooth: bool, cx: &mut Context<cra
                         gpui::BorderStyle::default(),
                     ));
                     let per_px = max / (track_h - thumb_h).max(1.0);
+                    let ht = handle.clone();
+                    let vt = view.clone();
+                    touch_drag(window, format!("scrollbar-{key:?}"), hitbox, move |e, _, cx| {
+                        if e.phase == gpui::TouchPhase::Started {
+                            let my = f32::from(e.position.y);
+                            let mut start = (-f32::from(ht.offset().y)).clamp(0.0, max);
+                            if my < top || my > top + thumb_h {
+                                start = ((my - f32::from(bounds.origin.y) - thumb_h / 2.0) * per_px).clamp(0.0, max);
+                            }
+                            UI_RT.with(|rt| {
+                                let mut rt = rt.borrow_mut();
+                                let w = rt.win_mut(win);
+                                w.smooth = None;
+                                w.scroll_drag = Some((ht.clone(), my, start));
+                            });
+                        }
+                        if let Some((_, grab_y, grab_scroll)) = UI_RT.with(|rt| rt.borrow().win(win).and_then(|w| w.scroll_drag.clone())) {
+                            let y = (grab_scroll + (f32::from(e.position.y) - grab_y) * per_px).clamp(0.0, max);
+                            ht.set_offset(gpui::point(px(0.0), px(-y)));
+                        }
+                        if matches!(e.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
+                            UI_RT.with(|rt| rt.borrow_mut().win_mut(win).scroll_drag = None);
+                        }
+                        vt.update(cx, |_, cx| cx.notify()).ok();
+                    });
                     let (h1, h2, v1, v2) = (handle.clone(), handle.clone(), view.clone(), view.clone());
                     window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, _, cx| {
                         if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !bounds.contains(&e.position) {

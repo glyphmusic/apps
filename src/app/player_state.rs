@@ -255,6 +255,9 @@ impl Glyph {
     /// Plays the `i`-th upcoming song (queue panel click) and continues the
     /// queue from there.
     pub fn queue_jump(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(track) = self.queue.upcoming().get(i).map(|t| (*t).clone()) {
+            if self.blocked_offline(&track, cx) { return; }
+        }
         // A jam guest asks the host for the song instead.
         if self.jam_queue_jump(i) {
             cx.notify();

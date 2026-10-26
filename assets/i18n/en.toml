@@ -1450,3 +1450,14 @@
 "sp.player.keys.open" = "Change shortcuts"
 "toast.key_fixed" = "{key} is a fixed key (lists, sidebar, closing)"
 "toast.key_moved" = "{key} now belongs here · “{other}” has no key any more"
+
+# Offline playback
+"offline.title" = "You are offline"
+"offline.downloads" = "Open downloads · cached songs also remain playable"
+"offline.unavailable" = "This song is not available offline. Open Downloads to listen to saved music."
+"offline.download_online" = "Connect to the internet to download songs."
+"offline.search" = "Search your saved music or open Downloads. Online results return when you reconnect."
+"offline.cached" = "Cached"
+"search.unavailable" = "Search is currently unavailable"
+"search.retry_sources" = "The music sources could not be reached. Please try again."
+"search.partial_sources" = "Some results may be missing. Unavailable sources: {names}"

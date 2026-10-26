@@ -70,7 +70,7 @@ impl Glyph {
 
     /// Plays `tracks` from a random song with shuffle on.
     pub fn play_shuffled(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
-        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.playable(t)).collect();
         if tracks.is_empty() {
             return;
         }
@@ -94,7 +94,7 @@ impl Glyph {
 
     /// Adds every song to the end of the queue.
     pub fn queue_all(&mut self, tracks: Vec<Track>, cx: &mut Context<Self>) {
-        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.allowed(t)).collect();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.playable(t)).collect();
         let n = tracks.len();
         for tr in tracks {
             guard(|| self.queue.push(tr));

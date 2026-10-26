@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.9.1 - 2026-10-26
+
+### Fixed
+
+- Mobile offline status links directly to Downloads; unavailable songs are dimmed while downloaded, local and fully cached audio remains playable. Search distinguishes unavailable sources from empty results and offers a retry.
+- Mobile playlists expose the existing song menu and reuse song data and sort order between frames; covers read only the songs needed for their mosaic.
+- Android stops submitting frames when the activity loses focus, keeping the playback task loop responsive for background track preloading and crossfades.
+- Touch dragging keeps sliders, equalizer bands, scrollbars and the profile image crop moving beyond the initial gesture threshold.
+- Mobile sheets and swipeable rows keep following the finger after moving away from the gesture's starting point.
+- Mouse-wheel control works on settings sliders, equalizer bands and mini-player bars, while seek and volume bars keep their configured step sizes.
+
 ## 0.9.0 - 2026-10-25
 
 ### Added

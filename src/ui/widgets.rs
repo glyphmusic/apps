@@ -15,6 +15,7 @@ use std::time::Duration;
 mod tooltip;
 mod buttons;
 mod bars;
+mod touch;
 mod cover;
 mod skeleton;
 mod indicators;
@@ -25,6 +26,7 @@ pub use tooltip::*;
 pub use fade::*;
 pub use buttons::*;
 pub use bars::*;
+pub use touch::*;
 pub use cover::*;
 pub use skeleton::*;
 pub use indicators::*;
@@ -85,12 +87,14 @@ struct WindowUiState {
     mouse_out: bool,
     hovers: std::collections::HashMap<SharedString, (bool, std::time::Instant, f32)>,
     bar_drag: Option<(&'static str, f32)>,
+    touch_drag: Option<SharedString>,
     bar_hover: Option<&'static str>,
     bar_hover_at: f32,
     viewport_h: f32,
     smooth: Option<(gpui::ScrollHandle, f32, f32)>,
     smooth_at: Option<std::time::Instant>,
     wheel_frames: Vec<(gpui::Bounds<gpui::Pixels>, bool)>,
+    wheel_controls: Vec<gpui::Hitbox>,
     last_wheel: Option<(gpui::Bounds<gpui::Pixels>, std::time::Instant)>,
     scroll_drag: Option<(gpui::ScrollHandle, f32, f32)>,
     scroll_seen: std::collections::HashMap<(i32, i32), (f32, Option<std::time::Instant>, bool)>,
@@ -106,12 +110,14 @@ impl Default for WindowUiState {
             mouse_out: false,
             hovers: Default::default(),
             bar_drag: None,
+            touch_drag: None,
             bar_hover: None,
             bar_hover_at: 0.0,
             viewport_h: 900.0,
             smooth: None,
             smooth_at: None,
             wheel_frames: Vec::new(),
+            wheel_controls: Vec::new(),
             last_wheel: None,
             scroll_drag: None,
             scroll_seen: Default::default(),
@@ -227,6 +233,7 @@ pub fn begin_window_frame(window: &Window) {
         let w = rt.win_mut(id);
         w.viewport_h = vh;
         w.wheel_frames.clear();
+        w.wheel_controls.clear();
         // The open tooltip's button was not drawn (or not hovered) last
         // frame: it is gone (page changed, dialog on top), so is the tooltip.
         if w.tip_now.is_some() && !w.tip_painted {

@@ -46,6 +46,22 @@ pub const HEADER_H: f32 = 60.0;
 /// Horizontal page padding on phones (layout GAP + PAGE_X).
 const EDGE: f32 = theme::PAGE_X;
 
+/// A persistent route to local music, rather than a disappearing error toast.
+pub fn offline_banner(app: &Glyph, cx: &mut Context<Glyph>) -> Option<AnyElement> {
+    app.offline().then(|| div()
+        .id("offline-downloads")
+        .flex_none().min_h(px(56.0)).px(px(EDGE)).py(px(10.0))
+        .bg(surface()).flex().items_center().gap(px(12.0))
+        .cursor_pointer().active(|s| s.bg(white(0.1)))
+        .on_click(cx.listener(|this, _, _, cx| this.open_list(ListRef::Downloads, cx)))
+        .child(icon("hard-drive", 22.0, theme::text_dim()))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.0))
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(t("offline.title")))
+            .child(div().text_size(px(12.0)).text_color(theme::text_dim()).child(t("offline.downloads"))))
+        .child(icon("arrow-right", 20.0, theme::text()))
+        .into_any_element())
+}
+
 fn surface() -> gpui::Hsla {
     hsla(0.0, 0.0, 0.07, 1.0)
 }
@@ -55,6 +71,75 @@ fn white(a: f32) -> gpui::Hsla {
 }
 
 // ------------------------------------------------------------------ swipes
+
+/// Keep an accepted pan routed to its owner when the owner's hitbox moves
+/// away from the gesture's fixed start position (sheets, covers, song rows).
+pub(crate) trait SwipeCapture: InteractiveElement + ParentElement + Sized {
+    fn on_swipe(self, key: impl Into<String>, on: impl Fn(&ScrollWheelEvent, &mut Window, &mut gpui::App) + 'static) -> Self {
+        let key = key.into();
+        let on = std::rc::Rc::new(on);
+        let start = on.clone();
+        self.on_scroll_wheel(move |e, window, cx| start(e, window, cx))
+            .child(gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+                let key = key.clone();
+                let on = on.clone();
+                window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture { return; }
+                    if e.touch_phase == TouchPhase::Started {
+                        SWIPES.with(|m| {
+                            if let Some(s) = m.borrow_mut().get_mut(&key) {
+                                s.live = false;
+                                s.fling = false;
+                            }
+                        });
+                        return;
+                    }
+                    let owned = SWIPES.with(|m| m.borrow().get(&key).is_some_and(|s| s.live || s.fling));
+                    if owned { on(e, window, cx); }
+                });
+            }).absolute().size_0())
+    }
+}
+
+impl<E: InteractiveElement + ParentElement> SwipeCapture for E {}
+
+#[cfg(all(test, feature = "ui-tests"))]
+mod swipe_tests {
+    use super::*;
+    use gpui::{point, PlatformInput, Render, TestAppContext, TouchEvent, TouchId};
+
+    struct MovingSheet(std::rc::Rc<RefCell<Vec<f32>>>);
+
+    impl Render for MovingSheet {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let y = SWIPES.with(|m| m.borrow().get("test-sheet").map_or(0.0, |s| s.d.1));
+            div().size_full().relative().child(div().id("test-sheet").absolute().top(px(y)).w(px(100.0)).h(px(100.0))
+                .on_swipe("test-sheet", cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                    match swipe_step("test-sheet", e, |_, _| true) {
+                        Step::Pass => return,
+                        _ => this.0.borrow_mut().push(SWIPES.with(|m| m.borrow()["test-sheet"].d.1)),
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                })))
+        }
+    }
+
+    #[gpui::test]
+    fn moving_sheet_keeps_pan_after_start_point_leaves_its_hitbox(cx: &mut TestAppContext) {
+        SWIPES.with(|m| m.borrow_mut().clear());
+        let movements = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({ let movements = movements.clone(); move |_, _| MovingSheet(movements) });
+        for (phase, y) in [(TouchPhase::Started, 5.0), (TouchPhase::Moved, 20.0), (TouchPhase::Moved, 55.0), (TouchPhase::Moved, 120.0), (TouchPhase::Ended, 130.0)] {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(PlatformInput::Touch(TouchEvent { id: TouchId(1), phase, position: point(px(10.0), px(y)), predicted_position: None, force: None }), cx);
+            }).unwrap();
+            cx.executor().run_until_parked();
+        }
+        assert_eq!(movements.borrow()[..3], [15.0, 50.0, 115.0]);
+        assert!(!SWIPES.with(|m| m.borrow()["test-sheet"].live));
+    }
+}
 
 /// Distance a swipe must travel to act (skip, queue, open/close).
 const SWIPE_ACT: f32 = 72.0;
@@ -271,7 +356,7 @@ fn queue_swipe(row: gpui::Stateful<gpui::Div>, key: String, tr: glyph_protocol::
     let slot = |d: gpui::Div| d.absolute().top_0().bottom_0().w(px(x.abs())).flex().items_center().justify_center();
     row.relative()
         .left(px(x))
-        .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| match swipe_step(&key, e, horizontal) {
+        .on_swipe(key.clone(), cx.listener(move |this, e: &ScrollWheelEvent, _, cx| match swipe_step(&key, e, horizontal) {
             Step::Pass => {}
             Step::Take => {
                 cx.stop_propagation();
@@ -320,7 +405,7 @@ pub fn header(app: &mut Glyph, title: Option<SharedString>, actions: Vec<AnyElem
     let pfp = crate::ui::profile::own_avatar(app, 40.0, cx);
     div()
         // Swipe right: the profile menu (as the tap on the picture).
-        .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| match swipe_step("header", e, horizontal) {
+        .on_swipe("header", cx.listener(|this, e: &ScrollWheelEvent, _, cx| match swipe_step("header", e, horizontal) {
             Step::Pass => {}
             Step::Take => cx.stop_propagation(),
             Step::Release(dx, _) => {
@@ -703,7 +788,7 @@ pub fn mini_bar(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
 
     Some(theme::on_panel(|| {
         div()
-            .on_scroll_wheel(on_swipe)
+            .on_swipe("mini", on_swipe)
             .relative()
             .h(px(MINI_H))
             .bg(hsla(0.0, 0.0, 0.06, 0.94))
@@ -888,7 +973,7 @@ pub fn drawer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> 
             .inset_0()
             .bg(hsla(0.0, 0.0, 0.0, 0.55 * k * (1.0 + sx / w).max(0.0)))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| close(this, cx)))
-            .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+            .on_swipe("drawer", cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
                 cx.stop_propagation();
                 match swipe_step("drawer", e, horizontal) {
                     Step::Pass => {}
@@ -1138,7 +1223,7 @@ pub fn library(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -
     for (i, (l, kind)) in lists.into_iter().enumerate() {
         let art = list_cover(app, &l, 56.0, cx);
         let title = app.list_title(&l);
-        let n = app.list_tracks(&l).len();
+        let n = app.list_len(&l);
         let pinned = app.is_pinned(&l);
         let sub = if matches!(l, ListRef::Album { .. }) { kind } else { format!("{kind} · {}", tf("common.n_songs", &[("n", &n)])) };
         rows.push(
@@ -1216,12 +1301,51 @@ pub fn library_actions(cx: &mut Context<Glyph>) -> Vec<AnyElement> {
 
 // ------------------------------------------------------------------ song list
 
+/// Retains immutable song data across renders. Comparing the source catches
+/// edits, sync and metadata changes without re-sorting or cloning unchanged songs.
+pub struct ListSnapshot {
+    source: std::rc::Rc<Vec<glyph_protocol::Track>>,
+    shown: std::rc::Rc<Vec<glyph_protocol::Track>>,
+    sort: glyph_core::config::ListSort,
+    keys: std::collections::HashSet<String>,
+    downloaded: Option<(Instant, bool)>,
+}
+
+impl ListSnapshot {
+    fn update(slot: &mut Option<Self>, tracks: &[glyph_protocol::Track], sort: glyph_core::config::ListSort) -> std::rc::Rc<Vec<glyph_protocol::Track>> {
+        if slot.as_ref().is_none_or(|s| s.sort != sort || s.source.as_slice() != tracks) {
+            let source = std::rc::Rc::new(tracks.to_vec());
+            let shown = if sort == glyph_core::config::ListSort::Custom { source.clone() } else {
+                std::rc::Rc::new(crate::app::sort_order(tracks, sort).into_iter().map(|i| tracks[i].clone()).collect())
+            };
+            let keys = tracks.iter().map(crate::app::track_key).collect();
+            *slot = Some(Self { source, shown, sort, keys, downloaded: None });
+        }
+        slot.as_ref().unwrap().shown.clone()
+    }
+}
+
 /// A song list (playlist, album, Liked Songs, Recent) like Spotify's: back,
 /// title and song count, download on the left, shuffle and a big play button
 /// on the right, then one row per song.
 pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> AnyElement {
-    let Some(l) = app.open_list.clone() else { return div().into_any_element() };
-    let tracks = app.shown_tracks(&l);
+    // Temporarily own the route while constructing this view; an album route
+    // itself contains its entire song list. Restore it before returning.
+    let Some(l) = app.open_list.take() else { return div().into_any_element() };
+    let sort = app.list_sort(&l);
+    let owned;
+    let downloads;
+    let source = match &l {
+        ListRef::Liked => app.library.liked.as_slice(),
+        ListRef::User(id) => app.library.playlist(id).map(|p| p.tracks.as_slice()).unwrap_or_default(),
+        ListRef::Album { tracks, .. } => tracks.as_slice(),
+        ListRef::Downloads => {
+            downloads = app.backend.as_ref().map(|b| b.downloaded_snapshot()).unwrap_or_default();
+            downloads.as_slice()
+        }
+        _ => { owned = app.list_tracks(&l); &owned }
+    };
+    let tracks = ListSnapshot::update(&mut app.compact_list, source, sort);
     let title = app.list_title(&l);
     let n = tracks.len();
     let vw = f32::from(window.viewport_size().width);
@@ -1230,11 +1354,18 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
 
     let here = app.current.as_ref().is_some_and(|c| {
         let k = crate::app::track_key(c);
-        tracks.iter().any(|t| crate::app::track_key(t) == k)
+        app.compact_list.as_ref().is_some_and(|s| s.keys.contains(&k))
     });
     let (playing, loading) = (here && app.is_playing(), here && app.is_loading());
     let has_dl = app.backend.is_some() && n > 0;
-    let all_dl = has_dl && tracks.iter().all(|tr| app.is_downloaded(tr));
+    let all_dl = match app.compact_list.as_ref().and_then(|s| s.downloaded).filter(|(at, _)| at.elapsed().as_secs() < 1) {
+        Some((_, saved)) => saved,
+        None => {
+            let saved = has_dl && tracks.iter().all(|tr| app.is_downloaded(tr));
+            if let Some(s) = app.compact_list.as_mut() { s.downloaded = Some((Instant::now(), saved)); }
+            saved
+        }
+    };
 
     let (t_play, t_shuf, t_dl) = (tracks.clone(), tracks.clone(), tracks.clone());
     let play = div()
@@ -1251,7 +1382,9 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
             if here {
                 this.toggle_play(cx)
             } else if !t_play.is_empty() {
-                this.play_list(t_play.clone(), 0, cx)
+                if let Some(index) = t_play.iter().position(|t| this.playable(t)) {
+                    this.play_list((*t_play).clone(), index, cx)
+                }
             }
         }))
         .child(play_glyph(loading, playing, 20.0, 52.0));
@@ -1263,13 +1396,14 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
             d.child(
                 icon_action("cl-dl", "arrow-down-to-line")
                     .when(all_dl, |d| d.bg(white(0.1)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.download_tracks(t_dl.clone(), cx))),
+                    .when(app.offline(), |d| d.opacity(0.4))
+                    .on_click(cx.listener(move |this, _, _, cx| this.download_tracks((*t_dl).clone(), cx))),
             )
         })
         .child(div().flex_1())
         // An empty list has nothing to play.
         .when(n > 0, |d| {
-            d.child(icon_action("cl-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled(t_shuf.clone(), cx))))
+            d.child(icon_action("cl-shuffle", "shuffle").on_click(cx.listener(move |this, _, _, cx| this.play_shuffled((*t_shuf).clone(), cx))))
                 .child(play)
         });
 
@@ -1284,45 +1418,16 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
         .child(div().text_size(px(13.0)).text_color(theme::text_dim()).child(tf("common.n_songs", &[("n", &n)])))
         .child(actions.mt(px(8.0)));
 
-    let list = std::rc::Rc::new(tracks);
+    let list = tracks;
     let scroll = app.main_scroll.clone();
     let rows = virtual_rows("cl-rows", list.len(), 60.0, &scroll, |i| {
-        let tr = list[i].clone();
-        let now = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
-        let all = list.clone();
-        let t_queue = tr.clone();
-        let row = div()
-            .id(("cl-row", i))
-            .h(px(60.0))
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(EDGE))
-            .cursor_pointer()
-            .active(|s| s.bg(white(0.05)))
-            .on_click(cx.listener(move |this, _, _, cx| this.play_row((*all).clone(), i, cx)))
-            .child(cover(app, &tr, 48.0, 4.0, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(song_title(SharedString::from(tr.title.clone()), crate::ui::widgets::rating(&tr)).text_size(px(15.0)).text_color(if now { theme::pink() } else { theme::text() }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.0))
-                            .when(app.is_downloaded(&tr), |d| d.child(icon("arrow-down-to-line", 12.0, theme::pink())))
-                            .child(div().truncate().text_size(px(12.5)).text_color(theme::text_dim()).child(tr.artist.clone())),
-                    ),
-            );
-        queue_swipe(row, format!("q-cl-{i}"), t_queue, cx).into_any_element()
+        // Albums cannot remove songs, so don't clone an album's entire track
+        // vector into every row's menu context.
+        let from = if matches!(l, ListRef::Album { .. }) { None } else { Some((l.clone(), i)) };
+        song_row(app, list.clone(), i, "cl-row", from, cx).h(px(60.0)).px(px(EDGE)).into_any_element()
     });
 
-    div()
+    let view = div()
         .id("cl-scroll")
         .track_scroll(&app.main_scroll)
         .size_full()
@@ -1334,7 +1439,9 @@ pub fn list_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) 
         .when(n == 0, |d| d.child(div().px(px(EDGE)).pt(px(8.0)).text_size(px(14.0)).text_color(theme::text_dim()).child(if l == ListRef::Liked { t("library.liked.empty.sub") } else { t("mobile.list.empty") })))
         .child(rows)
         .child(div().h(px(24.0)))
-        .into_any_element()
+        .into_any_element();
+    app.open_list = Some(l);
+    view
 }
 
 // ------------------------------------------------------------------ search
@@ -1465,7 +1572,10 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
     let tr = list[i].clone();
     let now = app.current.as_ref().map(crate::app::track_key) == Some(crate::app::track_key(&tr));
     let liked = app.is_liked(&tr);
-    let blocked = !app.allowed(&tr);
+    let blocked = !app.playable(&tr);
+    let subtitle = if app.offline() && !app.is_downloaded(&tr) && app.available_offline(&tr) {
+        format!("{} · {}", tr.artist, t("offline.cached"))
+    } else { tr.artist.clone() };
     let (t_like, t_menu, t_queue, from_menu) = (tr.clone(), tr.clone(), tr.clone(), from.clone());
     let all = list.clone();
     let row = div()
@@ -1494,7 +1604,8 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
                         .gap(px(5.0))
                         .min_w_0()
                         .when(app.is_downloaded(&tr), |d| d.child(icon("arrow-down-to-line", 12.0, theme::pink())))
-                        .child(div().truncate().text_size(px(12.5)).text_color(theme::text_dim()).child(tr.artist.clone())),
+                        .when(app.offline() && !app.is_downloaded(&tr) && app.available_offline(&tr), |d| d.child(icon("database", 12.0, theme::pink())))
+                        .child(div().truncate().text_size(px(12.5)).text_color(theme::text_dim()).child(subtitle)),
                 ),
         )
         .when(liked, |d| {
@@ -1502,7 +1613,7 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
                 div()
                     .id((prefix, i * 4 + 1))
                     .flex_none()
-                    .size(px(36.0))
+                    .size(px(44.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1517,7 +1628,7 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
             div()
                 .id((prefix, i * 4 + 2))
                 .flex_none()
-                .size(px(36.0))
+                .size(px(44.0))
                 .mr(px(-8.0))
                 .flex()
                 .items_center()
@@ -1534,4 +1645,36 @@ pub fn song_row(app: &mut Glyph, list: std::rc::Rc<Vec<glyph_protocol::Track>>, 
                 .child(icon("ellipsis-vertical", 18.0, theme::text_dim())),
         );
     queue_swipe(row, format!("q-{prefix}-{i}"), t_queue, cx)
+}
+
+#[cfg(test)]
+mod list_snapshot_tests {
+    use super::*;
+    use glyph_core::config::ListSort;
+    use glyph_protocol::{ProviderId, Track};
+    use std::rc::Rc;
+
+    fn track(id: usize) -> Track {
+        Track { id: id.to_string(), source: ProviderId::Archive, title: format!("Song {id:05}"), artist: "Artist".into(), album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false }
+    }
+
+    #[test]
+    fn large_playlist_reuses_data_and_sorted_order_between_frames() {
+        let tracks: Vec<_> = (0..5000).rev().map(track).collect();
+        let mut cache = None;
+        let shown = ListSnapshot::update(&mut cache, &tracks, ListSort::Title);
+        assert_eq!(shown[0].id, "0");
+        for _ in 0..60 {
+            assert!(Rc::ptr_eq(&shown, &ListSnapshot::update(&mut cache, &tracks, ListSort::Title)));
+        }
+        // A same-length sync update must invalidate the snapshot too.
+        let mut changed = tracks;
+        changed[0].title = "A renamed song".into();
+        let updated = ListSnapshot::update(&mut cache, &changed, ListSort::Title);
+        assert!(!Rc::ptr_eq(&shown, &updated));
+        assert_eq!(updated[0].id, "4999");
+        let custom = ListSnapshot::update(&mut cache, &changed, ListSort::Custom);
+        assert_eq!(custom[0].id, "4999");
+        assert!(Rc::ptr_eq(&cache.as_ref().unwrap().source, &custom));
+    }
 }

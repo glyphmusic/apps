@@ -61,7 +61,7 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .items_center()
                 .gap(px(12.0))
                 .when(!on, |d| d.opacity(0.45))
-                .child(thin_bar("eq-bass", 180.0, (cur + 12.0) / 24.0, pick, Some(label), cx))
+                .child(thin_bar_with_step("eq-bass", 180.0, (cur + 12.0) / 24.0, 0.5 / 24.0, pick, Some(label), cx))
                 .child(mono().w(px(56.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(db_label(cur)))
         }),
         row(t("sp.eq.headroom"), Some(t("sp.eq.headroom.desc")), {
@@ -80,7 +80,7 @@ pub(super) fn equalizer(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
                 .items_center()
                 .gap(px(12.0))
                 .when(!on, |d| d.opacity(0.45))
-                .child(thin_bar("eq-headroom", 180.0, cur / 12.0, pick, Some(label), cx))
+                .child(thin_bar_with_step("eq-headroom", 180.0, cur / 12.0, 0.5 / 12.0, pick, Some(label), cx))
                 .child(mono().w(px(56.0)).flex().justify_end().text_size(px(12.0)).text_color(white(0.6)).child(db_label(-cur)))
         }),
         row(t("sp.eq.share"), Some(t("sp.eq.share.desc")), select(app, "sel-eq-share", t("sp.eq.share.button"), share, cx)),
@@ -144,6 +144,7 @@ pub(super) fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> D
         // instead of the curve.
         |bounds, window, _| window.insert_hitbox(bounds.dilate(px(8.0)), gpui::HitboxBehavior::Normal),
         move |bounds, hitbox, window, _app_cx| {
+            crate::ui::widgets::wheel_control(window, hitbox.clone());
             let (x0, y0) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             let cell = w / 10.0;
@@ -237,6 +238,33 @@ pub(super) fn eq_curve(gains: [f32; 10], on: bool, cx: &mut Context<Glyph>) -> D
                 })
                 .ok();
             };
+            let vt = view.clone();
+            crate::ui::widgets::touch_drag(window, "eq-curve", hitbox.clone(), move |e, _, cx| {
+                if e.phase == gpui::TouchPhase::Started {
+                    EQ_DRAG.with(|d| d.set(Some(band_at(f32::from(e.start_position.x)))));
+                }
+                let Some(band) = EQ_DRAG.with(|d| d.get()) else { return };
+                let done = matches!(e.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled);
+                let gain = if e.phase == gpui::TouchPhase::Cancelled {
+                    vt.upgrade().map(|v| crate::app::eq_gains(&v.read(cx).config.audio.eq_gains)[band]).unwrap_or(0.0)
+                } else { gain_at(f32::from(e.position.y)) };
+                if done { EQ_DRAG.with(|d| d.set(None)); }
+                apply(&vt, band, gain, done, cx);
+            });
+            let vw = view.clone();
+            let wheel_hit = hitbox.clone();
+            window.on_mouse_event(move |e: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase != gpui::DispatchPhase::Bubble || window.last_input_was_touch() || !wheel_hit.is_hovered_at(e.position, window) { return; }
+                let band = band_at(f32::from(e.position.x));
+                let n = crate::ui::widgets::wheel_steps(e);
+                if n != 0 {
+                    if let Some(v) = vw.upgrade() {
+                        let gain = crate::app::eq_gains(&v.read(cx).config.audio.eq_gains)[band];
+                        apply(&vw, band, (gain + n as f32 * 0.5).clamp(-12.0, 12.0), true, cx);
+                    }
+                }
+                cx.stop_propagation();
+            });
             window.on_mouse_event(move |e: &gpui::MouseDownEvent, phase, window, cx| {
                 if phase != gpui::DispatchPhase::Bubble || e.button != gpui::MouseButton::Left || !hitbox.is_hovered_at(e.position, window) {
                     return;

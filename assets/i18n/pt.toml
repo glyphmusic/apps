@@ -1422,3 +1422,14 @@
 "sp.player.keys.open" = "Mudar atalhos"
 "toast.key_fixed" = "{key} é uma tecla fixa (listas, barra lateral, fechar)"
 "toast.key_moved" = "{key} pertence agora a este atalho · “{other}” já não tem tecla"
+
+# Offline playback and source availability
+"offline.title" = "Você está offline"
+"offline.downloads" = "Abrir downloads · músicas em cache também podem ser reproduzidas"
+"offline.unavailable" = "Esta música não está disponível offline. Abra Downloads para ouvir músicas salvas."
+"offline.download_online" = "Conecte-se à internet para baixar músicas."
+"offline.search" = "Busque músicas salvas ou abra Downloads. Os resultados online voltarão quando você se conectar."
+"offline.cached" = "Em cache"
+"search.unavailable" = "A busca está indisponível"
+"search.retry_sources" = "Não foi possível acessar as fontes de música. Tente novamente."
+"search.partial_sources" = "Alguns resultados podem estar ausentes. Fontes indisponíveis: {names}"

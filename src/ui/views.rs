@@ -212,7 +212,9 @@ fn home_cards(app: &mut Glyph, cx: &mut Context<Glyph>) -> gpui::Div {
         let tr = list[i].clone();
         let l = list.clone();
         let art = cover(app, &tr, 56.0, 8.0, cx);
-        let card = base(("card", i).into(), format!("card-{i}")).on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)));
+        let card = base(("card", i).into(), format!("card-{i}"))
+            .when(!app.playable(&tr), |d| d.opacity(0.4))
+            .on_click(cx.listener(move |this, _, _, cx| this.play_list((*l).clone(), i, cx)));
         let artist = artist_link(("card-artist", i), &tr.artist, cx);
         cards.push(
             with_menu(card, tr.clone(), None, cx)
@@ -267,6 +269,7 @@ fn cover_row_with(app: &mut Glyph, tracks: Vec<Track>, prefix: &'static str, rec
             let artist = artist_link((prefix, 10_000 + i), &tr.artist, cx);
             let el = div()
                 .id((prefix, i))
+                .when(!app.playable(&tr), |d| d.opacity(0.4))
                 .flex_none()
                 .w(px(192.0))
                 .p(px(8.0))
@@ -440,8 +443,10 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
         .child(chip_btn("f-artists", "search.filter.artists", SearchFilter::Artists, cx));
 
     let query = app.search.query.clone();
-    let body: gpui::AnyElement = if let Some(e) = app.search.error.clone() {
-        ascii_state(ART_OFFLINE, e, t("search.error.sub")).into_any_element()
+    let body: gpui::AnyElement = if app.offline() && app.search.results.is_empty() {
+        ascii_state(ART_OFFLINE, t("offline.title"), t("offline.search")).into_any_element()
+    } else if app.search.error.is_some() && app.search.results.is_empty() {
+        ascii_state(ART_OFFLINE, t("search.unavailable"), t("search.retry_sources")).into_any_element()
     } else if query.trim().is_empty() && crate::ui::compact::TOUCH {
         crate::ui::compact::search_recent(app, cx)
     } else if query.trim().is_empty() {
@@ -455,6 +460,8 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             .when(filter == SearchFilter::All, |d| d.child(skeleton_artist_rows("search", 2)))
             .child(skeleton_rows("search", 7))
             .into_any_element()
+    } else if app.search.results.is_empty() && !app.search.errors.is_empty() {
+        ascii_state(ART_OFFLINE, t("search.unavailable"), t("search.retry_sources")).into_any_element()
     } else if app.search.results.is_empty() {
         ascii_state(ART_EMPTY, t("search.none.title"), format!("\u{201c}{query}\u{201d}")).into_any_element()
     } else {
@@ -654,13 +661,20 @@ pub fn search(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> impl
             cx.defer(move |cx| me.update(cx, |g, cx| g.search_load_more(cx)));
         }
     }
+    let partial = (!app.offline() && (!app.search.errors.is_empty() || app.search.error.is_some())).then(|| {
+        let names = app.search.errors.iter().map(|(p, _)| p.display_name()).collect::<Vec<_>>().join(", ");
+        let q = query.clone();
+        div().flex().flex_col().gap(px(8.0))
+            .child(div().text_size(theme::text_sm()).text_color(theme::text_dim()).child(if names.is_empty() { t("search.retry_sources") } else { tf("search.partial_sources", &[("names", &names)]) }))
+            .child(button("retry-search-sources", t("common.retry")).min_h(px(44.0)).on_click(cx.listener(move |this, _, _, cx| this.search_for(q.clone(), cx))))
+    });
     let s = &app.search;
     let footer = div()
         .flex()
         .flex_col()
         .gap(px(4.0))
         .when((s.loading || s.loading_more) && !s.results.is_empty(), |d| d.child(spinner_line(app.spinner(), t("search.more"))))
-        .children(s.errors.iter().map(|(p, m)| status_line(format!("[{}] {} -> {}", p.badge(), p.display_name(), m))));
+        .children(partial);
 
     scroll_area("search-scroll").track_scroll(&app.main_scroll).child(
         div()
@@ -921,6 +935,7 @@ pub fn queue_panel(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) ->
         let by = if i < manual { crate::ui::jam::added_by(app, &tr, i, cx) } else { None };
         rows.push(
             queue_row_inner(shown, &tr, art, group.clone(), false)
+                .when(!app.playable(&tr), |d| d.opacity(0.4))
                 .id(("q", i))
                 .rounded(px(8.0))
                 .cursor_pointer()

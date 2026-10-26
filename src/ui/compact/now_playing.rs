@@ -292,7 +292,7 @@ fn carousel(app: &mut Glyph, tr: &glyph_protocol::Track, art: f32, window: &mut 
         .relative()
         .flex_none()
         .size(px(art))
-        .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| match swipe_step("np-art", e, horizontal) {
+        .on_swipe("np-art", cx.listener(move |this, e: &ScrollWheelEvent, _, cx| match swipe_step("np-art", e, horizontal) {
             Step::Pass => {}
             Step::Take => {
                 cx.stop_propagation();
@@ -420,7 +420,7 @@ fn header(app: &mut Glyph, tr: &glyph_protocol::Track, sk: f32, scroll: &gpui::S
         .flex_none()
         .pt(safe_top)
         .bg(hsla(0.0, 0.0, 0.06, 0.94 * sk))
-        .on_scroll_wheel(pull("np-pull", None, |_, cx| close(cx), cx))
+        .on_swipe("np-pull", pull("np-pull", None, |_, cx| close(cx), cx))
         .child(div().relative().h(px(HEADER_H - 8.0)).children(normal).children(bar))
         .into_any_element()
 }
@@ -653,7 +653,7 @@ fn sheet(app: &mut Glyph, top: f32, window: &mut Window, cx: &mut Context<Glyph>
     // together; the cards below are their own block.
     let has_line = line.is_some();
     let content = div()
-        .on_scroll_wheel(pull("np-pull", Some(scroll.clone()), |_, cx| close(cx), cx))
+        .on_swipe("np-pull", pull("np-pull", Some(scroll.clone()), |_, cx| close(cx), cx))
         .px(px(SIDE))
         .pt(px(12.0))
         .pb(safe.bottom + px(32.0))
@@ -683,6 +683,7 @@ fn sheet(app: &mut Glyph, top: f32, window: &mut Window, cx: &mut Context<Glyph>
             .flex()
             .flex_col()
             .child(header)
+            .children(super::offline_banner(app, cx))
             .child(div().id("np-scroll").track_scroll(&scroll).flex_1().min_h_0().overflow_y_scroll().child(content))
             .into_any_element(),
     )
@@ -719,7 +720,7 @@ fn lyrics_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) ->
         .flex()
         .items_center()
         .gap(px(4.0))
-        .on_scroll_wheel(pull("lyr-pull", None, |_, cx| set_lyrics(false, cx), cx))
+        .on_swipe("lyr-pull", pull("lyr-pull", None, |_, cx| set_lyrics(false, cx), cx))
         .child(icon_action("lyr-close", "chevron-down").on_click(cx.listener(|_, _, _, cx| set_lyrics(false, cx))))
         .child(
             div()
@@ -812,7 +813,7 @@ fn bottom_sheet(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     // Handle + title: pulled down, the sheet follows and closes.
     let grab = div()
         .flex_none()
-        .on_scroll_wheel(pull("sheet-pull", None, close_sheet, cx))
+        .on_swipe("sheet-pull", pull("sheet-pull", None, close_sheet, cx))
         .child(div().h(px(24.0)).flex().items_center().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(white(0.25))))
         .child(head);
     // The list pulled down from its top closes the sheet as well.
@@ -823,7 +824,7 @@ fn bottom_sheet(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -
     let panel = div()
         .id("np-bottom-sheet")
         .occlude()
-        .on_scroll_wheel(pull("sheet-pull", Some(list_scroll), close_sheet, cx))
+        .on_swipe("sheet-pull", pull("sheet-pull", Some(list_scroll), close_sheet, cx))
         .absolute()
         .left_0()
         .right_0()

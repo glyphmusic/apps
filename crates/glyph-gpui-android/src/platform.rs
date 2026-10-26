@@ -143,8 +143,14 @@ impl AndroidPlatformState {
             }
             MainEvent::Start => self.lifecycle(AppLifecyclePhase::Foreground),
             MainEvent::Resume { .. } => self.lifecycle(AppLifecyclePhase::Foreground),
-            MainEvent::Pause => self.lifecycle(AppLifecyclePhase::Inactive),
-            MainEvent::Stop => self.lifecycle(AppLifecyclePhase::Background),
+            MainEvent::Pause => {
+                if let Some(w) = self.window() { w.set_active(false); }
+                self.lifecycle(AppLifecyclePhase::Inactive);
+            }
+            MainEvent::Stop => {
+                if let Some(w) = self.window() { w.set_active(false); }
+                self.lifecycle(AppLifecyclePhase::Background);
+            }
             MainEvent::LowMemory => {
                 self.memory_warning.with(|cb| cb());
             }

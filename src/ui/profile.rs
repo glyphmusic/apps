@@ -993,6 +993,33 @@ pub fn crop_dialog(app: &mut Glyph, cx: &mut Context<Glyph>) -> AnyElement {
         .child(shade(0.0, vy, vx, wh))
         .child(shade(vx + ww, vy, sw - vx - ww, wh))
         .child(frame)
+        .child({
+            let view = cx.entity().downgrade();
+            gpui::canvas(
+                |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+                move |_, hitbox, window, _| {
+                    let view = view.clone();
+                    crate::ui::widgets::touch_drag(window, "crop-stage", hitbox, move |e, _, cx| {
+                        view.update(cx, |this, cx| {
+                            let Some(c) = this.profile.crop.as_mut() else { return };
+                            if e.phase == gpui::TouchPhase::Started {
+                                c.drag = Some(((f32::from(e.position.x), f32::from(e.position.y)), (c.crop.cx, c.crop.cy)));
+                            }
+                            if e.phase != gpui::TouchPhase::Cancelled {
+                                if let Some(((mx, my), (ox, oy))) = c.drag {
+                                    let s = c.scale();
+                                    c.crop.cx = ox - (f32::from(e.position.x) - mx) / (c.size.0 as f32 * s).max(1.0);
+                                    c.crop.cy = oy - (f32::from(e.position.y) - my) / (c.size.1 as f32 * s).max(1.0);
+                                    c.clamp();
+                                }
+                            }
+                            if matches!(e.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) { c.drag = None; }
+                            cx.notify();
+                        }).ok();
+                    });
+                },
+            ).absolute().inset_0()
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {

@@ -1422,3 +1422,14 @@
 "sp.player.keys.open" = "Kısayolları değiştir"
 "toast.key_fixed" = "{key} sabit bir tuş (listeler, kenar çubuğu, kapatma)"
 "toast.key_moved" = "{key} artık burada · “{other}” artık tuşsuz"
+
+# Offline playback and source availability
+"offline.title" = "Çevrimdışısınız"
+"offline.downloads" = "İndirilenleri aç · önbellekteki şarkılar da çalınabilir"
+"offline.unavailable" = "Bu şarkı çevrimdışı kullanılamıyor. Kayıtlı müziği dinlemek için İndirilenler bölümünü açın."
+"offline.download_online" = "Şarkı indirmek için internete bağlanın."
+"offline.search" = "Kayıtlı müziği arayın veya İndirilenler bölümünü açın. Çevrimiçi sonuçlar yeniden bağlandığınızda geri gelir."
+"offline.cached" = "Önbellekte"
+"search.unavailable" = "Arama şu anda kullanılamıyor"
+"search.retry_sources" = "Müzik kaynaklarına ulaşılamadı. Tekrar deneyin."
+"search.partial_sources" = "Bazı sonuçlar eksik olabilir. Kullanılamayan kaynaklar: {names}"
