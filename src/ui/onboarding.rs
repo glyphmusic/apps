@@ -113,6 +113,8 @@ pub struct Onboarding {
     /// Devices: the one playing, picked when.
     device: usize,
     device_at: Option<Instant>,
+    /// Phones: how far the current pan went sideways.
+    swipe: Option<f32>,
 }
 
 impl Onboarding {
@@ -142,6 +144,7 @@ impl Onboarding {
             lyrics_paused: None,
             device: 0,
             device_at: None,
+            swipe: None,
         }
     }
 
@@ -190,6 +193,32 @@ impl Glyph {
 
     fn onb_page(&self) -> Option<usize> {
         self.onboarding.as_ref().filter(|o| o.closing.is_none()).map(|o| o.page)
+    }
+
+    /// Phones: a sideways swipe turns the page. Touch pans arrive as scroll
+    /// steps (taps stay taps, so the buttons keep working); the fling's
+    /// momentum after the release is ignored.
+    fn onb_swipe(&mut self, e: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        let Some(o) = self.onboarding.as_mut() else { return };
+        let dx = f32::from(e.delta.pixel_delta(px(16.0)).x);
+        match e.touch_phase {
+            gpui::TouchPhase::Started => o.swipe = Some(dx),
+            gpui::TouchPhase::Moved => {
+                if let Some(s) = o.swipe.as_mut() {
+                    *s += dx;
+                }
+            }
+            gpui::TouchPhase::Cancelled => o.swipe = None,
+            gpui::TouchPhase::Ended => {
+                let Some(s) = o.swipe.take().map(|s| s + dx) else { return };
+                // A swipe never finishes the tour: that is the button's job.
+                match self.onb_page() {
+                    Some(p) if s < -56.0 && p + 1 < PAGES.len() => self.onb_go(p + 1, cx),
+                    Some(_) if s > 56.0 => self.onb_back(cx),
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn onb_next(&mut self, cx: &mut Context<Self>) {
@@ -466,9 +495,14 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
             .absolute()
             .inset_0()
             .occlude()
-            .bg(gpui::hsla(0.0, 0.0, 0.02, 0.96 * vis))
+            // Opaque: Android blends in linear light, where even 4% of the
+            // screen behind reads as a clear ghost of it.
+            .bg(gpui::hsla(0.0, 0.0, 0.02, vis))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(swipe_catcher(cx))
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                this.onb_swipe(e, cx);
+            }))
             .child(
                 div()
                     .size_full()
@@ -538,38 +572,6 @@ pub fn layer(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>) -> O
         })
         .into_any_element(),
     )
-}
-
-/// Phones: a sideways swipe anywhere turns the page.
-fn swipe_catcher(cx: &mut Context<Glyph>) -> impl IntoElement {
-    let view = cx.entity().downgrade();
-    gpui::canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |_, hitbox, window, _| {
-            let view = view.clone();
-            touch_drag(window, "onb-swipe", hitbox, move |e, _, cx| {
-                if e.phase != gpui::TouchPhase::Ended {
-                    return;
-                }
-                let dx = f32::from(e.position.x - e.start_position.x);
-                let dy = f32::from(e.position.y - e.start_position.y);
-                if dx.abs() < 56.0 || dx.abs() < dy.abs() * 1.2 {
-                    return;
-                }
-                view.update(cx, |this, cx| {
-                    // A swipe never finishes the tour: that is the button's job.
-                    match this.onb_page() {
-                        Some(p) if dx < 0.0 && p + 1 < PAGES.len() => this.onb_go(p + 1, cx),
-                        Some(_) if dx > 0.0 => this.onb_back(cx),
-                        _ => {}
-                    }
-                })
-                .ok();
-            });
-        },
-    )
-    .absolute()
-    .inset_0()
 }
 
 // ---- illustrations ----------------------------------------------------------

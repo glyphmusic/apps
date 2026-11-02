@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.10.1 - 2026-11-02
+
+### Fixed
+
+- Android: the first-start tour's buttons and live illustrations respond to taps again; sideways swipes still turn the page.
+- Android: the tour covers the screen fully instead of letting the home screen show through.
+
 ## 0.10.0 - 2026-11-02
 
 ### Added
