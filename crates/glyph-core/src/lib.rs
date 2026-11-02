@@ -1213,6 +1213,23 @@ impl Backend {
         (p.songs.len(), p.lists.len())
     }
 
+    /// `text` is exactly one song link (Spotify, YouTube, Deezer), nothing else.
+    pub fn is_song_link(text: &str) -> bool {
+        let p = import::keyless::parse_pasted(text);
+        p.songs.len() == 1 && p.lists.is_empty() && text.split_whitespace().count() == 1
+    }
+
+    /// The songs behind pasted song links, in order (unreadable ones left out).
+    pub async fn songs_from_links(&self, text: &str) -> anyhow::Result<Vec<Track>> {
+        use import::accounts::LinkReader;
+        let songs = import::keyless::parse_pasted(text).songs;
+        if songs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inner = self.cur();
+        self.spawn(async move { InnerReader(inner).songs(songs).await }).await
+    }
+
     /// What the connected account holds (counts, playlists).
     pub async fn library_overview(&self, src: Arc<dyn import::accounts::LibrarySource>) -> anyhow::Result<import::accounts::Overview> {
         self.spawn(async move { src.overview().await }).await?

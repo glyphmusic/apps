@@ -375,6 +375,15 @@ impl Glyph {
         self.schedule_sync(cx);
     }
 
+    /// Settings > Playback: search longer before a song counts as not found.
+    pub fn set_patient_search(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.config.playback.patient_search = on;
+        self.save_config(cx);
+        // The backend reads it on every resolve.
+        self.push_config_to_backend(cx);
+        cx.notify();
+    }
+
     pub fn set_youtube_only(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.config.providers.youtube_only = enabled;
         if enabled && !self.config.providers.enabled.contains(&ProviderId::YouTube) {

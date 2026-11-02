@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-11-02
+
+### Added
+
+- First-start tour: after the splash on a fresh install (desktop and Android), seven short pages introduce search, the library, sound, lyrics, sync and Connect, and colour themes, each with a small live illustration to try out. Arrow keys, Enter and Escape on desktop, swipes on phones; Settings › About › Introduction shows it again.
+- A single song link (Spotify, YouTube including Shorts and live links, Deezer) pasted into the search bar adds that song to Liked Songs.
+- Android: Glyph appears in the share sheet. Shared song and playlist links, or plain text such as a song name, open like text pasted into the search bar.
+- Settings › Playback: "Skip songs that can't play" (on by default) and "Search longer", which tries more videos and other search wordings before a song counts as not found.
+- Deleted playlists can be removed from the trash for good.
+
+### Changed
+
+- Local YouTube playback tries the next good matches when the best video will not play and remembers the one that worked.
+- The built-in YouTube search retries once after a dropped connection and pauses for one minute only after three failures in a row, instead of ten minutes after the first.
+
 ## 0.9.1 - 2026-10-26
 
 ### Fixed

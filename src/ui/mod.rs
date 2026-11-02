@@ -15,6 +15,7 @@ pub mod keys;
 pub mod lists;
 pub mod local;
 pub mod migrate;
+pub mod onboarding;
 pub mod mini;
 pub mod now_playing;
 pub mod player_bar;
@@ -96,6 +97,11 @@ pub fn bind_keys(cx: &mut App, ui: &glyph_core::config::UiConfig) {
         KeyBinding::new("delete", ListRemove, Some(MAIN)),
         KeyBinding::new("backspace", ListRemove, Some(MAIN)),
         KeyBinding::new("escape", CloseOverlay, Some("Glyph")),
+        // The first-start tour: its context is deeper, so these win while it is open.
+        KeyBinding::new("right", onboarding::OnbNext, Some(onboarding::CONTEXT)),
+        KeyBinding::new("enter", onboarding::OnbNext, Some(onboarding::CONTEXT)),
+        KeyBinding::new("left", onboarding::OnbBack, Some(onboarding::CONTEXT)),
+        KeyBinding::new("escape", onboarding::OnbSkip, Some(onboarding::CONTEXT)),
         // Ctrl+1..9 pick sidebar entries top to bottom (Settings is a shortcut).
         KeyBinding::new("secondary-1", Nav1, None),
         KeyBinding::new("secondary-2", Nav2, None),
@@ -445,7 +451,9 @@ impl Render for Glyph {
         });
         let dialog = self.name_dialog.is_some().then(|| lists::name_dialog(self, cx));
         let approval = controls::mcp_approval(self, cx);
-        let alpha = compact::alpha_notice(window, cx);
+        let onboarding = onboarding::layer(self, window, cx);
+        // Phones: the alpha notice waits until the tour is done.
+        let alpha = if self.onboarding.is_none() { compact::alpha_notice(window, cx) } else { None };
         let crop = self.profile.crop.is_some().then(|| crate::ui::profile::crop_dialog(self, cx));
         let dim = sk > 0.0 && !compact;
         let dim_a = 1.0 - 0.92 * sk;
@@ -637,6 +645,7 @@ impl Render for Glyph {
             .children(approval)
             .children(alpha)
             .children(crop)
+            .children(onboarding)
             .children(splash)
             .children(toasts)
             .children(widgets::tooltip_layer(window))

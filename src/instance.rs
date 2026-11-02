@@ -43,10 +43,36 @@ fn plugin_id(url: &str) -> Option<String> {
 /// the running app, Android to the activity); the app picks it up like a
 /// request of a second launch.
 pub fn open_url(url: &str) {
+    // Android share sheet: MainActivity hands shared text over this way.
+    if let Some(text) = url.strip_prefix(SHARED_PREFIX) {
+        open_shared(text);
+        return;
+    }
     if let Some(req) = request_for_url(url) {
         if let Ok(mut v) = OPENED.lock() {
             v.push(req);
         }
+    }
+}
+
+/// Marks text shared to Glyph (`MainActivity.takeLink`), not a link.
+pub const SHARED_PREFIX: &str = "glyph-shared:";
+
+/// Text another app shared to Glyph: its links (a song, a playlist), or the
+/// text itself when it holds none (a song name, searched for). The app
+/// handles it like text pasted into the search bar.
+pub fn open_shared(text: &str) {
+    let links: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| w.starts_with("https://") || w.starts_with("http://") || w.starts_with("spotify:"))
+        .collect();
+    let q = if links.is_empty() { text.split_whitespace().collect::<Vec<_>>().join(" ") } else { links.join(" ") };
+    let q: String = q.chars().take(2000).collect();
+    if q.is_empty() {
+        return;
+    }
+    if let Ok(mut v) = OPENED.lock() {
+        v.push(format!("shared {q}"));
     }
 }
 

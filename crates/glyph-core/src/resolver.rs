@@ -494,14 +494,22 @@ impl Resolver {
 
 /// Best candidate of one provider for `want` (at least [`MIN_CONFIDENCE`]).
 pub fn best_candidate(want: &Track, cands: Vec<Candidate>) -> Option<(Candidate, f32)> {
-    cands
+    ranked_candidates(want, cands).into_iter().next()
+}
+
+/// Every candidate of at least [`MIN_CONFIDENCE`] for `want`, best first.
+pub fn ranked_candidates(want: &Track, cands: Vec<Candidate>) -> Vec<(Candidate, f32)> {
+    let mut out: Vec<(Candidate, f32)> = cands
         .into_iter()
         .map(|c| {
             let s = score_candidate(want, &c);
             (c, s)
         })
         .filter(|(_, s)| *s >= MIN_CONFIDENCE)
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .collect();
+    // Stable: equal scores keep YouTube's own order.
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// De-duplicates ids while keeping order.

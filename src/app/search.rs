@@ -89,6 +89,13 @@ impl Glyph {
                 return;
             }
         }
+        // One song link (Spotify, YouTube, Deezer): that song into Liked Songs.
+        if pasted && glyph_core::Backend::is_song_link(&q) {
+            let link = q.trim().to_string();
+            self.search_input.update(cx, |i, cx| i.set_value(String::new(), cx));
+            self.import_song_link(link, cx);
+            return;
+        }
         use glyph_core::import::RemoteSource as R;
         if pasted && glyph_core::import::parse_url(&q).is_some_and(|s| !matches!(s, R::SpotifyTrack(_) | R::DeezerTrack(_))) {
             let link = q.trim().to_string();

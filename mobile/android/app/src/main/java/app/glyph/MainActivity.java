@@ -172,11 +172,25 @@ public class MainActivity extends GameActivity {
     }
 
     private void takeLink(Intent intent) {
-        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData() == null) {
+        if (intent == null) {
+            return;
+        }
+        String url;
+        if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            // Shared from another app (a Spotify / YouTube link, a song name):
+            // Rust treats it like text pasted into the search bar.
+            CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            if (text == null || text.length() == 0) {
+                return;
+            }
+            url = "glyph-shared:" + text;
+        } else if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
+            url = intent.getData().toString();
+        } else {
             return;
         }
         synchronized (this) {
-            openUrl = intent.getData().toString();
+            openUrl = url;
         }
         nativeUrlWaiting();
     }

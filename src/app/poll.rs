@@ -291,6 +291,9 @@ impl Glyph {
             if let Some(link) = self.pending_share_link.take() {
                 self.import_share_code(&link, cx);
             }
+            if let Some(text) = self.pending_shared_text.take() {
+                self.search_for(text, cx);
+            }
         }
         while let Some(req) = crate::instance::try_recv() {
             // Tray menu: only "Open" brings the window up.
@@ -326,6 +329,11 @@ impl Glyph {
             if let Some(link) = req.strip_prefix("open ") {
                 if self.backend.is_some() { self.import_share_code(link, cx); }
                 else { self.pending_share_link = Some(link.to_string()); }
+            }
+            // Shared to Glyph (Android share sheet): like pasted into search.
+            if let Some(text) = req.strip_prefix("shared ") {
+                if self.backend.is_some() { self.search_for(text.to_string(), cx); }
+                else { self.pending_shared_text = Some(text.to_string()); }
             }
             cx.activate(true);
         }
@@ -423,6 +431,7 @@ impl Glyph {
             || tip_anim
             || menu_anim
             || self.splash.is_some()
+            || self.onboarding.is_some()
             || nav_anim
             || self.bar_slide.running()
             || self.queue_slide.running()

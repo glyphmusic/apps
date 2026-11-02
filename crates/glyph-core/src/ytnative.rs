@@ -92,16 +92,31 @@ const SEARCH_URL: &str = "https://www.youtube.com/youtubei/v1/search?prettyPrint
 const VIDEOS_ONLY: &str = "EgIQAQ==";
 const WEB_CLIENT_VERSION: &str = "2.20260930.01.00";
 
-/// After a failed search the endpoint is left alone for a while, so a
-/// blocked or changed API does not slow every lookup down.
+/// After several failed searches in a row the endpoint is left alone for a
+/// moment, so a blocked or changed API does not slow every lookup down. One
+/// slow answer or network hiccup does not count: without yt-dlp as the
+/// fallback a pause means no song is found at all.
 static SEARCH_BROKEN_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static SEARCH_FAILS: Mutex<u32> = Mutex::new(0);
+const FAILS_BEFORE_PAUSE: u32 = 3;
+const SEARCH_PAUSE: Duration = Duration::from_secs(60);
 
 fn search_paused() -> bool {
     SEARCH_BROKEN_UNTIL.lock().unwrap().is_some_and(|t| Instant::now() < t)
 }
 
-fn pause_search() {
-    *SEARCH_BROKEN_UNTIL.lock().unwrap() = Some(Instant::now() + Duration::from_secs(10 * 60));
+fn search_failed() {
+    let mut fails = SEARCH_FAILS.lock().unwrap();
+    *fails += 1;
+    if *fails >= FAILS_BEFORE_PAUSE {
+        *fails = 0;
+        *SEARCH_BROKEN_UNTIL.lock().unwrap() = Some(Instant::now() + SEARCH_PAUSE);
+    }
+}
+
+fn search_worked() {
+    *SEARCH_FAILS.lock().unwrap() = 0;
+    *SEARCH_BROKEN_UNTIL.lock().unwrap() = None;
 }
 
 /// `"1:02:03"` / `"3:45"` -> ms.
@@ -179,29 +194,41 @@ pub async fn search(http: &reqwest::Client, query: &str, n: usize) -> Result<Vec
         "params": VIDEOS_ONLY,
     });
     let started = Instant::now();
-    let res = async {
+    let once = || async {
         let resp = http
             .post(SEARCH_URL)
             .header("X-Youtube-Client-Name", "1")
             .header("X-Youtube-Client-Version", WEB_CLIENT_VERSION)
             .header("Origin", "https://www.youtube.com")
             .json(&body)
-            .timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(8))
             .send()
             .await?
             .error_for_status()?;
         let json: serde_json::Value = resp.json().await?;
         Ok::<_, anyhow::Error>(parse_search(&json, n))
-    }
-    .await;
+    };
+    // A dropped connection or one slow answer: one quick second try.
+    let res = match once().await {
+        Ok(out) => Ok(out),
+        Err(e) => {
+            tracing::debug!("native YouTube search failed once, retrying: {e:#}");
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            once().await
+        }
+    };
     match res {
         Ok(out) if !out.is_empty() => {
+            search_worked();
             tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, results = out.len(), "native YouTube search");
             Ok(out)
         }
-        Ok(_) => Err(ProviderError::NotFound.into()),
+        Ok(_) => {
+            search_worked();
+            Err(ProviderError::NotFound.into())
+        }
         Err(e) => {
-            pause_search();
+            search_failed();
             Err(e.context("native YouTube search failed"))
         }
     }

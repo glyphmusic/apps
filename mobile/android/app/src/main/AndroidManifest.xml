@@ -44,6 +44,12 @@
                 <data android:scheme="glyph" android:host="p" />
                 <data android:scheme="glyph" android:host="plugin" />
             </intent-filter>
+            <!-- "Share" from Spotify, YouTube, the browser, ...: song and playlist links. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
 
         <service

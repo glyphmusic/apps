@@ -149,20 +149,83 @@ impl Inner {
         Some(out)
     }
 
-    pub(super) async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
-        let (matched, confidence) = self.local_youtube_match(t, hint).await?;
-        let yt = self.providers.youtube.as_ref()?;
-        match yt.local_source(&matched.id).await {
-            Ok(source) => {
-                // Keep the wanted song's metadata when it was a direct id hit.
-                let track = if confidence >= 1.0 && t.source != ProviderId::YouTube { t.clone() } else { matched };
-                Some(Resolved { track, source, confidence })
-            }
+    /// Other good enough videos for `t` (best first), searched with the
+    /// wording of `round`: 0 = the normal "Artist - Title" (cached, so free
+    /// after the first search), later rounds word it differently.
+    async fn local_youtube_alternatives(&self, t: &Track, round: usize) -> Vec<(Track, f32)> {
+        let Some(yt) = self.providers.youtube.as_ref().filter(|y| y.local().is_some()) else { return Vec::new() };
+        let title = t.title.split(" (").next().unwrap_or(&t.title).trim();
+        let query = match round {
+            0 => format!("{} - {}", t.artist, t.title),
+            1 => format!("{} {}", t.artist, t.title),
+            _ => format!("{} {title} audio", crate::dedupe::primary_artist(&t.artist)),
+        };
+        match provider::MusicProvider::search_candidates(yt.as_ref(), &query).await {
+            Ok(cands) => resolver::ranked_candidates(t, cands).into_iter().map(|(c, s)| (c.track, s)).collect(),
             Err(e) => {
-                tracing::info!("local YouTube playback failed: {e:#}");
-                None
+                tracing::info!(round, "local YouTube search failed: {e:#}");
+                Vec::new()
             }
         }
+    }
+
+    /// The best match first; when its video will not play (removed,
+    /// blocked, a hiccup), the next good matches. Patient search
+    /// (Settings > Playback) asks again with other wordings and waits a
+    /// little between the tries.
+    pub(super) async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+        let yt = self.providers.youtube.as_ref()?;
+        let patient = self.config.playback.patient_search;
+        let rounds = if patient { 3 } else { 1 };
+        let per_round = if patient { 5 } else { 3 };
+        let mut tried: Vec<String> = Vec::new();
+        let first = self.local_youtube_match(t, hint).await;
+        for round in 0..rounds {
+            if round > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1500 * round as u64)).await;
+                tracing::info!(round, "patient search: trying again");
+            }
+            let mut list: Vec<(Track, f32)> = Vec::new();
+            if round == 0 {
+                list.extend(first.clone());
+            }
+            let mut alternatives_loaded = false;
+            let mut i = 0;
+            loop {
+                if i >= list.len() {
+                    if alternatives_loaded {
+                        break;
+                    }
+                    alternatives_loaded = true;
+                    list.extend(self.local_youtube_alternatives(t, round).await);
+                    if i >= list.len() {
+                        break;
+                    }
+                }
+                let (matched, confidence) = list[i].clone();
+                i += 1;
+                if tried.contains(&matched.id) {
+                    continue;
+                }
+                if tried.len() >= per_round * (round + 1) {
+                    break;
+                }
+                tried.push(matched.id.clone());
+                match yt.local_source(&matched.id).await {
+                    Ok(source) => {
+                        if tried.len() > 1 {
+                            // A fallback played: remember it for next time.
+                            self.resolver.remember(t, &matched, confidence);
+                        }
+                        // Keep the wanted song's metadata when it was a direct id hit.
+                        let track = if confidence >= 1.0 && t.source != ProviderId::YouTube { t.clone() } else { matched };
+                        return Some(Resolved { track, source, confidence });
+                    }
+                    Err(e) => tracing::info!(video_id = %matched.id, "local YouTube playback failed: {e:#}"),
+                }
+            }
+        }
+        None
     }
 
     /// Warms the yt-dlp URL cache for songs that will play soon: songs whose

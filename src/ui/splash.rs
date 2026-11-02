@@ -279,16 +279,26 @@ thread_local! {
 
 /// The note logo, `row_h` px per character row.
 pub fn note_logo(row_h: f32) -> impl IntoElement {
+    logo(row_h, false)
+}
+
+/// Like [`note_logo`], but the characters stream in and assemble first (when
+/// it was not on screen a moment ago), as in the splash.
+pub fn note_logo_flying(row_h: f32) -> impl IntoElement {
+    logo(row_h, true)
+}
+
+fn logo(row_h: f32, fly_in: bool) -> impl IntoElement {
     let cols = ART[0].len() as f32;
     let rows = ART.len() as f32;
     let cell_w = row_h / CELL_ASPECT;
     let pad = row_h * 2.0;
-    canvas(|_, _, _| (), move |bounds: Bounds<Pixels>, _, window, cx| paint_logo(bounds, row_h, window, cx))
+    canvas(|_, _, _| (), move |bounds: Bounds<Pixels>, _, window, cx| paint_logo(bounds, row_h, fly_in, window, cx))
         .w(px(cols * cell_w + pad * 2.0))
         .h(px(rows * row_h + pad * 2.0))
 }
 
-fn paint_logo(bounds: Bounds<Pixels>, row_h: f32, window: &mut gpui::Window, cx: &mut App) {
+fn paint_logo(bounds: Bounds<Pixels>, row_h: f32, fly_in: bool, window: &mut gpui::Window, cx: &mut App) {
     let parts = LOGO_PARTS.with(|p| p.clone());
     let settled = parts.iter().map(|p| p.delay + p.dur).fold(0.0f32, f32::max);
     let still = cx.reduce_motion();
@@ -315,11 +325,11 @@ fn paint_logo(bounds: Bounds<Pixels>, row_h: f32, window: &mut gpui::Window, cx:
 
     LOGO.with(|l| {
         let mut l = l.borrow_mut();
-        // Shown already assembled (no fly-in); it only reacts to the mouse.
+        // Shown already assembled unless `fly_in`; then it reacts to the mouse.
         if l.as_ref().is_none_or(|s| s.seen.elapsed().as_secs_f32() > 1.0 || s.off.len() != parts.len()) {
             let now = Instant::now();
             *l = Some(Logo {
-                born: now.checked_sub(std::time::Duration::from_secs_f32(settled)).unwrap_or(now),
+                born: if fly_in { now } else { now.checked_sub(std::time::Duration::from_secs_f32(settled)).unwrap_or(now) },
                 seen: Instant::now(),
                 off: vec![[0.0; 4]; parts.len()],
                 glitch: vec![(0.0, ' '); parts.len()],

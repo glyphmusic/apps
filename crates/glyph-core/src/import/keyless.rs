@@ -304,7 +304,11 @@ fn youtube_video_id(url: &reqwest::Url) -> Option<String> {
     let host = url.host_str()?.trim_start_matches("www.").to_lowercase();
     let id = match host.as_str() {
         "youtu.be" => url.path_segments()?.next().map(str::to_string),
-        "youtube.com" | "m.youtube.com" | "music.youtube.com" => url.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.to_string()),
+        "youtube.com" | "m.youtube.com" | "music.youtube.com" => url.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.to_string()).or_else(|| {
+            // youtube.com/shorts/<id>, /live/<id>
+            let segs: Vec<&str> = url.path_segments()?.collect();
+            matches!(segs.first(), Some(&"shorts") | Some(&"live")).then(|| segs.get(1).map(|s| s.to_string())).flatten()
+        }),
         _ => None,
     }?;
     crate::ytdlp::valid_video_id(&id).then_some(id)

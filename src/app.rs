@@ -453,6 +453,8 @@ pub struct Glyph {
     new_releases_loading: bool,
     /// Startup animation while it runs.
     pub splash: Option<crate::ui::splash::Splash>,
+    /// First-start tour (after the splash), or the one opened from About.
+    pub onboarding: Option<crate::ui::onboarding::Onboarding>,
     /// Icon the mouse just left: (view, when, hover seconds at leave) for the ease-back.
     pub nav_leave: Option<(View, Instant, f32)>,
     /// Lyrics options open (since when, for the grow animation).
@@ -485,6 +487,8 @@ pub struct Glyph {
     pub account: crate::ui::account::AccountUi,
     pub shared_preview: Option<(String, String, Option<String>)>,
     pending_share_link: Option<String>,
+    /// Text shared to Glyph before the backend was up.
+    pending_shared_text: Option<String>,
     /// User profiles (open page, own settings).
     pub profile: crate::ui::profile::ProfileUi,
     /// Settings export / import (Settings -> Backup & share).

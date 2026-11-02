@@ -877,6 +877,17 @@ impl Library {
         true
     }
 
+    /// Deletes a playlist from the trash for good (its saved versions go
+    /// with it). The next sync removes it on the account too.
+    pub fn purge_playlist(&mut self, id: &str) -> bool {
+        if self.playlist_trash.remove(id).is_none() { return false; }
+        if self.playlist(id).is_none() {
+            self.playlist_versions.retain(|_, v| v.playlist.id != id);
+            self.playlist_membership.remove(id);
+        }
+        true
+    }
+
     pub fn restore_playlist_version(&mut self, revision: &str) -> bool {
         let Some(p) = self.playlist_versions.get(revision).map(|v| v.playlist.clone()) else { return false };
         self.checkpoint_playlists();

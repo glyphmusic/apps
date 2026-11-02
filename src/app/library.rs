@@ -27,6 +27,10 @@ impl Glyph {
         if self.library_ok && self.library.restore_playlist(id) { self.save_library(cx); cx.notify(); }
     }
 
+    pub fn purge_playlist(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.library_ok && self.library.purge_playlist(id) { self.save_library(cx); cx.notify(); }
+    }
+
     pub fn restore_playlist_version(&mut self, revision: &str, cx: &mut Context<Self>) {
         if self.library_ok && self.library.restore_playlist_version(revision) { self.save_library(cx); cx.notify(); }
     }

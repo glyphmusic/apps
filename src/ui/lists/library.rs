@@ -207,12 +207,24 @@ pub fn library(app: &mut Glyph, _w: &mut Window, cx: &mut Context<Glyph>) -> Any
             .child(section_title("user-round", t("library.artists")))
             .child(div().flex().flex_wrap().gap(px(8.0)).ml(px(-8.0)).children(artist_tiles))
     });
+    // Deleted playlists: restore, or delete for good (×).
     let trash: Vec<AnyElement> = app.library.playlist_trash.iter().enumerate().map(|(n, (id, p))| {
-        let id = id.clone();
-        div().id(("playlist-trash", n)).flex().items_center().gap(px(10.0)).cursor_pointer()
-            .child(icon("history", 16.0, white(0.7)))
-            .child(tf("playlist.restore", &[("name", &p.name)]))
-            .on_click(cx.listener(move |s, _, _, cx| s.restore_playlist(&id, cx))).into_any_element()
+        let (restore_id, purge_id) = (id.clone(), id.clone());
+        div().flex().items_center().gap(px(6.0)).max_w(px(560.0))
+            .child(
+                div().id(("playlist-trash", n)).flex().flex_1().min_w_0().items_center().gap(px(10.0)).cursor_pointer()
+                    .child(icon("history", 16.0, white(0.7)))
+                    .child(div().min_w_0().truncate().child(tf("playlist.restore", &[("name", &p.name)])))
+                    .on_click(cx.listener(move |s, _, _, cx| s.restore_playlist(&restore_id, cx))),
+            )
+            .child(
+                with_tip(div().id(("playlist-purge", n)), Some(t("tip.trash-2")))
+                    .flex().flex_none().items_center().justify_center().size(px(24.0)).rounded(px(6.0)).cursor_pointer()
+                    .hover(|s| s.bg(white(0.10)))
+                    .child(icon("x", 14.0, white(0.7)))
+                    .on_click(cx.listener(move |s, _, _, cx| s.purge_playlist(&purge_id, cx))),
+            )
+            .into_any_element()
     }).collect();
     div()
         .id("lib-scroll")

@@ -123,6 +123,45 @@ impl Glyph {
         cx.notify();
     }
 
+    /// One song link (pasted into the search bar or shared to Glyph): the
+    /// song goes into Liked Songs, from where it plays and can be added to
+    /// playlists like any other.
+    pub fn import_song_link(&mut self, link: String, cx: &mut Context<Self>) {
+        let Some(b) = self.backend.clone() else {
+            self.toast_info(t("status.backend_offline"));
+            cx.notify();
+            return;
+        };
+        if !self.library_ok {
+            self.toast_info(t("status.library_offline"));
+            cx.notify();
+            return;
+        }
+        self.toast_info(t("import.song.reading"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = guard_async(b.songs_from_links(&link)).await;
+            this.update(cx, |s, cx| {
+                match r.map(|songs| songs.into_iter().next()) {
+                    Ok(Some(song)) => {
+                        let sub = format!("{} · {}", song.title, song.artist);
+                        if s.is_liked(&song) {
+                            s.toast_sub(t("import.song.known"), sub);
+                        } else {
+                            s.toggle_like(&song, cx);
+                            s.toast_sub(t("import.song.added"), sub);
+                        }
+                    }
+                    Ok(None) => s.toast_info(t("import.song.unreadable")),
+                    Err(e) => s.toast_info(tf("import.failed", &[("e", &e)])),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Shows `msg` under the dialog's link field.
     pub fn link_import_error(&mut self, msg: String) {
         self.link_import_seq += 1;

@@ -120,10 +120,22 @@ pub enum ShuffleStyle {
     Random,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackConfig {
     pub shuffle: ShuffleStyle,
+    /// A song without a playable source is skipped (off: playback stops
+    /// on it and says so).
+    pub skip_unplayable: bool,
+    /// Searches longer for a song's source (more tries, other search
+    /// wordings, a short wait between) before giving up on it.
+    pub patient_search: bool,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self { shuffle: ShuffleStyle::default(), skip_unplayable: true, patient_search: false }
+    }
 }
 
 /// Order of a list's songs.

@@ -15,6 +15,22 @@ pub(super) fn content(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     let content = rows(vec![
         row(t("sp.shuffle"), Some(if style == ShuffleStyle::Smart { t("sp.shuffle.smart.desc") } else { t("sp.shuffle.random.desc") }), shuffle),
         row(
+            t("sp.skip_unplayable"),
+            Some(t("sp.skip_unplayable.desc")),
+            switch("skip-unplayable", app.config.playback.skip_unplayable).on_click(cx.listener(|this, _, _, cx| {
+                this.config.playback.skip_unplayable = !this.config.playback.skip_unplayable;
+                this.save_config(cx);
+                cx.notify();
+            })),
+        ),
+        row(
+            t("sp.patient_search"),
+            Some(t("sp.patient_search.desc")),
+            switch("patient-search", app.config.playback.patient_search).on_click(cx.listener(|this, _, _, cx| {
+                this.set_patient_search(!this.config.playback.patient_search, cx);
+            })),
+        ),
+        row(
             t("sp.stats"),
             Some(t("sp.stats.desc")),
             switch("stats-on", app.config.stats.enabled).on_click(cx.listener(|this, _, _, cx| {

@@ -113,6 +113,11 @@ pub(super) fn about(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
             switch("upd-auto", app.config.updates.auto_install).on_click(cx.listener(|this, _, _, cx| this.toggle_auto_update(cx))),
         ),
         row(t("update.channel"), Some(t("sp.about.channel.desc")), channel),
+        row(
+            t("sp.about.intro"),
+            Some(t("sp.about.intro.desc")),
+            button("about-intro", t("sp.about.intro.open")).on_click(cx.listener(|this, _, w, cx| this.open_onboarding(w, cx))),
+        ),
     ];
     if let Some(i) = avail.filter(|i| !i.can_self_install) {
         items.push(div().py(px(12.0)).text_size(px(12.5)).text_color(white(0.55)).child(tf(if glyph_core::updater::is_release_package() { "update.release_package" } else { "update.package_manager" }, &[("url", &i.html_url)])).into_any_element());

@@ -261,9 +261,10 @@ impl Glyph {
     /// The current song cannot play (no source, or the player refused it):
     /// go on with the next one instead of stopping. Not where someone else
     /// decides what plays (jam guest, another device), and not after
-    /// [`MAX_SKIPS`] failures in a row. `true` if the next song was started.
+    /// [`MAX_SKIPS`] failures in a row, and not when switched off in
+    /// Settings > Playback. `true` if the next song was started.
     pub(super) fn skip_unplayable(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.account.output_target.is_some() || self.jam_guest() || self.skip_streak >= MAX_SKIPS {
+        if !self.config.playback.skip_unplayable || self.account.output_target.is_some() || self.jam_guest() || self.skip_streak >= MAX_SKIPS {
             return false;
         }
         let Some(failed) = self.current.clone() else { return false };

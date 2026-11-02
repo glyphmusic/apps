@@ -1,10 +1,10 @@
-# Glyph 0.9.1 - 2026-10-26
+# Glyph 0.10.0 - 2026-11-02
 
-- Mobile offline status opens Downloads; downloaded, local and fully cached songs remain playable.
-- Search distinguishes unavailable sources from empty results and offers a retry.
-- Mobile playlists reuse song data and sort order and expose the existing song menu.
-- Android background playback keeps preloading and crossfades responsive.
-- Touch sliders, equalizer bands, scrollbars, image cropping, sheets and swipeable rows keep following the finger.
-- Mouse-wheel controls work on settings sliders, equalizer bands and mini-player bars.
+- A short animated tour on the first start introduces search, the library, sound, lyrics, sync and themes; Settings › About shows it again.
+- Paste a single song link into the search bar to add the song to Liked Songs.
+- Android: share links or song names from other apps to Glyph.
+- New playback options: skip songs that can't play, and search longer before giving up on a song.
+- Local YouTube playback falls back to other good matches when a video will not play.
+- Playlists in the trash can be deleted for good.
 
 See CHANGELOG.md for the complete changes.
