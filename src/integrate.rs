@@ -33,18 +33,22 @@ pub fn register() {
 
 /// What was registered last (binary path + version), so a start where
 /// nothing changed does not touch the system.
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn marker() -> PathBuf {
     glyph_core::paths::data_dir().join("integration.txt")
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn stamp(exe: &Path) -> String {
     format!("{}\n{}\nlinks-v1", exe.display(), env!("CARGO_PKG_VERSION"))
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn up_to_date(exe: &Path, entry: &Path) -> bool {
     entry.exists() && std::fs::read_to_string(marker()).is_ok_and(|s| s == stamp(exe))
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn remember(exe: &Path) {
     let _ = glyph_core::paths::write_atomic(&marker(), stamp(exe).as_bytes());
 }

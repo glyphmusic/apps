@@ -171,7 +171,6 @@ fn bar(app: &mut Glyph, _window: &mut Window, cx: &mut Context<Glyph>) -> gpui::
     };
 
     let repeat = app.repeat();
-    let on = |b: bool| if b { theme::text() } else { theme::text_dim() };
 
     // Pressed buttons shrink a little and spring back.
     use crate::ui::widgets::{press, press_k};

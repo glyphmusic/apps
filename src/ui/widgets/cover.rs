@@ -23,26 +23,6 @@ pub(super) fn cover_inner(app: &mut Glyph, t: &Track, size: f32, radius: f32, cx
         .rounded(px(radius))
         .overflow_hidden()
         .bg(theme::card());
-    // Mono cell is ~0.6 em wide and 1.05 em tall: size the grid to fill the square.
-    let fs = (size / 26.0).clamp(5.0, 11.0);
-    let cols = ((size / (fs * 0.6)) as u32).max(6);
-    let rows = ((size / (fs * 1.05)) as u32).max(3);
-    let grid = |bg: Hsla, fg: Hsla| {
-        div()
-            .flex_none()
-            .size(px(size))
-            .rounded(px(radius))
-            .overflow_hidden()
-            .bg(bg)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .font_family(theme::MONO)
-            .text_size(px(fs))
-            .line_height(px(fs * 1.05))
-            .text_color(fg)
-    };
     if let Some(p) = path {
         if app.config.visuals.ascii_covers {
             // The real cover rendered through the ASCII ramp (computed off the

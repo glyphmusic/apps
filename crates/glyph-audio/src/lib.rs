@@ -50,8 +50,11 @@ mod media_keys;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[path = "media_keys_hosted.rs"]
 pub mod media_keys;
+// Desktop builds compile the phone module only for its tests; the shell
+// API it exposes is used on phones alone.
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 #[path = "media_keys_hosted.rs"]
+#[allow(dead_code)]
 mod media_keys_hosted_tests;
 mod native;
 pub mod spatial;

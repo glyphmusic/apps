@@ -7,7 +7,6 @@ version = "0.11.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/glyphmusic/apps"
-rust-version = "1.85"
 
 [workspace.dependencies]
 glyph-protocol = { path = "crates/glyph-protocol" }
@@ -29,6 +28,7 @@ name = "glyph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Native music app: search everywhere, play only from legal free sources."
 
 [features]

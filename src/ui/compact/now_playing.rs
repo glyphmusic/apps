@@ -11,7 +11,6 @@
 
 use super::*;
 use crate::app::Slide;
-use gpui::prelude::*;
 use std::cell::RefCell;
 use std::time::Duration;
 

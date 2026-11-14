@@ -4,6 +4,7 @@ description = "Android shell: runs the Glyph views (src/lib.rs) on the GPUI Andr
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish = false
 
 [lib]

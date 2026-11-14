@@ -26,7 +26,7 @@ pub fn artist_view(app: &mut Glyph, window: &mut Window, cx: &mut Context<Glyph>
     let hero_img = src.as_ref().and_then(|p| app.hero_image(p, min_w, 460, false, cx));
     let still_loading = hero_img.is_none() && (src.is_some() || info_loading || loading);
 
-    let (t_play, t_shuf, t_queue) = (tracks.clone(), tracks.clone(), tracks.clone());
+    let (t_play, t_shuf) = (tracks.clone(), tracks.clone());
     let has = !tracks.is_empty();
     let n_songs = tracks.len();
     let stats = app.artists.get(&name).and_then(|p| p.stats.clone());

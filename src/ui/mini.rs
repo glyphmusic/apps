@@ -82,6 +82,8 @@ impl MiniPlayer {
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
+            #[cfg(not(windows))]
+            let _ = window;
             #[cfg(windows)]
             if let Some(h) = crate::app::window_hwnd(window) {
                 no_frame(h);

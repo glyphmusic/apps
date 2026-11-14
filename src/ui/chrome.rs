@@ -381,7 +381,6 @@ fn nav_motion(view: View, t: f32) -> (f32, f32, f32) {
     }
 }
 
-/// Label that floats to the right of a sidebar item after a short hover.
 thread_local! {
     /// Start of the sidebar hover whose tooltip shows without the wait.
     static SIDE_INSTANT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };

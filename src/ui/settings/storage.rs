@@ -21,12 +21,12 @@ pub(super) fn storage_label(k: StorageKind) -> SharedString {
     }
 }
 
-/// Ring chart of the storage split, drawn as filled ring segments.
 thread_local! {
     /// Storage ring segment under the mouse (index into the parts).
     pub(super) static DONUT_HOVER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+/// Ring chart of the storage split, drawn as filled ring segments.
 pub(super) fn donut(parts: Vec<(f32, Hsla)>, size: f32, thickness: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),

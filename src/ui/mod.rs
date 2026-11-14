@@ -370,8 +370,6 @@ impl Render for Glyph {
         // Phones: bottom tab bar instead of the sidebar, mini player instead
         // of the player bar, all inside the safe area (see `compact`).
         let safe = window.insets().safe_area;
-        // Phone Now Playing is full screen: no mini player, no tabs.
-        let want_bar = want_bar && !(compact && self.view == View::NowPlaying);
         let bar = (shown > 0.0).then(|| {
             // "Playing on …" / "Connect to …" under the bar (see `connect::status_strip`).
             let strip = connect::status_strip(self, cx);

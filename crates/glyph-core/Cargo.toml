@@ -4,6 +4,7 @@ description = "GPUI-free core of Glyph: providers, resolver, server client, libr
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 glyph-protocol = { workspace = true, features = ["release-verify"] }

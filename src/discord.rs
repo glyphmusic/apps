@@ -141,23 +141,21 @@ fn worker(client_id: String, rx: flume::Receiver<Msg>) {
     let mut now: Option<Now> = None;
     let mut party: Option<(String, usize, usize)> = None;
     loop {
-        let mut dirty = false;
-        match rx.recv_timeout(RETRY) {
+        let dirty = match rx.recv_timeout(RETRY) {
             Ok(Msg::Quit) => break,
             Ok(Msg::Now { track, playing, position }) => {
                 now = Some(Now { track, playing, position, captured: Instant::now() });
-                dirty = true;
+                true
             }
             Ok(Msg::Party(p)) => {
-                dirty = party != p;
+                let changed = party != p;
                 party = p;
+                changed
             }
             Err(flume::RecvTimeoutError::Disconnected) => break,
             // Discord may have started while the song kept playing.
-            Err(flume::RecvTimeoutError::Timeout) => {
-                dirty = conn.is_none() && now.is_some();
-            }
-        }
+            Err(flume::RecvTimeoutError::Timeout) => conn.is_none() && now.is_some(),
+        };
         if !dirty {
             continue;
         }

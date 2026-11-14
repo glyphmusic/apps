@@ -4,6 +4,7 @@ description = "Shared API types between the Glyph app and glyph-server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 # Signature checks for updaters (`release::verify_checksums`).

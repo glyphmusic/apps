@@ -53,7 +53,7 @@ pub fn from_image_colored(path: &Path, cols: u32, rows: u32) -> Option<Vec<Color
         .resize_exact(cols, rows, image::imageops::FilterType::Triangle)
         .to_rgb8();
     let quant = |c: Rgb| -> (u8, u8, u8) {
-        let q = |v: f32| ((v.clamp(0.0, 1.0) * 15.0).round() as u8);
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 15.0).round() as u8;
         (q(c.0), q(c.1), q(c.2))
     };
     // Stretch the cover's own luma range over the ramp, so flat covers still

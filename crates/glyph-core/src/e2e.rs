@@ -72,7 +72,7 @@ fn hkdf(ikm: &[u8], salt: &[u8], info: &str) -> [u8; 32] {
 
 fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Value {
     let nonce = random::<24>();
-    let ct = XChaCha20Poly1305::new(key.into()).encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad }).unwrap_or_default();
+    let ct = XChaCha20Poly1305::new(key.into()).encrypt(&XNonce::from(nonce), Payload { msg: plain, aad }).unwrap_or_default();
     json!({ "n": b64(&nonce), "ct": b64(&ct) })
 }
 
@@ -82,7 +82,7 @@ fn open(key: &[u8; 32], aad: &[u8], v: &Value) -> Option<Vec<u8>> {
     if nonce.len() != 24 {
         return None;
     }
-    XChaCha20Poly1305::new(key.into()).decrypt(XNonce::from_slice(&nonce), Payload { msg: &ct, aad }).ok()
+    XChaCha20Poly1305::new(key.into()).decrypt(&XNonce::try_from(nonce.as_slice()).ok()?, Payload { msg: &ct, aad }).ok()
 }
 
 // ------------------------------------------------------------------ data key

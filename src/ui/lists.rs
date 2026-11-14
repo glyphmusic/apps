@@ -13,7 +13,7 @@ use crate::ui::widgets::*;
 use glyph_core::RecentItem;
 use glyph_protocol::Track;
 use gpui::{
-    anchored, deferred, div, img, linear_color_stop, linear_gradient, prelude::*, px, AnyElement, Context, ElementId, ExternalPaths,
+    anchored, deferred, div, img, prelude::*, px, AnyElement, Context, ElementId, ExternalPaths,
     FontWeight, Hsla, MouseButton, MouseDownEvent, ObjectFit, SharedString, Stateful, Window,
 };
 use std::rc::Rc;

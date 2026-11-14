@@ -60,7 +60,7 @@ impl DownloadQueue {
         loop {
             let changed = self.changed.notified();
             let limit = parallelism(self.maximum.load(Ordering::SeqCst), self.adaptive.load(Ordering::SeqCst), glyph_protocol::network::class());
-            if self.active.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < limit).then_some(n + 1)).is_ok() {
+            if self.active.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < limit).then_some(n + 1)).is_ok() {
                 return DownloadPermit(self.clone());
             }
             // Network estimates can change without a download completing.

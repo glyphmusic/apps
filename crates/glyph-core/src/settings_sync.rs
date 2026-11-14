@@ -104,7 +104,7 @@ impl Vault {
         h.update(b"glyph-nonce-v1");
         h.update(plain);
         let nonce = h.finalize();
-        let nonce = XNonce::from_slice(&nonce[..24]);
+        let nonce = &XNonce::try_from(&nonce[..24]).expect("SHA-256 output is 32 bytes");
         let ct = XChaCha20Poly1305::new((&self.0).into()).encrypt(nonce, plain).unwrap_or_default();
         serde_json::json!({ "v": 1, "nonce": b64(nonce), "ct": b64(&ct) })
     }
@@ -119,7 +119,7 @@ impl Vault {
         if nonce.len() != 24 {
             return None;
         }
-        XChaCha20Poly1305::new((&self.0).into()).decrypt(XNonce::from_slice(&nonce), ct.as_slice()).ok()
+        XChaCha20Poly1305::new((&self.0).into()).decrypt(&XNonce::try_from(nonce.as_slice()).ok()?, ct.as_slice()).ok()
     }
 }
 

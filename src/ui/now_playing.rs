@@ -129,7 +129,6 @@ pub fn now_playing(app: &mut Glyph, w: &mut Window, cx: &mut Context<Glyph>) -> 
 
     let t_like = track.clone();
     let repeat = app.repeat();
-    let on = |b: bool| if b { theme::text() } else { theme::text_dim() };
     let play_btn = div()
         .id("np-play")
         .size(px(44.0))

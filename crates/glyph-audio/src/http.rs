@@ -37,7 +37,7 @@ pub fn prewarm(url: String) {
     use std::time::Instant;
     static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static SEEN: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
-    if ACTIVE.fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+    if ACTIVE.try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
         |n| (n < 2).then_some(n + 1)).is_err() { return; }
     let mut seen = SEEN.get_or_init(Default::default).lock().unwrap();
     seen.retain(|_, at| at.elapsed() < Duration::from_secs(300));

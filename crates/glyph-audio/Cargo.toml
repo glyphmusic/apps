@@ -4,6 +4,7 @@ description = "Glyph playback: native decode (rodio/symphonia) + visible embed m
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 glyph-protocol.workspace = true
