@@ -30,7 +30,7 @@ rand = "0.8"
 # Local calendar time for listening statistics.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Tags + embedded covers of imported audio files (same build as glyph-audio).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mkv"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "alac", "adpcm", "mkv"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 mozjpeg = { version = "0.10", default-features = false }
 mozjpeg-sys = { version = "2.2.3", default-features = false, features = ["unwinding"] }
