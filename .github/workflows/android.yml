@@ -62,7 +62,7 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256'
           rm -f dist/*.idsig
           cd dist && sha256sum "glyph-$VERSION-android.apk" > "glyph-$VERSION-android.apk.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-android
           path: |
