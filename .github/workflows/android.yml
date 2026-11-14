@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
       # The runner image ships the SDK; setup-android trips over preview licenses.
       - name: NDK and cargo-ndk
         run: |
