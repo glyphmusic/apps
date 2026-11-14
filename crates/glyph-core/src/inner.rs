@@ -81,6 +81,12 @@ impl Inner {
     /// hit is shared back so the next user skips the search.
     pub(super) async fn local_youtube_match(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
         if !self.local_youtube_on() { return None; }
+        self.local_youtube_match_here(t, hint).await
+    }
+
+    /// [`Self::local_youtube_match`] without asking whether local YouTube is
+    /// the chosen mode (see [`Self::rescue_on_this_computer`]).
+    async fn local_youtube_match_here(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
         let yt = self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
         let as_video = |id: &str| {
             let mut view = t.clone();
@@ -174,12 +180,33 @@ impl Inner {
     /// (Settings > Playback) asks again with other wordings and waits a
     /// little between the tries.
     pub(super) async fn local_youtube(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+        let first = self.local_youtube_match(t, hint).await;
+        self.local_youtube_from(t, first).await
+    }
+
+    /// Server mode, and the server answered without full YouTube audio for
+    /// a song that should come from YouTube (YouTube blocks or bot-checks
+    /// the server, or its resolver is broken): this computer tries itself
+    /// before the song counts as unplayable. r-dlp is built in, so this
+    /// works without installing anything. Not when the server is down:
+    /// server mode sends nothing directly then.
+    async fn rescue_on_this_computer(&self, t: &Track, hint: Option<&str>) -> Option<Resolved> {
+        // Local mode already tried here; YouTube switched off stays off.
+        if self.local_youtube_on() || !self.config.providers.enabled.contains(&ProviderId::YouTube) {
+            return None;
+        }
+        self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
+        tracing::info!("server found no YouTube audio, trying this computer");
+        let first = self.local_youtube_match_here(t, hint).await;
+        self.local_youtube_from(t, first).await
+    }
+
+    async fn local_youtube_from(&self, t: &Track, first: Option<(Track, f32)>) -> Option<Resolved> {
         let yt = self.providers.youtube.as_ref()?;
         let patient = self.config.playback.patient_search;
         let rounds = if patient { 3 } else { 1 };
         let per_round = if patient { 5 } else { 3 };
         let mut tried: Vec<String> = Vec::new();
-        let first = self.local_youtube_match(t, hint).await;
         for round in 0..rounds {
             if round > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(1500 * round as u64)).await;
@@ -272,7 +299,7 @@ impl Inner {
             && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
         {
             return self.local_youtube(t, None).await.map(Some)
-                .ok_or_else(|| anyhow!("Local YouTube playback failed. Check yt-dlp in Settings > Playback > Sources."));
+                .ok_or_else(|| anyhow!(crate::ERR_YOUTUBE_FAILED));
         }
         if let Some(server) = self.live_server() {
             let local_yt = self.local_youtube_on();
@@ -281,6 +308,9 @@ impl Inner {
             // The server would search YouTube for this song first (seconds on
             // a cold server); a search from here takes a few hundred ms. A sure
             // match travels along as the song's YouTube id.
+            // The song should come from YouTube: when the server answers
+            // without YouTube audio, this computer may try (see below).
+            let youtube_wanted = self.config.providers.youtube_only || t.source == ProviderId::YouTube || priority.first() == Some(&ProviderId::YouTube);
             let hinted;
             let t = if self.config.providers.youtube_only || priority.first() == Some(&ProviderId::YouTube) {
                 hinted = self.youtube_id_hint(t).await;
@@ -293,7 +323,10 @@ impl Inner {
                     let hint = resp.youtube_hint.as_deref();
                     if let Some(source) = resp.source.clone() {
                         if self.config.providers.youtube_only && (source.provider() != ProviderId::YouTube || matches!(source, PlaybackSource::Preview { .. })) {
-                            return Err(anyhow!("Song not found on YouTube."));
+                            if let Some(r) = self.rescue_on_this_computer(t, hint).await {
+                                return Ok(Some(r));
+                            }
+                            return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE));
                         }
                         let matched = resp.matched.unwrap_or_else(|| t.clone());
                         if local_yt && source.provider() == ProviderId::YouTube {
@@ -306,6 +339,13 @@ impl Inner {
                                 return Ok(Some(r));
                             }
                         }
+                        // Only a 30-second preview from the server: the whole
+                        // song from here beats it.
+                        if preview && youtube_wanted {
+                            if let Some(r) = self.rescue_on_this_computer(t, hint).await {
+                                return Ok(Some(r));
+                            }
+                        }
                         if !matches!(source, PlaybackSource::Preview { .. }) {
                             self.resolver.remember(t, &matched, resp.confidence);
                         }
@@ -314,7 +354,12 @@ impl Inner {
                     if local_yt {
                         return Ok(self.local_youtube(t, hint).await);
                     }
-                    if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
+                    if youtube_wanted {
+                        if let Some(r) = self.rescue_on_this_computer(t, hint).await {
+                            return Ok(Some(r));
+                        }
+                    }
+                    if self.config.providers.youtube_only { return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE)); }
                     return Ok(None);
                 }
                 Err(e) => {
@@ -332,7 +377,7 @@ impl Inner {
             }
         }
         if self.config.providers.youtube_only {
-            return self.local_youtube(t, None).await.map(Some).ok_or_else(|| anyhow!("Song not found on YouTube."));
+            return self.local_youtube(t, None).await.map(Some).ok_or_else(|| anyhow!(crate::ERR_NOT_ON_YOUTUBE));
         }
         if let Some(r) = self.resolver.resolve_known(t).await {
             return Ok(Some(r));
@@ -354,7 +399,7 @@ impl Inner {
             if let Some((matched, _)) = self.local_youtube_match(t, None).await {
                 return Ok(self.download_at(ProviderId::YouTube, &matched).await.map(|url| (ProviderId::YouTube, url)));
             }
-            return Err(anyhow!("Local YouTube download failed. Check yt-dlp in Settings > Playback > Sources."));
+            return Err(anyhow!(crate::ERR_YOUTUBE_FAILED));
         }
         // The official server out: the direct path below (`break 'server`).
         'server: { if let Some(server) = self.live_server() {
@@ -369,7 +414,7 @@ impl Inner {
             };
             if let Some(hit) = lookup {
                 if self.config.providers.youtube_only && hit.0 != ProviderId::YouTube {
-                    return Err(anyhow!("Song not found on YouTube."));
+                    return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE));
                 }
                 // The server picks the normal Archive file; another quality
                 // needs the item's file list.
@@ -384,14 +429,14 @@ impl Inner {
                 }
                 return Ok(Some(hit));
             }
-            if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
+            if self.config.providers.youtube_only { return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE)); }
             // Same path as playback: YouTube through the local yt-dlp.
             if let Some(Resolved { source: PlaybackSource::Stream { provider, url, .. }, .. }) = self.local_youtube(t, None).await {
                 return Ok(Some((provider, url)));
             }
             return Ok(None);
         } }
-        if self.config.providers.youtube_only { return Err(anyhow!("Song not found on YouTube.")); }
+        if self.config.providers.youtube_only { return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE)); }
         const DL: [ProviderId; 4] = [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive, ProviderId::YouTube];
         for p in DL {
             if provider::id_at(p, t).is_some() {

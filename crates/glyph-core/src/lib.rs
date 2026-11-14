@@ -11,6 +11,11 @@
 //!   swaps the config (and re-evaluates providers / server) without a restart.
 //! * [`Queue`] and [`Library`] are plain synchronous data structures.
 
+/// Resolve errors the app shows in its own words (matched with `contains`,
+/// the error may carry context around them).
+pub const ERR_NOT_ON_YOUTUBE: &str = "Song not found on YouTube.";
+pub const ERR_YOUTUBE_FAILED: &str = "YouTube audio could not be loaded on this device.";
+
 pub mod account;
 pub mod config;
 pub mod connectivity;
@@ -748,13 +753,18 @@ impl Backend {
                 None => Arc::new(providers::deezer::Deezer::new(inner.http.clone())),
             };
             let (since, today) = (catalog::date_days_ago(days), catalog::date_days_ago(0));
-            let mut out: Vec<providers::deezer::Release> = Vec::new();
-            for name in artists {
-                if let Ok(list) = d.artist_new_releases(&name, &since, &today).await {
-                    out.extend(list);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+            // A few artists side by side: the per-host throttle in
+            // `send_json` keeps Deezer's rate limit, so no pause per artist
+            // (40 artists one after another took about 20 s).
+            let (since, today) = (&since, &today);
+            let mut out: Vec<providers::deezer::Release> = futures::stream::iter(artists)
+                .map(|name| {
+                    let d = d.clone();
+                    async move { d.artist_new_releases(&name, since, today).await.unwrap_or_default() }
+                })
+                .buffer_unordered(4)
+                .concat()
+                .await;
             out.sort_by(|a, b| b.released.cmp(&a.released));
             out.dedup_by(|a, b| a.id == b.id);
             Ok(out)

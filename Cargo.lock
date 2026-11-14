@@ -5787,8 +5787,8 @@ dependencies = [
 
 [[package]]
 name = "r-dlp"
-version = "0.2.0"
-source = "git+https://github.com/glyphmusic/r-dlp?tag=v0.2.0#e1a683de464b0e4bada270a07f1c01482c5487d9"
+version = "0.2.2"
+source = "git+https://github.com/glyphmusic/r-dlp?tag=v0.2.2#91ca20692c2423b3c0ce3840e62c7e356867ca70"
 dependencies = [
  "reqwest",
  "serde",

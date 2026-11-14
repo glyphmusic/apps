@@ -110,22 +110,15 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         (t("ytdlp.mode.local"), local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Local, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
         (t("ytdlp.mode.server"), !local, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_youtube_mode(YouTubeMode::Server, cx))),
     ], cx, "youtube-mode");
-    let mut top = vec![
+    // Search first, then everything about YouTube in the order it is used:
+    // where it plays, with which program, what happens when that fails.
+    let search = rows(vec![
         row(t("sp.search.mode"), Some(t("sp.search.mode.desc")), segmented(vec![
             (t("sp.search.mode.device"), app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(true, cx)) as Rc<dyn Fn(&mut Glyph, &mut Context<Glyph>)>),
             (t("sp.search.mode.server"), !app.config.providers.local_search, Rc::new(|this: &mut Glyph, cx: &mut Context<Glyph>| this.set_local_search(false, cx))),
         ], cx, "search-mode")),
-        row(t("ytdlp.mode"), Some(t("ytdlp.mode.hint")), youtube_mode),
-        row(t("ytdlp.only"), Some(t("ytdlp.only.hint")),
-            switch("youtube-only", app.config.providers.youtube_only).on_click(cx.listener(|this, _, _, cx| {
-                this.set_youtube_only(!this.config.providers.youtube_only, cx);
-            }))),
-        row(
-            t("settings.sources.fallback"),
-            Some(t("settings.sources.fallback.hint")),
-            switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
-        ),
-    ];
+    ]);
+    let mut top = vec![row(t("ytdlp.mode"), Some(t("ytdlp.mode.hint")), youtube_mode)];
     // Phones always use the built-in r-dlp: yt-dlp cannot be installed there.
     if !crate::ui::compact::TOUCH {
         // Which program finds YouTube audio on this computer.
@@ -144,6 +137,15 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
         // Local yt-dlp plays YouTube directly (only matters with YouTube on).
         top.push(row_status(t("ytdlp.title"), Some(crate::ui::ytdlp::description(app)), crate::ui::ytdlp::control(app, cx)));
     }
+    top.push(row(
+        t("settings.sources.fallback"),
+        Some(t("settings.sources.fallback.hint")),
+        switch("embed-fallback", app.embed_fallback()).on_click(cx.listener(|this, _, _, cx| this.toggle_embed_fallback(cx))),
+    ));
+    top.push(row(t("ytdlp.only"), Some(t("ytdlp.only.hint")),
+        switch("youtube-only", app.config.providers.youtube_only).on_click(cx.listener(|this, _, _, cx| {
+            this.set_youtube_only(!this.config.providers.youtube_only, cx);
+        }))));
     let top = rows(top);
     let enabled = app.config.providers.enabled.clone();
     let sources: Vec<AnyElement> = [ProviderId::Audius, ProviderId::Jamendo, ProviderId::Archive]
@@ -164,6 +166,9 @@ pub(super) fn sources(app: &mut Glyph, cx: &mut Context<Glyph>) -> Div {
     div()
         .flex()
         .flex_col()
+        .child(section_label(t("sp.section.search")))
+        .child(search)
+        .child(section_label("YouTube"))
         .child(top)
         .child(section_label(t("settings.sources")))
         .child(rows(sources))

@@ -254,6 +254,7 @@ impl Glyph {
             redownloaded_broken: HashSet::new(),
             resolving: false,
             hold_play: false,
+            pending_start: false,
             skip_streak: 0,
             sleep: None,
             sleep_fade_from: None,
@@ -679,6 +680,18 @@ impl Glyph {
                     None => BackendState::Ready(BackendMode::Direct),
                 };
                 self.backend = Some(b);
+                // A song clicked while the backend started plays now.
+                if std::mem::take(&mut self.pending_start) {
+                    if let Some(track) = self.current.clone() {
+                        let key = track_key(&track);
+                        self.load_current(track, key, false, cx);
+                    }
+                }
+                // A search typed during the start failed with "offline": run it again.
+                if self.view == View::Search && self.search.error.is_some() && !self.search.query.trim().is_empty() {
+                    let q = self.search.query.clone();
+                    self.on_query(q, false, cx);
+                }
                 glyph_core::cover::set_data_saver(self.config.storage.data_saver);
                 self.load_feeds(cx);
                 self.load_new_releases(cx);
@@ -700,6 +713,11 @@ impl Glyph {
             Err(e) => {
                 tracing::warn!("backend offline: {e}");
                 self.backend_state = BackendState::Offline(e);
+                if std::mem::take(&mut self.pending_start) {
+                    self.resolving = false;
+                    self.lyrics.loading = false;
+                    self.toast_info(t("status.backend_offline"));
+                }
                 // Unknown instead of "broken": the switch stays usable.
                 self.radio_ok = None;
             }

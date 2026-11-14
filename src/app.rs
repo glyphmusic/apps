@@ -534,6 +534,9 @@ pub struct Glyph {
     /// Play/pause pressed while the new song was still being found: it is
     /// loaded paused instead of starting (the old song never resumes).
     pub hold_play: bool,
+    /// A song was started before the backend was up: it is found and played
+    /// as soon as the backend is ready (see `backend_ready`).
+    pub(crate) pending_start: bool,
     /// Songs skipped in a row because they could not play; the skipping
     /// stops after a few (see [`App::skip_unplayable`]).
     pub skip_streak: u32,

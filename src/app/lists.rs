@@ -1,6 +1,9 @@
 use super::*;
 use glyph_core::config::ListSort;
 
+/// Feeds and releases up to this old are shown while fresh ones load.
+const STALE_FEEDS_S: u64 = 7 * 24 * 3600;
+
 /// Display order of `tracks` under `sort`: indexes into `tracks`. Stable,
 /// so equal titles keep the list's own order; missing albums and lengths go last.
 pub fn sort_order(tracks: &[Track], sort: ListSort) -> Vec<usize> {
@@ -380,10 +383,6 @@ impl Glyph {
         let epoch = self.account.data_epoch;
         const ARTISTS: usize = 40;
         const DAYS: u32 = 56;
-        let Some(b) = self.backend.clone() else { return };
-        if self.new_releases_loading {
-            return;
-        }
         let artists: Vec<String> = self.library.followed.iter().take(ARTISTS).map(|a| a.name.clone()).collect();
         if artists.is_empty() {
             self.new_releases.clear();
@@ -392,6 +391,18 @@ impl Glyph {
         if let Some(cached) = load_releases_cache(&scope, &artists, 12 * 3600) {
             self.new_releases = cached;
             cx.notify();
+            return;
+        }
+        // Older list for the same artists: show it right away (also before
+        // the backend is up) while the fresh one loads.
+        if self.new_releases.is_empty() {
+            if let Some(stale) = load_releases_cache(&scope, &artists, STALE_FEEDS_S) {
+                self.new_releases = stale.into_iter().filter(|r| !self.is_hidden_artist(&r.artist)).take(20).collect();
+                cx.notify();
+            }
+        }
+        let Some(b) = self.backend.clone() else { return };
+        if self.new_releases_loading {
             return;
         }
         self.new_releases_loading = true;
@@ -450,6 +461,15 @@ impl Glyph {
         if !self.library_ok || self.account.merge_pending { return; }
         let scope = self.library.storage_path.0.clone().unwrap_or_else(Library::guest_path);
         let epoch = self.account.data_epoch;
+        // Last session's feeds on screen at once (also before the backend
+        // is up); the fresh ones replace them as they arrive.
+        if self.trending.is_empty() && self.recs.is_empty() {
+            if let Some((trending, recs)) = load_feeds_cache(&scope, STALE_FEEDS_S) {
+                self.trending = trending.into_iter().filter(|t| self.allowed(t) && !self.is_hidden_artist(&t.artist)).collect();
+                self.recs = recs.into_iter().filter(|t| self.allowed(t) && !self.is_hidden_artist(&t.artist)).collect();
+                cx.notify();
+            }
+        }
         let Some(b) = self.backend.clone() else { return };
         if self.feeds_loading {
             return;
@@ -482,19 +502,26 @@ impl Glyph {
         }
         seeds.truncate(5);
         cx.spawn(async move |this, cx| {
-            let trending = b.trending(30).await.unwrap_or_default();
+            // Popular songs and the similar songs of every seed side by side
+            // (one after another took a request round trip per seed).
+            let (trending, similar) = futures::join!(
+                b.trending(30),
+                futures::future::join_all(seeds.iter().map(|seed| b.similar(seed)))
+            );
+            let trending = trending.unwrap_or_default();
             this.update(cx, |s, cx| {
                 if s.account.data_epoch != epoch { return; }
-                s.trending = trending.into_iter().filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist)).take(20).collect();
+                // Offline: keep what is on screen instead of an empty row.
+                if !trending.is_empty() || s.trending.is_empty() {
+                    s.trending = trending.into_iter().filter(|t| s.allowed(t) && !s.is_hidden_artist(&t.artist)).take(20).collect();
+                }
                 cx.notify();
             })
             .ok();
-            // Similar songs per seed (via the server); songs suggested by
-            // several seeds and by liked artists come first.
+            // Songs suggested by several seeds and by liked artists come first.
             let mut found: Vec<(Track, f32)> = Vec::new();
-            for seed in &seeds {
-                if !this.update(cx, |s, _| s.account.data_epoch == epoch).unwrap_or(false) { return; }
-                let sim = b.similar(seed).await.unwrap_or_default();
+            for sim in similar {
+                let sim = sim.unwrap_or_default();
                 for (i, t) in sim.into_iter().take(25).enumerate() {
                     let w = 1.0 - i as f32 / 30.0;
                     let key = glyph_core::dedupe::track_key(&t);
@@ -518,6 +545,11 @@ impl Glyph {
                     })
                     .collect();
                 v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                s.feeds_loading = false;
+                if v.is_empty() && !s.recs.is_empty() {
+                    cx.notify();
+                    return;
+                }
                 // At most two songs per artist, so it does not become one artist's page.
                 let mut per: std::collections::HashMap<String, usize> = Default::default();
                 s.recs = v
@@ -530,7 +562,6 @@ impl Glyph {
                     .map(|(t, _)| t)
                     .take(16)
                     .collect();
-                s.feeds_loading = false;
                 save_feeds_cache(&scope, &s.trending, &s.recs);
                 cx.notify();
             })

@@ -138,7 +138,19 @@ impl Glyph {
         };
         cx.notify();
 
+        self.pending_start = false;
+        self.load_current(track, key, adopted.is_some(), cx);
+    }
+
+    /// Finds the source of the current song, then loads lyrics and cover.
+    /// Before the backend is up the song waits (`pending_start`) instead of
+    /// failing: a click right after the start used to do nothing.
+    pub(super) fn load_current(&mut self, track: Track, key: String, adopted: bool, cx: &mut Context<Self>) {
         let Some(backend) = self.backend.clone() else {
+            if matches!(self.backend_state, BackendState::Connecting) {
+                self.pending_start = true;
+                return;
+            }
             self.resolving = false;
             self.lyrics.loading = false;
             self.toast_info(t("status.backend_offline"));
@@ -146,7 +158,7 @@ impl Glyph {
         };
 
         // Resolve → load → play.
-        if adopted.is_some() {
+        if adopted {
             self.prefetch_upcoming();
         } else {
             let b = backend.clone();
@@ -193,7 +205,7 @@ impl Glyph {
                             s.finish_account_transfer(Some(e.to_string()), cx);
                             let transfer = s.account.transfer_resume.take().is_some();
                             if transfer || !s.skip_unplayable(cx) {
-                                s.toast_info(tf("toast.resolve_error", &[("e", &e)]));
+                                s.toast_info(resolve_error_text(&e));
                             } else {
                                 tracing::warn!(error = %e, "playback: resolve failed, skipped");
                             }
@@ -936,6 +948,18 @@ pub(super) const MAX_SKIPS: u32 = 5;
 
 /// A problem of the audio output itself: every song would fail the same
 /// way, so skipping to the next one does not help.
+/// A failed resolve in the user's language: the known YouTube cases get
+/// their own sentence instead of the raw (English) error.
+fn resolve_error_text(e: &str) -> SharedString {
+    if e.contains(glyph_core::ERR_NOT_ON_YOUTUBE) {
+        t("toast.not_on_youtube")
+    } else if e.contains(glyph_core::ERR_YOUTUBE_FAILED) {
+        t("toast.youtube_failed")
+    } else {
+        tf("toast.resolve_error", &[("e", &e)])
+    }
+}
+
 pub(super) fn output_error(e: &str) -> bool {
     ["no audio output device", "audio output not available", "The selected audio output"].iter().any(|p| e.starts_with(p))
 }

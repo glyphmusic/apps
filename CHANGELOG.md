@@ -5,6 +5,16 @@
 ### Fixed
 
 - macOS: all text shows again. The macOS builds were made without GPUI's text system, so every label, title and value was blank while icons and controls still drew.
+- Songs behind YouTube's bot check play again with the built-in r-dlp (r-dlp 0.2.2): its visitor check failed over HTTP/2, so these songs either failed or fell back to the much slower yt-dlp.
+- A song clicked right after the start, before Glyph had finished connecting, now plays as soon as it is ready instead of showing "Backend offline" and doing nothing. A search typed in that moment runs again by itself.
+- YouTube through the Glyph server: when the server answers without YouTube audio for a song that should come from YouTube (for example with "Use YouTube only"), this computer tries itself with r-dlp before the song counts as not found.
+
+### Changed
+
+- Home appears with the last session's recommendations, popular songs and new releases right away; the fresh rows replace them as they arrive.
+- Recommendations load their seed songs side by side, and "New from artists you follow" loads four artists at a time instead of one after another with a pause each.
+- Settings › Playback › Sources is split into Search and YouTube, in the order things happen. The switch that turns YouTube and SoundCloud on or off now says so (it was labelled like a player fallback), and the texts no longer call yt-dlp the default.
+- Playback errors about YouTube are shown in the app's language instead of an English error message.
 
 ## 0.10.1 - 2026-11-02
 
