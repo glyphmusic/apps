@@ -20,7 +20,7 @@ thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
 futures = "0.3"
-flume = "0.11"
+flume = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
 
 # ---- Desktop app (GPUI). Owned by the UI work stream. ----
