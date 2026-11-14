@@ -282,8 +282,21 @@ impl Glyph {
         }).detach();
     }
 
+    /// "Copy link" makes Glyph links: signed in, and not turned off in
+    /// Settings > Account (`config.sharing.glyph_links`).
+    pub(crate) fn glyph_links(&self) -> bool {
+        self.config.sharing.glyph_links && self.backend.as_ref().is_some_and(|b| b.account().is_some())
+    }
+
+    /// Settings > Account: Glyph links on / off.
+    pub fn set_glyph_links(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.config.sharing.glyph_links = on;
+        self.save_config(cx);
+        cx.notify();
+    }
+
     pub fn share(&mut self, t: &Track, cx: &mut Context<Self>) {
-        if self.backend.as_ref().is_some_and(|b| b.account().is_some()) {
+        if self.glyph_links() {
             self.copy_glyph_link(t.title.clone(), vec![t.clone()], "track", cx);
             return;
         }

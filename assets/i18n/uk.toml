@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "Неправильний пароль."
 "account.limit" = "Ліміт пристроїв"
 "account.limit.desc" = "Скільки пристроїв може бути підключено одночасно. Визначає сервер."
+"account.glyph_links" = "Посилання Glyph під час поширення"
+"account.glyph_links.desc" = "«Копіювати посилання» створює посилання glyph.my: грає в браузері, відкривається в Glyph і працює з yt-dlp. Вимк.: посилання треку на його платформі, списки — кодом."
 "account.devices" = "Пристрої ({n}/{max})"
 "account.devices.loading" = "Завантаження пристроїв"
 "account.devices.this" = "Цей пристрій"

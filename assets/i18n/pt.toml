@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "Senha incorreta."
 "account.limit" = "Limite de dispositivos"
 "account.limit.desc" = "Quantos dispositivos podem estar conectados ao mesmo tempo. Definido pelo servidor."
+"account.glyph_links" = "Links do Glyph ao partilhar"
+"account.glyph_links.desc" = "\"Copiar link\" cria um link glyph.my: toca no navegador, abre no Glyph e funciona com yt-dlp. Desligado: o link da música na sua plataforma; listas como código."
 "account.devices" = "Dispositivos ({n}/{max})"
 "account.devices.loading" = "Carregando dispositivos"
 "account.devices.this" = "Este dispositivo"

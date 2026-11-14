@@ -557,6 +557,8 @@
 "account.err.wrong_password" = "That password is wrong."
 "account.limit" = "Device limit"
 "account.limit.desc" = "How many devices may be signed in at once. Set by the server."
+"account.glyph_links" = "Glyph links when sharing"
+"account.glyph_links.desc" = "\"Copy link\" makes a glyph.my link: it plays in the browser, opens in Glyph and works with yt-dlp. Off: the song's own link on its platform, lists as a share code."
 "account.devices" = "Devices ({n}/{max})"
 "account.devices.loading" = "Loading devices"
 "account.devices.this" = "This device"

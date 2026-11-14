@@ -554,6 +554,8 @@
 "account.err.wrong_password" = "Неверный пароль."
 "account.limit" = "Лимит устройств"
 "account.limit.desc" = "Сколько устройств может быть подключено одновременно. Задаётся сервером."
+"account.glyph_links" = "Ссылки Glyph при отправке"
+"account.glyph_links.desc" = "«Копировать ссылку» создаёт ссылку glyph.my: играет в браузере, открывается в Glyph и работает с yt-dlp. Выкл.: ссылка трека на его платформе, списки — кодом."
 "account.devices" = "Устройства ({n}/{max})"
 "account.devices.loading" = "Загружаем устройства"
 "account.devices.this" = "Это устройство"

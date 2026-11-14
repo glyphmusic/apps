@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "Nieprawidłowe hasło."
 "account.limit" = "Limit urządzeń"
 "account.limit.desc" = "Ile urządzeń może być połączonych jednocześnie. Decyduje serwer."
+"account.glyph_links" = "Linki Glyph przy udostępnianiu"
+"account.glyph_links.desc" = "„Kopiuj link” tworzy link glyph.my: gra w przeglądarce, otwiera się w Glyph i działa z yt-dlp. Wyłączone: link utworu na jego platformie, listy jako kod."
 "account.devices" = "Urządzenia ({n}/{max})"
 "account.devices.loading" = "Wczytywanie urządzeń"
 "account.devices.this" = "To urządzenie"

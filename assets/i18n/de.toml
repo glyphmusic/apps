@@ -557,6 +557,8 @@
 "account.err.wrong_password" = "Das Passwort ist falsch."
 "account.limit" = "Gerätelimit"
 "account.limit.desc" = "Wie viele Geräte gleichzeitig angemeldet sein dürfen. Legt der Server fest."
+"account.glyph_links" = "Glyph-Links beim Teilen"
+"account.glyph_links.desc" = "„Link kopieren“ erstellt einen glyph.my-Link: spielt im Browser, öffnet sich in Glyph und funktioniert mit yt-dlp. Aus: der Link des Songs auf seiner Plattform, Listen als Share-Code."
 "account.devices" = "Geräte ({n}/{max})"
 "account.devices.loading" = "Lade Geräte"
 "account.devices.this" = "Dieses Gerät"

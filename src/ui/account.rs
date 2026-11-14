@@ -10,7 +10,7 @@ use crate::app::Glyph;
 use crate::i18n::{t, tf};
 use crate::theme;
 use crate::ui::input::TextInput;
-use crate::ui::settings::{input_box, row, row_status, rows, section_label, segmented, white};
+use crate::ui::settings::{input_box, row, row_status, rows, section_label, segmented, switch, white};
 use crate::ui::widgets::*;
 use glyph_core::account::{is_signed_out, Stored};
 use glyph_protocol::{AccountPatch, DevicesResponse, LoginPollResponse, LoginStartResponse};
@@ -1115,6 +1115,12 @@ fn signed_in(app: &mut Glyph, acc: Stored, col: Div, cx: &mut Context<Glyph>) ->
             div().text_size(px(13.0)).text_color(white(0.85)).child(limit.to_string()),
         ),
         library_row(app, &acc, cx),
+        row(
+            t("account.glyph_links"),
+            Some(t("account.glyph_links.desc")),
+            switch("acct-glyph-links", app.config.sharing.glyph_links)
+                .on_click(cx.listener(|this, _, _, cx| this.set_glyph_links(!this.config.sharing.glyph_links, cx))),
+        ),
     ]);
 
     let devices: Vec<AnyElement> = match &a.devices {

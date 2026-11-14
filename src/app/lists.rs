@@ -218,7 +218,8 @@ impl Glyph {
     /// Copies a short link (public server) or a share code for `tracks`
     /// under `title`.
     pub fn share_songs(&mut self, title: String, tracks: Vec<Track>, kind: &'static str, origin: Option<String>, cx: &mut Context<Self>) {
-        let Some(b) = self.backend.clone() else {
+        // Glyph links turned off in Settings > Account: always the code.
+        let Some(b) = self.backend.clone().filter(|_| self.config.sharing.glyph_links) else {
             let code = glyph_core::share::encode(&title, &tracks);
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
             self.toast_sub(t("toast.share_copied"), title);

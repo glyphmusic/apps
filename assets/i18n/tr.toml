@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "Yanlış şifre."
 "account.limit" = "Cihaz sınırı"
 "account.limit.desc" = "Aynı anda kaç cihazın bağlı olabileceği. Sunucu belirler."
+"account.glyph_links" = "Paylaşırken Glyph bağlantıları"
+"account.glyph_links.desc" = "\"Bağlantıyı kopyala\" bir glyph.my bağlantısı oluşturur: tarayıcıda çalar, Glyph'te açılır ve yt-dlp ile çalışır. Kapalı: şarkının kendi platformundaki bağlantısı, listeler kod olarak."
 "account.devices" = "Cihazlar ({n}/{max})"
 "account.devices.loading" = "Cihazlar yükleniyor"
 "account.devices.this" = "Bu cihaz"

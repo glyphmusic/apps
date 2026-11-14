@@ -89,6 +89,7 @@ pub(super) const OPTIONS: &[(SettingsPage, u8, &str, &str)] = &[
     (SettingsPage::Account, 0, "account.handle", "handle name rename umbenennen"),
     (SettingsPage::Account, 0, "account.library", "sync api keys schlüssel encryption verschlüsselung e2e library bibliothek"),
     (SettingsPage::Account, 0, "account.limit", "device limit gerätelimit"),
+    (SettingsPage::Account, 0, "account.glyph_links", "share teilen link copy kopieren glyph.my yt-dlp browser"),
     (SettingsPage::Account, 1, "account.pair", "pair koppeln code device gerät add hinzufügen"),
     (SettingsPage::Account, 2, "account.password.change", "password passwort"),
     (SettingsPage::Account, 2, "account.passkey.add", "passkey"),

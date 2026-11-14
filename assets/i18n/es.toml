@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "La contraseña es incorrecta."
 "account.limit" = "Límite de dispositivos"
 "account.limit.desc" = "Cuántos dispositivos pueden tener la sesión iniciada a la vez. Lo fija el servidor."
+"account.glyph_links" = "Enlaces de Glyph al compartir"
+"account.glyph_links.desc" = "«Copiar enlace» crea un enlace de glyph.my: suena en el navegador, se abre en Glyph y funciona con yt-dlp. Desactivado: el enlace propio de la canción en su plataforma; las listas, como código."
 "account.devices" = "Dispositivos ({n}/{max})"
 "account.devices.loading" = "Cargando dispositivos"
 "account.devices.this" = "Este dispositivo"

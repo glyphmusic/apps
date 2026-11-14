@@ -28,6 +28,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Connections to other apps on this computer.
     pub integrations: IntegrationsConfig,
+    /// What "Copy link" / "Share" put on the clipboard.
+    pub sharing: SharingConfig,
     /// Player state kept across restarts (volume, shuffle, ...).
     pub player: PlayerPrefs,
     /// How playback behaves (shuffle style).
@@ -530,6 +532,22 @@ pub struct IntegrationsConfig {
     pub discord_client_id: String,
 }
 
+/// Sharing songs, lists and artists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharingConfig {
+    /// Signed in: "Copy link" makes a Glyph link (`glyph.my/p/<id>`) that
+    /// plays in the browser, in Glyph and with `yt-dlp`. Off: the song's own
+    /// link on its platform, and lists as a `glyph:playlist:` code.
+    pub glyph_links: bool,
+}
+
+impl Default for SharingConfig {
+    fn default() -> Self {
+        Self { glyph_links: true }
+    }
+}
+
 impl Default for IntegrationsConfig {
     fn default() -> Self {
         Self { discord_presence: false, discord_client_id: String::new() }
@@ -796,6 +814,15 @@ mod tests {
         // Device-bound: never in shared settings.
         let shared = crate::settings_share::to_json(&c);
         assert!(!shared.contains("folders") && !shared.contains("text_scale"));
+    }
+
+    #[test]
+    fn glyph_links_are_on_unless_turned_off() {
+        assert!(Config::default().sharing.glyph_links);
+        assert!(Config::from_toml("").unwrap().sharing.glyph_links);
+        assert!(!Config::from_toml("[sharing]
+glyph_links = false
+").unwrap().sharing.glyph_links);
     }
 
     #[test]

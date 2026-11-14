@@ -133,10 +133,10 @@ impl Glyph {
         cx.notify();
     }
 
-    /// Signed-in users share a Glyph artist link; guests copy the Wikipedia article, else
-    /// their top song on its platform.
+    /// With Glyph links (see `glyph_links`) a Glyph artist link; otherwise the
+    /// Wikipedia article, else the artist's top song on its platform.
     pub fn copy_artist_link(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.backend.as_ref().is_some_and(|b| b.account().is_some()) {
+        if self.glyph_links() {
             let tracks = self.artists.get(name).map(|p| p.tracks.clone()).unwrap_or_default();
             self.copy_glyph_link(name.to_string(), tracks, "artist", cx);
             return;

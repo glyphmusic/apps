@@ -539,6 +539,8 @@
 "account.err.wrong_password" = "Ce mot de passe est incorrect."
 "account.limit" = "Limite d’appareils"
 "account.limit.desc" = "Nombre d’appareils pouvant être connectés à la fois. Fixé par le serveur."
+"account.glyph_links" = "Liens Glyph pour partager"
+"account.glyph_links.desc" = "« Copier le lien » crée un lien glyph.my : il se lit dans le navigateur, s'ouvre dans Glyph et fonctionne avec yt-dlp. Désactivé : le lien du titre sur sa plateforme, les listes en code de partage."
 "account.devices" = "Appareils ({n}/{max})"
 "account.devices.loading" = "Chargement des appareils"
 "account.devices.this" = "Cet appareil"

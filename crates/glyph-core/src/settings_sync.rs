@@ -149,6 +149,7 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
         (setting("visuals"), json(&cfg.visuals)),
         (setting("updates"), json(&cfg.updates)),
         (setting("integrations"), json(&cfg.integrations)),
+        (setting("sharing"), json(&cfg.sharing)),
         (setting("stats"), json(&cfg.stats)),
         (setting("playback"), json(&cfg.playback)),
         (setting("lists"), json(&cfg.lists)),
@@ -238,6 +239,10 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
             (kind::SETTING, "integrations") => {
                 let Some(x) = parse::<IntegrationsConfig>(v) else { continue };
                 cfg.integrations = x;
+            }
+            (kind::SETTING, "sharing") => {
+                let Some(x) = parse::<crate::config::SharingConfig>(v) else { continue };
+                cfg.sharing = x;
             }
             (kind::SETTING, "stats") => {
                 let Some(x) = parse::<crate::config::StatsConfig>(v) else { continue };

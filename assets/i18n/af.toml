@@ -554,6 +554,8 @@
 "account.err.wrong_password" = "Daardie wagwoord is verkeerd."
 "account.limit" = "Toestellimiet"
 "account.limit.desc" = "Hoeveel toestelle gelyktydig aangemeld mag wees. Deur die bediener gestel."
+"account.glyph_links" = "Glyph-skakels wanneer jy deel"
+"account.glyph_links.desc" = "\"Kopieer skakel\" maak 'n glyph.my-skakel: dit speel in die blaaier, maak in Glyph oop en werk met yt-dlp. Af: die liedjie se eie skakel op sy platform, lyste as 'n deelkode."
 "account.devices" = "Toestelle ({n}/{max})"
 "account.devices.loading" = "Laai toestelle"
 "account.devices.this" = "Hierdie toestel"
