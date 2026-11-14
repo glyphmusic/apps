@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- macOS: all text shows again. The macOS builds were made without GPUI's text system, so every label, title and value was blank while icons and controls still drew.
+
 ## 0.10.1 - 2026-11-02
 
 ### Fixed
