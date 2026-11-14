@@ -53,7 +53,7 @@ spake2 = "0.4"
 r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.2.2" }
 # Plugin code: WebAssembly in an interpreter (no JIT, so it runs on phones
 # too), with fuel and memory limits (see src/plugin_host.rs).
-wasmi = { version = "1.1", default-features = false, features = ["std"] }
+wasmi = { version = "2.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Plugin host tests write their modules as text.
