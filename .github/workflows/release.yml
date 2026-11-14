@@ -28,12 +28,16 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Restores the dependency cache (GPUI etc., most of the build time) that
+      # release-cache.yml saves on main; a cache saved here would only be
+      # visible to this tag.
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: release-${{ matrix.target }}
           save-if: false
       - name: Linux system packages
         timeout-minutes: 15
@@ -99,7 +103,7 @@ jobs:
             nfpm pkg -f packaging/linux/nfpm.yaml -p "$p" -t "dist/$ASSET"
             (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -124,8 +128,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true

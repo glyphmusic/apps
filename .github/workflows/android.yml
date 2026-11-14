@@ -1,12 +1,16 @@
 # Android APK for a release tag: built, signed with the Glyph release key
 # (secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD) and attached
 # as an artifact. Only release.yml publishes the complete signed release.
+# With warm_cache (release-cache.yml, on main) it only compiles the Rust
+# libraries and saves their cache: caches saved by a tag run are invisible
+# to the next tag, so release runs restore the one saved on main.
 name: Android
 
 on:
   workflow_call:
     inputs:
-      tag: { type: string, required: true }
+      tag: { type: string, required: false, default: "" }
+      warm_cache: { type: boolean, required: false, default: false }
   workflow_dispatch:
     inputs:
       tag: { description: "Release tag, e.g. v0.5.0", type: string, required: true }
@@ -18,7 +22,7 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -26,8 +30,9 @@ jobs:
           targets: aarch64-linux-android,x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: false
-      - uses: actions/setup-java@v4
+          shared-key: release-android
+          save-if: ${{ inputs.warm_cache == true }}
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -39,13 +44,16 @@ jobs:
           "$SDKMANAGER" --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
           cargo install cargo-ndk --locked
-      - name: Build
+      - name: Build Rust libraries
+        run: cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
+      - name: Build APK
+        if: ${{ !inputs.warm_cache }}
         run: |
-          cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
           cd mobile/android
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
       - name: Sign
+        if: ${{ !inputs.warm_cache }}
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -62,7 +70,8 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256'
           rm -f dist/*.idsig
           cd dist && sha256sum "glyph-$VERSION-android.apk" > "glyph-$VERSION-android.apk.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
+        if: ${{ !inputs.warm_cache }}
         with:
           name: release-android
           path: |

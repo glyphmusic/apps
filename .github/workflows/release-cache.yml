@@ -1,0 +1,66 @@
+# Keeps the release build cache warm. GitHub only lets a tag run restore
+# caches from its own tag or from main, so release.yml and android.yml
+# (save-if: false on tags) restore what this workflow saves on main.
+# rust-cache stores only the compiled dependencies (GPUI, wgpu, codecs, ...),
+# which take most of the build time; Glyph's own crates are rebuilt per release.
+# Matrix, packages, toolchain and env must match release.yml, or the keys differ.
+name: Release cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - .cargo/config.toml
+      - .github/workflows/release-cache.yml
+      - .github/workflows/android.yml
+  # Fridays: picks up a new stable Rust (released on Thursdays) and keeps the
+  # caches alive, since GitHub drops caches unused for 7 days.
+  schedule:
+    - cron: "0 4 * * 5"
+  workflow_dispatch:
+
+concurrency:
+  group: release-cache
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      - name: Linux system packages
+        timeout-minutes: 15
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libdbus-1-dev libssl-dev pkg-config
+      # Same command as release.yml so the dependencies get identical features.
+      - name: Build
+        run: cargo build --release -p glyph --target ${{ matrix.target }}
+
+  android:
+    uses: ./.github/workflows/android.yml
+    with:
+      warm_cache: true

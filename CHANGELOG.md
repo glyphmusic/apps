@@ -11,6 +11,7 @@
 ### Security
 
 - The glib 0.18 and lru 0.12 libraries, both with published security advisories, are gone. Linux no longer needs GTK or WebKit: the official YouTube and SoundCloud player opens in the browser there, and the .deb/.rpm packages stop depending on GTK 3 and WebKitGTK.
+- The self-updater uses `zip` 9.5.1 (critical advisory GHSA-m665-v7pm-7grj), and library sync uses `chacha20poly1305` 0.11 (same encryption, existing libraries stay readable).
 
 ### Fixed
 
