@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-11-14
+
+### Added
+
+- Settings › Account: "Glyph links when sharing" (on by default). Signed in, "Copy link" makes a glyph.my link that plays in the browser, opens in Glyph and works with yt-dlp; off, it copies the song's own link on its platform and lists as a share code.
+
+### Security
+
+- The glib 0.18 and lru 0.12 libraries, both with published security advisories, are gone. Linux no longer needs GTK or WebKit: the official YouTube and SoundCloud player opens in the browser there, and the .deb/.rpm packages stop depending on GTK 3 and WebKitGTK.
+
 ### Fixed
 
 - macOS: all text shows again. The macOS builds were made without GPUI's text system, so every label, title and value was blank while icons and controls still drew.

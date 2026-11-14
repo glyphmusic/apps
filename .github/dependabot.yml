@@ -11,6 +11,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Pinned Zed revision (Cargo.toml): bumped deliberately, with a full test.
+      - dependency-name: "gpui"
+      - dependency-name: "gpui_platform"
 
   - package-ecosystem: "gradle"
     directory: "/mobile/android"
