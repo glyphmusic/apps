@@ -7,20 +7,15 @@
 //! Two transports sit behind one [`Transport`] trait; the page
 //! (`assets/player.html`) and the control protocol are identical for both:
 //!
-//! * **Webview window** (Windows, Linux): `tao` + `wry` on a dedicated thread
-//!   (`EventLoopBuilderExt*::with_any_thread(true)`), frameless 320x180
-//!   window with the ASCII label `[ NOW PLAYING · YT ]`, optional
-//!   always-on-top. Commands go through `evaluate_script`, events come back
-//!   through the wry IPC handler. On Linux this needs webkit2gtk and GTK and
-//!   works because GPUI does not use GTK; on Windows it uses WebView2.
-//! * **Browser tab** (macOS, and automatic fallback if the webview cannot be
-//!   created, e.g. WebView2 runtime / webkit2gtk missing): AppKit insists on
-//!   the main thread for `NSWindow`/`WKWebView`, which GPUI owns, so there we
-//!   open the very same player page in the user's default browser (visible,
-//!   as the terms of service require). Control and events flow through the
-//!   local page server: commands are long-polled by the page and `eval`ed,
-//!   events are POSTed back. A future macOS-native child webview can be
-//!   added as another [`Transport`] without touching the rest.
+//! * **Webview window** (Windows): Win32 + `wry` (WebView2) on a dedicated
+//!   thread, frameless 320x180 window with the ASCII label
+//!   `[ NOW PLAYING · YT ]`, optional always-on-top. Commands go through
+//!   `evaluate_script`, events come back through the wry IPC handler.
+//! * **Browser tab** (macOS, Linux, and automatic fallback if the webview
+//!   cannot be created, e.g. WebView2 runtime missing): opens the very same
+//!   player page in the user's default browser (visible, as the terms of
+//!   service require). Control and events flow through the local page server:
+//!   commands are long-polled by the page and `eval`ed, events are POSTed back.
 //!
 //! Both transports load the page from a tiny loopback HTTP server
 //! ([`server::LocalServer`], `127.0.0.1`, random token in the path) instead of
@@ -32,7 +27,7 @@
 
 pub mod host;
 pub mod server;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 pub mod webview;
 
 use crate::MiniPlayerOptions;
@@ -258,14 +253,14 @@ impl EmbedBackend {
         }
         #[allow(unused_mut)]
         let mut transport: Option<Box<dyn Transport>> = None;
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        #[cfg(target_os = "windows")]
         {
             match webview::WebviewTransport::spawn(srv.clone(), sink, options) {
                 Ok(t) => transport = Some(Box::new(t)),
                 Err(e) => tracing::warn!("mini-player webview unavailable ({e:#}); using the browser"),
             }
         }
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        #[cfg(not(target_os = "windows"))]
         let _ = (&sink, options);
         let transport = transport.unwrap_or_else(|| Box::new(BrowserTransport::new(srv)));
         tracing::info!("embed transport: {}", transport.name());

@@ -21,7 +21,6 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = ["c
 async-trait = "0.1"
 toml = "0.8"
 dirs = "6"
-lru = "0.12"
 sha2 = "0.10"
 tempfile = "3"
 semver = "1"

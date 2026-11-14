@@ -21,28 +21,32 @@ webbrowser = "1"
 
 raw-window-handle = "0.6"
 
-# Desktop only: the child webview for the embed player and the OS media keys.
-# Phones get both from their app shell (see media_keys_hosted.rs).
+# Desktop only: OS media keys. Phones get them from their app shell (see media_keys_hosted.rs).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-wry = "0.57"
 souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
+
+# Child webview for the embed player (Windows WebView2, macOS WKWebView).
+# `default-features = false` omits wry's optional Linux gtk3/webkit2gtk/glib stack.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false }
 
 # CPAL only registers its WASAPI callback with Windows MMCSS when enabled.
 # Keep audio scheduled ahead of ordinary UI/background work when minimized.
 [target.'cfg(target_os = "windows")'.dependencies]
 cpal = { version = "0.18", features = ["realtime"] }
-
-# Own-window mini-player (fallback) runs tao on its own thread where the OS allows it.
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
-tao = "0.37"
-
-# wry's webkit2gtk needs gtk initialised/pumped by us for the child-webview host.
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [features]
-# The Windows embed-host check needs tao, which is not a dependency on macOS;
-# build it with `--features embed-host-example`.
+# Build the Windows embed-host check with `--features embed-host-example`.
 embed-host-example = []
 
 [[example]]

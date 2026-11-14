@@ -27,9 +27,9 @@
 use super::EventSink;
 use anyhow::{anyhow, Result};
 use raw_window_handle::RawWindowHandle;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
-#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
@@ -131,23 +131,23 @@ impl HostQueue {
     pub fn set_sink(&self, sink: EventSink) {
         *self.sink.lock().unwrap() = Some(sink);
     }
-    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     fn emit(&self, session: u64, ev: super::EmbedEvent) {
         let sink = self.sink.lock().unwrap().clone();
         if let Some(s) = sink {
             s(session, ev);
         }
     }
-    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     fn drain(&self) -> Vec<HostCmd> {
         self.q.lock().unwrap().drain()
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct Parent(RawWindowHandle);
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl HasWindowHandle for Parent {
     fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
         // SAFETY: the caller of `attach_embed_host` guarantees the handle
@@ -156,19 +156,19 @@ impl HasWindowHandle for Parent {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct HostState {
     webview: wry::WebView,
     ui_visible: bool,
     parked: bool,
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
+#[cfg(target_os = "macos")]
 thread_local! {
     static HOST: RefCell<Option<HostState>> = const { RefCell::new(None) };
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn to_rect(b: Bounds) -> wry::Rect {
     wry::Rect {
         position: wry::dpi::LogicalPosition::new(b.x as f64, b.y as f64).into(),
@@ -176,7 +176,7 @@ fn to_rect(b: Bounds) -> wry::Rect {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<wry::WebView> {
     let ipc_q = queue.clone();
     let builder = wry::WebViewBuilder::new()
@@ -200,7 +200,7 @@ fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> 
     builder.build_as_child(&Parent(parent)).map_err(|e| anyhow!("child webview: {e}"))
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn apply(st: &mut HostState, c: HostCmd) {
     eprintln!("DBG apply {:?}", c);
     match c {
@@ -229,26 +229,17 @@ fn apply(st: &mut HostState, c: HostCmd) {
 }
 
 /// Create the child webview. On Windows this spawns the embed thread (see the
-/// module docs); elsewhere it builds on the calling (main/UI) thread.
+/// module docs); on macOS it builds on the calling (main/UI) thread.
 pub fn attach(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     return attach_threaded(queue, parent);
-    // Phones: no wry child webview (it needs its own Kotlin/Swift glue); the
-    // caller keeps its fallback.
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (queue, parent);
         Err(anyhow!("child webviews are not supported on this platform yet"))
     }
-    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
+    #[cfg(target_os = "macos")]
     {
-        #[cfg(target_os = "linux")]
-        {
-            if matches!(parent, RawWindowHandle::Wayland(_)) {
-                return Err(anyhow!("child webviews are not supported on Wayland"));
-            }
-            gtk::init().map_err(|e| anyhow!("gtk init failed: {e}"))?;
-        }
         let webview = build_webview(queue, parent)?;
         HOST.with(|h| *h.borrow_mut() = Some(HostState { webview, ui_visible: false, parked: true }));
         queue.attached.store(true, Ordering::SeqCst);
@@ -258,10 +249,13 @@ pub fn attach(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Res
 
 #[cfg(target_os = "windows")]
 fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<()> {
-    use tao::event::Event;
-    use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tao::platform::run_return::EventLoopExtRunReturn;
-    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, TranslateMessage, MSG,
+        PM_NOREMOVE, WM_APP,
+    };
 
     let RawWindowHandle::Win32(h) = parent else {
         return Err(anyhow!("expected a Win32 window handle"));
@@ -278,10 +272,12 @@ fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -
     // parent sends messages to the parent, which only the (unblocked) UI
     // thread can answer.
     std::thread::Builder::new().name("glyph-embed-host".into()).spawn(move || {
-        let mut builder = EventLoopBuilder::<()>::with_user_event();
-        builder.with_any_thread(true);
-        let mut event_loop = builder.build();
-        let proxy = event_loop.create_proxy();
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        }
+        let tid = unsafe { GetCurrentThreadId() };
         let parent = match std::num::NonZeroIsize::new(hwnd) {
             Some(n) => RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(n)),
             None => {
@@ -299,45 +295,39 @@ fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -
             }
         };
         let mut st = HostState { webview, ui_visible: false, parked: true };
-        let wake = Mutex::new(proxy);
-        *q.waker.lock().unwrap() = Some(Box::new(move || {
-            let _ = wake.lock().unwrap().send_event(());
+        *q.waker.lock().unwrap() = Some(Box::new(move || unsafe {
+            let _ = PostThreadMessageW(tid, WM_APP, WPARAM(0), LPARAM(0));
         }));
         q.attached.store(true, Ordering::SeqCst);
         q.phase.store(2, Ordering::SeqCst);
-        let q2 = q.clone();
         for c in q.drain() {
             apply(&mut st, c);
         }
-        event_loop.run_return(move |event, _, flow| {
-            *flow = ControlFlow::Wait;
-            if let Event::UserEvent(()) = event {
-                for c in q2.drain() {
-                    apply(&mut st, c);
+        let mut msg = MSG::default();
+        while unsafe { GetMessageW(&mut msg, None, 0, 0).as_bool() } {
+            if msg.message != WM_APP {
+                unsafe {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
                 }
             }
-        });
+            for c in q.drain() {
+                apply(&mut st, c);
+            }
+        }
     })?;
     Ok(())
 }
 
-/// Apply queued commands. Non-Windows: must run on the thread that called
-/// [`attach`]. Windows: no-op (the embed thread applies them itself).
+/// Apply queued commands. macOS: must run on the thread that called
+/// [`attach`]. Elsewhere: no-op (Windows applies them on the embed thread).
 pub fn pump(queue: &HostQueue) {
-    #[cfg(any(target_os = "windows", target_os = "android", target_os = "ios"))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = queue;
     }
-    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "ios")))]
+    #[cfg(target_os = "macos")]
     {
-        // Before the first attach gtk is not initialised yet (and must not be
-        // touched then).
-        #[cfg(target_os = "linux")]
-        if gtk::is_initialized() {
-            while gtk::events_pending() {
-                gtk::main_iteration_do(false);
-            }
-        }
         HOST.with(|h| {
             let mut h = h.borrow_mut();
             let Some(st) = h.as_mut() else { return };
