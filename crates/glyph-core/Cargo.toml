@@ -27,7 +27,7 @@ tempfile = "3"
 semver = "1"
 sys-locale = "0.3"
 uuid = { version = "1", features = ["v4"] }
-rand = "0.8"
+rand = "0.10"
 # Local calendar time for listening statistics.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Tags + embedded covers of imported audio files (same build as glyph-audio).
