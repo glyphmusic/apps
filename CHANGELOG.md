@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.12.0 - 2026-11-15
+
+### Changed
+
+- **Desktop and Android UI migrated to Tauri 2 + Svelte (`glyph-ui`)**: the desktop app (`glyph-tauri`) and Android WebView shell (`glyph-android`, keeping native `PlaybackService` background playback) now run the shared Svelte interface on top of `glyph-core` and `glyph-audio`, replacing the GPUI UI layer while preserving desktop features (mini player window, tray, media keys, taskbar/Dock integration, Discord Rich Presence, gapless playback, plugins, local HTTP MCP server, and `glyph://` links).
+- Linux packages (`.deb` / `.rpm`) now depend on WebKitGTK and GTK 3 (`libwebkit2gtk-4.1-0` / `webkit2gtk4.1`, `libgtk-3-0`, `libayatana-appindicator3-1`) for the Tauri desktop shell.
+
+### Added
+
+- **Web player build (`glyph-ui` web backend)**: adds browser playback mode for `glyph.my/web` using direct provider `<audio>` streams and the official YouTube IFrame embed, browser-local storage (`localStorage`), end-to-end encrypted account sync, listening statistics, and server-relay MCP approval prompts.
+- **Public profiles & MCP controls (`glyph-protocol` 0.11.0)**: configurable profile section order (`playlists`, `recent`) and additional MCP playback/queue/device tools (`queue_remove`, `queue_move`, `queue_jump`, `queue_clear`, `start_radio`, `sleep_timer`, `recent_songs`, `list_devices`, `play_on_device`, `select_device`).
+
 ## 0.11.0 - 2026-11-14
 
 ### Added

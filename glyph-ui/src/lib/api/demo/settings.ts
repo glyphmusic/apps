@@ -251,7 +251,7 @@ const status = (ctx: DemoCtx): AccountStatus => ({
 export const handlers: Record<string, DemoHandler> = {
   open_url: (_, a) => { window.open(String(a.url), "_blank", "noopener"); },
   reveal_data_dir: () => {},
-  diagnostics: (ctx) => `Glyph 0.11.0-demo\nOS: web\nBackend: demo\nLanguage: ${ctx.config.language || "en"}`,
+  diagnostics: (ctx) => `Glyph 0.12.0-demo\nOS: web\nBackend: demo\nLanguage: ${ctx.config.language || "en"}`,
   import_playlist_file: () => {},
   set_autostart: () => {},
   reveal_path: () => {},
@@ -399,7 +399,7 @@ export const handlers: Record<string, DemoHandler> = {
   plugin_action: () => {},
 
   update_state: () => st.update,
-  update_check: async () => { st.update.checking = true; await lag(900); st.update.checking = false; st.update.status = { kind: "up_to_date", current: "0.11.0-demo" }; return st.update.status; },
+  update_check: async () => { st.update.checking = true; await lag(900); st.update.checking = false; st.update.status = { kind: "up_to_date", current: "0.12.0-demo" }; return st.update.status; },
   update_install: async () => { await lag(500); st.update.installed = true; },
   update_restart: () => {},
 };
