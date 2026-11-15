@@ -27,6 +27,8 @@ $jni = Join-Path $android "app\src\main\jniLibs"
 $targets = $Abi | ForEach-Object { @("-t", $_) }
 Push-Location $root
 try {
+    npm --prefix (Join-Path $root "glyph-ui") run build
+    if ($LASTEXITCODE -ne 0) { throw "glyph-ui build failed" }
     # Written out per branch: PowerShell mangles a splatted "--release".
     if ($Fast) {
         & cargo ndk @targets -P 26 -o $jni build -p glyph-android --profile fast

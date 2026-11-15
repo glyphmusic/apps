@@ -1,5 +1,5 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
+<!-- Glyph icon set, see docs/ICONS.md -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
-  <circle cx="12" cy="12" r="3" />
+  <path d="M2.8 12.9a1.8 1.8 0 0 1 0-1.8C4.8 7.6 8.2 5.5 12 5.5s7.2 2.1 9.2 5.6a1.8 1.8 0 0 1 0 1.8c-2 3.5-5.4 5.6-9.2 5.6s-7.2-2.1-9.2-5.6Z"/>
+  <circle fill="currentColor" cx="12" cy="12" r="2.6"/>
 </svg>

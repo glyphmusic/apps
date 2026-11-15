@@ -15,7 +15,7 @@ $exe = Join-Path $env:CARGO_TARGET_DIR 'debug\glyph.exe'
 # The preview runs from a copy, so builds (ours and anyone else's) can always
 # overwrite glyph.exe while the preview stays open.
 $preview = Join-Path $env:CARGO_TARGET_DIR 'debug\glyph-run.exe'
-$watch = @('src', 'crates', 'assets', '.cargo', 'Cargo.toml', 'Cargo.lock', 'build.rs')
+$watch = @('crates', 'glyph-ui\src', 'assets', '.cargo', 'Cargo.toml', 'Cargo.lock')
 
 function Get-Stamp {
     # Only look at files git reports as changed: a full directory walk is
@@ -34,7 +34,9 @@ function Start-Glyph {
 
 function Invoke-Build {
     Write-Host ("[{0:HH:mm:ss}] building..." -f (Get-Date)) -ForegroundColor DarkGray
-    cargo build -p glyph 2>&1 | Select-String -Pattern '^(error|warning: unused)|-->|Finished' |
+    npm --prefix (Join-Path $root 'glyph-ui') run build
+    if ($LASTEXITCODE -ne 0) { return $false }
+    cargo build -p glyph-tauri 2>&1 | Select-String -Pattern '^(error|warning: unused)|-->|Finished' |
         ForEach-Object { Write-Host $_ }
     return ($LASTEXITCODE -eq 0)
 }

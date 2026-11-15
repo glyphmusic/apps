@@ -50,7 +50,15 @@ pub fn small_cover_url(url: &str) -> String {
 pub const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024;
 /// Longest edge of a cached cover.
 pub const COVER_PX: u32 = 512;
-const MAX_DOWNLOAD: usize = 12 * 1024 * 1024;
+pub(crate) const MAX_DOWNLOAD: usize = 12 * 1024 * 1024;
+/// Cap simultaneous full-res cover/artist image decodes to keep peak heap small.
+const MAX_CONCURRENT_IMAGE_DECODES: usize = 4;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn image_decode_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_IMAGE_DECODES))
+}
 
 pub struct CoverCache {
     server: Option<crate::server_client::ServerClient>,
@@ -61,11 +69,23 @@ pub struct CoverCache {
     providers: Arc<Providers>,
     /// Songs for which the whole chain failed (this session only).
     misses: Mutex<HashSet<String>>,
+    last_prune: Mutex<Option<std::time::Instant>>,
+    pruning: Arc<AtomicBool>,
 }
 
 impl CoverCache {
     pub fn new(dir: PathBuf, http: reqwest::Client, providers: Arc<Providers>) -> Self {
-        Self { server: None, server_musicbrainz: None, dir, max_bytes: MAX_CACHE_BYTES, http, providers, misses: Mutex::new(HashSet::new()) }
+        Self {
+            server: None,
+            server_musicbrainz: None,
+            dir,
+            max_bytes: MAX_CACHE_BYTES,
+            http,
+            providers,
+            misses: Mutex::new(HashSet::new()),
+            last_prune: Mutex::new(None),
+            pruning: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn with_server(mut self, server: Option<crate::server_client::ServerClient>) -> Self {
@@ -168,12 +188,31 @@ impl CoverCache {
         Ok(None)
     }
 
+    fn try_claim_prune(&self) -> bool {
+        let now = std::time::Instant::now();
+        {
+            let guard = self.last_prune.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.is_some_and(|t| now.saturating_duration_since(t) < PRUNE_INTERVAL) {
+                return false;
+            }
+        }
+        if self.pruning.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        *self.last_prune.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+        true
+    }
+
     fn finish(&self, path: PathBuf) -> PathBuf {
-        let dir = self.dir.clone();
-        let max = self.max_bytes;
-        std::thread::spawn(move || {
-            let _ = prune(&dir, max);
-        });
+        if self.try_claim_prune() {
+            let dir = self.dir.clone();
+            let max = self.max_bytes;
+            let pruning = self.pruning.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = prune(&dir, max);
+                pruning.store(false, Ordering::Release);
+            });
+        }
         path
     }
 
@@ -276,9 +315,9 @@ pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage> {
     }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(48 * 1024 * 1024);
     reader.limits(limits);
     Ok(reader.decode()?)
 }
@@ -309,7 +348,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<image::DynamicImage> {
         errors.emit_message = Some(jpeg_message);
         let decoder = mozjpeg::Decompress::with_err(errors).from_mem(bytes)?;
         let (width, height) = (decoder.width(), decoder.height());
-        if width > 8192 || height > 8192 || width.checked_mul(height).and_then(|n| n.checked_mul(3)).is_none_or(|n| n > 64 * 1024 * 1024) {
+        if width > 4096 || height > 4096 || width.checked_mul(height).and_then(|n| n.checked_mul(3)).is_none_or(|n| n > 48 * 1024 * 1024) {
             return Err(anyhow!("image too large"));
         }
         let mut decoder = decoder.rgb()?;
@@ -341,6 +380,7 @@ pub(crate) async fn download_image(http: &reqwest::Client, url: &str, server: Op
                 bytes.extend_from_slice(&chunk);
             }
             if expected.is_some_and(|n| n != bytes.len() as u64) { return Err(anyhow!("image download cut off")); }
+            let _permit = image_decode_semaphore().acquire().await?;
             tokio::task::spawn_blocking(move || decode_image(&bytes)).await?
         }.await;
         match result { Ok(image) => return Ok(image), Err(error) => last = Some(error) }
@@ -478,6 +518,49 @@ mod tests {
         assert_eq!((result.width(), result.height()), (16, 16));
     }
 
+    #[tokio::test]
+    async fn downloads_image_concurrently_beyond_decode_slots() {
+        use std::io::{Read, Write};
+        const N: usize = MAX_CONCURRENT_IMAGE_DECODES + 2;
+        let image = image::RgbImage::from_pixel(16, 16, image::Rgb([30, 140, 220]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&image).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut streams = Vec::with_capacity(N);
+            for _ in 0..N {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut req = [0; 4096];
+                let _ = stream.read(&mut req);
+                streams.push(stream);
+            }
+            for mut stream in streams {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    jpeg.len()
+                )
+                .unwrap();
+                stream.write_all(&jpeg).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().unwrap();
+        let url = format!("http://{addr}");
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let c = client.clone();
+                let u = url.clone();
+                tokio::spawn(async move { download_image(&c, &u, None).await })
+            })
+            .collect();
+        for h in handles {
+            let img = h.await.unwrap().unwrap();
+            assert_eq!((img.width(), img.height()), (16, 16));
+        }
+        server.join().unwrap();
+    }
+
     #[test]
     fn normalizes_to_max_edge_jpeg() {
         let img = image::RgbImage::from_fn(1200, 800, |x, y| image::Rgb([(x % 255) as u8, (y % 255) as u8, 90]));
@@ -509,5 +592,15 @@ mod tests {
         assert!(dir.path().join("2.jpg").exists());
         assert!(dir.path().join("3.jpg").exists());
         assert_eq!(prune(dir.path(), 10_000).unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_claim_is_coalesced() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CoverCache::new(dir.path().to_path_buf(), reqwest::Client::new(), Arc::new(Providers::default()));
+        assert!(cache.try_claim_prune());
+        assert!(!cache.try_claim_prune(), "second concurrent/immediate prune must coalesce");
+        cache.pruning.store(false, Ordering::Release);
+        assert!(!cache.try_claim_prune(), "cooldown must skip immediate repeat prune");
     }
 }

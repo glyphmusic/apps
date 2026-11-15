@@ -89,10 +89,10 @@ impl Tags {
             };
             slot.get_or_insert(v);
         }
-        // Prefer the front cover, else any picture.
+        // Prefer the front cover, else any picture within the safe size cap.
         let front = rev.visuals().iter().find(|v| v.usage == Some(StandardVisualKey::FrontCover));
         if let Some(v) = front.or_else(|| rev.visuals().first()) {
-            if self.cover.is_none() || front.is_some() {
+            if v.data.len() <= crate::cover::MAX_DOWNLOAD && (self.cover.is_none() || front.is_some()) {
                 self.cover = Some(v.data.to_vec());
             }
         }

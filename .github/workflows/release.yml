@@ -23,7 +23,9 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: tar.gz }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: tar.gz }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, ext: tar.gz }
+          # Intel Macs: cross-compiled on the Apple Silicon runner, which builds
+          # about twice as fast as the Intel one (15 vs ~6 min with cache).
+          - { os: macos-latest, target: x86_64-apple-darwin, ext: tar.gz }
           - { os: macos-latest, target: aarch64-apple-darwin, ext: tar.gz }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
     runs-on: ${{ matrix.os }}
@@ -32,7 +34,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # Restores the dependency cache (GPUI etc., most of the build time) that
+      # Restores the dependency cache (Tauri, codecs etc., most of the build time) that
       # release-cache.yml saves on main; a cache saved here would only be
       # visible to this tag.
       - uses: Swatinem/rust-cache@v2
@@ -44,11 +46,20 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-            libasound2-dev libdbus-1-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libayatana-appindicator3-dev libgtk-3-dev libasound2-dev libdbus-1-dev \
+            libssl-dev pkg-config
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: glyph-ui/package-lock.json
+      - name: Build UI
+        run: |
+          npm --prefix glyph-ui ci
+          npm --prefix glyph-ui run build
       - name: Build
-        run: cargo build --release -p glyph --target ${{ matrix.target }}
+        run: cargo build --release -p glyph-tauri --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |

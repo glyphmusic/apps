@@ -15,6 +15,36 @@ pub const FILE_EXT: &str = "glyph-eq";
 pub const BANDS: usize = 10;
 /// Gain range per band (dB).
 pub const MAX_DB: f32 = 12.0;
+
+/// Built-in equalizer presets: `(key, gains)` for 32 Hz .. 16 kHz.
+pub const BUILTIN_PRESETS: &[(&str, [f32; BANDS])] = &[
+    ("flat", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("bass_boost", [6.0, 5.0, 4.0, 2.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("bass_reducer", [-6.0, -5.0, -4.0, -2.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("treble_boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0]),
+    ("treble_reducer", [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -2.5, -4.0, -5.0, -6.0]),
+    ("vocal", [-2.0, -2.0, -1.0, 1.0, 3.0, 4.0, 3.5, 2.0, 0.0, -1.0]),
+    ("rock", [4.0, 3.0, 2.0, 0.5, -1.0, -1.0, 0.5, 2.0, 3.0, 4.0]),
+    ("pop", [-1.0, 1.0, 2.5, 3.5, 2.0, 0.0, -0.5, -0.5, 1.0, 1.5]),
+    ("hiphop", [5.0, 4.5, 2.0, 3.0, -1.0, -1.0, 1.0, -0.5, 1.5, 2.5]),
+    ("electronic", [4.5, 4.0, 1.5, 0.0, -2.0, 2.0, 1.0, 1.5, 4.0, 5.0]),
+    ("acoustic", [4.0, 4.0, 3.0, 1.0, 2.0, 1.5, 3.0, 3.5, 3.0, 2.0]),
+    ("classical", [4.5, 3.5, 3.0, 2.5, -1.5, -1.5, 0.0, 2.0, 3.0, 3.5]),
+    ("jazz", [3.5, 2.5, 1.5, 2.0, -1.5, -1.5, 0.0, 1.5, 2.5, 3.0]),
+    ("small_speakers", [5.0, 4.0, 3.5, 2.5, 1.0, 0.0, -1.0, -2.0, -2.5, -3.0]),
+];
+
+/// Resolves a built-in key or `user:<name>` (or plain saved name) into `(canonical_key, gains)`.
+pub fn resolve_preset(key: &str, user: &[EqPreset]) -> Option<(String, [f32; BANDS])> {
+    let trimmed = key.trim();
+    if let Some(&(k, g)) = BUILTIN_PRESETS.iter().find(|&&(k, _)| k.eq_ignore_ascii_case(trimmed)) {
+        return Some((k.to_string(), g));
+    }
+    let user_name = trimmed.strip_prefix("user:").unwrap_or(trimmed);
+    user.iter()
+        .find(|p| p.name.eq_ignore_ascii_case(user_name))
+        .map(|p| (format!("user:{}", p.name), p.gains()))
+}
 /// Longest preset name kept.
 const MAX_NAME: usize = 40;
 

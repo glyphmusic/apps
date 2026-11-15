@@ -875,7 +875,8 @@ impl Engine {
             self.fail(format!("{} has no embed player", provider.display_name()));
             return;
         }
-        // Windows attaches the child webview asynchronously; give it a moment.
+        // Spawn the lazy child WebView2 (if registered) and wait for it to settle.
+        self.shared.host.ensure_attached();
         self.shared.host.wait_settled(Duration::from_secs(10));
         // A popup/browser backend must be replaced once the host child webview exists.
         if self.embed.as_ref().is_some_and(|e| !e.is_host()) && self.shared.host.is_attached() {

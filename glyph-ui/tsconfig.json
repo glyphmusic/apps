@@ -1,0 +1,17 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": false,
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "types": ["vite/client", "svelte"],
+    "paths": { "$lib/*": ["./src/lib/*"], "$assets/*": ["../assets/*"] }
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
+}

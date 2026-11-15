@@ -46,6 +46,17 @@ jobs:
           cargo install cargo-ndk --locked
       - name: Build Rust libraries
         run: cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
+      - uses: actions/setup-node@v4
+        if: ${{ !inputs.warm_cache }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: glyph-ui/package-lock.json
+      - name: Build UI
+        if: ${{ !inputs.warm_cache }}
+        run: |
+          npm --prefix glyph-ui ci
+          npm --prefix glyph-ui run build
       - name: Build APK
         if: ${{ !inputs.warm_cache }}
         run: |

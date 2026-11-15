@@ -24,7 +24,10 @@ fn fallback_path(base: &str) -> std::path::PathBuf {
 pub fn load(base: &str) -> Option<String> {
     if !secure_base(base) { return None; }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    return entry(base).ok()?.get_password().ok();
+    return {
+        let base = base.to_string();
+        crate::paths::run_keyring(move || entry(&base).ok()?.get_password().ok())
+    };
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
     return std::fs::read_to_string(fallback_path(base)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 }
@@ -33,12 +36,16 @@ pub fn store(base: &str, token: &str) -> Result<()> {
     if !token.is_empty() && (!(32..=256).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))) { return Err(anyhow!("use a bearer with 32-256 ASCII characters")); }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     {
-        let e = entry(base)?;
-        if token.is_empty() {
-            match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(_) => Err(anyhow!("could not remove server credential")) }
-        } else {
-            e.set_password(token).map_err(|_| anyhow!("could not save server credential in OS keychain"))
-        }
+        let base = base.to_string();
+        let token = token.to_string();
+        crate::paths::run_keyring(move || {
+            let e = entry(&base)?;
+            if token.is_empty() {
+                match e.delete_credential() { Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), Err(_) => Err(anyhow!("could not remove server credential")) }
+            } else {
+                e.set_password(&token).map_err(|_| anyhow!("could not save server credential in OS keychain"))
+            }
+        })
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
     {

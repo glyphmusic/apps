@@ -1,95 +1,477 @@
 package app.glyph;
 
-import android.content.ClipData;
 import android.Manifest;
+import android.app.ActivityManager;
 import android.app.PendingIntent;
+import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
-import android.net.Uri;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-
+import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
-import com.google.androidgamesdk.GameActivity;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Hosts the Rust app (libglyph_android.so, android_main). Everything on
- * screen is drawn by GPUI; this class only reports insets and offers the
- * few SDK calls Rust makes over JNI (the gpui* methods).
+ * Hosts the Svelte UI inside a WebView and bridges it to the Rust core/audio
+ * library (libglyph_android.so), while driving Android-specific features:
+ * PlaybackService media controls, network status, insets, APK self-updates,
+ * deep links, share intents, clipboard, and hardware/remote volume keys.
  */
-public class MainActivity extends GameActivity {
+public class MainActivity extends AppCompatActivity {
 
+    static {
+        System.loadLibrary("glyph_android");
+    }
+
+    private static final String APP_ORIGIN = "https://glyph.localhost";
+    private static final String APP_HOST = "glyph.localhost";
+    private static final String ASSET_PREFIX = "/__asset__";
+
+    /** Result of a PackageInstaller session, delivered back to this activity. */
+    private static final String ACTION_INSTALL_STATUS = "app.glyph.INSTALL_STATUS";
+    private static final int DEFAULT_ACCENT = 0xff5fd2;
+    private static final String[] LAUNCHER_THEMES = {
+            "glyph", "ember", "ocean", "forest", "violet", "crimson", "mono"
+    };
+    private static final String[] LAUNCHER_ALIASES = {
+            "app.glyph.LauncherGlyph",
+            "app.glyph.LauncherEmber",
+            "app.glyph.LauncherOcean",
+            "app.glyph.LauncherForest",
+            "app.glyph.LauncherViolet",
+            "app.glyph.LauncherCrimson",
+            "app.glyph.LauncherMono"
+    };
+    private static final int[] LAUNCHER_ACCENTS = {
+            0xff5fd2, 0xff8a3d, 0x4da3ff, 0x3ddc84, 0xb07cff, 0xff4d5e, 0xe8e8e8
+    };
+
+    private native void nativeInit(MainActivity activity, String filesDir);
+    private native void nativeInvoke(long id, String cmd, String argsJson);
     private native void nativeInsets(int top, int right, int bottom, int left,
                                      int imeTop, int imeRight, int imeBottom, int imeLeft);
-
     /** A glyph:// link is waiting; Rust takes it with gpuiTakeOpenUrl. */
     private native void nativeUrlWaiting();
     private native void nativeConnectivity(boolean online);
+
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private WebView webView;
+    private boolean pageReady;
+    private String lastInsetsJs;
+    private final List<String> pendingScripts = new ArrayList<>();
+    private final Handler themeHandler = new Handler(Looper.getMainLooper());
+    private int lastAccentRgb = -1;
+    private String pendingAlias;
+    private final Runnable applyAliasRunnable = () -> applyLauncherAliasNow(pendingAlias);
+
+    private ValueCallback<Uri[]> fileChooserCallback;
+    private final ActivityResultLauncher<Intent> fileChooserLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (fileChooserCallback == null) {
+                    return;
+                }
+                Uri[] uris = WebChromeClient.FileChooserParams.parseResult(result.getResultCode(), result.getData());
+                fileChooserCallback.onReceiveValue(uris);
+                fileChooserCallback = null;
+            });
+
+    /** Link the app was opened with (jam invite, playlist), until Rust takes it. */
+    private String openUrl;
+
+    /** Downloaded update waiting for the "install unknown apps" permission. */
+    private String pendingApk;
 
     private void reportConnectivity() {
+        if (connectivity == null) {
+            return;
+        }
         NetworkCapabilities caps = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
         nativeConnectivity(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED));
     }
 
-    /** Link the app was opened with (jam invite, playlist), until Rust takes it. */
-    private String openUrl;
-
-    /** Result of a PackageInstaller session, delivered back to this activity. */
-    private static final String ACTION_INSTALL_STATUS = "app.glyph.INSTALL_STATUS";
-
-    /** Downloaded update waiting for the "install unknown apps" permission. */
-    private String pendingApk;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // Draw behind the status and navigation bars; GPUI keeps content in
-        // the safe area from the insets below.
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         super.onCreate(savedInstanceState);
+
+        nativeInit(this, getFilesDir().getAbsolutePath());
+
         connectivity = getSystemService(ConnectivityManager.class);
-        networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onAvailable(Network network) { reportConnectivity(); }
-            @Override public void onLost(Network network) { reportConnectivity(); }
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) { reportConnectivity(); }
-        };
-        connectivity.registerDefaultNetworkCallback(networkCallback);
-        reportConnectivity();
+        if (connectivity != null) {
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) { reportConnectivity(); }
+                @Override public void onLost(Network network) { reportConnectivity(); }
+                @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) { reportConnectivity(); }
+            };
+            connectivity.registerDefaultNetworkCallback(networkCallback);
+            reportConnectivity();
+        }
+
+        webView = new WebView(this);
+        webView.setBackgroundColor(Color.BLACK);
+        webView.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+
+        webView.addJavascriptInterface(new Bridge(), "__GLYPH_ANDROID__");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (fileChooserCallback != null) {
+                    fileChooserCallback.onReceiveValue(null);
+                }
+                fileChooserCallback = callback;
+                try {
+                    fileChooserLauncher.launch(params.createIntent());
+                    return true;
+                } catch (Exception e) {
+                    fileChooserCallback = null;
+                    return false;
+                }
+            }
+        });
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return interceptWebRequest(request);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
+                    return false;
+                }
+                if (uri != null) {
+                    gpuiOpenUrl(uri.toString());
+                }
+                return true;
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageReady = false;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                pageReady = true;
+                if (lastInsetsJs != null) {
+                    webView.evaluateJavascript(lastInsetsJs, null);
+                }
+                if (!pendingScripts.isEmpty()) {
+                    List<String> copy = new ArrayList<>(pendingScripts);
+                    pendingScripts.clear();
+                    for (String js : copy) {
+                        webView.evaluateJavascript(js, null);
+                    }
+                }
+            }
+        });
+
+        ViewCompat.setOnApplyWindowInsetsListener(webView, (v, insets) -> {
+            Insets safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+            nativeInsets(safe.top, safe.right, safe.bottom, safe.left, ime.top, ime.right, ime.bottom, ime.left);
+            applyCssInsets(safe, ime);
+            return WindowInsetsCompat.CONSUMED;
+        });
+
+        setContentView(webView);
+        ViewCompat.requestApplyInsets(webView);
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (webView == null || !pageReady) {
+                    moveTaskToBack(true);
+                    return;
+                }
+                webView.evaluateJavascript(
+                        "(function(){return !!(window.__glyphBack&&window.__glyphBack());})()",
+                        value -> {
+                            if (!"true".equals(value)) {
+                                moveTaskToBack(true);
+                            }
+                        });
+            }
+        });
+
+        webView.loadUrl(APP_ORIGIN + "/index.html");
         takeLink(getIntent());
+
         // The playback notification needs this on Android 13+.
-        if (android.os.Build.VERSION.SDK_INT >= 33
+        if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
     }
 
-    @Override
-    public WindowInsetsCompat onApplyWindowInsets(View v, WindowInsetsCompat insets) {
-        Insets safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
-        Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-        nativeInsets(safe.top, safe.right, safe.bottom, safe.left, ime.top, ime.right, ime.bottom, ime.left);
-        return super.onApplyWindowInsets(v, insets);
+    private void applyCssInsets(Insets safe, Insets ime) {
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) {
+            density = 1f;
+        }
+        String js = String.format(Locale.US,
+                "(function(r){r.setProperty('--safe-top','%.2fpx');r.setProperty('--safe-right','%.2fpx');"
+                        + "r.setProperty('--safe-bottom','%.2fpx');r.setProperty('--safe-left','%.2fpx');"
+                        + "r.setProperty('--ime-bottom','%.2fpx');})(document.documentElement.style);",
+                safe.top / density, safe.right / density, safe.bottom / density, safe.left / density,
+                ime.bottom / density);
+        lastInsetsJs = js;
+        if (pageReady && webView != null) {
+            webView.evaluateJavascript(js, null);
+        }
+    }
+
+    private final class Bridge {
+        @JavascriptInterface
+        public void invoke(long id, String cmd, String argsJson) {
+            nativeInvoke(id, cmd == null ? "" : cmd, argsJson == null ? "{}" : argsJson);
+        }
+    }
+
+    private void evalJs(String js) {
+        runOnUiThread(() -> {
+            if (webView != null && pageReady) {
+                webView.evaluateJavascript(js, null);
+            } else {
+                if (pendingScripts.size() >= 128) {
+                    pendingScripts.remove(0);
+                }
+                pendingScripts.add(js);
+            }
+        });
+    }
+
+    private static String toSafeJsLiteral(String json) {
+        if (json == null || json.isEmpty()) {
+            return "null";
+        }
+        return json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+    }
+
+    private WebResourceResponse interceptWebRequest(WebResourceRequest request) {
+        Uri uri = request.getUrl();
+        if (uri == null) {
+            return null;
+        }
+        String host = uri.getHost();
+        if ("asset.localhost".equalsIgnoreCase(host)) {
+            String rawPath = uri.getPath();
+            if (rawPath == null || rawPath.isEmpty()) {
+                return textResponse(404, "Not Found");
+            }
+            return serveLocalAssetFile(Uri.decode(rawPath));
+        }
+        if (!APP_HOST.equalsIgnoreCase(host)) {
+            return null;
+        }
+        String path = uri.getPath();
+        if (path == null || path.isEmpty()) {
+            path = "/index.html";
+        }
+        if (ASSET_PREFIX.equals(path)) {
+            String filePath = uri.getQueryParameter("path");
+            if (filePath == null || filePath.isEmpty()) {
+                return textResponse(400, "Missing path");
+            }
+            return serveLocalAssetFile(filePath);
+        }
+        return serveUiAsset(path);
+    }
+
+    private WebResourceResponse serveLocalAssetFile(String filePath) {
+        try {
+            File root = getFilesDir().getCanonicalFile();
+            File target = new File(filePath).getCanonicalFile();
+            String rootPath = root.getPath();
+            String targetPath = target.getPath();
+            if (!targetPath.equals(rootPath) && !targetPath.startsWith(rootPath + File.separator)) {
+                return textResponse(403, "Forbidden");
+            }
+            if (!target.isFile()) {
+                return textResponse(404, "Not Found");
+            }
+            return new WebResourceResponse(mimeTypeFor(targetPath), null, new FileInputStream(target));
+        } catch (IOException e) {
+            return textResponse(404, "Not Found");
+        }
+    }
+
+    private WebResourceResponse serveUiAsset(String rawPath) {
+        String rel = rawPath.startsWith("/") ? rawPath.substring(1) : rawPath;
+        if (rel.isEmpty() || rel.endsWith("/")) {
+            rel = rel + "index.html";
+        }
+        if (rel.contains("..")) {
+            return textResponse(403, "Forbidden");
+        }
+        try {
+            InputStream stream = getAssets().open("ui/" + rel);
+            if ("index.html".equals(rel)) {
+                return injectBridge(stream);
+            }
+            return new WebResourceResponse(mimeTypeFor(rel), "utf-8", stream);
+        } catch (IOException notFound) {
+            // Client-side route without file extension falls back to index.html.
+            int slash = rel.lastIndexOf('/');
+            String tail = slash >= 0 ? rel.substring(slash + 1) : rel;
+            if (!tail.contains(".")) {
+                try {
+                    return injectBridge(getAssets().open("ui/index.html"));
+                } catch (IOException ignored) {
+                }
+            }
+            return textResponse(404, "Not Found");
+        }
+    }
+
+    private WebResourceResponse injectBridge(InputStream stream) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = stream.read(buf)) > 0) {
+            out.write(buf, 0, n);
+        }
+        stream.close();
+        String html = out.toString(StandardCharsets.UTF_8.name());
+        String script = "<script>" + tauriShimScript() + "</script>";
+        int idx = html.indexOf("<head>");
+        String patched = idx >= 0
+                ? html.substring(0, idx + 6) + script + html.substring(idx + 6)
+                : script + html;
+        return new WebResourceResponse("text/html", "utf-8",
+                new ByteArrayInputStream(patched.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String tauriShimScript() {
+        return "(function(){"
+                + "if(window.__TAURI_INTERNALS__)return;"
+                + "var nextCb=1,nextReq=1,cbs=new Map(),pending=new Map(),listeners=new Map();"
+                + "window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:function(){}};"
+                + "function runCb(id,arg){var fn=cbs.get(id);if(fn){try{fn(arg);}catch(e){console.error(e);}}}"
+                + "function winNoop(cmd){"
+                + "var dpr=window.devicePixelRatio||1;"
+                + "if(cmd==='plugin:window|is_maximized'||cmd==='plugin:window|is_fullscreen'||cmd==='plugin:window|is_minimized')return false;"
+                + "if(cmd==='plugin:window|is_focused'||cmd==='plugin:window|is_visible')return true;"
+                + "if(cmd==='plugin:window|scale_factor')return dpr;"
+                + "if(cmd==='plugin:window|inner_size'||cmd==='plugin:window|outer_size')return{width:Math.round(window.innerWidth*dpr),height:Math.round(window.innerHeight*dpr)};"
+                + "return null;}"
+                + "window.__glyphResolve=function(id,ok,payload){"
+                + "var p=pending.get(id);if(!p)return;pending.delete(id);"
+                + "if(ok)p.resolve(payload);else p.reject(typeof payload==='string'?payload:((payload&&payload.message)||String(payload)));};"
+                + "window.__glyphEmit=function(name,payload){"
+                + "var map=listeners.get(name);if(!map)return;"
+                + "map.forEach(function(cbId,lid){runCb(cbId,{event:name,id:lid,payload:payload});});};"
+                + "window.__TAURI_INTERNALS__={"
+                + "metadata:{currentWindow:{label:'main'},currentWebview:{windowLabel:'main',label:'main'}},"
+                + "callbacks:cbs,"
+                + "transformCallback:function(cb,once){var id=nextCb++;cbs.set(id,function(d){if(once)cbs.delete(id);return cb&&cb(d);});return id;},"
+                + "unregisterCallback:function(id){cbs.delete(id);},"
+                + "convertFileSrc:function(path){if(!path)return '';if(/^(https?:|data:|blob:)/.test(path))return path;return 'https://glyph.localhost/__asset__?path='+encodeURIComponent(path);},"
+                + "invoke:function(cmd,args){"
+                + "if(cmd==='plugin:event|listen'){"
+                + "var ev=args&&args.event,cbId=args&&args.handler;"
+                + "var lid=nextCb++;if(!listeners.has(ev))listeners.set(ev,new Map());"
+                + "listeners.get(ev).set(lid,cbId);return Promise.resolve(lid);}"
+                + "if(cmd==='plugin:event|unlisten'){"
+                + "var m=listeners.get(args&&args.event);if(m)m.delete(args&&args.eventId);return Promise.resolve(null);}"
+                + "if(cmd==='plugin:event|emit'||cmd==='plugin:event|emit_to'){"
+                + "window.__glyphEmit(args&&args.event,args&&args.payload);return Promise.resolve(null);}"
+                + "if(cmd&&cmd.indexOf('plugin:')===0){return Promise.resolve(winNoop(cmd));}"
+                + "return new Promise(function(resolve,reject){"
+                + "var id=nextReq++;pending.set(id,{resolve:resolve,reject:reject});"
+                + "try{window.__GLYPH_ANDROID__.invoke(id,cmd,JSON.stringify(args===undefined?{}:args));}"
+                + "catch(e){pending.delete(id);reject(e);}"
+                + "});}"
+                + "};"
+                + "})();";
+    }
+
+    private static WebResourceResponse textResponse(int code, String msg) {
+        return new WebResourceResponse("text/plain", "utf-8", code, msg, null,
+                new ByteArrayInputStream(msg.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String mimeTypeFor(String path) {
+        String lower = path.toLowerCase(Locale.US);
+        if (lower.endsWith(".html")) return "text/html";
+        if (lower.endsWith(".js") || lower.endsWith(".mjs")) return "application/javascript";
+        if (lower.endsWith(".css")) return "text/css";
+        if (lower.endsWith(".json")) return "application/json";
+        if (lower.endsWith(".svg")) return "image/svg+xml";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".woff2")) return "font/woff2";
+        if (lower.endsWith(".wasm")) return "application/wasm";
+        if (lower.endsWith(".mp3")) return "audio/mpeg";
+        if (lower.endsWith(".flac")) return "audio/flac";
+        if (lower.endsWith(".ogg") || lower.endsWith(".opus")) return "audio/ogg";
+        if (lower.endsWith(".m4a")) return "audio/mp4";
+        return "application/octet-stream";
     }
 
     /** singleTask: a link opened while the app runs arrives here. */
@@ -108,7 +490,12 @@ public class MainActivity extends GameActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (connectivity != null) { reportConnectivity(); }
+        if (webView != null) {
+            webView.onResume();
+        }
+        if (connectivity != null) {
+            reportConnectivity();
+        }
         if (pendingApk != null && getPackageManager().canRequestPackageInstalls()) {
             String path = pendingApk;
             pendingApk = null;
@@ -117,9 +504,31 @@ public class MainActivity extends GameActivity {
     }
 
     @Override
+    protected void onPause() {
+        if (webView != null) {
+            webView.onPause();
+        }
+        super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (pendingAlias != null) {
+            themeHandler.removeCallbacks(applyAliasRunnable);
+            applyLauncherAliasNow(pendingAlias);
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        themeHandler.removeCallbacks(applyAliasRunnable);
         if (connectivity != null && networkCallback != null) {
             connectivity.unregisterNetworkCallback(networkCallback);
+        }
+        if (webView != null) {
+            webView.destroy();
+            webView = null;
         }
         super.onDestroy();
     }
@@ -212,14 +621,16 @@ public class MainActivity extends GameActivity {
         return super.dispatchKeyEvent(event);
     }
 
-    /** Back that the app did not take: keep running (and playing) in the background. */
-    @Override
-    @SuppressWarnings("deprecation")
-    public void onBackPressed() {
-        moveTaskToBack(true);
+    // ------------------------------------------------------------ called from Rust
+
+    public void gpuiCompleteInvoke(long id, boolean ok, String payloadJson) {
+        evalJs("window.__glyphResolve(" + id + "," + ok + "," + toSafeJsLiteral(payloadJson) + ");");
     }
 
-    // ------------------------------------------------------------ called from Rust
+    public void gpuiEmitEvent(String name, String payloadJson) {
+        evalJs("window.__glyphEmit(" + JSONObject.quote(name == null ? "" : name)
+                + "," + toSafeJsLiteral(payloadJson) + ");");
+    }
 
     public void gpuiOpenUrl(String url) {
         runOnUiThread(() -> {
@@ -250,13 +661,36 @@ public class MainActivity extends GameActivity {
     }
 
     public void gpuiSetClipboard(String text) {
-        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) {
-            cm.setPrimaryClip(ClipData.newPlainText("Glyph", text));
-        }
+        runOnUiThread(() -> {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(ClipData.newPlainText("Glyph", text));
+            }
+        });
     }
 
     public String gpuiGetClipboard() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return readClipboardNow();
+        }
+        AtomicReference<String> out = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        runOnUiThread(() -> {
+            try {
+                out.set(readClipboardNow());
+            } finally {
+                latch.countDown();
+            }
+        });
+        try {
+            latch.await(2, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        return out.get();
+    }
+
+    private String readClipboardNow() {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null || cm.getPrimaryClip().getItemCount() == 0) {
             return null;
@@ -279,6 +713,11 @@ public class MainActivity extends GameActivity {
                 remoteVolume));
     }
 
+    /** Keeps the foreground service and wake/Wi-Fi locks alive while in a Jam even without active audio. */
+    public void gpuiJamActive(boolean active) {
+        runOnUiThread(() -> PlaybackService.setJamActive(this, active));
+    }
+
     /** ANDROID_ID; Rust only sends a salted hash of it (glyph_core::hardware). */
     public String gpuiAndroidId() {
         return Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
@@ -291,8 +730,153 @@ public class MainActivity extends GameActivity {
         return url;
     }
 
+    @SuppressWarnings("deprecation")
     public float gpuiRefreshRate() {
         Display d = getWindowManager().getDefaultDisplay();
         return d == null ? 60f : d.getRefreshRate();
+    }
+
+    /** Updates Android Recents icon immediately and schedules launcher alias switch. */
+    public void gpuiSetThemeIcon(String themeId, int accentRgb) {
+        int rgb = accentRgb & 0x00ffffff;
+        runOnUiThread(() -> {
+            updateTaskDescription(rgb);
+            scheduleLauncherAlias(aliasForTheme(themeId, rgb));
+        });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void updateTaskDescription(int rgb) {
+        if (lastAccentRgb == rgb) {
+            return;
+        }
+        lastAccentRgb = rgb;
+        Bitmap bmp = tintLauncherBitmap(rgb);
+        if (bmp != null) {
+            setTaskDescription(new ActivityManager.TaskDescription("Glyph", bmp));
+        }
+    }
+
+    private Bitmap tintLauncherBitmap(int rgb) {
+        Bitmap src = BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher);
+        if (src == null) {
+            return null;
+        }
+        if (rgb == DEFAULT_ACCENT) {
+            return src;
+        }
+        Bitmap out = src.copy(Bitmap.Config.ARGB_8888, true);
+        if (out == null) {
+            return src;
+        }
+        int w = out.getWidth();
+        int h = out.getHeight();
+        int[] px = new int[w * h];
+        out.getPixels(px, 0, w, 0, 0, w, h);
+        float tr = (rgb >> 16) & 0xff;
+        float tg = (rgb >> 8) & 0xff;
+        float tb = rgb & 0xff;
+        final float mix = 0.72f;
+        float sr = (mix * tr + (1.0f - mix) * 255.0f) / 255.0f;
+        float sg = (mix * tg + (1.0f - mix) * 255.0f) / 255.0f;
+        float sb = (mix * tb + (1.0f - mix) * 255.0f) / 255.0f;
+        for (int i = 0; i < px.length; i++) {
+            int p = px[i];
+            int a = (p >>> 24) & 0xff;
+            if (a == 0) {
+                continue;
+            }
+            float r = (p >> 16) & 0xff;
+            float g = (p >> 8) & 0xff;
+            float b = p & 0xff;
+            if (r <= g || b <= g) {
+                continue;
+            }
+            float intensity = Math.min(r, Math.min((r - g) / 0.3125f, (b - g) / 0.256f));
+            if (intensity <= 0.5f) {
+                continue;
+            }
+            float white = Math.max(0.0f, r - intensity);
+            int nr = Math.min(255, Math.max(0, Math.round(white + intensity * sr)));
+            int ng = Math.min(255, Math.max(0, Math.round(white + intensity * sg)));
+            int nb = Math.min(255, Math.max(0, Math.round(white + intensity * sb)));
+            px[i] = (a << 24) | (nr << 16) | (ng << 8) | nb;
+        }
+        out.setPixels(px, 0, w, 0, 0, w, h);
+        return out;
+    }
+
+    private static String aliasForTheme(String themeId, int rgb) {
+        if (themeId != null) {
+            for (int i = 0; i < LAUNCHER_THEMES.length; i++) {
+                if (LAUNCHER_THEMES[i].equals(themeId)) {
+                    return LAUNCHER_ALIASES[i];
+                }
+            }
+        }
+        int r = (rgb >> 16) & 0xff;
+        int g = (rgb >> 8) & 0xff;
+        int b = rgb & 0xff;
+        int bestIdx = 0;
+        int bestDist = Integer.MAX_VALUE;
+        for (int i = 0; i < LAUNCHER_ACCENTS.length; i++) {
+            int c = LAUNCHER_ACCENTS[i];
+            int dr = r - ((c >> 16) & 0xff);
+            int dg = g - ((c >> 8) & 0xff);
+            int db = b - (c & 0xff);
+            int d = dr * dr + dg * dg + db * db;
+            if (d < bestDist) {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        return LAUNCHER_ALIASES[bestIdx];
+    }
+
+    private void scheduleLauncherAlias(String alias) {
+        pendingAlias = alias;
+        themeHandler.removeCallbacks(applyAliasRunnable);
+        themeHandler.postDelayed(applyAliasRunnable, 1000L);
+    }
+
+    private void applyLauncherAliasNow(String targetAlias) {
+        pendingAlias = null;
+        if (targetAlias == null) {
+            return;
+        }
+        try {
+            PackageManager pm = getPackageManager();
+            String pkg = getPackageName();
+            if (!isAliasEnabled(pm, pkg, targetAlias, LAUNCHER_ALIASES[0].equals(targetAlias))) {
+                pm.setComponentEnabledSetting(
+                        new ComponentName(pkg, targetAlias),
+                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                        PackageManager.DONT_KILL_APP
+                );
+            }
+            for (int i = 0; i < LAUNCHER_ALIASES.length; i++) {
+                String cls = LAUNCHER_ALIASES[i];
+                if (cls.equals(targetAlias)) {
+                    continue;
+                }
+                if (isAliasEnabled(pm, pkg, cls, i == 0)) {
+                    pm.setComponentEnabledSetting(
+                            new ComponentName(pkg, cls),
+                            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                            PackageManager.DONT_KILL_APP
+                    );
+                }
+            }
+        } catch (Throwable t) {
+            Log.w("GlyphTheme", "launcher alias update failed", t);
+        }
+    }
+
+    private static boolean isAliasEnabled(PackageManager pm, String pkg, String cls, boolean defaultEnabled) {
+        int st = pm.getComponentEnabledSetting(new ComponentName(pkg, cls));
+        if (st == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) {
+            return defaultEnabled;
+        }
+        return st == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
     }
 }

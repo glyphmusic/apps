@@ -73,6 +73,24 @@ pub fn hash_hex(s: &str) -> String {
     d.iter().take(10).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Runs a blocking OS-keyring operation safely off the caller thread on Linux
+/// (`secret-service` uses a blocking wrapper over an async zbus runtime that
+/// can stall or fail if invoked from the main UI thread or a Tokio worker).
+pub(crate) fn run_keyring<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    #[cfg(target_os = "linux")]
+    {
+        match std::thread::Builder::new().name("glyph-keyring".into()).spawn(f) {
+            Ok(handle) => match handle.join() {
+                Ok(v) => v,
+                Err(p) => std::panic::resume_unwind(p),
+            },
+            Err(e) => panic!("failed to spawn keyring helper thread: {e}"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    f()
+}
+
 /// Serialises tests that touch process-wide environment variables.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -1,16 +1,5 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
-<svg
-  class="lucide lucide-music-2"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <circle cx="8" cy="18" r="4" />
-  <path d="M12 18V2l7 4" />
+<!-- Glyph icon set, see docs/ICONS.md -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle fill="currentColor" cx="8" cy="17.5" r="3.5"/>
+  <path d="M11.5 17.5V5.2a1.5 1.5 0 0 1 2.2-1.3L18 6.3"/>
 </svg>

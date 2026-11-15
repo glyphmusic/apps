@@ -1,6 +1,6 @@
 [package]
 name = "glyph-android"
-description = "Android shell: runs the Glyph views (src/lib.rs) on the GPUI Android backend."
+description = "Android shell: runs the Glyph core/audio backend inside an AppCompat WebView shell."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,16 +8,22 @@ repository.workspace = true
 publish = false
 
 [lib]
-# Loaded by GameActivity (android.app.lib_name in the manifest).
+# Loaded by MainActivity / PlaybackService via System.loadLibrary("glyph_android").
 name = "glyph_android"
 crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-glyph = { path = "../.." }
+glyph-app.workspace = true
+glyph-protocol.workspace = true
 glyph-core.workspace = true
 glyph-audio.workspace = true
-glyph-gpui-android = { path = "../glyph-gpui-android" }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "9f63850f7affbd57772a4f99554d4fd333b50a6f" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+flume.workspace = true
+reqwest.workspace = true
 jni = "0.22"
 log = "0.4"
 android_logger = "0.15"

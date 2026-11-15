@@ -44,12 +44,25 @@ android {
 }
 
 dependencies {
-    // games-activity pulls an older kotlin-stdlib-jdk7/8 next to appcompat's stdlib.
+    // Align transitive kotlin-stdlib-jdk7/8 (1.6.21) with kotlin-stdlib:1.8.22 pulled by AndroidX.
     implementation platform("org.jetbrains.kotlin:kotlin-bom:1.8.22")
-    // Must match android-activity's GameActivity glue (0.6.1 -> 4.4.0).
-    implementation "androidx.games:games-activity:4.4.0"
     implementation "androidx.appcompat:appcompat:1.7.1"
     implementation "androidx.core:core:1.16.0"
     // MediaSession + media notification for background playback.
     implementation "androidx.media:media:1.7.0"
+}
+
+// Copy the built Svelte UI (glyph-ui/dist) into assets/ui/ before packaging.
+def syncUiAssets = tasks.register("syncUiAssets", Sync) {
+    def distDir = rootProject.file("../../glyph-ui/dist")
+    doFirst {
+        if (!distDir.exists()) {
+            throw new GradleException("glyph-ui/dist not found; run 'npm --prefix glyph-ui run build' first")
+        }
+    }
+    from(distDir)
+    into(layout.projectDirectory.dir("src/main/assets/ui"))
+}
+tasks.named("preBuild").configure {
+    dependsOn(syncUiAssets)
 }

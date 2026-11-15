@@ -889,6 +889,11 @@ impl ServerClient {
         Ok(())
     }
 
+    pub async fn sign_out_all_devices(&self, token: &str) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::POST, "/v1/devices/all/signout", token).send().await?).await?;
+        Ok(())
+    }
+
     pub async fn sync_push(&self, token: &str, items: Vec<SyncItem>) -> Result<SyncPushResponse> {
         Self::json_of(self.authed(reqwest::Method::POST, "/v1/sync/push", token).json(&SyncPushRequest { items })).await
     }

@@ -15,6 +15,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Build cache in two layers: rust-cache restores the compiled dependencies,
+  # sccache (workspace crates only) skips Glyph's own crates that did not
+  # change since an earlier run. If the cache service fails, rustc compiles
+  # normally instead of failing the job.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WORKSPACE_WRAPPER: sccache
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
 
 jobs:
   # PRs and pushes to main: one cheap Linux run. `cargo check` catches compile
@@ -25,15 +32,55 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # Only main saves: tag and PR runs can restore caches from main, while
+      # caches saved by PRs would only fill the 10 GB repo limit and push out
+      # the release caches.
       - uses: Swatinem/rust-cache@v2
-      - name: Linux system packages (GPUI, webview, audio, media keys)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Linux system packages (Tauri webview, tray, audio, media keys)
         timeout-minutes: 15
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-            libasound2-dev libdbus-1-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libayatana-appindicator3-dev libgtk-3-dev libasound2-dev libdbus-1-dev \
+            libssl-dev pkg-config
       - name: Test core crates
         run: cargo test -p glyph-protocol -p glyph-core -p glyph-audio
-      - name: Check app
-        run: cargo check -p glyph
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: glyph-ui/package-lock.json
+      - name: Build the UI
+        run: |
+          npm --prefix glyph-ui ci
+          npm --prefix glyph-ui run check
+          npm --prefix glyph-ui run build
+      - name: Check Tauri app
+        run: cargo check -p glyph-tauri
+
+  # macOS-only code of the Tauri app (Dock menu, links handed to the app)
+  # cannot be checked from Linux.
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Only main saves, see the check job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: glyph-ui/package-lock.json
+      - name: Build the UI
+        run: |
+          npm --prefix glyph-ui ci
+          npm --prefix glyph-ui run build
+      - name: Check Tauri app
+        run: cargo check -p glyph-tauri

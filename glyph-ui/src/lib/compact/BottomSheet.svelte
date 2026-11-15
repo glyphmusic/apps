@@ -1,0 +1,354 @@
+<script lang="ts">
+  // compact/now_playing.rs bottom_sheet: queue or Connect as a sheet from
+  // the bottom (86 % of the height), a grab handle, dim behind; pull down or
+  // tap outside to close. Queue sheet supports edit mode (multi-select
+  // move-to-top / remove), drag-to-reorder handles, pinned current song with
+  // play/pause, and bottom Shuffle / Repeat / Sleep Timer bar.
+  import { fade, fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
+  import Icon from "../components/Icon.svelte";
+  import Cover from "../components/Cover.svelte";
+  import SongTitle from "../components/SongTitle.svelte";
+  import IconButton from "../components/IconButton.svelte";
+  import PlayGlyph from "../components/PlayGlyph.svelte";
+  import { app } from "../state.svelte";
+  import { onWeb } from "../web";
+  import { t, tf } from "../i18n.svelte";
+  import { rating, type Track } from "../api/types";
+  import { jam } from "../jam.svelte";
+  import { fadeEdges } from "../ui.svelte";
+  import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "../overlays/sleep.svelte";
+  import ConnectView from "../shell/ConnectView.svelte";
+  import { drag, sheetIn, sheetOut, shouldClose } from "./cstate.svelte";
+
+  let pull = $state(0);
+  let editing = $state(false);
+  let selected = $state<number[]>([]);
+  let timerOpen = $state(false);
+  let listEl: HTMLDivElement | undefined = $state();
+  let dragRow = $state<{ from: number; slot: number; dy: number; h: number } | null>(null);
+
+  const kind = $derived(app.showDevices ? "devices" : "queue");
+  const close = () => { app.showQueue = false; app.showDevices = false; app.jamOpen = false; jam.page = "main"; };
+  const up = $derived(app.upNext);
+  const manual = $derived(Math.min(app.queue.user, up.length));
+  const base = $derived((app.queue.index ?? -1) + 1);
+  const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
+  const devName = $derived(remote?.name ?? app.config.audio.output_device ?? t("connect.this_phone"));
+  const sleepLabelText = $derived.by(() => {
+    void app.clock;
+    const s = app.sleep;
+    if (!s) return t("sleep.short");
+    if (s.endOfSong) return t("sleep.end_of_song");
+    return s.until ? sleepCountdown(s.until - Date.now()) : t("sleep.short");
+  });
+  const DEV_ICON: Record<string, string> = { this: "smartphone", glyph: "monitor", cast: "cast", airplay: "airplay", upnp: "speaker", account: "laptop" };
+
+  $effect(() => { if (!up.length && editing) { editing = false; selected = []; } });
+
+  function toggleSel(qIdx: number) {
+    selected = selected.includes(qIdx) ? selected.filter((x) => x !== qIdx) : [...selected, qIdx];
+  }
+
+  async function moveSelectedTop() {
+    if (!selected.length) return;
+    const sorted = [...selected].sort((a, b) => a - b);
+    let dest = base;
+    for (const idx of sorted) {
+      if (idx !== dest) await app.queueMove(idx, dest);
+      dest++;
+    }
+    selected = [];
+    editing = false;
+  }
+
+  async function removeSelected() {
+    if (!selected.length) return;
+    const sorted = [...selected].sort((a, b) => b - a);
+    for (const idx of sorted) await app.queueRemove(idx);
+    selected = [];
+    if (!app.upNext.length) editing = false;
+  }
+
+  function startRowDrag(e: PointerEvent, from: number, u: { track: Track; index: number }) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.stopPropagation();
+    const grip = e.currentTarget as HTMLElement;
+    const row = grip.closest<HTMLElement>("[data-qrow]");
+    const container = listEl;
+    if (!row || !container) return;
+    const rowEls = [...container.querySelectorAll<HTMLElement>("[data-qrow]")];
+    const centers = rowEls.map((el) => el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2);
+    const h = row.getBoundingClientRect().height || 60;
+    const startY = e.clientY;
+    let started = false;
+    try { grip.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const blockTouch = (ev: TouchEvent) => ev.preventDefault();
+    const onMove = (ev: PointerEvent) => {
+      const dy = ev.clientY - startY;
+      if (!started) {
+        if (Math.abs(dy) < 4) return;
+        started = true;
+      }
+      let slot = from;
+      for (let i = 0; i < centers.length; i++) if (ev.clientY > centers[i]) slot = i;
+      slot = Math.max(0, Math.min(up.length - 1, slot));
+      dragRow = { from, slot, dy, h };
+    };
+    const cleanup = () => {
+      removeEventListener("pointermove", onMove);
+      removeEventListener("pointerup", onEnd);
+      removeEventListener("pointercancel", onCancel);
+      grip.removeEventListener("touchmove", blockTouch);
+    };
+    const onCancel = () => { cleanup(); dragRow = null; };
+    const onEnd = () => {
+      cleanup();
+      const d = dragRow;
+      dragRow = null;
+      if (d && d.slot !== d.from && up[d.from] && up[d.slot]) {
+        app.queueMove(u.index, up[d.slot].index);
+      }
+    };
+    grip.addEventListener("touchmove", blockTouch, { passive: false });
+    addEventListener("pointermove", onMove);
+    addEventListener("pointerup", onEnd);
+    addEventListener("pointercancel", onCancel);
+  }
+
+  function rowShift(i: number): number {
+    const d = dragRow;
+    if (!d) return 0;
+    if (i === d.from) return d.dy;
+    if (d.from < d.slot && i > d.from && i <= d.slot) return -d.h;
+    if (d.from > d.slot && i >= d.slot && i < d.from) return d.h;
+    return 0;
+  }
+</script>
+
+<div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} role="presentation">
+  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    {#if kind === "devices"}
+      <ConnectView
+        sheet
+        onpull={(dy) => (pull = dy)}
+        ondrop={(dy, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; }}
+        onclose={close}
+      />
+    {:else}
+    <div class="grab" use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
+      <span class="hdl"></span>
+      {#if timerOpen}
+        <button class="t-back" onclick={() => (timerOpen = false)}>
+          <span class="bk-ic"><Icon name="chevron-left" size={20} color="rgba(255,255,255,.85)" /></span>
+          <span class="t-hd">
+            <b>{t("tip.timer")}</b>
+            <span>{app.sleep?.endOfSong ? t("sleep.status.song") : app.sleep?.until ? tf("sleep.status.left", { time: sleepCountdown(app.sleep.until - Date.now()) }) : t("sleep.title")}</span>
+          </span>
+        </button>
+      {:else}
+        <div class="q-top">
+          <div class="q-ht">
+            <div class="q-title-row">
+              <h2>{editing ? t("queue.edit") : t("queue.title")}</h2>
+              {#if editing && selected.length}<span class="ecnt">({selected.length})</span>{/if}
+            </div>
+            {#if !editing}
+              {#if app.queue.context}<span class="sub trunc">{t("np.playing_from")} „{app.queue.context}“</span>{/if}
+              {#if !onWeb()}
+                <button class="dev-line" onclick={() => { app.showQueue = false; app.showDevices = true; }}>
+                  <Icon name={remote ? (DEV_ICON[remote.kind] ?? "cast") : "headphones"} size={13} color="var(--accent)" />
+                  <span class="trunc">{devName}</span>
+                </button>
+              {/if}
+            {/if}
+          </div>
+          {#if editing}
+            <IconButton name="x" size={20} box={36} notip onclick={() => { editing = false; selected = []; }} />
+          {:else if up.length}
+            <button class="edit-pill" onclick={() => { editing = true; selected = []; }}>{t("list.edit")}</button>
+          {/if}
+        </div>
+        {#if app.player.current}
+          {@const cur = app.player.current}
+          <div class="now-row" role="button" tabindex="-1" oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: cur }); }}>
+            <Cover track={cur} size={46} radius={4} />
+            <span class="tx">
+              <span class="t on">
+                <span class="now-ic"><Icon name="audio-lines" size={14} color="var(--accent)" /></span>
+                <SongTitle rating={rating(cur)}>{cur.title}</SongTitle>
+              </span>
+              <span class="a trunc">{cur.artist}</span>
+            </span>
+            <button class="now-play" onclick={(e) => { e.stopPropagation(); app.togglePlay(); }} aria-label={t(app.playing ? "common.pause" : "common.play")}>
+              <PlayGlyph loading={app.loading} playing={app.playing} size={15} button={38} />
+            </button>
+          </div>
+        {/if}
+      {/if}
+    </div>
+
+    <div class="scroll list" bind:this={listEl} use:fadeEdges={{ top: 14, bottom: 14, minOverflow: 8 }}
+      use:drag={{ axis: "y", onlyAtTop: () => !dragRow && (listEl?.scrollTop ?? 0) <= 0, move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
+      {#if timerOpen}
+        {@const onSong = !!app.sleep?.endOfSong}
+        <div class="t-list" in:fly|local={{ x: 24, duration: 180, easing: cubicOut }}>
+          {#each SLEEP_MINUTES as mins}
+            {@const on = app.sleep?.mins === mins}
+            <button class="t-opt" class:on onclick={() => { setSleep(mins); timerOpen = false; }}>
+              <Icon name="timer" size={18} color={on ? "var(--accent)" : "rgba(255,255,255,.72)"} />
+              <span class="t-lb">{sleepLabel(mins)}</span>
+              {#if on}<Icon name="check" size={18} color="var(--accent)" />{/if}
+            </button>
+          {/each}
+          <button class="t-opt" class:on={onSong} onclick={() => { setSleep("song"); timerOpen = false; }}>
+            <Icon name="music-2" size={18} color={onSong ? "var(--accent)" : "rgba(255,255,255,.72)"} />
+            <span class="t-lb">{t("sleep.end_of_song")}</span>
+            {#if onSong}<Icon name="check" size={18} color="var(--accent)" />{/if}
+          </button>
+          {#if app.sleep}
+            <div class="t-sep"></div>
+            <button class="t-opt off" onclick={() => { setSleep(null); timerOpen = false; }}>
+              <Icon name="x" size={18} color="hsla(0, 75%, 68%, .9)" />
+              <span class="t-lb">{t("sleep.off")}</span>
+            </button>
+          {/if}
+        </div>
+      {:else}
+        {#if !editing && manual > 0 && up.length > manual}
+          <div class="sec">{tf("queue.next_n", { n: manual })}</div>
+        {/if}
+        {#each up as u, i (`${u.index}:${u.track.source}:${u.track.id}`)}
+          {@const checked = selected.includes(u.index)}
+          {@const dragging = dragRow?.from === i}
+          {#if !editing && i === manual && manual > 0 && up.length > manual}
+            <div class="sec">{app.queue.context ? tf("queue.from_n", { name: app.queue.context, n: up.length - manual }) : tf("queue.later_n", { n: up.length - manual })}</div>
+          {/if}
+          <div
+            class="r tap q-row"
+            class:dragging
+            data-qrow
+            style:transform="translateY({rowShift(i)}px)"
+            onclick={() => (editing ? toggleSel(u.index) : app.queueJump(u.index))}
+            oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: u.track }); }}
+            onkeydown={() => {}}
+            role="button"
+            tabindex="-1"
+          >
+            {#if editing}
+              <span class="chk" class:on={checked}>
+                {#if checked}<Icon name="check" size={13} color="#000" />{/if}
+              </span>
+            {/if}
+            <Cover track={u.track} size={46} radius={4} />
+            <span class="tx">
+              <span class="t"><SongTitle rating={rating(u.track)}>{u.track.title}</SongTitle></span>
+              <span class="a trunc">{u.track.artist}</span>
+            </span>
+            <button class="grip" aria-label="Reorder" onpointerdown={(e) => startRowDrag(e, i, u)} onclick={(e) => e.stopPropagation()}>
+              <svg width="18" height="14" viewBox="0 0 18 14" fill="none" aria-hidden="true">
+                <line x1="2" y1="2.5" x2="16" y2="2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                <line x1="2" y1="7" x2="16" y2="7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                <line x1="2" y1="11.5" x2="16" y2="11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+            </button>
+          </div>
+        {/each}
+        {#if !up.length}<p class="empty">{t("queue.empty")}</p>{/if}
+      {/if}
+    </div>
+
+    {#if !timerOpen}
+      <div class="foot">
+        {#if editing}
+          <div class="edit-bar">
+            <button class="x-circ" onclick={() => { editing = false; selected = []; }} aria-label={t("common.back")}>
+              <Icon name="x" size={18} color="#fff" />
+            </button>
+            <button class="act-pill" disabled={!selected.length} onclick={moveSelectedTop}>{t("queue.move_top")}</button>
+            <button class="act-pill" disabled={!selected.length} onclick={removeSelected}>{t("queue.remove")}</button>
+          </div>
+        {:else}
+          <div class="ctl-bar">
+            <button class="ctl-btn" class:on={app.player.shuffle} onclick={() => app.toggleShuffle()}>
+              <Icon name="shuffle" size={20} color={app.player.shuffle ? "var(--accent)" : "rgba(255,255,255,.88)"} />
+              <span>{t("tip.shuffle")}</span>
+            </button>
+            <button class="ctl-btn" class:on={app.player.repeat !== "off"} onclick={() => app.cycleRepeat()}>
+              <Icon name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={20} color={app.player.repeat !== "off" ? "var(--accent)" : "rgba(255,255,255,.88)"} />
+              <span>{t("ctl.repeat")}</span>
+            </button>
+            <button class="ctl-btn" class:on={app.sleep != null} onclick={() => (timerOpen = true)}>
+              <Icon name="timer" size={20} color={app.sleep != null ? "var(--accent)" : "rgba(255,255,255,.88)"} />
+              <span class="trunc">{sleepLabelText}</span>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {/if}
+  </div>
+</div>
+
+<style>
+  .dim { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, .55); }
+  .panel { position: absolute; left: 0; right: 0; bottom: 0; height: min(86vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px)); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: max(var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; }
+  .panel.settle { transition: transform .24s var(--ease); }
+  .grab { flex: none; touch-action: none; }
+  .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 8px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
+  .q-top { padding: 0 16px 10px; display: flex; align-items: flex-start; gap: 12px; }
+  .q-ht { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .q-title-row { display: flex; align-items: baseline; gap: 8px; }
+  h2 { margin: 0; font-size: 21px; font-weight: 700; color: #fff; }
+  .ecnt { font-size: 13px; font-weight: 600; color: var(--accent); }
+  .sub { font-size: 13px; color: var(--dim); }
+  .dev-line { align-self: flex-start; max-width: 100%; margin-top: 2px; display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--accent); }
+  .edit-pill { flex: none; height: 32px; padding: 0 14px; border-radius: 999px; background: rgba(255, 255, 255, .1); font-size: 13px; font-weight: 600; color: #fff; transition: background-color .14s ease-out, transform .14s var(--ease); }
+  .edit-pill:active { background: rgba(255, 255, 255, .18); transform: scale(.96); }
+
+  .now-row { padding: 6px 16px 10px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid rgba(255, 255, 255, .07); }
+  .now-ic { display: inline-flex; vertical-align: -2px; margin-right: 4px; }
+  .now-play { flex: none; width: 38px; height: 38px; border-radius: 50%; background: #fff; display: grid; place-items: center; transition: transform .14s var(--ease); }
+  .now-play:active { transform: scale(.92); }
+
+  .t-back { width: 100%; padding: 2px 16px 12px; display: flex; align-items: center; gap: 10px; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, .07); }
+  .bk-ic { flex: none; width: 34px; height: 34px; border-radius: 50%; background: rgba(255, 255, 255, .07); display: grid; place-items: center; }
+  .t-hd { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .t-hd b { font-size: 16px; color: #fff; }
+  .t-hd span { font-size: 12.5px; color: var(--dim); }
+  .t-list { padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .t-opt { width: 100%; height: 48px; padding: 0 12px; border-radius: 10px; display: flex; align-items: center; gap: 12px; font-size: 15px; color: rgba(255, 255, 255, .9); text-align: left; transition: background-color .12s ease-out; }
+  .t-opt:active { background: rgba(255, 255, 255, .08); }
+  .t-opt.on { color: var(--accent); font-weight: 600; }
+  .t-opt.off { color: hsla(0, 75%, 68%, .9); }
+  .t-lb { flex: 1; }
+  .t-sep { height: 1px; margin: 6px 8px; background: rgba(255, 255, 255, .07); }
+
+  .list { flex: 1; min-height: 0; position: relative; }
+  .sec { padding: 12px 16px 4px; font-size: 13px; font-weight: 700; color: var(--dim); }
+  .r { width: 100%; height: 60px; padding: 0 8px 0 16px; display: flex; align-items: center; gap: 12px; text-align: left; }
+  .q-row { transition: transform .14s var(--ease), background-color .12s ease-out; }
+  .q-row.dragging { position: relative; z-index: 3; transition: none; background: rgba(255, 255, 255, .09); border-radius: 10px; }
+  .tap:active { background: rgba(255, 255, 255, .06); }
+  .chk { flex: none; width: 19px; height: 19px; border-radius: 4px; border: 1.5px solid rgba(255, 255, 255, .4); display: grid; place-items: center; transition: background-color .12s ease-out, border-color .12s ease-out; }
+  .chk.on { background: var(--accent); border-color: var(--accent); }
+  .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .t { font-size: 15px; color: var(--text); min-width: 0; display: flex; align-items: center; }
+  .t.on { color: var(--accent); font-weight: 500; }
+  .a { font-size: 12.5px; color: var(--dim); }
+  .grip { flex: none; width: 42px; height: 48px; display: grid; place-items: center; color: rgba(255, 255, 255, .45); touch-action: none; cursor: grab; }
+  .grip:active { color: #fff; cursor: grabbing; }
+  .empty { padding: 16px; color: var(--dim); }
+
+  .foot { flex: none; padding: 10px 14px 12px; border-top: 1px solid rgba(255, 255, 255, .07); background: hsl(0 0% 8%); }
+  .ctl-bar { display: flex; gap: 8px; }
+  .ctl-btn { flex: 1; min-width: 0; height: 60px; padding: 8px 6px; border-radius: 10px; background: rgba(255, 255, 255, .07); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; font-size: 11.5px; font-weight: 500; color: rgba(255, 255, 255, .88); transition: background-color .14s ease-out, transform .14s var(--ease), color .14s ease-out; }
+  .ctl-btn.on { color: var(--accent); background: rgba(255, 255, 255, .1); }
+  .ctl-btn:active { transform: scale(.96); }
+  .edit-bar { display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .x-circ { flex: none; width: 40px; height: 40px; border-radius: 50%; background: rgba(255, 255, 255, .1); display: grid; place-items: center; transition: transform .14s var(--ease); }
+  .x-circ:active { transform: scale(.92); }
+  .act-pill { height: 40px; padding: 0 18px; border-radius: 999px; background: rgba(255, 255, 255, .14); font-size: 13.5px; font-weight: 600; color: #fff; transition: opacity .14s, background-color .14s, transform .14s var(--ease); }
+  .act-pill:disabled { opacity: .4; pointer-events: none; }
+  .act-pill:active { transform: scale(.96); }
+</style>

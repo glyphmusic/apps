@@ -1,0 +1,26 @@
+[package]
+name = "glyph-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared cross-platform Glyph application controller, devices, jam, and JSON/Tauri command backend."
+
+[dependencies]
+glyph-protocol.workspace = true
+glyph-core.workspace = true
+glyph-audio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+futures.workspace = true
+tokio.workspace = true
+flume.workspace = true
+reqwest.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+roxmltree = "0.20"
+qrcode = { version = "0.14", default-features = false }
+if-addrs = "0.13"
+socket2 = "0.6"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

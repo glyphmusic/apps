@@ -30,6 +30,26 @@ pub mod server;
 #[cfg(target_os = "windows")]
 pub mod webview;
 
+/// Disable status bar, zoom hotkeys, and WebView2's built-in error page on
+/// embed player webviews (DevTools, context menus, and accelerator keys are
+/// also disabled via `wry::WebViewBuilder`).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn harden_wry_webview(wv: &wry::WebView) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use wry::WebViewExtWindows;
+        if let Ok(settings) = wv.webview().Settings() {
+            let _ = settings.SetAreDevToolsEnabled(false);
+            let _ = settings.SetAreDefaultContextMenusEnabled(false);
+            let _ = settings.SetIsStatusBarEnabled(false);
+            let _ = settings.SetIsZoomControlEnabled(false);
+            let _ = settings.SetIsBuiltInErrorPageEnabled(false);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = wv;
+}
+
 use crate::MiniPlayerOptions;
 use glyph_protocol::ProviderId;
 use std::sync::Arc;

@@ -140,8 +140,10 @@ fn put_refresh(device_id: &str, token: &str) {
         return;
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Some(e) = entry(device_id) {
-        if e.set_password(token).is_ok() {
+    {
+        let id = device_id.to_string();
+        let tok = token.to_string();
+        if paths::run_keyring(move || entry(&id).is_some_and(|e| e.set_password(&tok).is_ok())) {
             let _ = std::fs::remove_file(fallback_path(device_id));
             return;
         }
@@ -157,8 +159,11 @@ fn get_refresh(device_id: &str) -> Option<String> {
         return Some(t);
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Some(t) = entry(device_id).and_then(|e| e.get_password().ok()) {
-        return Some(t);
+    {
+        let id = device_id.to_string();
+        if let Some(t) = paths::run_keyring(move || entry(&id).and_then(|e| e.get_password().ok())) {
+            return Some(t);
+        }
     }
     std::fs::read_to_string(fallback_path(device_id)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -168,8 +173,13 @@ fn forget_refresh(device_id: &str) {
         s.delete(&format!("account:{device_id}"));
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Some(e) = entry(device_id) {
-        let _ = e.delete_credential();
+    {
+        let id = device_id.to_string();
+        paths::run_keyring(move || {
+            if let Some(e) = entry(&id) {
+                let _ = e.delete_credential();
+            }
+        });
     }
     let _ = std::fs::remove_file(fallback_path(device_id));
 }
@@ -185,8 +195,10 @@ fn put_secret(name: &str, fallback: &str, text: &str) {
         return;
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, name) {
-        if e.set_password(text).is_ok() {
+    {
+        let k = name.to_string();
+        let v = text.to_string();
+        if paths::run_keyring(move || keyring::Entry::new(KEYCHAIN_SERVICE, &k).is_ok_and(|e| e.set_password(&v).is_ok())) {
             let _ = std::fs::remove_file(&path);
             return;
         }
@@ -201,8 +213,11 @@ fn get_secret(name: &str, fallback: &str) -> Option<String> {
         return Some(t);
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Some(t) = keyring::Entry::new(KEYCHAIN_SERVICE, name).ok().and_then(|e| e.get_password().ok()) {
-        return Some(t);
+    {
+        let k = name.to_string();
+        if let Some(t) = paths::run_keyring(move || keyring::Entry::new(KEYCHAIN_SERVICE, &k).ok().and_then(|e| e.get_password().ok())) {
+            return Some(t);
+        }
     }
     std::fs::read_to_string(paths::data_dir().join(fallback)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
@@ -212,8 +227,13 @@ fn forget_secret(name: &str, fallback: &str) {
         s.delete(name);
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, name) {
-        let _ = e.delete_credential();
+    {
+        let k = name.to_string();
+        paths::run_keyring(move || {
+            if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &k) {
+                let _ = e.delete_credential();
+            }
+        });
     }
     let _ = std::fs::remove_file(paths::data_dir().join(fallback));
 }
@@ -1172,6 +1192,38 @@ impl Backend {
                 Err(e) if !is_signed_out(&e) => tracing::warn!("server sign-out failed, signed out locally: {e:#}"),
                 _ => {}
             }
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Sign out of all devices on the account (server and local). The library stays on this device.
+    pub async fn account_sign_out_all(&self) -> Result<()> {
+        let Some(expected) = self.account() else { return Ok(()) };
+        let c = self.account_client()?;
+        self.spawn(async move {
+            with_auth(&c, |t| {
+                let c = c.clone();
+                async move {
+                    match c.sign_out_all_devices(&t).await {
+                        Ok(()) => Ok(()),
+                        // Older servers only expose per-device deletion + self/signout.
+                        Err(e) if matches!(server_error(&e), Some((404 | 405, _))) => {
+                            let list = c.devices(&t).await?;
+                            for d in list.devices.into_iter().filter(|d| !d.current) {
+                                match c.remove_device(&t, &d.id).await {
+                                    Err(rm_err) if matches!(server_error(&rm_err), Some((404, _))) => {}
+                                    res => res?,
+                                }
+                            }
+                            c.sign_out_device(&t).await
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            })
+            .await?;
+            drop_local_if_current(Some(&expected));
             Ok(())
         })
         .await?

@@ -18,7 +18,9 @@ pub fn load(plugin: &str, item: &crate::plugins::SettingItem) -> Option<String> 
         return store.get(&key).filter(|s| !s.is_empty());
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
-    return keyring::Entry::new("glyph-plugin", &key).ok()?.get_password().ok().filter(|s| !s.is_empty());
+    return crate::paths::run_keyring(move || {
+        keyring::Entry::new("glyph-plugin", &key).ok()?.get_password().ok().filter(|s| !s.is_empty())
+    });
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
     None
 }
@@ -35,15 +37,18 @@ pub fn store(plugin: &str, item: &crate::plugins::SettingItem, value: &str) -> R
     }
     #[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
     {
-        let entry = keyring::Entry::new("glyph-plugin", &key).map_err(|_| anyhow!("secure credential storage is unavailable"))?;
-        if value.is_empty() {
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(_) => Err(anyhow!("could not delete plugin credential")),
+        let value = value.to_string();
+        crate::paths::run_keyring(move || {
+            let entry = keyring::Entry::new("glyph-plugin", &key).map_err(|_| anyhow!("secure credential storage is unavailable"))?;
+            if value.is_empty() {
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                    Err(_) => Err(anyhow!("could not delete plugin credential")),
+                }
+            } else {
+                entry.set_password(&value).map_err(|_| anyhow!("could not save plugin credential in OS keychain"))
             }
-        } else {
-            entry.set_password(value).map_err(|_| anyhow!("could not save plugin credential in OS keychain"))
-        }
+        })
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "linux")))]
     Err(anyhow!("secure credential storage is unavailable"))

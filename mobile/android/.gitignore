@@ -2,3 +2,6 @@
 build/
 local.properties
 app/src/main/jniLibs/
+
+# Built WebView UI synced from glyph-ui/dist
+app/src/main/assets/ui/

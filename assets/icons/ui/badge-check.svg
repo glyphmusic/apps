@@ -1,16 +1,5 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
-<svg
-  class="lucide lucide-badge-check"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" />
-  <path d="m9 12 2 2 4-4" />
+<!-- Glyph icon set, see docs/ICONS.md -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M14.91 4.98A3.3 3.3 0 0 1 19.02 9.09A3.3 3.3 0 0 1 19.02 14.91A3.3 3.3 0 0 1 14.91 19.02A3.3 3.3 0 0 1 9.09 19.02A3.3 3.3 0 0 1 4.98 14.91A3.3 3.3 0 0 1 4.98 9.09A3.3 3.3 0 0 1 9.09 4.98A3.3 3.3 0 0 1 14.91 4.98Z"/>
+  <path d="M8.5 12.2L9.7 13.4Q10.9 14.6 12.42 13.01L15.5 9.8"/>
 </svg>

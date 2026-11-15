@@ -1,6 +1,6 @@
 # Retention for this checkout only. Never starts a build.
 [CmdletBinding(SupportsShouldProcess=$true)]
-param([ValidateSet('debug','fast','release')][string]$KeepProfile='debug', [switch]$Plan)
+param([ValidateSet('debug','fast','release')][string]$KeepProfile='debug', [switch]$Plan, [int]$UnusedDays=14, [int]$MaxSizeGB=50)
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $target=[IO.Path]::GetFullPath((Join-Path $repo 'target'))
@@ -47,42 +47,28 @@ function Remove-OldOutput {
 }
 # Abandoned second target tree: never used by the current scripts.
 Remove-OldOutput (Join-Path $target 'ui') -Tree
-# Keep the selected profile and recently used profiles. Never clean active caches.
+# Every profile (debug, fast, release, Android targets) keeps its build cache,
+# so a profile switch never forces a full rebuild. Only outputs nobody used for
+# a while go away: old app executables here, stale artifacts via cargo-sweep.
+# -KeepProfile is still accepted from older callers; no profile is deleted.
 $cutoff=[DateTime]::UtcNow.AddHours(-24)
-foreach ($profile in @('debug','fast','release')) {
-    $dir=Join-Path $target $profile
-    if ($profile -eq $KeepProfile -or -not (Test-Path -LiteralPath $dir)) { continue }
-    $dir=Assert-OwnedPath $dir
-    # Nested writes do not reliably change the directory timestamp on Windows.
-    $newest=Get-ChildItem -LiteralPath $dir -Force -File -ErrorAction Stop | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    $stamp=(Get-Item -LiteralPath $dir).LastWriteTimeUtc
-    if ($newest -and $newest.LastWriteTimeUtc -gt $stamp) { $stamp=$newest.LastWriteTimeUtc }
-    # Cargo check/tests can update only nested artifacts. Inspect the small
-    # fingerprint index rather than walking the entire dependency cache.
-    $fingerprints=Join-Path $dir '.fingerprint'
-    if (Test-Path -LiteralPath $fingerprints) {
-        $fingerprints=Assert-OwnedPath $fingerprints
-        foreach ($entry in @(Get-ChildItem -LiteralPath $fingerprints -Directory -Force)) {
-            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-            $invoked=Join-Path $entry.FullName 'invoked.timestamp'
-            if (Test-Path -LiteralPath $invoked) {
-                $time=(Get-Item -LiteralPath $invoked).LastWriteTimeUtc
-                if ($time -gt $stamp) { $stamp=$time }
-            }
-        }
+$profiles=@()
+foreach ($dir in @(Get-ChildItem -LiteralPath $target -Directory -Force)) {
+    if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+    if (Test-Path -LiteralPath (Join-Path $dir.FullName '.fingerprint')) { $profiles += $dir.FullName; continue }
+    # Cross-compiled targets: target\<triple>\<profile>
+    foreach ($sub in @(Get-ChildItem -LiteralPath $dir.FullName -Directory -Force)) {
+        if ($sub.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+        if (Test-Path -LiteralPath (Join-Path $sub.FullName '.fingerprint')) { $profiles += $sub.FullName }
     }
-    if ($stamp -lt $cutoff) { Remove-OldOutput $dir -Tree }
 }
-$active=Join-Path $target $KeepProfile
-if ((Test-Path -LiteralPath $active) -and -not $Plan -and -not $WhatIfPreference) {
-    $active=Assert-OwnedPath $active
-    [IO.File]::WriteAllText((Join-Path $active '.glyph-last-used'),[DateTime]::UtcNow.ToString('o'))
-}
-# Stable runtime copy is overwritten in place; obsolete preview copies go away.
-Remove-OldOutput (Join-Path $active 'glyph-preview.exe')
-# Retain the newest executable for each Cargo hash family, plus recent outputs.
-$deps=Join-Path $active 'deps'
-if (Test-Path -LiteralPath $deps) {
+foreach ($profileDir in $profiles) {
+    $profileDir=Assert-OwnedPath $profileDir
+    # Stable runtime copy is overwritten in place; obsolete preview copies go away.
+    Remove-OldOutput (Join-Path $profileDir 'glyph-preview.exe')
+    # Retain the newest executable for each Cargo hash family, plus recent outputs.
+    $deps=Join-Path $profileDir 'deps'
+    if (-not (Test-Path -LiteralPath $deps)) { continue }
     $deps=Assert-OwnedPath $deps
     $executables=@(Get-ChildItem -LiteralPath $deps -File -Filter '*.exe' | Where-Object { $_.Name -match '^glyph(?:[_-][a-z_]+)?-[0-9a-f]+\.exe$' })
     foreach ($group in @($executables | Group-Object { $_.BaseName -replace '-[0-9a-f]+$','' })) {
@@ -98,4 +84,33 @@ $timings=Join-Path $target 'cargo-timings'
 if (Test-Path -LiteralPath $timings) {
     $timings=Assert-OwnedPath $timings
     foreach ($old in @(Get-ChildItem -LiteralPath $timings -File -Filter 'cargo-timing-*.html' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 5)) { Remove-OldOutput $old.FullName }
+}
+# Stale artifacts in all profiles, at most once a day (cargo install cargo-sweep):
+# outputs of Rust toolchains no longer installed, artifacts Cargo has not read
+# for $UnusedDays days (each build reads the fingerprint of every crate it
+# uses, even unchanged ones), then the least recently used ones while target
+# is above $MaxSizeGB. cargo-sweep only deletes inside target.
+$sweepStamp=Join-Path $target '.glyph-sweep'
+$dryRun=[bool]($Plan -or $WhatIfPreference)
+$due=$dryRun -or -not (Test-Path -LiteralPath $sweepStamp) -or (Get-Item -LiteralPath $sweepStamp).LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-1)
+if ($due) {
+    $cargoBin=Join-Path $HOME '.cargo\bin'
+    if (Test-Path -LiteralPath $cargoBin) { $env:PATH="$cargoBin;$env:PATH" }
+    $sweepExe=(Get-Command cargo-sweep -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $sweepExe) {
+        Write-Warning 'Stale artifact cleanup skipped: cargo-sweep is not installed (cargo install cargo-sweep).'
+    } else {
+        $dry=@(); if ($dryRun) { $dry=@('--dry-run') }
+        $complete=$true
+        foreach ($rule in @(@('--installed'), @('--time',"$UnusedDays"), @('--maxsize',"${MaxSizeGB}GB"))) {
+            if (Test-BuildActive) { Write-Host 'Cleanup deferred: build started.'; $complete=$false; break }
+            # cargo-sweep logs to stderr; Windows PowerShell would turn that into errors.
+            $ErrorActionPreference='Continue'
+            & $sweepExe sweep @dry @rule $repo 2>&1 | ForEach-Object { Write-Host "$_" }
+            $code=$LASTEXITCODE
+            $ErrorActionPreference='Stop'
+            if ($code -ne 0) { Write-Warning "Cleanup incomplete: cargo sweep $($rule -join ' ') failed (exit $code)"; $complete=$false }
+        }
+        if ($complete -and -not $dryRun) { [IO.File]::WriteAllText($sweepStamp,[DateTime]::UtcNow.ToString('o')) }
+    }
 }

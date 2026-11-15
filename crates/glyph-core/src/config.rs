@@ -339,7 +339,7 @@ pub struct VisualsConfig {
     /// active window (saves power). Off: full rate all the time.
     pub throttle_unfocused: bool,
     /// Shape of the background glow: "" = a new one with every song, else
-    /// one shape always ("strahl", "band", "sonnenaufgang", "horizont").
+    /// one shape always ("strahl", "band", "sonnenaufgang", "horizont", "solid").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub glow_shape: String,
 }
@@ -520,16 +520,37 @@ impl Default for StorageConfig {
     }
 }
 
-/// Optional hooks into other apps. Off unless the user turns them on.
+/// Optional hooks into other apps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IntegrationsConfig {
     /// Show the song Glyph is playing in the user's Discord profile
-    /// (Rich Presence). Off by default; the user decides who sees what.
+    /// (Rich Presence). On by default on desktop.
     pub discord_presence: bool,
     /// Discord application ID whose name and assets the presence shows.
     /// Empty = the ID built into the app (see `src/discord.rs`).
     pub discord_client_id: String,
+}
+
+/// Default section order for user profiles (`playlists`, `recent`).
+pub fn default_profile_sections() -> Vec<String> {
+    glyph_protocol::PROFILE_SECTIONS.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Keeps known profile section keys in order without duplicates and appends missing defaults.
+pub fn normalize_profile_sections(order: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in order {
+        if glyph_protocol::PROFILE_SECTIONS.contains(&s.as_str()) && !out.contains(s) {
+            out.push(s.clone());
+        }
+    }
+    for &def in glyph_protocol::PROFILE_SECTIONS {
+        if !out.iter().any(|s| s == def) {
+            out.push(def.to_string());
+        }
+    }
+    out
 }
 
 /// Sharing songs, lists and artists.
@@ -540,17 +561,20 @@ pub struct SharingConfig {
     /// plays in the browser, in Glyph and with `yt-dlp`. Off: the song's own
     /// link on its platform, and lists as a `glyph:playlist:` code.
     pub glyph_links: bool,
+    /// Order of sections shown on the user's profile (`playlists`, `recent`).
+    #[serde(default = "default_profile_sections")]
+    pub profile_sections: Vec<String>,
 }
 
 impl Default for SharingConfig {
     fn default() -> Self {
-        Self { glyph_links: true }
+        Self { glyph_links: true, profile_sections: default_profile_sections() }
     }
 }
 
 impl Default for IntegrationsConfig {
     fn default() -> Self {
-        Self { discord_presence: false, discord_client_id: String::new() }
+        Self { discord_presence: true, discord_client_id: String::new() }
     }
 }
 
@@ -826,12 +850,12 @@ glyph_links = false
     }
 
     #[test]
-    fn discord_presence_is_opt_in() {
+    fn discord_presence_defaults_on() {
         let c = Config::default();
-        assert!(!c.integrations.discord_presence);
-        assert!(c.integrations.discord_client_id.is_empty());
-        let c = Config::from_toml("[integrations]\ndiscord_presence = true\ndiscord_client_id = \"123456789012345678\"\n").unwrap();
         assert!(c.integrations.discord_presence);
+        assert!(c.integrations.discord_client_id.is_empty());
+        let c = Config::from_toml("[integrations]\ndiscord_presence = false\ndiscord_client_id = \"123456789012345678\"\n").unwrap();
+        assert!(!c.integrations.discord_presence);
         assert_eq!(c.integrations.discord_client_id, "123456789012345678");
     }
 

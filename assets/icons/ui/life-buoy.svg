@@ -1,9 +1,9 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
+<!-- Glyph icon set, see docs/ICONS.md -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="12" cy="12" r="10" />
-  <circle cx="12" cy="12" r="4" />
-  <path d="m4.93 4.93 4.24 4.24" />
-  <path d="m14.83 9.17 4.24-4.24" />
-  <path d="m14.83 14.83 4.24 4.24" />
-  <path d="m9.17 14.83-4.24 4.24" />
+  <circle cx="12" cy="12" r="9.5"/>
+  <circle cx="12" cy="12" r="4"/>
+  <path d="M5.3 5.3l3.9 3.9"/>
+  <path d="M14.8 14.8l3.9 3.9"/>
+  <path d="M14.8 9.2l3.9-3.9"/>
+  <path d="M9.2 14.8l-3.9 3.9"/>
 </svg>

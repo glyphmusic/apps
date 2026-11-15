@@ -52,6 +52,10 @@ import java.util.Objects;
  */
 public class PlaybackService extends Service {
 
+    static {
+        System.loadLibrary("glyph_android");
+    }
+
     private static final String CHANNEL = "playback";
     private static final int NOTIFICATION_ID = 1;
     /** Custom action / intent action of the add (like) button. */
@@ -76,7 +80,7 @@ public class PlaybackService extends Service {
     private static final long VOLUME_SETTLE_MS = 1_500;
 
     private static String title = "", artist = "", coverPath = "";
-    private static boolean playing = false, buffering = false, liked = false;
+    private static boolean playing = false, buffering = false, liked = false, jamActive = false;
     private static long positionMs = 0, durationMs = 0;
     /** Volume of the network device playing now, -1 when the phone plays. */
     private static int remoteVolume = -1;
@@ -115,8 +119,21 @@ public class PlaybackService extends Service {
         if (remote < 0 || SystemClock.uptimeMillis() - volumeKeyAt > VOLUME_SETTLE_MS) {
             remoteVolume = remote;
         }
+        syncService(ctx);
+    }
+
+    /** Keeps the service running in the foreground with CPU/Wi-Fi locks whenever a Jam is active. */
+    static void setJamActive(Context ctx, boolean active) {
+        if (jamActive == active) {
+            return;
+        }
+        jamActive = active;
+        syncService(ctx);
+    }
+
+    private static void syncService(Context ctx) {
         Intent i = new Intent(ctx, PlaybackService.class);
-        if (!has) {
+        if (title.isEmpty() && !jamActive) {
             ctx.stopService(i);
             return;
         }
@@ -236,9 +253,9 @@ public class PlaybackService extends Service {
                         positionMs, playing && !buffering ? 1f : 0f)
                 .build());
 
-        boolean active = playing || buffering;
-        String key = meta + '\u0000' + playing + '\u0000' + buffering + '\u0000' + liked;
-        // Paused: the grace timer already runs (or the foreground is gone).
+        boolean active = playing || buffering || jamActive;
+        String key = meta + '\u0000' + playing + '\u0000' + buffering + '\u0000' + liked + '\u0000' + jamActive;
+        // Paused (and not in a Jam): the grace timer already runs (or the foreground is gone).
         if (!mustStartForeground && key.equals(notificationKey) && (foreground || !active)) {
             return;
         }
@@ -274,7 +291,7 @@ public class PlaybackService extends Service {
 
     /** Still paused after the grace time: the notification may be swiped away, the phone may sleep. */
     private void leaveForeground() {
-        if (playing || buffering) {
+        if (playing || buffering || jamActive) {
             return;
         }
         if (foreground) {
@@ -390,6 +407,17 @@ public class PlaybackService extends Service {
     private Notification buildNotification(int likeIcon, String likeLabel) {
         Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent content = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        if (title.isEmpty()) {
+            return new NotificationCompat.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setContentTitle("Glyph Jam")
+                    .setContentText("Jam active")
+                    .setContentIntent(content)
+                    .setOngoing(true)
+                    .setOnlyAlertOnce(true)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .build();
+        }
         Intent likeIntent = new Intent(this, PlaybackService.class).setAction(ACTION_LIKE);
         NotificationCompat.Action like = new NotificationCompat.Action(likeIcon, likeLabel,
                 PendingIntent.getService(this, 1, likeIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));

@@ -16,8 +16,10 @@
 use glyph_protocol::Track;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
     #[default]
     Off,
@@ -26,7 +28,8 @@ pub enum RepeatMode {
 }
 
 /// How shuffle picks the play order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShuffleMode {
     /// Feels random: songs of one artist are spread over the whole list and
     /// songs played lately come last (the "dithering" approach Spotify
@@ -35,6 +38,28 @@ pub enum ShuffleMode {
     Smart,
     /// Every order is equally likely (Fisher-Yates).
     Random,
+}
+
+/// Serializable queue snapshot for saving and restoring playback across restarts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueSnapshot {
+    pub base: Vec<Track>,
+    pub order: Vec<usize>,
+    pub pos: Option<usize>,
+    pub shuffle: bool,
+    pub shuffle_mode: ShuffleMode,
+    pub repeat: RepeatMode,
+    pub manual: Vec<Track>,
+    pub manual_current: Option<Track>,
+    pub recent: Vec<String>,
+    pub next_round: Option<Vec<usize>>,
+}
+
+impl QueueSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.base.is_empty() && self.manual.is_empty() && self.manual_current.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -458,6 +483,59 @@ impl Queue {
 
     pub fn set_repeat(&mut self, mode: RepeatMode) {
         self.repeat = mode;
+        self.prepare_round();
+    }
+
+    pub fn snapshot(&self) -> QueueSnapshot {
+        QueueSnapshot {
+            base: self.base.clone(),
+            order: self.order.clone(),
+            pos: self.pos,
+            shuffle: self.shuffle,
+            shuffle_mode: self.shuffle_mode,
+            repeat: self.repeat,
+            manual: self.manual.clone(),
+            manual_current: self.manual_current.clone(),
+            recent: self.recent.clone(),
+            next_round: self.next_round.clone(),
+        }
+    }
+
+    /// Restores a saved queue snapshot, validating all indices so a corrupt
+    /// file can never cause out-of-bounds panics.
+    pub fn restore(&mut self, snap: QueueSnapshot) {
+        let n = snap.base.len();
+        let valid_perm = |v: &[usize]| -> bool {
+            if v.len() != n {
+                return false;
+            }
+            let mut seen = vec![false; n];
+            for &i in v {
+                if i >= n || seen[i] {
+                    return false;
+                }
+                seen[i] = true;
+            }
+            true
+        };
+        let order_ok = valid_perm(&snap.order);
+        let order = if order_ok { snap.order } else { (0..n).collect() };
+        let pos = if order_ok {
+            snap.pos.filter(|&p| p < order.len())
+        } else {
+            (!snap.base.is_empty()).then_some(0)
+        };
+        let next_round = snap.next_round.filter(|r| valid_perm(r));
+        self.base = snap.base;
+        self.order = order;
+        self.pos = pos;
+        self.shuffle = snap.shuffle;
+        self.shuffle_mode = snap.shuffle_mode;
+        self.repeat = snap.repeat;
+        self.manual = snap.manual;
+        self.manual_current = snap.manual_current;
+        self.recent = snap.recent;
+        self.next_round = next_round;
         self.prepare_round();
     }
 }

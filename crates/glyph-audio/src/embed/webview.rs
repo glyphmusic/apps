@@ -163,6 +163,9 @@ impl WebviewTransport {
                     }
                 };
                 let wb = WebViewBuilder::new()
+                    .with_devtools(false)
+                    .with_browser_accelerator_keys(false)
+                    .with_default_context_menus(false)
                     .with_bounds(wry::Rect {
                         position: LogicalPosition::new(0.0, 0.0).into(),
                         size: LogicalSize::new(MINI_SIZE.0, MINI_SIZE.1).into(),
@@ -190,6 +193,7 @@ impl WebviewTransport {
                 let webview = wb
                     .build(&Win32Parent(raw_hwnd))
                     .map_err(|e| anyhow!("webview: {e}"))?;
+                super::harden_wry_webview(&webview);
                 Ok((hwnd, webview))
             })();
 

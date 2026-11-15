@@ -31,10 +31,14 @@ and register any running animation in the app's frame loop
 
 - Flat UI. Gradients and glow only in the page background; panels, text and
   buttons are flat: no shadows, no glow, no coloured borders.
+- No outlines: menus, panels, dialogs and settings have no border. They stand
+  out by a solid (not see-through) fill. Settings blur the page behind them.
+- Errors are shown as a calm card (round alert icon, plain sentence, details
+  folded away, try again), never as a raw line of text.
 - ASCII is an accent only: the background raster, `[ BADGES ]`, skeleton
   shimmer, the optional ASCII cover (the real cover drawn in characters).
-  Everything else is a normal polished desktop UI: Lucide icons, Inter,
-  small sizes (about 13.5 px body).
+  Everything else is a normal polished desktop UI: Glyph's own round icons
+  (`docs/ICONS.md`), Inter, small sizes (about 13.5 px body).
 - One accent colour, the pink. Text stays readable on the glow.
 - Toggleable things show their state in the icon itself: filled when on.
 - Centre things properly; keep spacing tight and consistent.

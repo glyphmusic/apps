@@ -973,18 +973,16 @@ impl Library {
                 self.playlists.len() - 1
             }
         };
-        let p = &mut self.playlists[idx];
-        let mut seen = TrackIndex::from_tracks(&p.tracks);
-        let mut added = 0;
-        for t in tracks {
-            if p.tracks.len() >= playlist_track_limit() { break; }
-            if !seen.contains(&t) {
-                seen.insert(&t);
-                p.tracks.push(t);
-                added += 1;
-            }
-        }
+        let added = append_unique_tracks(&mut self.playlists[idx], tracks);
         (&mut self.playlists[idx], added)
+    }
+
+    /// Appends imported tracks to an existing playlist without duplicates,
+    /// respecting the playlist track limit. Returns `None` if `id` is missing.
+    pub fn add_imported_to_playlist(&mut self, id: &str, tracks: Vec<Track>) -> Option<(&mut Playlist, usize)> {
+        let idx = self.playlists.iter().position(|p| p.id == id)?;
+        let added = append_unique_tracks(&mut self.playlists[idx], tracks);
+        Some((&mut self.playlists[idx], added))
     }
 
     /// Saves imported albums after the ones already saved (same title +
@@ -1047,6 +1045,22 @@ impl Library {
             self.lyrics_offsets.insert(key, offset_ms);
         }
     }
+}
+
+fn append_unique_tracks(p: &mut Playlist, tracks: Vec<Track>) -> usize {
+    let mut seen = TrackIndex::from_tracks(&p.tracks);
+    let mut added = 0;
+    for t in tracks {
+        if p.tracks.len() >= playlist_track_limit() {
+            break;
+        }
+        if !seen.contains(&t) {
+            seen.insert(&t);
+            p.tracks.push(t);
+            added += 1;
+        }
+    }
+    added
 }
 
 /// Same library entry: same provider id, or the same song by title/artist/duration.
@@ -1297,7 +1311,10 @@ mod tests {
         assert_eq!((p.tracks.len(), added), (2, 2));
         let (p, added) = lib.save_import("Imp", Some("https://x/pl"), vec![tr("2", "B"), tr("3", "C")]);
         assert_eq!((p.tracks.len(), added), (3, 1));
+        let pid = p.id.clone();
         assert_eq!(lib.playlists.len(), 1);
+        let (p, added) = lib.add_imported_to_playlist(&pid, vec![tr("3", "C"), tr("4", "D")]).unwrap();
+        assert_eq!((p.tracks.len(), added), (4, 1));
     }
 
     #[test]

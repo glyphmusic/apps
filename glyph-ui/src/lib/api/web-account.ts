@@ -1,0 +1,1337 @@
+// Account sign-in, E2E keyring, library/stats sync, and public profiles for the
+// browser player (/web). Mirrors glyph-core::{account, sync, e2e, e2e_sync} and
+// glyph-tauri::account commands.
+import type {
+  Account, BackendEvents, Config, Library, ListKey, Playlist, Profile, RecentItem, SearchItem, Track,
+} from "./types";
+import type { ProfileSettingsData } from "../settings/types";
+import { listId, sameList, trackKey } from "./types";
+import {
+  b64url, DataKey, deriveLoginKey, derivePasswordKey, DeviceKey, openFromDevice, randomBytes,
+  sealToDevice, splitPairCode, suspiciousSignInSalt, SYNC_KIND, type SyncItem, unwrapWithPassword, wrapWithPassword,
+} from "./web-e2e";
+import {
+  ApiError, server, serverOrigin, wireTrack,
+  type AccountSession, type DeviceInfo, type ProfileSettingsWire, type PublicProfile,
+} from "./web-server";
+import type { MonthStats, WebStats } from "./web-stats";
+import { installId, load, remove, save } from "./web-store";
+
+interface StoredAccountSession {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number; // unix seconds
+  device_id: string;
+  account: {
+    id: string;
+    handle: string;
+    device_limit: number;
+    created_at: number;
+    has_password: boolean;
+  };
+}
+
+interface SyncJournal {
+  rev: number;
+  /** `${kind}\0${key}` -> { hash, rev, updated_at } */
+  known: Record<string, { hash: string; rev: number; updated_at: number }>;
+  /** blinded hex -> [plainKind, plainKey] */
+  blind: Record<string, [string, string]>;
+  /** keyring items from server: key -> value */
+  keyring: Record<string, any>;
+}
+
+interface KeyStore {
+  device_key: string; // base64url 32-byte secret
+  data_key?: string | null; // base64url 32-byte DataKey
+  pw_key?: string | null; // base64url 32-byte vault key
+}
+
+interface GuestSnapshot {
+  library: Library;
+  stats: Record<string, MonthStats>;
+}
+
+const norm = (s: string) => s.trim().toLowerCase();
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+function detectPlatform(): string {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
+  if (ua.includes("android")) return "android";
+  if (ua.includes("iphone") || ua.includes("ipad") || ua.includes("ipod")) return "ios";
+  if (ua.includes("win")) return "windows";
+  if (ua.includes("mac")) return "macos";
+  if (ua.includes("linux")) return "linux";
+  return "other";
+}
+
+function detectDeviceName(): string {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const browser = ua.includes("Firefox/")
+    ? "Firefox"
+    : ua.includes("Edg/")
+      ? "Edge"
+      : ua.includes("Chrome/")
+        ? "Chrome"
+        : ua.includes("Safari/")
+          ? "Safari"
+          : "Browser";
+  return `Glyph Web (${browser})`;
+}
+
+function listSyncKey(l: ListKey): string {
+  return listId(l);
+}
+
+function searchSyncKey(s: SearchItem): string {
+  if (s.kind === "query") return `q:${norm(s.text)}`;
+  if (s.kind === "artist") return `a:${norm(s.name)}`;
+  return `t:${trackKey(s.track)}`;
+}
+
+function quickHash(v: unknown): string {
+  return JSON.stringify(v);
+}
+
+function normalizeSections(raw?: readonly string[] | null): ("playlists" | "recent")[] {
+  const out: ("playlists" | "recent")[] = [];
+  for (const s of raw ?? []) {
+    if ((s === "playlists" || s === "recent") && !out.includes(s)) out.push(s);
+  }
+  if (!out.includes("playlists")) out.push("playlists");
+  if (!out.includes("recent")) out.push("recent");
+  return out;
+}
+
+function wireToProfileSettings(handle: string, w: Partial<ProfileSettingsWire>, fallback?: string[]): ProfileSettingsData {
+  const av = w.avatar ?? null;
+  const bn = w.banner ?? null;
+  return {
+    public: Boolean(w.public),
+    show_recent: w.show_recent ?? true,
+    playlists: w.playlists ?? [],
+    sections: normalizeSections(w.sections?.length ? w.sections : fallback),
+    avatar: av,
+    banner: bn,
+    avatar_url: av ? server.profileImageUrl(handle, av) : null,
+    banner_url: bn ? server.profileImageUrl(handle, bn) : null,
+  };
+}
+
+export interface WebAccountHost {
+  getConfig: () => Config;
+  setConfig: (c: Config) => void;
+  getLibrary: () => Library;
+  setLibrary: (l: Library) => void;
+  getLyricsOffsets: () => Record<string, number>;
+  setLyricsOffsets: (o: Record<string, number>) => void;
+  stats: WebStats;
+  emit: <K extends keyof BackendEvents>(ev: K, p: BackendEvents[K]) => void;
+  toast: (key: string, kind?: "ok" | "info", vars?: Record<string, string | number>) => void;
+  onSessionChange?: () => void;
+  onBeforeAccountSwitch?: (prevAccountId: string | null) => void;
+  onAfterAccountSwitch?: (nextAccountId: string | null, signOut: boolean) => void;
+}
+
+export class WebAccountManager {
+  private session: StoredAccountSession | null;
+  private devices: DeviceInfo[] = [];
+  private syncing = false;
+  private syncError: string | null = null;
+  private lastSyncedAt: number | null = null;
+  private keysLocked = false;
+  private accountsAvailable = true;
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
+  private recentTimer: ReturnType<typeof setTimeout> | null = null;
+  private webLogins: { domain: string; at: number }[] = [];
+
+  constructor(private host: WebAccountHost) {
+    this.session = load<StoredAccountSession>("account") ?? null;
+    this.webLogins = load<{ domain: string; at: number }[]>("web_logins") ?? [];
+    if (this.session) {
+      // Load cached devices and kick off an initial refresh + sync
+      this.devices = load<DeviceInfo[]>(`devices.${this.session.account.id}`) ?? [];
+      setTimeout(() => {
+        void this.refreshAccountAndSync();
+      }, 150);
+    }
+  }
+
+  setAccountsAvailable(ok: boolean) {
+    this.accountsAvailable = ok;
+  }
+
+  isSignedIn(): boolean {
+    return this.session !== null;
+  }
+
+  uiAccount(): Account | null {
+    if (!this.session) return null;
+    return {
+      handle: this.session.account.handle,
+      syncing: this.syncing,
+    };
+  }
+
+  /** Valid access token, refreshing automatically when within 60s of expiry. */
+  async validToken(): Promise<string> {
+    const s = this.session;
+    if (!s) throw new Error("signed_out");
+    if (s.expires_at - nowSec() > 60) return s.access_token;
+    try {
+      const next = await server.tokenRefresh(s.refresh_token);
+      this.saveSession(next);
+      return next.access_token;
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.code === "unauthorized")) {
+        this.clearSessionAndRestoreGuest();
+        throw new Error("signed_out");
+      }
+      return s.access_token;
+    }
+  }
+
+  private saveSession(ws: AccountSession) {
+    this.session = {
+      access_token: ws.access_token,
+      refresh_token: ws.refresh_token,
+      expires_at: nowSec() + (ws.access_expires_in_s || 3600),
+      device_id: ws.device_id,
+      account: {
+        id: ws.account.id,
+        handle: ws.account.handle,
+        device_limit: ws.account.device_limit ?? 3,
+        created_at: ws.account.created_at,
+        has_password: Boolean(ws.account.has_password),
+      },
+    };
+    save("account", this.session);
+  }
+
+  private getKeyStore(accountId: string): { store: KeyStore; dk: DeviceKey; dataKey: DataKey | null } {
+    let store = load<KeyStore>(`keys.${accountId}`);
+    let dk = store?.device_key ? DeviceKey.fromB64(store.device_key) : null;
+    if (!dk) {
+      dk = DeviceKey.generate();
+      store = { ...store, device_key: dk.toB64() };
+      save(`keys.${accountId}`, store);
+    }
+    const dataKey = store?.data_key ? DataKey.fromB64(store.data_key) : null;
+    return { store: store!, dk, dataKey };
+  }
+
+  private saveDataKey(accountId: string, k: DataKey, pwKey?: Uint8Array) {
+    const { store } = this.getKeyStore(accountId);
+    store.data_key = k.toB64();
+    if (pwKey) store.pw_key = b64url(pwKey);
+    save(`keys.${accountId}`, store);
+    this.keysLocked = false;
+  }
+
+  private getJournal(accountId: string): SyncJournal {
+    return (
+      load<SyncJournal>(`sync.${accountId}`) ?? {
+        rev: 0,
+        known: {},
+        blind: {},
+        keyring: {},
+      }
+    );
+  }
+
+  private saveJournal(accountId: string, j: SyncJournal) {
+    save(`sync.${accountId}`, j);
+  }
+
+  // ---- Guest library backup & switch ----
+
+  private stashGuestBeforeSignIn(accountId: string) {
+    this.host.onBeforeAccountSwitch?.(null);
+    const curLib = this.host.getLibrary();
+    const curStats = this.host.stats.ownMonths();
+    const guestCount = curLib.liked.length + curLib.playlists.length + curLib.saved_albums.length + curLib.followed.length;
+    if (guestCount > 0 || Object.keys(curStats).length > 0) {
+      save("guest_backup", { library: curLib, stats: curStats });
+    }
+    const cachedLib = load<Library>(`account_lib.${accountId}`);
+    if (cachedLib) {
+      this.host.setLibrary(cachedLib);
+    } else {
+      this.host.setLibrary({
+        liked: [],
+        recent: [],
+        playlists: [],
+        saved_albums: [],
+        pinned: [],
+        recent_lists: [],
+        followed: [],
+        downloads: [],
+        search_history: [],
+        hidden_sidebar: [],
+      });
+    }
+    this.host.onAfterAccountSwitch?.(accountId, false);
+  }
+
+  private checkGuestMergePrompt() {
+    const backup = load<GuestSnapshot>("guest_backup");
+    if (!backup) return;
+    const songs = backup.library.liked.length;
+    const playlists = backup.library.playlists.length;
+    const statsMonths = Object.keys(backup.stats ?? {}).length;
+    if (songs > 0 || playlists > 0 || statsMonths > 0) {
+      this.host.emit("account_merge", { needed: true });
+    } else {
+      remove("guest_backup");
+    }
+  }
+
+  private clearSessionAndRestoreGuest(accountDeleted = false) {
+    const prevId = this.session?.account.id ?? null;
+    if (!accountDeleted) {
+      this.host.onBeforeAccountSwitch?.(prevId);
+    }
+    if (prevId && !accountDeleted) {
+      save(`account_lib.${prevId}`, this.host.getLibrary());
+    }
+    this.session = null;
+    this.devices = [];
+    this.syncing = false;
+    this.syncError = null;
+    this.keysLocked = false;
+    remove("account");
+    const backup = load<GuestSnapshot>("guest_backup");
+    if (backup) {
+      this.host.setLibrary(backup.library);
+      remove("guest_backup");
+    } else {
+      this.host.setLibrary({
+        liked: [],
+        recent: [],
+        playlists: [],
+        saved_albums: [],
+        pinned: [],
+        recent_lists: [],
+        followed: [],
+        downloads: [],
+        search_history: [],
+        hidden_sidebar: [],
+      });
+    }
+    this.host.onAfterAccountSwitch?.(null, true);
+    this.host.emit("account", null);
+    this.host.emit("account_reset", { signed_in: false });
+    this.host.onSessionChange?.();
+  }
+
+  private async finishSignIn(ws: AccountSession, password?: string) {
+    const prevId = this.session?.account.id;
+    const isNewSignIn = prevId !== ws.account.id;
+    if (isNewSignIn) {
+      this.stashGuestBeforeSignIn(ws.account.id);
+    }
+    this.saveSession(ws);
+    this.host.emit("account", this.uiAccount());
+    this.host.emit("account_reset", { signed_in: true });
+    if (password) {
+      try {
+        const pwKey = await derivePasswordKey(password, ws.account.id);
+        const { store } = this.getKeyStore(ws.account.id);
+        store.pw_key = b64url(pwKey);
+        save(`keys.${ws.account.id}`, store);
+      } catch { /* non-fatal */ }
+    }
+    this.host.onSessionChange?.();
+    await this.refreshAccountAndSync();
+    if (isNewSignIn) {
+      this.checkGuestMergePrompt();
+    }
+  }
+
+  async refreshAccountAndSync() {
+    if (!this.session) return;
+    try {
+      const token = await this.validToken();
+      const [acc, devs] = await Promise.all([
+        server.accountGet(token).catch(() => null),
+        server.devicesList(token).catch(() => null),
+      ]);
+      if (acc && this.session) {
+        this.session.account = {
+          id: acc.id,
+          handle: acc.handle,
+          device_limit: acc.device_limit ?? this.session.account.device_limit,
+          created_at: acc.created_at,
+          has_password: Boolean(acc.has_password),
+        };
+        save("account", this.session);
+      }
+      if (devs && this.session) {
+        this.devices = devs.devices;
+        this.session.account.device_limit = devs.limit || this.session.account.device_limit;
+        save(`devices.${this.session.account.id}`, this.devices);
+      }
+      await this.syncNow();
+    } catch { /* offline */ }
+  }
+
+  // ---- E2E Keyring Resolution & Sync ----
+
+  private async resolveDataKey(accountId: string, deviceId: string, hasPassword: boolean, keyring: Record<string, any>): Promise<DataKey | null> {
+    const { store, dk, dataKey: existing } = this.getKeyStore(accountId);
+    const main = keyring.main;
+
+    if (existing) {
+      if (!main || !main.kid || (await existing.kid()) === main.kid) {
+        this.keysLocked = false;
+        return existing;
+      }
+    }
+
+    // 1. Check `env:<deviceId>` sealed to our device's X25519 key
+    const envVal = keyring[`env:${deviceId}`];
+    if (envVal) {
+      const opened = await openFromDevice(deviceId, dk, envVal);
+      if (opened && (!main?.kid || (await opened.kid()) === main.kid)) {
+        this.saveDataKey(accountId, opened);
+        return opened;
+      }
+    }
+
+    // 2. Check `main.escrow` (passkey-only accounts without password)
+    if (main?.escrow && typeof main.escrow === "string") {
+      const opened = DataKey.fromB64(main.escrow);
+      if (opened && (!main.kid || (await opened.kid()) === main.kid)) {
+        this.saveDataKey(accountId, opened);
+        return opened;
+      }
+    }
+
+    // 3. Check `main.pw` with cached `pw_key`
+    if (main?.pw && main?.kid && store.pw_key) {
+      const pwKeyBytes = DataKey.fromB64(store.pw_key)?.raw;
+      if (pwKeyBytes) {
+        const opened = await unwrapWithPassword(pwKeyBytes, accountId, main.kid, main.pw);
+        if (opened) {
+          this.saveDataKey(accountId, opened);
+          return opened;
+        }
+      }
+    }
+
+    // 4. Brand-new account with no `main` entry yet: create DataKey
+    if (!main) {
+      const created = existing ?? DataKey.generate();
+      this.saveDataKey(accountId, created);
+      return created;
+    }
+
+    // Otherwise, the account has an E2E key we need the password (or device approval) to unlock
+    if (hasPassword || main.pw) {
+      this.keysLocked = true;
+    }
+    return null;
+  }
+
+  private async buildKeyringOutbox(accountId: string, deviceId: string, hasPassword: boolean, k: DataKey, journal: SyncJournal): Promise<SyncItem[]> {
+    const { store, dk } = this.getKeyStore(accountId);
+    const out: SyncItem[] = [];
+    const now = Date.now();
+    const kid = await k.kid();
+
+    const pushKeyring = (key: string, val: any) => {
+      const prev = journal.keyring[key];
+      if (JSON.stringify(prev) === JSON.stringify(val)) return;
+      journal.keyring[key] = val;
+      const kKey = `${SYNC_KIND.KEYRING}\0${key}`;
+      out.push({
+        kind: SYNC_KIND.KEYRING,
+        key,
+        value: val,
+        updated_at: now,
+        deleted: false,
+        rev: journal.known[kKey]?.rev ?? 0,
+      });
+    };
+
+    // Publish our device public key `dev:<deviceId>`
+    const pubB64 = dk.publicB64();
+    const mac = await k.deviceMac(deviceId, dk.pub);
+    pushKeyring(`dev:${deviceId}`, { v: 1, pk: pubB64, kid, mac });
+
+    // Ensure `main` exists
+    const main = journal.keyring.main;
+    if (!main || main.kid !== kid) {
+      if (hasPassword && store.pw_key) {
+        const pwKeyBytes = DataKey.fromB64(store.pw_key)?.raw;
+        if (pwKeyBytes) {
+          const pwBox = await wrapWithPassword(pwKeyBytes, accountId, k);
+          pushKeyring("main", { v: 1, kid, pw: pwBox });
+        }
+      } else if (!hasPassword) {
+        pushKeyring("main", { v: 1, kid, escrow: k.toB64() });
+      }
+    }
+
+    // Seal DataKey to any other device that published `dev:<otherId>` without a current `env:<otherId>`
+    for (const [kName, devVal] of Object.entries(journal.keyring)) {
+      if (!kName.startsWith("dev:")) continue;
+      const otherId = kName.slice(4);
+      if (!otherId || typeof devVal?.pk !== "string") continue;
+      const existingEnv = journal.keyring[`env:${otherId}`];
+      if (existingEnv && existingEnv.kid === kid) continue;
+      const sealedEnv = await sealToDevice(otherId, devVal.pk, k, deviceId);
+      if (sealedEnv) pushKeyring(`env:${otherId}`, sealedEnv);
+    }
+
+    return out;
+  }
+
+  scheduleSync(delayMs = 1500) {
+    if (!this.session) return;
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      void this.syncNow();
+    }, delayMs);
+  }
+
+  scheduleRecentUpdate() {
+    if (!this.session) return;
+    if (this.recentTimer) clearTimeout(this.recentTimer);
+    this.recentTimer = setTimeout(async () => {
+      this.recentTimer = null;
+      if (!this.session) return;
+      try {
+        const token = await this.validToken();
+        const songs = this.host
+          .getLibrary()
+          .recent.flatMap((r) => (r.kind === "song" ? [r.track] : []))
+          .slice(0, 12);
+        await server.profilePutRecent(token, songs);
+      } catch { /* ignore */ }
+    }, 2500);
+  }
+
+  async syncNow(): Promise<void> {
+    if (!this.session || this.syncing) return;
+    this.syncing = true;
+    this.syncError = null;
+    const s = this.session;
+    const accountId = s.account.id;
+    try {
+      const token = await this.validToken();
+      const journal = this.getJournal(accountId);
+
+      // 1. Pull remote changes since journal.rev
+      let pull = await server.syncPull(token, journal.rev);
+      if (pull.reset) {
+        journal.rev = 0;
+        journal.known = {};
+        pull = await server.syncPull(token, 0);
+      }
+      const allPulled: SyncItem[] = [...pull.items];
+      let latestRev = pull.rev;
+      let guard = 0;
+      while (pull.more && guard++ < 20) {
+        pull = await server.syncPull(token, latestRev);
+        allPulled.push(...pull.items);
+        latestRev = pull.rev;
+      }
+
+      // First collect keyring updates
+      for (const it of allPulled) {
+        if (it.kind === SYNC_KIND.KEYRING) {
+          if (it.deleted || it.value == null) delete journal.keyring[it.key];
+          else journal.keyring[it.key] = it.value;
+          journal.known[`${it.kind}\0${it.key}`] = {
+            hash: quickHash(it.value),
+            rev: it.rev ?? latestRev,
+            updated_at: it.updated_at,
+          };
+        }
+      }
+
+      const dataKey = await this.resolveDataKey(accountId, s.device_id, s.account.has_password, journal.keyring);
+
+      // Decrypt and apply remote non-keyring items
+      const plainRemote: SyncItem[] = [];
+      for (const it of allPulled) {
+        if (it.kind === SYNC_KIND.KEYRING) continue;
+        if (it.kind === SYNC_KIND.E2E || it.kind === SYNC_KIND.E2E_PLAYLIST) {
+          if (!dataKey) continue;
+          const opened = await dataKey.openItem(it, (b) => journal.blind[b] ?? null);
+          if (opened.ok && opened.item) {
+            journal.blind[it.key] = [opened.item.kind, opened.item.key];
+            plainRemote.push({ ...opened.item, rev: it.rev });
+          }
+        } else {
+          plainRemote.push(it);
+        }
+      }
+
+      if (plainRemote.length > 0) {
+        this.applyRemoteItems(plainRemote, journal, latestRev);
+      }
+      journal.rev = latestRev;
+
+      // 2. Build local outbox (only if we have DataKey)
+      if (dataKey) {
+        const keyringOut = await this.buildKeyringOutbox(accountId, s.device_id, s.account.has_password, dataKey, journal);
+        const plainDiff = this.collectLocalDiff(journal);
+        const pushItems: SyncItem[] = [...keyringOut];
+
+        for (const pItem of plainDiff) {
+          const sealed = await dataKey.sealItem(pItem);
+          journal.blind[sealed.key] = [pItem.kind, pItem.key];
+          const blindKnown = journal.known[`${sealed.kind}\0${sealed.key}`];
+          sealed.rev = blindKnown?.rev ?? pItem.rev ?? 0;
+          pushItems.push(sealed);
+        }
+
+        if (pushItems.length > 0) {
+          const pushed = await server.syncPush(token, pushItems);
+          journal.rev = pushed.rev;
+          for (const pItem of plainDiff) {
+            const kKey = `${pItem.kind}\0${pItem.key}`;
+            if (pItem.deleted) delete journal.known[kKey];
+            else journal.known[kKey] = { hash: quickHash(pItem.value), rev: pushed.rev, updated_at: pItem.updated_at };
+          }
+          for (const sItem of pushItems) {
+            const kKey = `${sItem.kind}\0${sItem.key}`;
+            if (sItem.deleted) delete journal.known[kKey];
+            else journal.known[kKey] = { hash: quickHash(sItem.value), rev: pushed.rev, updated_at: sItem.updated_at };
+          }
+        }
+      }
+
+      this.saveJournal(accountId, journal);
+      save(`account_lib.${accountId}`, this.host.getLibrary());
+      this.lastSyncedAt = nowSec();
+    } catch (e) {
+      this.syncError = String((e as Error)?.message ?? e);
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  private applyRemoteItems(items: SyncItem[], journal: SyncJournal, pullRev: number) {
+    const lib = this.host.getLibrary();
+    const offsets = this.host.getLyricsOffsets();
+    const devId = installId();
+    let libChanged = false;
+    let offsetsChanged = false;
+
+    for (const it of items) {
+      const kKey = `${it.kind}\0${it.key}`;
+      if (it.deleted || it.value == null) {
+        delete journal.known[kKey];
+      } else {
+        journal.known[kKey] = {
+          hash: quickHash(it.value),
+          rev: it.rev ?? pullRev,
+          updated_at: it.updated_at,
+        };
+      }
+
+      switch (it.kind) {
+        case SYNC_KIND.LIKED: {
+          lib.liked = lib.liked.filter((t) => trackKey(t) !== it.key);
+          if (!it.deleted && it.value?.id && it.value?.title) {
+            lib.liked.unshift(it.value as Track);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.PLAYLIST: {
+          lib.playlists = lib.playlists.filter((p) => p.id !== it.key);
+          if (!it.deleted && it.value?.name) {
+            const pl: Playlist = {
+              id: it.key,
+              name: String(it.value.name),
+              description: it.value.description ?? "",
+              tracks: Array.isArray(it.value.tracks) ? it.value.tracks : [],
+              created_at: Number(it.value.created_at) || Date.now(),
+              local_only: false,
+            };
+            lib.playlists.push(pl);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.ALBUM: {
+          lib.saved_albums = lib.saved_albums.filter((a) => !(a.kind === "album" && `${norm(a.artist)}|${norm(a.title)}` === it.key));
+          if (!it.deleted && it.value?.title && it.value?.artist) {
+            lib.saved_albums.push({
+              kind: "album",
+              title: String(it.value.title),
+              artist: String(it.value.artist),
+              tracks: [],
+            });
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.FOLLOWED: {
+          const name = typeof it.value === "string" ? it.value : it.value?.name;
+          lib.followed = lib.followed.filter((a) => norm(a) !== it.key);
+          if (!it.deleted && typeof name === "string" && name.trim()) {
+            lib.followed.push(name.trim());
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.RECENT: {
+          const tr: Track | null = it.value?.track ?? (it.value?.id ? it.value : null);
+          lib.recent = lib.recent.filter((r) => !(r.kind === "song" && trackKey(r.track) === it.key));
+          if (!it.deleted && tr?.id && tr?.title) {
+            lib.recent.unshift({ kind: "song", track: tr, at: Number(it.value?.played_at) || it.updated_at * 1000 });
+            lib.recent = lib.recent.slice(0, 100);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.PINNED: {
+          lib.pinned = lib.pinned.filter((l) => listSyncKey(l) !== it.key);
+          if (!it.deleted && it.value?.kind) {
+            lib.pinned.push(it.value as ListKey);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.RECENT_LIST: {
+          lib.recent_lists = lib.recent_lists.filter((l) => listSyncKey(l) !== it.key);
+          if (!it.deleted && it.value?.kind) {
+            lib.recent_lists.unshift(it.value as ListKey);
+            lib.recent_lists = lib.recent_lists.slice(0, 20);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.SEARCH: {
+          lib.search_history = lib.search_history.filter((s) => searchSyncKey(s) !== it.key);
+          if (!it.deleted && it.value?.kind) {
+            lib.search_history.unshift(it.value as SearchItem);
+            lib.search_history = lib.search_history.slice(0, 20);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.HIDDEN_SIDEBAR: {
+          lib.hidden_sidebar = lib.hidden_sidebar.filter((id) => id !== it.key);
+          if (!it.deleted) lib.hidden_sidebar.push(it.key);
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.HIDDEN_ARTIST: {
+          lib.hidden_artists = (lib.hidden_artists ?? []).filter((a) => norm(a) !== it.key);
+          if (!it.deleted && typeof it.value === "string") {
+            lib.hidden_artists.push(it.value);
+          }
+          libChanged = true;
+          break;
+        }
+        case SYNC_KIND.LYRICS_OFFSET: {
+          if (it.deleted || typeof it.value !== "number") delete offsets[it.key];
+          else offsets[it.key] = it.value;
+          offsetsChanged = true;
+          break;
+        }
+        case SYNC_KIND.STATS: {
+          this.host.stats.applyRemote(devId, it.key, it.deleted ? null : it.value);
+          break;
+        }
+      }
+    }
+
+    if (libChanged) this.host.setLibrary(lib);
+    if (offsetsChanged) this.host.setLyricsOffsets(offsets);
+  }
+
+  private collectLocalDiff(journal: SyncJournal): SyncItem[] {
+    const lib = this.host.getLibrary();
+    const cfg = this.host.getConfig();
+    const offsets = this.host.getLyricsOffsets();
+    const devId = installId();
+    const now = Date.now();
+    const current = new Map<string, { kind: string; key: string; value: any }>();
+
+    const put = (kind: string, key: string, value: any) => {
+      if (!key) return;
+      current.set(`${kind}\0${key}`, { kind, key, value });
+    };
+
+    for (const t of lib.liked) put(SYNC_KIND.LIKED, trackKey(t), wireTrack(t));
+    for (const p of lib.playlists) {
+      if (p.local_only) continue;
+      put(SYNC_KIND.PLAYLIST, p.id, {
+        id: p.id,
+        name: p.name,
+        description: p.description ?? "",
+        tracks: p.tracks.map(wireTrack),
+        created_at: p.created_at ?? now * 1000,
+        updated_at: now,
+      });
+    }
+    for (const a of lib.saved_albums) {
+      if (a.kind !== "album") continue;
+      put(SYNC_KIND.ALBUM, `${norm(a.artist)}|${norm(a.title)}`, {
+        title: a.title,
+        artist: a.artist,
+        cover_url: a.tracks[0]?.cover_url ?? null,
+      });
+    }
+    for (const f of lib.followed) put(SYNC_KIND.FOLLOWED, norm(f), { name: f });
+    for (const r of lib.recent.slice(0, 50)) {
+      if (r.kind === "song") {
+        put(SYNC_KIND.RECENT, trackKey(r.track), {
+          track: wireTrack(r.track),
+          played_at: r.at ?? now * 1000,
+        });
+      }
+    }
+    for (const p of lib.pinned) put(SYNC_KIND.PINNED, listSyncKey(p), p);
+    for (const rl of lib.recent_lists) put(SYNC_KIND.RECENT_LIST, listSyncKey(rl), rl);
+    for (const s of lib.search_history) put(SYNC_KIND.SEARCH, searchSyncKey(s), s);
+    for (const h of lib.hidden_sidebar) put(SYNC_KIND.HIDDEN_SIDEBAR, h, h);
+    for (const ha of lib.hidden_artists ?? []) put(SYNC_KIND.HIDDEN_ARTIST, norm(ha), ha);
+    for (const [tk, off] of Object.entries(offsets)) put(SYNC_KIND.LYRICS_OFFSET, tk, off);
+
+    if (cfg.stats.enabled) {
+      for (const [sKey, mStats] of this.host.stats.syncItems(devId)) {
+        put(SYNC_KIND.STATS, sKey, mStats);
+      }
+    }
+
+    const diff: SyncItem[] = [];
+    for (const [kKey, item] of current.entries()) {
+      const h = quickHash(item.value);
+      const prev = journal.known[kKey];
+      if (!prev || prev.hash !== h) {
+        diff.push({
+          kind: item.kind,
+          key: item.key,
+          value: item.value,
+          updated_at: now,
+          deleted: false,
+          rev: prev?.rev ?? 0,
+        });
+      }
+    }
+
+    for (const [kKey, prev] of Object.entries(journal.known)) {
+      const sep = kKey.indexOf("\0");
+      if (sep < 0) continue;
+      const kind = kKey.slice(0, sep);
+      const key = kKey.slice(sep + 1);
+      if (kind === SYNC_KIND.KEYRING || kind === SYNC_KIND.E2E || kind === SYNC_KIND.E2E_PLAYLIST || kind === SYNC_KIND.SETTINGS || kind === SYNC_KIND.TASTE || kind === SYNC_KIND.FEED_NEW_SEEN) {
+        continue;
+      }
+      // For stats, only delete our own device's stats when stats are disabled
+      if (kind === SYNC_KIND.STATS && !key.startsWith(`${devId}:`)) continue;
+      if (!current.has(kKey)) {
+        diff.push({
+          kind,
+          key,
+          value: undefined,
+          updated_at: now,
+          deleted: true,
+          rev: prev.rev,
+        });
+      }
+    }
+
+    return diff;
+  }
+
+  // ---- Handlers for WebBackend ----
+
+  handlers(): Record<string, (a: Record<string, any>) => unknown> {
+    return {
+      account_status: () => {
+        if (!this.session) {
+          return {
+            signed_in: false,
+            available: this.accountsAvailable,
+            syncing: false,
+          };
+        }
+        return {
+          signed_in: true,
+          available: true,
+          handle: this.session.account.handle,
+          account_id: this.session.account.id,
+          device_id: this.session.device_id,
+          device_limit: this.session.account.device_limit,
+          created_at: this.session.account.created_at,
+          has_password: this.session.account.has_password,
+          keys_locked: this.keysLocked,
+          syncing: this.syncing,
+          last_synced_at: this.lastSyncedAt,
+          sync_error: this.syncError,
+          devices: this.devices,
+        };
+      },
+
+      account_login_start: async (a) => {
+        const res = await server.loginStart(detectDeviceName(), detectPlatform());
+        const url = res.browser_url.startsWith("http")
+          ? res.browser_url
+          : `${serverOrigin()}${res.browser_url.startsWith("/") ? "" : "/"}${res.browser_url}`;
+        if (a.open_browser) {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+        return {
+          login_id: res.login_id,
+          code: res.code,
+          browser_url: url,
+          expires_in_s: res.expires_in_s,
+        };
+      },
+
+      account_login_poll: async (a) => {
+        const res = await server.loginPoll(String(a.login_id));
+        if (res.status === "done") {
+          await this.finishSignIn(res.session);
+          return { state: "done", handle: res.session.account.handle };
+        }
+        return { state: res.status };
+      },
+
+      account_password_submit: async (a) => {
+        const handle = String(a.handle ?? "").trim().replace(/^@/, "");
+        const password = String(a.password ?? "");
+        const create = Boolean(a.create);
+        const device_name = detectDeviceName();
+        const platform = detectPlatform();
+
+        if (create) {
+          const salt = b64url(randomBytes(16));
+          const key = await deriveLoginKey(password, salt);
+          const reg = await server.passwordRegister({ handle, salt, key, device_name, platform });
+          const session = "session" in reg ? reg.session : reg;
+          await this.finishSignIn(session, password);
+          return "recovery_code" in reg ? reg.recovery_code : undefined;
+        }
+
+        const saltRes = await server.passwordSalt(handle);
+        const key = await deriveLoginKey(password, saltRes.salt);
+        const session = await server.passwordLogin({ handle, key, device_name, platform });
+        if (await suspiciousSignInSalt(saltRes.salt, session.account.id)) {
+          throw new Error("suspicious_salt");
+        }
+        await this.finishSignIn(session, password);
+      },
+
+      account_unlock_keys: async (a) => {
+        if (!this.session) throw new Error("signed_out");
+        const password = String(a.password ?? "");
+        const accountId = this.session.account.id;
+        const journal = this.getJournal(accountId);
+        const main = journal.keyring.main;
+        const pwKey = await derivePasswordKey(password, accountId);
+        if (main?.pw && main?.kid) {
+          const opened = await unwrapWithPassword(pwKey, accountId, main.kid, main.pw);
+          if (!opened) throw new Error("invalid_credentials");
+          this.saveDataKey(accountId, opened, pwKey);
+        } else {
+          const { store } = this.getKeyStore(accountId);
+          store.pw_key = b64url(pwKey);
+          save(`keys.${accountId}`, store);
+          this.keysLocked = false;
+        }
+        await this.syncNow();
+      },
+
+      account_change_password: async (a) => {
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        const currentPassword = String(a.current_password ?? "");
+        const newPassword = String(a.new_password ?? "");
+        const handle = this.session.account.handle;
+        const accountId = this.session.account.id;
+
+        if (this.session.account.has_password && currentPassword) {
+          const saltRes = await server.passwordSalt(handle);
+          const currentKey = await deriveLoginKey(currentPassword, saltRes.salt);
+          await server.passwordCheck(token, currentKey);
+        }
+
+        const newSalt = b64url(randomBytes(16));
+        const newLoginKey = await deriveLoginKey(newPassword, newSalt);
+        const updated = await server.passwordSet(token, { salt: newSalt, key: newLoginKey });
+        this.session.account.has_password = Boolean(updated.has_password ?? true);
+        save("account", this.session);
+
+        // Re-wrap E2E DataKey with new password
+        const newPwKey = await derivePasswordKey(newPassword, accountId);
+        const { dataKey } = this.getKeyStore(accountId);
+        const k = dataKey ?? DataKey.generate();
+        this.saveDataKey(accountId, k, newPwKey);
+        const journal = this.getJournal(accountId);
+        const kid = await k.kid();
+        const pwBox = await wrapWithPassword(newPwKey, accountId, k);
+        const mainVal = { v: 1, kid, pw: pwBox };
+        journal.keyring.main = mainVal;
+        await server.syncPush(token, [
+          {
+            kind: SYNC_KIND.KEYRING,
+            key: "main",
+            value: mainVal,
+            updated_at: Date.now(),
+            deleted: false,
+            rev: journal.known[`${SYNC_KIND.KEYRING}\0main`]?.rev ?? 0,
+          },
+        ]);
+        this.saveJournal(accountId, journal);
+      },
+
+      account_link_passkey: async () => {
+        const token = await this.validToken();
+        const res = await server.passkeyLink(token);
+        const url = res.url.startsWith("http")
+          ? res.url
+          : `${serverOrigin()}${res.url.startsWith("/") ? "" : "/"}${res.url}`;
+        return { url };
+      },
+
+      account_rename: async (a) => {
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        const handle = String(a.handle ?? "").trim().replace(/^@/, "");
+        const info = await server.accountPatch(token, handle);
+        this.session.account.handle = info.handle;
+        save("account", this.session);
+        this.host.emit("account", this.uiAccount());
+      },
+
+      account_approve: async (a) => {
+        const token = await this.validToken();
+        const parsed = splitPairCode(String(a.code ?? ""));
+        const serverCode = parsed ? parsed[0] : String(a.code ?? "").trim().toUpperCase();
+        await server.loginApprove(token, serverCode);
+        await this.refreshAccountAndSync();
+      },
+
+      account_recovery: async () => {
+        const token = await this.validToken();
+        const res = await server.recoveryCode(token);
+        return res.recovery_code;
+      },
+
+      account_remove_device: async (a) => {
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        await server.deviceRemove(token, String(a.id));
+        const devs = await server.devicesList(token).catch(() => null);
+        if (devs) {
+          this.devices = devs.devices;
+          save(`devices.${this.session.account.id}`, this.devices);
+        }
+      },
+
+      account_sign_out: async () => {
+        if (this.session) {
+          try {
+            const token = await this.validToken();
+            await server.deviceSignOut(token);
+          } catch { /* ignore network error on sign out */ }
+        }
+        this.clearSessionAndRestoreGuest();
+      },
+
+      account_sign_out_all: async () => {
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        try {
+          await server.deviceSignOutAll(token);
+        } catch (e: any) {
+          if (e?.status !== 404 && e?.status !== 405) throw e;
+          const devs = await server.devicesList(token);
+          for (const d of devs.devices) {
+            if (!d.current) {
+              try {
+                await server.deviceRemove(token, d.id);
+              } catch (rmErr: any) {
+                if (rmErr?.status !== 404) throw rmErr;
+              }
+            }
+          }
+          await server.deviceSignOut(token);
+        }
+        this.clearSessionAndRestoreGuest();
+      },
+
+      account_delete: async () => {
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        const prevId = this.session.account.id;
+        await server.accountDelete(token);
+        remove(`account_lib.${prevId}`);
+        remove(`playback.${prevId}`);
+        remove(`sync.${prevId}`);
+        remove(`keys.${prevId}`);
+        remove(`devices.${prevId}`);
+        this.clearSessionAndRestoreGuest(true);
+      },
+
+      account_sync_now: async () => {
+        await this.refreshAccountAndSync();
+      },
+
+      account_merge: async (a) => {
+        const backup = load<GuestSnapshot>("guest_backup");
+        remove("guest_backup");
+        if (!a.merge || !backup) return;
+        const lib = this.host.getLibrary();
+        const haveLiked = new Set(lib.liked.map(trackKey));
+        for (const t of backup.library.liked) {
+          if (!haveLiked.has(trackKey(t))) lib.liked.push(t);
+        }
+        const havePl = new Set(lib.playlists.map((p) => p.id));
+        for (const p of backup.library.playlists) {
+          if (!havePl.has(p.id)) lib.playlists.push({ ...p, local_only: false });
+        }
+        for (const al of backup.library.saved_albums) {
+          if (!lib.saved_albums.some((x) => sameList(x, al))) lib.saved_albums.push(al);
+        }
+        for (const f of backup.library.followed) {
+          if (!lib.followed.some((x) => norm(x) === norm(f))) lib.followed.push(f);
+        }
+        this.host.setLibrary(lib);
+        if (backup.stats && Object.keys(backup.stats).length > 0) {
+          this.host.stats.mergeGuestMonths(backup.stats);
+        }
+        await this.syncNow();
+      },
+
+      // ---- Profile ----
+      profile: async (a) => {
+        const handle = String(a.handle ?? "").trim().replace(/^@/, "");
+        if (!handle) return null;
+        if (!this.session) throw new Error("signed_out");
+        const token = await this.validToken();
+        let pub: PublicProfile;
+        try {
+          pub = await server.publicProfile(handle, token);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 404) return null;
+          throw e;
+        }
+        const is_me = Boolean(pub.own || (this.session && norm(this.session.account.handle) === norm(pub.handle)));
+        const follows = this.host.getLibrary().followed.some((f) => norm(f) === norm(`@${pub.handle}`) || norm(f) === norm(pub.handle));
+        const playlists: Playlist[] = (pub.playlists ?? []).map((pl) => ({
+          id: pl.id,
+          name: pl.name,
+          cover: pl.cover ?? pl.preview?.[0]?.cover_url ?? null,
+          tracks: pl.preview?.length
+            ? pl.preview
+            : Array.from({ length: pl.songs || 0 }, (_, i) => ({
+                id: `${pl.id}-${i}`,
+                source: "deezer" as const,
+                title: pl.name,
+                artist: `@${pub.handle}`,
+              })),
+        }));
+        const out: Profile & { private?: boolean; recent?: Track[] } = {
+          handle: pub.handle,
+          name: pub.handle,
+          bio: "",
+          avatar: pub.avatar ? server.profileImageUrl(pub.handle, pub.avatar) : null,
+          banner: pub.banner ? server.profileImageUrl(pub.handle, pub.banner) : null,
+          followers: 0,
+          following: 0,
+          follows,
+          is_me,
+          top_artists: [],
+          top_tracks: (pub.recent ?? []).slice(0, 5),
+          playlists,
+          recent: pub.recent ?? [],
+          sections: normalizeSections(pub.sections?.length ? pub.sections : is_me ? this.host.getConfig().sharing.profile_sections : undefined),
+          private: Boolean(pub.private),
+        };
+        return out;
+      },
+
+      profile_playlist: async (a) => {
+        const handle = String(a.handle ?? "").trim().replace(/^@/, "");
+        const id = String(a.id ?? "");
+        const token = this.session ? await this.validToken().catch(() => undefined) : undefined;
+        const full = await server.publicProfilePlaylist(handle, id, token);
+        return full.tracks ?? [];
+      },
+
+      profile_follow: (a) => {
+        const h = `@${String(a.handle ?? "").replace(/^@/, "")}`;
+        const lib = this.host.getLibrary();
+        lib.followed = a.on ? [...lib.followed.filter((x) => norm(x) !== norm(h)), h] : lib.followed.filter((x) => norm(x) !== norm(h));
+        this.host.setLibrary(lib);
+        this.scheduleSync();
+      },
+
+      profile_settings: async () => {
+        const token = await this.validToken();
+        const handle = this.session!.account.handle;
+        const w = await server.profileSettingsGet(token);
+        return wireToProfileSettings(handle, w, this.host.getConfig().sharing.profile_sections);
+      },
+
+      profile_update: async (a) => {
+        const token = await this.validToken();
+        const handle = this.session!.account.handle;
+        const patch: { public?: boolean; show_recent?: boolean; playlists?: string[]; sections?: string[] } = {};
+        if (typeof a.public === "boolean") patch.public = a.public;
+        if (typeof a.show_recent === "boolean") patch.show_recent = a.show_recent;
+        if (Array.isArray(a.playlists)) patch.playlists = a.playlists;
+        if (Array.isArray(a.sections)) {
+          const sec = normalizeSections(a.sections as string[]);
+          patch.sections = sec;
+          const cfg = this.host.getConfig();
+          cfg.sharing.profile_sections = sec;
+          this.host.setConfig(cfg);
+          this.scheduleSync();
+        }
+        const w = await server.profileSettingsPatch(token, patch);
+        return wireToProfileSettings(handle, w, this.host.getConfig().sharing.profile_sections);
+      },
+
+      profile_reorder_playlist: async (a) => {
+        const token = await this.validToken();
+        const cur = await server.profileSettingsGet(token);
+        const shown = new Set(cur.playlists ?? []);
+        const order = Array.isArray(a.order) ? (a.order as string[]).filter((id) => shown.has(id)) : cur.playlists ?? [];
+        await server.profileSettingsPatch(token, { playlists: order });
+      },
+
+      profile_toggle_playlist: async (a) => {
+        const token = await this.validToken();
+        const id = String(a.id ?? "");
+        const lib = this.host.getLibrary();
+        const pl = lib.playlists.find((p) => p.id === id);
+        if (pl && pl.local_only) {
+          pl.local_only = false;
+          this.host.setLibrary(lib);
+          await this.syncNow();
+        }
+        const cur = await server.profileSettingsGet(token);
+        const list = [...(cur.playlists ?? [])];
+        const idx = list.indexOf(id);
+        if (idx >= 0) list.splice(idx, 1);
+        else list.push(id);
+        await server.profileSettingsPatch(token, { playlists: list });
+      },
+
+      profile_pick_image: async (a) => {
+        const token = await this.validToken();
+        const banner = Boolean(a.banner);
+        const bytes = await new Promise<Uint8Array | null>((resolve, reject) => {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = "image/jpeg,image/png,image/webp";
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if (!file) { resolve(null); return; }
+            const url = URL.createObjectURL(file);
+            const im = new Image();
+            im.onload = () => {
+              try {
+                const [ow, oh] = banner ? [1500, 500] : [512, 512];
+                const aspect = ow / oh;
+                const w = im.naturalWidth, h = im.naturalHeight;
+                const [cw, ch] = w >= h * aspect ? [h * aspect, h] : [w, w / aspect];
+                const sx = Math.floor((w - cw) / 2);
+                const sy = Math.floor((h - ch) / 2);
+                const cv = document.createElement("canvas");
+                cv.width = ow; cv.height = oh;
+                const g = cv.getContext("2d")!;
+                g.imageSmoothingQuality = "high";
+                g.drawImage(im, sx, sy, cw, ch, 0, 0, ow, oh);
+                const dataUrl = cv.toDataURL("image/jpeg", 0.86);
+                const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+                const bin = atob(b64);
+                const out = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                resolve(out);
+              } catch (err) {
+                reject(err);
+              } finally {
+                URL.revokeObjectURL(url);
+              }
+            };
+            im.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image")); };
+            im.src = url;
+          };
+          input.oncancel = () => resolve(null);
+          input.click();
+        });
+        if (!bytes) return;
+        await server.profilePutImage(token, banner ? "banner" : "avatar", "image/jpeg", bytes);
+      },
+
+      profile_set_image: async (a) => {
+        const token = await this.validToken();
+        const kind = a.banner ? "banner" : "avatar";
+        if (!a.image) {
+          await server.profileDeleteImage(token, kind);
+          return;
+        }
+        const dataUrl = String(a.image);
+        const comma = dataUrl.indexOf(",");
+        const meta = comma >= 0 ? dataUrl.slice(0, comma) : "";
+        const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+        const mime = /data:([^;]+);/.exec(meta)?.[1] ?? "image/jpeg";
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await server.profilePutImage(token, kind, mime, bytes);
+      },
+
+      profile_remove_image: async (a) => {
+        const token = await this.validToken();
+        await server.profileDeleteImage(token, a.banner ? "banner" : "avatar");
+      },
+
+      // ---- Privacy report ----
+      privacy_report: () => {
+        const cfg = this.host.getConfig();
+        return {
+          mode: "Server (/web)",
+          account: this.session ? `@${this.session.account.handle}` : null,
+          install_id: installId(),
+          direct_domains: ["api.audius.co", "api.jamendo.com", "archive.org", "www.youtube.com"],
+          web_logins: this.webLogins,
+          discord_on: false,
+          last_synced_at: this.lastSyncedAt,
+          data_dir: "localStorage (glyph.web.*)",
+          files: [],
+          total_bytes: 0,
+          keys_in_keychain: 0,
+          keys_in_config: Object.keys(cfg.keys ?? {}).length,
+        };
+      },
+
+      privacy_clear: (a) => {
+        const what = String(a.what ?? "");
+        const lib = this.host.getLibrary();
+        if (what === "search_history") {
+          lib.search_history = [];
+          this.host.setLibrary(lib);
+        } else if (what === "recent") {
+          lib.recent = [];
+          lib.recent_lists = [];
+          this.host.setLibrary(lib);
+        } else if (what === "web_logins") {
+          this.webLogins = [];
+          remove("web_logins");
+        }
+      },
+
+      privacy_record_web_login: (a) => {
+        const domain = String(a.domain ?? "");
+        if (!domain) return;
+        this.webLogins = [{ domain, at: nowSec() }, ...this.webLogins.filter((x) => x.domain !== domain)].slice(0, 20);
+        save("web_logins", this.webLogins);
+      },
+    };
+  }
+}

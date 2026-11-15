@@ -36,6 +36,7 @@ pub mod lyrics;
 pub mod lyricsearch;
 pub mod outage;
 pub mod paths;
+pub mod playback_session;
 pub mod plugins;
 pub mod plugin_host;
 pub mod plugin_credentials;
@@ -64,7 +65,8 @@ pub mod ytnative;
 pub use config::Config;
 pub use library::{FollowedArtist, Library, ListKey, Playlist, RecentItem, SearchItem};
 pub use lyrics::Lyrics;
-pub use queue::{Queue, RepeatMode};
+pub use playback_session::{PlaybackPosition, PlaybackSession};
+pub use queue::{Queue, QueueSnapshot, RepeatMode};
 pub use updater::{UpdateInfo, UpdateStatus};
 
 use anyhow::{anyhow, Result};
@@ -174,8 +176,74 @@ fn stream_cached(t: &Track) -> Option<PathBuf> {
     Some(p)
 }
 
-/// Saves a playing stream to the cache in the background (whole file, then
-/// renamed into place; nothing is kept if it fails or is too big).
+/// Maximum number of search queries kept in the in-memory session cache.
+const MAX_SEARCH_CACHE: usize = 32;
+const SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn prune_search_cache_locked(
+    c: &mut std::collections::HashMap<String, (std::time::Instant, Vec<Track>)>,
+    max_keep: usize,
+) {
+    c.retain(|_, (at, _)| at.elapsed() < SEARCH_CACHE_TTL);
+    while c.len() > max_keep {
+        let Some(oldest) = c.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        c.remove(&oldest);
+    }
+}
+
+fn store_search_cache(
+    cache: &std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<Track>)>>,
+    key: String,
+    tracks: Vec<Track>,
+) {
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    prune_search_cache_locked(&mut c, MAX_SEARCH_CACHE.saturating_sub(1));
+    c.insert(key, (std::time::Instant::now(), tracks));
+}
+
+struct PartGuard(Option<std::path::PathBuf>);
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+async fn write_stream_to_disk(
+    mut resp: reqwest::Response,
+    tmp: &std::path::Path,
+    dest: &std::path::Path,
+    max_bytes: u64,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    if resp.content_length().is_some_and(|n| n > max_bytes) {
+        anyhow::bail!("too big");
+    }
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut guard = PartGuard(Some(tmp.to_path_buf()));
+    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, std::fs::File::create(tmp)?);
+    let mut written: u64 = 0;
+    while let Some(chunk) = resp.chunk().await? {
+        written = written.saturating_add(chunk.len() as u64);
+        if written > max_bytes {
+            anyhow::bail!("too big");
+        }
+        writer.write_all(&chunk)?;
+    }
+    writer.flush()?;
+    drop(writer);
+    std::fs::rename(tmp, dest)?;
+    guard.0 = None;
+    Ok(())
+}
+
+/// Saves a playing stream directly to disk in bounded 64 KiB buffered chunks
+/// (never buffering the full audio file in RAM; `.part` is cleaned up on failure).
 async fn cache_stream(http: reqwest::Client, t: Track, url: String, mime: Option<String>) {
     if stream_cached(&t).is_some() {
         return;
@@ -189,26 +257,14 @@ async fn cache_stream(http: reqwest::Client, t: Track, url: String, mime: Option
         _ => "mp3",
     };
     let r = async {
-        let mut resp = http.get(&url).timeout(std::time::Duration::from_secs(180)).send().await?.error_for_status()?;
-        if resp.content_length().is_some_and(|n| n > STREAM_CACHE_MAX_FILE) {
-            anyhow::bail!("too big");
-        }
+        let resp = http.get(&url).timeout(std::time::Duration::from_secs(180)).send().await?.error_for_status()?;
         let ctype = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.split(';').next().unwrap_or("").trim().to_string());
         let ext = ext_of(mime.as_deref().or(ctype.as_deref()).unwrap_or(""));
         let dir = stream_cache_dir();
-        std::fs::create_dir_all(&dir)?;
         let name = stream_cache_name(&t);
         let tmp = dir.join(format!("{name}.part"));
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = resp.chunk().await? {
-            buf.extend_from_slice(&chunk);
-            if buf.len() as u64 > STREAM_CACHE_MAX_FILE {
-                anyhow::bail!("too big");
-            }
-        }
-        std::fs::write(&tmp, &buf)?;
-        std::fs::rename(&tmp, dir.join(format!("{name}.{ext}")))?;
-        Ok::<_, anyhow::Error>(())
+        let dest = dir.join(format!("{name}.{ext}"));
+        write_stream_to_disk(resp, &tmp, &dest, STREAM_CACHE_MAX_FILE).await
     }
     .await;
     match r {
@@ -438,6 +494,7 @@ impl Backend {
         self.download_queue.configure(if inner.config.storage.data_saver { 1 } else { inner.config.audio.download_parallelism }, inner.config.audio.download_adaptive);
         *self.inner.write().unwrap() = Arc::new(inner);
         self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         Ok(())
     }
 
@@ -486,11 +543,7 @@ impl Backend {
                         }
                     }
                     SearchEvent::Done => {
-                        let mut c = cache.lock().unwrap();
-                        if c.len() > 200 {
-                            c.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(600));
-                        }
-                        c.insert(key, (std::time::Instant::now(), all));
+                        store_search_cache(&cache, key, all);
                         break;
                     }
                     _ => {}
@@ -499,11 +552,13 @@ impl Backend {
         });
         // Cleared when the search falls back to the local sources.
         let server_rated = Arc::new(std::sync::atomic::AtomicBool::new(route == "server" && inner.server_rates));
+        let enabled = inner.config.providers.enabled.clone();
         let tx = {
             let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<SearchEvent>();
             let fwd = tx.clone();
             let (http, ratings) = (inner.http.clone(), self.ratings.clone());
             let server_rated = server_rated.clone();
+            let enabled = enabled.clone();
             self.rt.as_ref().expect("runtime alive").spawn(async move {
                 let mut seen: Vec<Track> = Vec::new();
                 loop {
@@ -512,6 +567,7 @@ impl Backend {
                         _ = fwd.closed() => break,
                         ev = out_rx.recv() => match ev { Some(ev) => ev, None => break },
                     };
+                    let Some(ev) = filter_search_event(ev, &enabled) else { continue };
                     match &ev {
                         SearchEvent::Results { tracks, .. } => {
                             for t in tracks {
@@ -524,7 +580,7 @@ impl Backend {
                         // Before the end: ask Deezer about the YouTube songs
                         // nothing rated yet; each answer replaces its song.
                         // A server that rates has done this already.
-                        SearchEvent::Done if !server_rated.load(std::sync::atomic::Ordering::Relaxed) => {
+                        SearchEvent::Done if !server_rated.load(std::sync::atomic::Ordering::Relaxed) && enabled.contains(&ProviderId::Deezer) => {
                             let send = |t: Track| {
                                 let ev = SearchEvent::Results { provider: ProviderId::Deezer, tracks: vec![t] };
                                 let _ = tap_tx.send(ev.clone());
@@ -562,7 +618,8 @@ impl Backend {
                                 server_rated.store(false, std::sync::atomic::Ordering::Relaxed);
                             } else {
                                 tracing::warn!("server search failed: {e}");
-                                let _ = tx.send(SearchEvent::ProviderError { provider: ProviderId::Deezer, message: format!("server search failed: {e}") });
+                                let err_provider = enabled.first().copied().unwrap_or(ProviderId::Deezer);
+                                let _ = tx.send(SearchEvent::ProviderError { provider: err_provider, message: format!("server search failed: {e}") });
                                 let _ = tx.send(SearchEvent::Done);
                                 return;
                             }
@@ -1399,6 +1456,26 @@ impl Backend {
         self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
+
+    /// Shrinks in-memory search and warm-resolve caches under memory pressure
+    /// without removing persisted library or catalog data on disk.
+    pub fn trim_caches(&self, aggressive: bool) {
+        {
+            let mut c = self.search_cache.lock().unwrap_or_else(|e| e.into_inner());
+            prune_search_cache_locked(&mut c, if aggressive { 0 } else { 4 });
+        }
+        {
+            let mut w = self.warm.lock().unwrap_or_else(|e| e.into_inner());
+            if aggressive {
+                w.clear();
+            } else {
+                w.retain(|_, (at, _)| at.elapsed() < WARM_TTL);
+            }
+        }
+        if aggressive {
+            self.cur().resolver.cache().flush();
+        }
+    }
 }
 
 /// Reads links and files for the library move like a pasted link import.
@@ -1440,3 +1517,84 @@ pub mod flume_like {
 
 #[cfg(test)]
 mod tests;
+
+const SEARCH_SOURCES: [ProviderId; 6] = [
+    ProviderId::YouTube,
+    ProviderId::Deezer,
+    ProviderId::Audius,
+    ProviderId::Jamendo,
+    ProviderId::Archive,
+    ProviderId::SoundCloud,
+];
+
+/// Filters a server or cached track against enabled providers, promoting an
+/// enabled searchable match from `external_ids` if the primary source is disabled.
+pub(crate) fn filter_track_by_enabled(mut track: Track, enabled: &[ProviderId]) -> Option<Track> {
+    track.external_ids.retain(|p, id| !id.is_empty() && enabled.contains(p) && SEARCH_SOURCES.contains(p));
+    if enabled.contains(&track.source) {
+        return Some(track);
+    }
+    let next = SEARCH_SOURCES
+        .iter()
+        .copied()
+        .find_map(|p| track.external_ids.get(&p).map(|id| (p, id.clone())))?;
+    track.source = next.0;
+    track.id = next.1.clone();
+    track.permalink = (next.0 == ProviderId::YouTube)
+        .then(|| format!("https://www.youtube.com/watch?v={}", next.1));
+    Some(track)
+}
+
+pub(crate) fn filter_search_event(ev: SearchEvent, enabled: &[ProviderId]) -> Option<SearchEvent> {
+    match ev {
+        SearchEvent::Results { provider, tracks } => {
+            let tracks: Vec<Track> = tracks
+                .into_iter()
+                .filter_map(|t| filter_track_by_enabled(t, enabled))
+                .collect();
+            if tracks.is_empty() {
+                return None;
+            }
+            let provider = if enabled.contains(&provider) { provider } else { tracks[0].source };
+            Some(SearchEvent::Results { provider, tracks })
+        }
+        SearchEvent::ProviderError { provider, .. } if !enabled.contains(&provider) => None,
+        other => Some(other),
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+
+    #[test]
+    fn search_cache_evicts_oldest_above_limit() {
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        for i in 0..(MAX_SEARCH_CACHE + 5) {
+            store_search_cache(&cache, format!("q{i}"), Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let guard = cache.lock().unwrap();
+        assert_eq!(guard.len(), MAX_SEARCH_CACHE);
+        assert!(!guard.contains_key("q0"));
+        assert!(guard.contains_key(&format!("q{}", MAX_SEARCH_CACHE + 4)));
+    }
+
+    #[test]
+    fn prune_search_cache_respects_soft_and_hard_caps() {
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        for i in 0..10 {
+            store_search_cache(&cache, format!("q{i}"), Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        {
+            let mut guard = cache.lock().unwrap();
+            prune_search_cache_locked(&mut guard, 4);
+            assert_eq!(guard.len(), 4);
+            assert!(guard.contains_key("q9"));
+            assert!(!guard.contains_key("q0"));
+            prune_search_cache_locked(&mut guard, 0);
+            assert!(guard.is_empty());
+        }
+    }
+}

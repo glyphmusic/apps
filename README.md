@@ -2,12 +2,29 @@
 
 See [CHANGELOG.md](CHANGELOG.md) for the version history and [Releases](https://github.com/glyphmusic/apps/releases) for downloads.
 
-A desktop music player for Linux, macOS and Windows, written in Rust with [GPUI](https://www.gpui.rs).
+A desktop and Android music player powered by Rust (`glyph-core`, `glyph-audio`), Tauri, and Svelte (`glyph-ui`).
 Glyph searches many legal music sources at once, plays full tracks where the source allows it
 and keeps your library, playlists and downloads in one flat, fast UI with optional ASCII-art covers.
 
 Server: [glyphmusic/server](https://github.com/glyphmusic/server) — the app uses
 `https://glyph-server.glyphmusic.workers.dev` by default, or any instance you host yourself.
+
+## Screenshots
+
+![Glyph home: recently played and popular songs, with the player bar](docs/shots/home.jpg)
+
+<table>
+  <tr>
+    <td><img src="docs/shots/lyrics.jpg" alt="Now playing with synced lyrics" /></td>
+    <td><img src="docs/shots/search.jpg" alt="Search results from several sources" /></td>
+    <td><img src="docs/shots/list.jpg" alt="Liked songs list" /></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Now playing & synced lyrics</sub></td>
+    <td align="center"><sub>Multi-source search</sub></td>
+    <td align="center"><sub>Liked songs & library</sub></td>
+  </tr>
+</table>
 
 ## Features
 
@@ -45,13 +62,13 @@ New releases include one `SHA256SUMS.txt` listing every asset and `SHA256SUMS.tx
 Requires Rust 1.85 or newer.
 
 ```bash
-cargo build --release -p glyph
+cargo build --release -p glyph-tauri
 ```
 
 Linux needs these packages (Debian/Ubuntu names):
 
 ```bash
-sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libasound2-dev libdbus-1-dev libssl-dev pkg-config
+sudo apt-get install libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libayatana-appindicator3-dev libgtk-3-dev libasound2-dev libdbus-1-dev libssl-dev pkg-config
 ```
 
 ## Configuration
@@ -70,17 +87,17 @@ An empty `server_url` switches to direct mode, where the app talks to the provid
 
 | Path | Contents |
 |---|---|
-| `src/` | The app and its UI (GPUI) |
+| `crates/glyph-tauri/` | The Tauri desktop shell (binary `glyph`) |
+| `glyph-ui/` | The Svelte frontend shared across desktop, web, and Android |
 | `crates/glyph-core` | Providers, search, library, config, sync |
 | `crates/glyph-audio` | Playback engine, crossfade, equalizer, loudness |
 | `crates/glyph-protocol` | Types shared with the server |
 | `assets/` | Fonts, icons, translations |
-| `docs/` | Interfaces and account docs |
+| `docs/` | Interfaces, account docs, and screenshots |
 
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-Icons from [Lucide](https://lucide.dev) ([license](assets/icons/ui/LICENSE-lucide.txt)).
 
 ### Fast Windows development
 
@@ -91,11 +108,11 @@ All three share the ordinary Cargo `target` cache and overwrite one
 `glyph-run.exe`. Keep the incremental/dependency cache: `cargo clean` makes the
 next start slower. Dependencies stay optimized and Windows links with rust-lld.
 
-For quick compiler feedback without linking or launching, use `./scripts/run-dev.ps1 -Check` (or `cargo check -p glyph` on any platform). Add `-Timings` to collect Cargo's HTML compilation report in `target/cargo-timings/`. `-NoBuild` restarts the existing debug binary immediately. Dev scripts share one target directory and use half the logical CPUs, capped at four compiler jobs; set `CARGO_BUILD_JOBS` explicitly to override. Keep the dependency cache for fast incremental edits: removing it forces GPUI, audio codecs and all other dependencies to compile again. Workspace crates already inherit level-1 dev optimization; third-party codecs, FFT and GPUI retain level 3. The desktop binary omits debug tables during normal development; use `cargo build -p glyph --config 'profile.dev.package.glyph.debug=1'` when source-level debugging is needed. Release optimization is unchanged.
+For quick compiler feedback without linking or launching, use `./scripts/run-dev.ps1 -Check` (or `cargo check -p glyph-tauri` on any platform). Add `-Timings` to collect Cargo's HTML compilation report in `target/cargo-timings/`. `-NoBuild` restarts the existing debug binary immediately. Dev scripts share one target directory and use half the logical CPUs, capped at four compiler jobs; set `CARGO_BUILD_JOBS` explicitly to override. Keep the dependency cache for fast incremental edits: removing it forces Tauri, audio codecs and all other dependencies to compile again. Workspace crates already inherit level-1 dev optimization; third-party codecs and FFT retain level 3. The desktop binary omits debug tables during normal development; use `cargo build -p glyph-tauri --config 'profile.dev.package.glyph-tauri.debug=1'` when source-level debugging is needed. Release optimization is unchanged.
 
 With Glyph closed, run `./scripts/measure-startup.ps1` for three process-to-window measurements. This opens and closes only its own test instances and reports the median; it does not measure server/feed readiness. Startup logs separately mark platform, font, window, library and audio initialization. Settings load once alongside platform initialization, translations load per language, and library/audio initialize independently. The optional splash preserves its original 2.9-second animation.
 
-The `fast` profile is for local tests with release-level optimization but without LTO (`cargo build --profile fast -p glyph`). Own workspace crates inherit incremental code generation; third-party dependencies use compact non-incremental artifacts. LTO is explicitly `"off"` so local ThinLTO is disabled as well. It uses `target/fast`, separate from `target/debug`: use one profile consistently for an edit cycle instead of alternating and rebuilding both. Normal `dev` uses less optimization for frequently edited code and is preferable for UI iteration.
+The `fast` profile is for local tests with release-level optimization but without LTO (`cargo build --profile fast -p glyph-tauri`). Own workspace crates inherit incremental code generation; third-party dependencies use compact non-incremental artifacts. LTO is explicitly `"off"` so local ThinLTO is disabled as well. It uses `target/fast`, separate from `target/debug`: use one profile consistently for an edit cycle instead of alternating and rebuilding both. Normal `dev` uses less optimization for frequently edited code and is preferable for UI iteration.
 
 ### Automatic build retention
 

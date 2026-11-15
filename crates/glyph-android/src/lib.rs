@@ -1,54 +1,311 @@
-//! Android entry point. GameActivity starts `android_main` on its own thread;
-//! from there on it is the same app as on the desktop: `glyph::init` and
-//! `glyph::root` build the views, only the platform underneath differs.
+//! Android WebView shell entry point (`app.glyph.MainActivity` + `PlaybackService`).
+//! Runs the shared `glyph-app` controller, Tokio async runtime, `glyph-core`,
+//! and `glyph-audio` while delegating UI rendering to Svelte inside WebView.
 #![cfg(target_os = "android")]
 
-use gpui::WindowOptions;
-use gpui_android::android_activity::AndroidApp;
-use glyph_audio::MediaKeyEvent;
-use jni::objects::{JClass, JObject, JString};
-use jni::sys::jint;
-use jni::{jni_sig, jni_str, EnvUnowned, JValue};
+use glyph_app::controller::Core;
+use glyph_app::host::Host;
+use glyph_audio::{MediaKeyEvent, MediaKeys, Status};
+use glyph_core::dedupe::track_key;
+use glyph_protocol::Track;
+use jni::errors::LogErrorAndDefault;
+use jni::objects::{Global, JClass, JObject, JString};
+use jni::sys::{jboolean, jint, jlong};
+use jni::{jni_sig, jni_str, Env, EnvUnowned, JValue, JavaVM};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_app_glyph_MainActivity_nativeConnectivity(
-    _env: EnvUnowned, _class: JClass, online: jni::sys::jboolean,
-) {
-    glyph_core::connectivity::set_platform_online(online);
+struct AndroidAppState {
+    rt: tokio::runtime::Runtime,
+    core: Arc<Core>,
 }
 
-#[unsafe(no_mangle)]
-fn android_main(app: AndroidApp) {
-    android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("glyph"),
-    );
-    std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+static JVM: OnceLock<JavaVM> = OnceLock::new();
+static ACTIVITY: Mutex<Option<Global<JObject<'static>>>> = Mutex::new(None);
+static STATE: OnceLock<Arc<AndroidAppState>> = OnceLock::new();
+static URL_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_JAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-    // dirs:: knows no Android folders: point the core at the app's own.
-    if let Some(base) = app.internal_data_path() {
-        let set = |key: &str, dir: std::path::PathBuf| {
-            let _ = std::fs::create_dir_all(&dir);
-            // Before any other thread of ours exists.
-            std::env::set_var(key, dir);
+fn with_activity<R>(
+    label: &str,
+    f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<R>,
+) -> Option<R> {
+    let vm = JVM.get()?;
+    let act_ref = {
+        let guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        let g = guard.as_ref()?;
+        vm.attach_current_thread(|env| env.new_global_ref(g.as_ref()))
+            .ok()?
+    };
+
+    match vm.attach_current_thread(|env| f(env, act_ref.as_ref())) {
+        Ok(val) => Some(val),
+        Err(e) => {
+            log::warn!("jni `{label}` failed: {e}");
+            None
+        }
+    }
+}
+
+fn encode_uri_component(s: &str) -> String {
+    let mut enc = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            enc.push(b as char);
+        } else {
+            enc.push_str(&format!("%{b:02X}"));
+        }
+    }
+    enc
+}
+
+#[derive(Default)]
+struct MediaState {
+    keys: Option<MediaKeys>,
+    rx: Option<flume::Receiver<MediaKeyEvent>>,
+    cover_cache: Arc<Mutex<(Option<String>, Option<PathBuf>, bool)>>,
+}
+
+struct AndroidHost {
+    media: Mutex<MediaState>,
+}
+
+impl AndroidHost {
+    fn new() -> Self {
+        let (keys, rx) = match glyph_app::guard::guard_res(|| MediaKeys::new(None)) {
+            Ok(mk) => {
+                let rx = mk.events();
+                (Some(mk), Some(rx))
+            }
+            Err(e) => {
+                log::warn!("media keys init failed: {e}");
+                (None, None)
+            }
         };
-        set("GLYPH_DATA_DIR", base.join("data"));
-        set("GLYPH_CACHE_DIR", base.join("cache"));
-        let config = base.join("config");
-        let _ = std::fs::create_dir_all(&config);
-        std::env::set_var("GLYPH_CONFIG", config.join("config.toml"));
+        Self {
+            media: Mutex::new(MediaState {
+                keys,
+                rx,
+                cover_cache: Arc::new(Mutex::new((None, None, false))),
+            }),
+        }
+    }
+}
+
+fn toggle_like_current(core: &Arc<Core>) {
+    let cur = core.st().current.clone();
+    if let Some(t) = cur {
+        core.st().library.toggle_like(&t);
+        core.library_changed();
+    }
+}
+
+fn call_complete_invoke(id: i64, ok: bool, payload_json: &str) {
+    with_activity("gpuiCompleteInvoke", |env, activity| {
+        let json = env.new_string(payload_json)?;
+        env.call_method(
+            activity,
+            jni_str!("gpuiCompleteInvoke"),
+            jni_sig!("(JZLjava/lang/String;)V"),
+            &[
+                JValue::Long(id),
+                JValue::Bool(ok.into()),
+                JValue::Object(&json),
+            ],
+        )?;
+        Ok(())
+    });
+}
+
+fn call_emit_event(name: &str, payload_json: &str) {
+    with_activity("gpuiEmitEvent", |env, activity| {
+        let name = env.new_string(name)?;
+        let json = env.new_string(payload_json)?;
+        env.call_method(
+            activity,
+            jni_str!("gpuiEmitEvent"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+            &[JValue::Object(&name), JValue::Object(&json)],
+        )?;
+        Ok(())
+    });
+}
+
+fn take_open_url() -> Option<String> {
+    with_activity("gpuiTakeOpenUrl", |env, activity| {
+        let value = env
+            .call_method(activity, jni_str!("gpuiTakeOpenUrl"), jni_sig!("()Ljava/lang/String;"), &[])?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let s = env.cast_local::<JString>(value)?;
+        Ok(Some(s.try_to_string(env)?))
+    })
+    .flatten()
+}
+
+fn fetch_cover_if_needed(core: &Arc<Core>, track: &Track, cache: &Arc<Mutex<(Option<String>, Option<PathBuf>, bool)>>) -> Option<PathBuf> {
+    let key = track_key(track);
+    let need_fetch = {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if c.0.as_deref() == Some(&key) {
+            return c.1.clone();
+        }
+        c.0 = Some(key.clone());
+        c.1 = None;
+        c.2 = true;
+        true
+    };
+    if need_fetch {
+        if let Some(b) = core.backend() {
+            let track = track.clone();
+            let cache = cache.clone();
+            glyph_app::rt::spawn(async move {
+                let path = b.cover(&track).await.ok().flatten();
+                let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+                if c.0.as_deref() == Some(&key) {
+                    c.1 = path;
+                    c.2 = false;
+                }
+            });
+        }
+    }
+    None
+}
+
+impl Host for AndroidHost {
+    fn emit(&self, event: &str, payload: Value) {
+        let json = serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string());
+        call_emit_event(event, &json);
     }
 
-    // `adb shell setprop debug.glyph.gpu gl`: use the OpenGL ES adapter
-    // instead of Vulkan (diagnosing GPU driver problems, e.g. on emulators).
-    if getprop("debug.glyph.gpu").as_deref() == Some("gl") {
-        std::env::set_var("ZED_DEVICE_ID", "0x0000");
+    fn asset_url(&self, path: &Path) -> String {
+        let p = path.to_string_lossy();
+        format!("https://glyph.localhost/__asset__?path={}", encode_uri_component(&p))
     }
 
-    // Background playback: now playing goes to MainActivity.gpuiNowPlaying,
-    // which runs the media notification service (PlaybackService.java).
-    // The cover file becomes the notification's artwork ("" for none),
-    // `liked` the state of its add button, and the remote volume (-1: none)
-    // hands the volume keys to a network device.
+    fn run_on_main_thread(&self, f: Box<dyn FnOnce() + Send>) {
+        f();
+    }
+
+    fn on_tick(&self, core: &Arc<Core>) {
+        if URL_WAITING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            while let Some(raw) = take_open_url() {
+                glyph_app::links::apply(core, &raw);
+            }
+        }
+
+        let events: Vec<MediaKeyEvent> = {
+            let m = self.media.lock().unwrap_or_else(|e| e.into_inner());
+            m.rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default()
+        };
+        for ev in events {
+            match ev {
+                MediaKeyEvent::Play => {
+                    if core.player_dto().status != "playing" {
+                        core.toggle_play();
+                    }
+                }
+                MediaKeyEvent::Pause => {
+                    if core.player_dto().status == "playing" {
+                        core.toggle_play();
+                    }
+                }
+                MediaKeyEvent::Toggle => core.toggle_play(),
+                MediaKeyEvent::Next => core.next(false),
+                MediaKeyEvent::Previous => core.previous(),
+                MediaKeyEvent::Stop => {
+                    if let Some(p) = &core.player {
+                        p.stop();
+                    }
+                }
+                MediaKeyEvent::SeekForward => core.seek(core.player_dto().position + 5.0),
+                MediaKeyEvent::SeekBackward => core.seek((core.player_dto().position - 5.0).max(0.0)),
+                MediaKeyEvent::Like => toggle_like_current(core),
+                MediaKeyEvent::Volume(v) => core.set_volume(f32::from(v) / 100.0),
+            }
+        }
+
+        let (current, liked, playing, buffering, position, remote_volume) = {
+            let st = core.st();
+            let ps = core.player_state();
+            let current = st.current.clone().or_else(|| ps.as_ref().and_then(|s| s.track.clone()));
+            let liked = current.as_ref().is_some_and(|c| st.library.is_liked(c));
+            let hold = glyph_app::jam::hold_play();
+            let loading = ps.as_ref().is_some_and(|s| s.status == Status::Loading);
+            let playing = (ps.as_ref().is_some_and(|s| s.status == Status::Playing) && !st.resolving)
+                || (st.resolving && !hold);
+            let buffering = (st.resolving || loading) && !hold;
+            let pos = ps.as_ref().map_or(Duration::ZERO, |s| s.position);
+            let remote_vol = if glyph_app::jam::remote_on() {
+                ps.as_ref().map(|s| (s.volume.clamp(0.0, 1.0) * 100.0).round() as u8)
+            } else {
+                None
+            };
+            (current, liked, playing, buffering, pos, remote_vol)
+        };
+
+        let jam_active = glyph_app::jam::jam_active();
+        if LAST_JAM_ACTIVE.swap(jam_active, std::sync::atomic::Ordering::AcqRel) != jam_active {
+            with_activity("jam active", |env, activity| {
+                env.call_method(activity, jni_str!("gpuiJamActive"), jni_sig!("(Z)V"), &[JValue::Bool(jam_active.into())])?;
+                Ok(())
+            });
+        }
+
+        let m = self.media.lock().unwrap_or_else(|e| e.into_inner());
+        let cover = current.as_ref().and_then(|t| fetch_cover_if_needed(core, t, &m.cover_cache));
+        if let Some(mk) = &m.keys {
+            mk.set_playback_state(current.as_ref(), playing, buffering, position);
+            mk.set_artwork(cover.as_deref(), liked);
+            mk.set_remote_volume(remote_volume);
+        }
+    }
+
+    fn open_url(&self, url: &str) -> Result<(), String> {
+        let called = with_activity("gpuiOpenUrl", |env, activity| {
+            let u = env.new_string(url)?;
+            env.call_method(activity, jni_str!("gpuiOpenUrl"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&u)])?;
+            Ok(())
+        });
+        if called.is_some() {
+            Ok(())
+        } else {
+            Err("activity unavailable".into())
+        }
+    }
+
+    fn write_clipboard(&self, text: &str) -> Result<(), String> {
+        let called = with_activity("gpuiSetClipboard", |env, activity| {
+            let s = env.new_string(text)?;
+            env.call_method(activity, jni_str!("gpuiSetClipboard"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&s)])?;
+            Ok(())
+        });
+        if called.is_some() {
+            Ok(())
+        } else {
+            Err("activity unavailable".into())
+        }
+    }
+
+    fn set_theme_icon(&self, theme_id: &str, accent: u32) {
+        with_activity("gpuiSetThemeIcon", |env, activity| {
+            let t = env.new_string(theme_id)?;
+            env.call_method(
+                activity,
+                jni_str!("gpuiSetThemeIcon"),
+                jni_sig!("(Ljava/lang/String;I)V"),
+                &[JValue::Object(&t), JValue::Int(accent as i32)],
+            )?;
+            Ok(())
+        });
+    }
+}
+
+fn install_platform_hooks() {
     glyph_audio::media_keys::set_now_playing_sink(Box::new(|now: &glyph_audio::media_keys::NowPlaying<'_>| {
         let (title, artist, dur) = match now.track {
             Some(t) => (t.title.clone(), t.artist.clone(), t.duration_ms.unwrap_or(0)),
@@ -56,7 +313,7 @@ fn android_main(app: AndroidApp) {
         };
         let cover = now.cover.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let remote_volume = now.remote_volume.map_or(-1, i32::from);
-        gpui_android::java::with_activity("now playing", |env, activity| {
+        with_activity("now playing", |env, activity| {
             let title = env.new_string(&title)?;
             let artist = env.new_string(&artist)?;
             let cover = env.new_string(&cover)?;
@@ -80,23 +337,27 @@ fn android_main(app: AndroidApp) {
         });
     }));
 
-    // In-app updates: the verified APK goes to MainActivity.gpuiInstallApk
-    // (install permission, then the system installer's confirmation).
     glyph_core::updater::set_apk_installer(Box::new(|path| {
         let path = path.to_string_lossy().into_owned();
-        gpui_android::java::with_activity("install update", |env, activity| {
+        with_activity("install update", |env, activity| {
             let path = env.new_string(&path)?;
-            env.call_method(activity, jni_str!("gpuiInstallApk"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&path)])?;
+            env.call_method(
+                activity,
+                jni_str!("gpuiInstallApk"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&path)],
+            )?;
             Ok(())
         })
         .is_some()
     }));
 
-    // ANDROID_ID for the hardware id servers can ban (glyph_core::hardware).
     std::thread::spawn(|| {
         for _ in 0..100 {
-            let id = gpui_android::java::with_activity("android id", |env, activity| {
-                let value = env.call_method(activity, jni_str!("gpuiAndroidId"), jni_sig!("()Ljava/lang/String;"), &[])?.l()?;
+            let id = with_activity("android id", |env, activity| {
+                let value = env
+                    .call_method(activity, jni_str!("gpuiAndroidId"), jni_sig!("()Ljava/lang/String;"), &[])?
+                    .l()?;
                 if value.is_null() {
                     return Ok(None);
                 }
@@ -104,82 +365,171 @@ fn android_main(app: AndroidApp) {
                 Ok(Some(value.try_to_string(env)?))
             });
             match id {
-                Some(Some(id)) => return glyph_core::hardware::set_platform_id(&id),
-                Some(None) => return,
-                // No activity yet.
-                None => std::thread::sleep(std::time::Duration::from_millis(100)),
-            }
-        }
-    });
-
-    let config = glyph_core::Config::load().unwrap_or_default();
-    glyph::i18n::set_lang(glyph::i18n::Lang::system());
-    gpui_android::application(app).with_assets(glyph::assets::Assets).run(move |cx| {
-        glyph::init(cx, &config);
-        let options = WindowOptions { titlebar: None, ..Default::default() };
-        if let Err(e) = cx.open_window(options, |window, cx| glyph::root(window, config, cx)) {
-            log::error!("could not open the window: {e:#}");
-        }
-    });
-}
-
-fn getprop(name: &str) -> Option<String> {
-    let out = std::process::Command::new("getprop").arg(name).output().ok()?;
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!v.is_empty()).then_some(v)
-}
-
-/// `MainActivity.nativeInsets`: system bars + cutout and keyboard, in device pixels.
-#[unsafe(no_mangle)]
-extern "system" fn Java_app_glyph_MainActivity_nativeInsets<'local>(
-    _env: EnvUnowned<'local>,
-    _this: JObject<'local>,
-    top: jint,
-    right: jint,
-    bottom: jint,
-    left: jint,
-    ime_top: jint,
-    ime_right: jint,
-    ime_bottom: jint,
-    ime_left: jint,
-) {
-    gpui_android::set_system_insets([top, right, bottom, left], [ime_top, ime_right, ime_bottom, ime_left]);
-}
-
-/// `MainActivity.nativeUrlWaiting`: the app was opened with a `glyph://`
-/// link (jam invite, playlist). Taken on another thread: the activity may
-/// not be handed to Rust yet right after start.
-#[unsafe(no_mangle)]
-extern "system" fn Java_app_glyph_MainActivity_nativeUrlWaiting<'local>(_env: EnvUnowned<'local>, _this: JObject<'local>) {
-    std::thread::spawn(|| {
-        for _ in 0..100 {
-            let url = gpui_android::java::with_activity("take open url", |env, activity| {
-                let value = env.call_method(activity, jni_str!("gpuiTakeOpenUrl"), jni_sig!("()Ljava/lang/String;"), &[])?.l()?;
-                if value.is_null() {
-                    return Ok(None);
-                }
-                let value = env.cast_local::<JString>(value)?;
-                Ok(Some(value.try_to_string(env)?))
-            });
-            match url {
-                Some(Some(url)) => {
-                    glyph::instance::open_url(&url);
-                    gpui_android::wake();
+                Some(Some(id)) => {
+                    glyph_core::hardware::set_platform_id(&id);
                     return;
                 }
-                // Taken already (or none).
                 Some(None) => return,
-                // No activity yet.
-                None => std::thread::sleep(std::time::Duration::from_millis(100)),
+                None => std::thread::sleep(Duration::from_millis(100)),
             }
         }
     });
 }
 
-/// `PlaybackService.nativeMediaKey`: a button on the notification, lock
-/// screen or headset (codes in PlaybackService.java).
+fn configure_dirs(files_dir: &str) {
+    let base = PathBuf::from(files_dir);
+    let set = |key: &str, dir: PathBuf| {
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var(key, dir);
+    };
+    set("GLYPH_DATA_DIR", base.join("data"));
+    set("GLYPH_CACHE_DIR", base.join("cache"));
+    let config = base.join("config");
+    let _ = std::fs::create_dir_all(&config);
+    std::env::set_var("GLYPH_CONFIG", config.join("config.toml"));
+}
+
+/// Called from `MainActivity.onCreate` once WebView is initialized.
 #[unsafe(no_mangle)]
-extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(_env: EnvUnowned<'local>, _class: JClass<'local>, code: jint) {
+pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
+    mut env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    activity: JObject<'local>,
+    files_dir: JString<'local>,
+) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("glyph"),
+    );
+
+    let init_info = env
+        .with_env(|env| -> jni::errors::Result<Option<(JavaVM, Global<JObject<'static>>, String)>> {
+            let vm = env.get_java_vm()?;
+            let global = env.new_global_ref(&activity)?;
+            let dir = files_dir.try_to_string(env)?;
+            Ok(Some((vm, global, dir)))
+        })
+        .resolve::<LogErrorAndDefault>();
+
+    let Some((vm, global_act, files_dir)) = init_info else {
+        return;
+    };
+    let _ = JVM.set(vm);
+    *ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(global_act);
+
+    STATE.get_or_init(|| {
+        std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+        configure_dirs(&files_dir);
+        install_platform_hooks();
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        glyph_app::rt::set_handle(rt.handle().clone());
+
+        let host = Arc::new(AndroidHost::new());
+        let core = Core::new(host);
+        glyph_app::setup(&core);
+
+        while let Some(raw) = take_open_url() {
+            glyph_app::links::apply(&core, &raw);
+        }
+
+        Arc::new(AndroidAppState { rt, core })
+    });
+}
+
+/// Asynchronous command bridge called from WebView `window.__GLYPH_ANDROID__.invoke`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeInvoke<'local>(
+    mut env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    id: jlong,
+    cmd: JString<'local>,
+    args_json: JString<'local>,
+) {
+    let parsed = env
+        .with_env(|env| -> jni::errors::Result<(String, String)> {
+            let cmd = cmd.try_to_string(env)?;
+            let args = args_json.try_to_string(env)?;
+            Ok((cmd, args))
+        })
+        .resolve::<LogErrorAndDefault>();
+    let (cmd, args_json) = parsed;
+    if cmd.is_empty() {
+        return;
+    }
+
+    let Some(state) = STATE.get().cloned() else {
+        let err_json = serde_json::to_string("app not initialized").unwrap_or_else(|_| "\"init error\"".into());
+        call_complete_invoke(id as i64, false, &err_json);
+        return;
+    };
+
+    let args: Value = if args_json.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&args_json).unwrap_or_else(|_| Value::Object(Default::default()))
+    };
+
+    let core = Arc::clone(&state.core);
+    state.rt.spawn(async move {
+        let result = glyph_app::dispatch::dispatch(&core, &cmd, args).await;
+        let (ok, json) = match result {
+            Ok(v) => (true, serde_json::to_string(&v).unwrap_or_else(|_| "null".into())),
+            Err(e) => (false, serde_json::to_string(&e).unwrap_or_else(|_| "\"error\"".into())),
+        };
+        call_complete_invoke(id as i64, ok, &json);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeConnectivity(
+    _env: EnvUnowned,
+    _this: JObject,
+    online: jboolean,
+) {
+    glyph_core::connectivity::set_platform_online(online);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeInsets<'local>(
+    _env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    _top: jint,
+    _right: jint,
+    _bottom: jint,
+    _left: jint,
+    _ime_top: jint,
+    _ime_right: jint,
+    _ime_bottom: jint,
+    _ime_left: jint,
+) {
+    // WebView applies system-bar and IME CSS custom properties (--safe-* / --ime-bottom).
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeUrlWaiting<'local>(
+    _env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+) {
+    if let Some(state) = STATE.get().cloned() {
+        while let Some(raw) = take_open_url() {
+            glyph_app::links::apply(&state.core, &raw);
+        }
+    } else {
+        URL_WAITING.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    code: jint,
+) {
     let ev = match code {
         0 => MediaKeyEvent::Play,
         1 => MediaKeyEvent::Pause,
@@ -191,13 +541,13 @@ extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(_env: E
         _ => return,
     };
     glyph_audio::media_keys::push_event(ev);
-    gpui_android::wake();
 }
 
-/// `PlaybackService.nativeVolume`: the volume keys (or the system's volume
-/// panel) while a network device plays; 0..=100.
 #[unsafe(no_mangle)]
-extern "system" fn Java_app_glyph_PlaybackService_nativeVolume<'local>(_env: EnvUnowned<'local>, _class: JClass<'local>, volume: jint) {
+pub extern "system" fn Java_app_glyph_PlaybackService_nativeVolume<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    volume: jint,
+) {
     glyph_audio::media_keys::push_event(MediaKeyEvent::Volume(volume.clamp(0, 100) as u8));
-    gpui_android::wake();
 }

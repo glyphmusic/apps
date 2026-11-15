@@ -297,6 +297,7 @@ once.
 | GET | `/v1/devices` | access token |
 | PATCH / DELETE | `/v1/devices/{id}` (rename / remove) | access token |
 | POST | `/v1/devices/self/signout` | access token |
+| POST | `/v1/devices/all/signout` | access token |
 | POST / GET | `/v1/sync/push`, `/v1/sync/pull` | access token |
 | GET | `/v1/sync/export` (all items as JSON) | access token |
 | GET / PATCH | `/v1/profile` (public, show_recent, shown playlist ids) | access token |

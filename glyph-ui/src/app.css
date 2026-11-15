@@ -1,0 +1,116 @@
+/* Glyph tokens, from src/theme.rs. Flat UI: glow only in the background
+   (lib/glow.ts), panels, text and buttons are flat. */
+@font-face { font-family: Inter; font-weight: 400; src: url("$assets/fonts/Inter-Regular.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: Inter; font-weight: 500; src: url("$assets/fonts/Inter-Medium.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: Inter; font-weight: 600; src: url("$assets/fonts/Inter-SemiBold.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: Inter; font-weight: 700; src: url("$assets/fonts/Inter-Bold.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 300; src: url("$assets/fonts/JetBrainsMono-Light.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("$assets/fonts/JetBrainsMono-Regular.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 500; src: url("$assets/fonts/JetBrainsMono-Medium.ttf") format("truetype"); font-display: block; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 700; src: url("$assets/fonts/JetBrainsMono-Bold.ttf") format("truetype"); font-display: block; }
+
+:root {
+  /* theme.rs: set from the colour theme at run time (state.ts applyTheme) */
+  --bg: #030303;
+  --accent: #ff5fd2;
+  --accent-h: 316;
+  --accent-s: 100%;
+  /* text ink (light; on bright glow, `.ink-dark` flips it) */
+  --ink: 242, 242, 242;
+  --text: rgba(var(--ink), 1);
+  --dim: rgba(var(--ink), .72);
+  --faint: rgba(var(--ink), .56);
+  --ghost: rgba(var(--ink), .22);
+  --panel: rgba(0, 0, 0, .68);
+  --panel-strong: rgba(0, 0, 0, .75);
+  --panel-light: rgba(0, 0, 0, .60);
+  --border: rgba(255, 255, 255, .12);
+  --border-strong: rgba(255, 255, 255, .15);
+  --border-faint: rgba(255, 255, 255, .10);
+  --hover: rgba(255, 255, 255, .06);
+  --active: rgba(255, 255, 255, .10);
+  --card: rgba(20, 20, 20, .75);
+  --card-hover: rgba(31, 31, 31, .82);
+  --danger: hsl(355 86% 58%);
+  --ok: hsl(140 55% 62%);
+  --warn: hsl(40 90% 62%);
+  --tip-bg: rgba(31, 31, 31, .98);
+  /* sizes (theme.rs); --k is the text size factor from Settings > Appearance */
+  --k: 1;
+  --xs: calc(11.5px * var(--k));
+  --sm: calc(12.5px * var(--k));
+  --md: calc(13.5px * var(--k));
+  --lg: calc(16px * var(--k));
+  --titlebar-h: 44px;
+  --sidebar-w: 64px;
+  --player-h: 80px;
+  --gap: 10px;
+  --radius: 10px;
+  --page-x: 32px;
+  --page-top: 20px;
+  --font: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", Menlo, monospace;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  color-scheme: dark;
+}
+html.compact { --page-x: 16px; --page-top: 8px; }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+/* The mini player window (Tauri): only the card / bar shows, its corners round. */
+html.mini-window, html.mini-window body { background: transparent; }
+body { color: var(--text); font: var(--md)/1.35 var(--font); -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: default; }
+#app { height: 100%; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; }
+input, textarea { font: inherit; color: inherit; user-select: text; -webkit-user-select: text; }
+a { color: inherit; text-decoration: none; }
+img { display: block; -webkit-user-drag: none; }
+:focus { outline: none; }
+:focus-visible { outline: 1px solid rgba(255, 255, 255, .35); outline-offset: 1px; }
+/* Clickable rows and cards (tabindex -1) get focus from the mouse or a
+   closing menu; Tab never reaches them, so no ring there. */
+[tabindex="-1"]:focus-visible { outline: none; }
+
+.mono { font-family: var(--mono); font-variant-ligatures: none; }
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dim { color: var(--dim); }
+.faint { color: var(--faint); }
+.ghost { color: var(--ghost); }
+.accent { color: var(--accent); }
+.flex1 { flex: 1; min-width: 0; }
+.row-c { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+
+/* Text that sits on a bright spot of the glow flips to dark ink
+   (theme.rs adaptive ink). */
+.ink-dark { --ink: 13, 13, 13; --dim: rgba(13, 13, 13, .82); --faint: rgba(13, 13, 13, .70); --ghost: rgba(13, 13, 13, .3); }
+
+/* Panels (widgets/buttons.rs panel / card / pill) */
+/* No outlines: panels stand out by their fill only (user wish, 2026-11-15). */
+.panel { background: var(--panel); border-radius: var(--radius); }
+/* Named app-card so a component's own scoped .card does not pick it up. */
+.app-card { background: var(--card); border-radius: 8px; overflow: hidden; }
+
+/* Scrollbars: thin, flat (widgets/scroll.rs) */
+.scroll { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .16) transparent; overscroll-behavior: contain; }
+.scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+.scroll::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, .26); }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* Toggle pop (widgets.rs toggle_button): 0.7 → 1.18 → 1.0 over 260 ms */
+@keyframes pop { 0% { transform: scale(.7); } 45% { transform: scale(1.18); } 100% { transform: scale(1); } }
+/* Transport press (widgets::press): shrink and spring back */
+@keyframes press { 0% { transform: scale(1); } 35% { transform: scale(.86); } 100% { transform: scale(1); } }
+/* Long-press hold & bounce pop (compact long-press / tactile selection) */
+@keyframes lp-pop { 0% { transform: scale(.955); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
+.lp-hold { transform: scale(.965) !important; transition: transform .18s var(--ease) !important; }
+.lp-pop { animation: lp-pop .32s cubic-bezier(.34, 1.56, .64, 1); }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+}
+.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }

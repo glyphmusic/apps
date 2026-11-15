@@ -1,16 +1,5 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
-<svg
-  class="lucide lucide-skip-back"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <polygon points="19 20 9 12 19 4 19 20" />
-  <line x1="5" x2="5" y1="19" y2="5" />
+<!-- Glyph icon set, see docs/ICONS.md -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="currentColor" d="M16.92 6.23L11.08 10.77Q9.5 12 11.08 13.23L16.92 17.77Q18.5 19 18.5 17L18.5 7Q18.5 5 16.92 6.23Z"/>
+  <path d="M5.5 5v14"/>
 </svg>

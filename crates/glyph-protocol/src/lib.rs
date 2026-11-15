@@ -506,6 +506,9 @@ pub struct DevicePatch {
 // Picture, banner and a page other signed-in users open by handle. Private
 // until the owner makes it public (server: `accounts/profile.rs`).
 
+/// Default order of sections on a user profile.
+pub const PROFILE_SECTIONS: &[&str] = &["playlists", "recent"];
+
 /// `GET|PATCH /v1/profile`: the owner's settings.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProfileSettings {
@@ -514,6 +517,9 @@ pub struct ProfileSettings {
     /// Ids of the playlists shown on the profile.
     #[serde(default)]
     pub playlists: Vec<String>,
+    /// Order of profile sections (`playlists`, `recent`).
+    #[serde(default)]
+    pub sections: Vec<String>,
     /// sha256 of the picture / banner (`/v1/profiles/{handle}/images/{sha}`).
     #[serde(default)]
     pub avatar: Option<String>,
@@ -530,6 +536,8 @@ pub struct ProfilePatch {
     pub show_recent: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playlists: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<String>>,
 }
 
 /// `PUT /v1/profile/recent`: songs played last, newest first (at most 20 kept).
@@ -568,6 +576,9 @@ pub struct PublicProfile {
     pub playlists: Vec<ProfilePlaylist>,
     #[serde(default)]
     pub recent: Vec<Track>,
+    /// Order of profile sections (`playlists`, `recent`).
+    #[serde(default)]
+    pub sections: Vec<String>,
 }
 
 /// `GET /v1/profiles/{handle}/playlists/{id}`
@@ -929,6 +940,26 @@ pub mod mcp {
             tool("play_artist", "Play an artist's songs.", obj(json!({ "name": { "type": "string" }, "shuffle": { "type": "boolean" } }), &["name"])),
             tool("queue_add", "Add a song to the queue (\"Up next\"); `next` puts it first.", obj(json!({ "ref": song, "query": query, "next": { "type": "boolean" } }), &[])),
             tool("get_queue", "The current queue: songs queued by hand and what plays next from the list.", none()),
+            tool("queue_remove", "Remove one upcoming song from the queue at `index` (0-based into get_queue).", obj(json!({ "index": { "type": "integer", "minimum": 0 } }), &["index"])),
+            tool("queue_move", "Move an upcoming song in the queue from `from` to `to` (0-based into get_queue).", obj(json!({ "from": { "type": "integer", "minimum": 0 }, "to": { "type": "integer", "minimum": 0 } }), &["from", "to"])),
+            tool("queue_jump", "Jump to and play the upcoming song at `index` (0-based into get_queue).", obj(json!({ "index": { "type": "integer", "minimum": 0 } }), &["index"])),
+            tool("queue_clear", "Clear all upcoming songs from the queue while keeping the current song.", none()),
+            tool("start_radio", "Start radio (similar songs) from the current song, a given song, an artist, or a playlist.", obj(json!({ "ref": song, "query": query, "artist": { "type": "string" }, "playlist_id": { "type": "string" } }), &[])),
+            tool("sleep_timer", "Set, inspect, or turn off the sleep timer.", obj(json!({ "minutes": { "type": "integer", "minimum": 0, "maximum": 480 }, "end_of_song": { "type": "boolean" }, "off": { "type": "boolean" } }), &[])),
+            tool("recent_songs", "Recently played songs (most recent first).", obj(json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 50 } }), &[])),
+            tool("list_devices", "List signed-in account devices (online status, current song, playing state, volume, platform) and discovered network devices (Cast, AirPlay, Sonos, DLNA, MPD), plus the active output.", none()),
+            tool("play_on_device", "Play a song, artist, or playlist on another signed-in account device (by id or name), a network device, or \"local\".", obj(json!({
+                "device": { "type": "string", "description": "Target device id or name from list_devices, or \"local\"." },
+                "ref": song,
+                "query": query,
+                "artist": { "type": "string", "description": "Artist name to play on the target device." },
+                "playlist_id": { "type": "string", "description": "Playlist id (from list_playlists, or \"liked\") to play on the target device." },
+                "shuffle": { "type": "boolean" },
+                "control": { "type": "boolean", "description": "Also switch this app into remote-control mode for that account device (default false)." }
+            }), &["device"])),
+            tool("select_device", "Switch active playback output to another signed-in account device (transferring or controlling playback), a network device, or \"local\" to return playback here.", obj(json!({
+                "device": { "type": "string", "description": "Target device id or name from list_devices, or \"local\"." }
+            }), &["device"])),
             tool("list_playlists", "The user's playlists (id, name, song count).", none()),
             tool("get_playlist", "Songs of a playlist (`liked` for Liked Songs).", obj(json!({ "id": { "type": "string" } }), &["id"])),
             tool("play_playlist", "Play a playlist (`liked` for Liked Songs).", obj(json!({ "id": { "type": "string" }, "shuffle": { "type": "boolean" } }), &["id"])),
@@ -939,8 +970,129 @@ pub mod mcp {
             tool("remove_from_playlist", "Remove the song at `index` (0-based) from a playlist.", obj(json!({ "id": { "type": "string" }, "index": { "type": "integer", "minimum": 0 } }), &["id", "index"])),
             tool("like", "Like a song (the current one without ref).", obj(json!({ "ref": song }), &[])),
             tool("unlike", "Remove a song from Liked Songs (the current one without ref).", obj(json!({ "ref": song }), &[])),
+            tool("list_followed", "Followed artists in the user's library.", none()),
+            tool("follow_artist", "Follow or unfollow an artist.", obj(json!({ "name": { "type": "string" }, "follow": { "type": "boolean" } }), &["name"])),
             tool("get_lyrics", "Lyrics of the current song (plain text).", none()),
             tool("listening_stats", "Listening statistics, if the user turned them on.", obj(json!({ "range": { "type": "string", "enum": ["month", "last_month", "year", "all"] } }), &[])),
+            tool(
+                "get_settings",
+                "Read Glyph's cross-device synced settings (general language, appearance/theme/glow/ASCII, audio & equalizer, playback behavior, player UI, stats toggle, sharing, Discord integration, source providers, updates, and list sorting), along with available choices for themes, glow shapes, languages, and EQ presets. Excludes device-local settings (audio output device, volume, download folder, cache limit, server URL, shortcuts).",
+                obj(
+                    json!({
+                        "section": {
+                            "type": "string",
+                            "enum": ["all", "general", "appearance", "audio", "playback", "player", "stats", "sharing", "integrations", "providers", "updates", "lists"],
+                            "description": "Optional section filter (default: all)."
+                        }
+                    }),
+                    &[],
+                ),
+            ),
+            tool(
+                "set_settings",
+                "Update one or more cross-device synced Glyph settings and sync them across the user's signed-in devices. Only include the fields you want to change. Excludes device-local settings (audio output device, volume, download folder, cache limit, server URL, shortcuts).",
+                obj(
+                    json!({
+                        "general": {
+                            "type": "object",
+                            "properties": {
+                                "language": { "type": "string", "description": "Language code (e.g. 'en', 'de', 'fr', 'es') or 'system'." }
+                            }
+                        },
+                        "appearance": {
+                            "type": "object",
+                            "description": "Appearance & visual settings.",
+                            "properties": {
+                                "theme": { "type": "string", "description": "Built-in theme ('glyph', 'ember', 'ocean', 'forest', 'violet', 'crimson', 'mono') or installed 'plugin:<id>'." },
+                                "glow_shape": { "type": "string", "enum": ["auto", "strahl", "band", "sonnenaufgang", "horizont", "solid"] },
+                                "intensity": { "type": "number", "minimum": 0, "maximum": 1 },
+                                "music_reactivity": { "type": "number", "minimum": 0, "maximum": 1 },
+                                "ascii_covers": { "type": "boolean" },
+                                "ascii_effects": { "type": "boolean" },
+                                "startup_animation": { "type": "boolean" },
+                                "throttle_unfocused": { "type": "boolean" }
+                            }
+                        },
+                        "audio": {
+                            "type": "object",
+                            "properties": {
+                                "quality": { "type": "string", "enum": ["auto", "low", "standard", "high"] },
+                                "download_quality": { "type": "string", "enum": ["auto", "low", "standard", "high"] },
+                                "crossfade_s": { "type": "integer", "minimum": 0, "maximum": 20 },
+                                "level": { "type": "string", "enum": ["loud", "normal", "quiet"] },
+                                "normalize": { "type": "boolean" },
+                                "hide_explicit": { "type": "boolean" },
+                                "eq_enabled": { "type": "boolean" },
+                                "eq_preset": { "type": "string", "description": "Built-in EQ preset key (e.g. 'flat', 'bass_boost', 'rock', 'vocal'), 'user:<name>', or 'custom'." },
+                                "eq_gains": { "type": "array", "items": { "type": "number", "minimum": -12, "maximum": 12 }, "minItems": 10, "maxItems": 10 },
+                                "eq_bass_db": { "type": "number", "minimum": -12, "maximum": 12 },
+                                "eq_headroom_db": { "type": "number", "minimum": 0, "maximum": 12 }
+                            }
+                        },
+                        "playback": {
+                            "type": "object",
+                            "properties": {
+                                "shuffle_style": { "type": "string", "enum": ["smart", "random"] },
+                                "skip_unplayable": { "type": "boolean" },
+                                "patient_search": { "type": "boolean" }
+                            }
+                        },
+                        "player": {
+                            "type": "object",
+                            "properties": {
+                                "shuffle": { "type": "boolean" },
+                                "repeat": { "type": "string", "enum": ["off", "all", "one"] },
+                                "show_queue": { "type": "boolean" },
+                                "mini_large": { "type": "boolean" }
+                            }
+                        },
+                        "stats": {
+                            "type": "object",
+                            "properties": { "enabled": { "type": "boolean" } }
+                        },
+                        "sharing": {
+                            "type": "object",
+                            "properties": {
+                                "glyph_links": { "type": "boolean" },
+                                "profile_sections": { "type": "array", "items": { "type": "string", "enum": ["playlists", "recent"] } }
+                            }
+                        },
+                        "integrations": {
+                            "type": "object",
+                            "properties": {
+                                "discord_presence": { "type": "boolean" },
+                                "discord_client_id": { "type": "string" }
+                            }
+                        },
+                        "providers": {
+                            "type": "object",
+                            "properties": {
+                                "enabled": { "type": "array", "items": { "type": "string" } },
+                                "priority": { "type": "array", "items": { "type": "string" } },
+                                "youtube_daily_searches": { "type": "integer", "minimum": 0 }
+                            }
+                        },
+                        "updates": {
+                            "type": "object",
+                            "properties": {
+                                "check_on_start": { "type": "boolean" },
+                                "auto_install": { "type": "boolean" },
+                                "channel": { "type": "string", "enum": ["stable", "prerelease"] }
+                            }
+                        },
+                        "lists": {
+                            "type": "object",
+                            "properties": {
+                                "sort": { "type": "object", "additionalProperties": { "type": "string", "enum": ["custom", "title", "artist", "album", "duration"] } }
+                            }
+                        },
+                        "language": { "type": "string", "description": "Shortcut for general.language." },
+                        "theme": { "type": "string", "description": "Shortcut for appearance.theme." },
+                        "glow_shape": { "type": "string", "description": "Shortcut for appearance.glow_shape." }
+                    }),
+                    &[],
+                ),
+            ),
             tool(
                 "docs_search",
                 "Search Glyph's documentation for how to do something in Glyph (settings, keyboard shortcuts, local files, downloads, equalizer, accounts, devices, plugins, self-hosting). Returns the best sections with their address and the path for docs_read. Use a few English keywords.",
@@ -977,12 +1129,14 @@ pub mod mcp {
         Playback,
         /// Playlists and liked songs; writing changes them.
         Library,
+        /// Cross-device synced app settings (appearance, audio/EQ, playback, sources, etc.).
+        Settings,
         /// Listening statistics (read only).
         Stats,
     }
 
     impl Area {
-        pub const ALL: [Area; 3] = [Area::Playback, Area::Library, Area::Stats];
+        pub const ALL: [Area; 4] = [Area::Playback, Area::Library, Area::Settings, Area::Stats];
 
         /// `false` for areas without tools that change anything.
         pub fn has_write(self) -> bool {
@@ -994,14 +1148,18 @@ pub mod mcp {
     /// name that is not a tool.
     pub fn tool_area(name: &str) -> Option<(Area, bool)> {
         Some(match name {
-            "now_playing" | "get_queue" | "get_lyrics" | "search" => (Area::Playback, false),
+            "now_playing" | "get_queue" | "get_lyrics" | "search" | "list_devices" | "recent_songs" => (Area::Playback, false),
             "play" | "pause" | "toggle_play" | "next" | "previous" | "seek" | "set_volume" | "set_shuffle" | "set_repeat"
-            | "play_song" | "play_artist" | "queue_add" | "play_playlist" => (Area::Playback, true),
-            "list_playlists" | "get_playlist" => (Area::Library, false),
-            "create_playlist" | "rename_playlist" | "delete_playlist" | "add_to_playlist" | "remove_from_playlist" | "like" | "unlike" => {
+            | "play_song" | "play_artist" | "queue_add" | "queue_remove" | "queue_move" | "queue_jump" | "queue_clear"
+            | "play_playlist" | "start_radio" | "sleep_timer" | "play_on_device" | "select_device" => (Area::Playback, true),
+            "list_playlists" | "get_playlist" | "list_followed" => (Area::Library, false),
+            "create_playlist" | "rename_playlist" | "delete_playlist" | "add_to_playlist" | "remove_from_playlist" | "like" | "unlike"
+            | "follow_artist" => {
                 (Area::Library, true)
             }
             "listening_stats" => (Area::Stats, false),
+            "get_settings" => (Area::Settings, false),
+            "set_settings" => (Area::Settings, true),
             _ => return None,
         })
     }
@@ -1013,12 +1171,18 @@ pub mod mcp {
     pub struct Permissions {
         pub playback: Access,
         pub library: Access,
+        #[serde(default = "default_write")]
+        pub settings: Access,
         pub stats: Access,
+    }
+
+    fn default_write() -> Access {
+        Access::Write
     }
 
     impl Default for Permissions {
         fn default() -> Self {
-            Self { playback: Access::Write, library: Access::Read, stats: Access::None }
+            Self { playback: Access::Write, library: Access::Read, settings: Access::Write, stats: Access::None }
         }
     }
 
@@ -1027,6 +1191,7 @@ pub mod mcp {
             match area {
                 Area::Playback => self.playback,
                 Area::Library => self.library,
+                Area::Settings => self.settings,
                 Area::Stats => self.stats,
             }
         }
@@ -1037,6 +1202,7 @@ pub mod mcp {
             match area {
                 Area::Playback => self.playback = access,
                 Area::Library => self.library = access,
+                Area::Settings => self.settings = access,
                 Area::Stats => self.stats = access,
             }
         }
@@ -1087,7 +1253,7 @@ pub mod mcp {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": server_name, "title": "Glyph", "version": version },
-                "instructions": "Controls the Glyph music app: playback, queue, search, playlists, likes, lyrics. Songs are passed between tools by their `ref`. For how-to questions about Glyph itself (settings, shortcuts, features) use docs_search, then docs_read."
+                "instructions": "Controls the Glyph music app: playback, devices & remote playback, queue, radio, sleep timer, search, playlists, likes, followed artists, lyrics, and cross-device settings (appearance, audio/EQ, playback, sources, etc.). Songs are passed between tools by their `ref`. Use list_devices before play_on_device or select_device when targeting another device. Use get_settings before set_settings to inspect current cross-device settings and valid options. For how-to questions about Glyph itself (shortcuts, local setup) use docs_search, then docs_read."
             }))),
             "ping" => Some(Ok(serde_json::json!({}))),
             "tools/list" => Some(Ok(serde_json::json!({ "tools": tools() }))),
@@ -1126,7 +1292,7 @@ pub mod mcp {
         fn permissions_filter_tools() {
             use super::{Access, Area, Permissions};
             let p = Permissions::default();
-            assert!(p.allows("play") && p.allows("search") && p.allows("list_playlists"));
+            assert!(p.allows("play") && p.allows("search") && p.allows("list_playlists") && p.allows("set_settings"));
             assert!(!p.allows("delete_playlist") && !p.allows("like") && !p.allows("listening_stats"));
             assert!(!p.allows("rm_rf"));
             let mut none = p;
@@ -1135,7 +1301,7 @@ pub mod mcp {
             }
             // Only the docs stay: they hold nothing of the user's.
             assert!(none.tools().iter().all(|t| super::always_allowed(t["name"].as_str().unwrap())));
-            assert!(none.allows("docs_search") && none.allows("docs_read") && !none.allows("now_playing"));
+            assert!(none.allows("docs_search") && none.allows("docs_read") && !none.allows("now_playing") && !none.allows("get_settings"));
             let mut all = p;
             for area in Area::ALL {
                 all.set(area, Access::Write);
@@ -1144,10 +1310,12 @@ pub mod mcp {
             assert_eq!(all.tools().len(), super::tools().len());
             let mut read = p;
             read.set(Area::Playback, Access::Read);
+            read.set(Area::Settings, Access::Read);
             assert!(read.allows("now_playing") && !read.allows("pause"));
+            assert!(read.allows("get_settings") && !read.allows("set_settings"));
             // Old settings files without the section keep the defaults.
             let parsed: Permissions = serde_json::from_str(r#"{"library":"write"}"#).unwrap();
-            assert_eq!((parsed.playback, parsed.library, parsed.stats), (Access::Write, Access::Write, Access::None));
+            assert_eq!((parsed.playback, parsed.library, parsed.settings, parsed.stats), (Access::Write, Access::Write, Access::Write, Access::None));
         }
 
         #[test]
@@ -1341,7 +1509,7 @@ pub mod jam {
     impl Reaction {
         pub const ALL: [Reaction; 4] = [Reaction::Heart, Reaction::Fire, Reaction::Sparkles, Reaction::ThumbsUp];
 
-        /// Lucide icon name.
+        /// Icon name from Glyph's set (`assets/icons/ui`, docs/ICONS.md).
         pub fn icon(self) -> &'static str {
             match self {
                 Reaction::Heart => "heart",

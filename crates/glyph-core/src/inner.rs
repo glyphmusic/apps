@@ -303,16 +303,18 @@ impl Inner {
         }
         if let Some(server) = self.live_server() {
             let local_yt = self.local_youtube_on();
-            let priority = self.resolver.priority();
+            let enabled = &self.config.providers.enabled;
+            let yt_enabled = enabled.contains(&ProviderId::YouTube);
+            let priority: Vec<ProviderId> = self.resolver.priority().into_iter().filter(|p| enabled.contains(p)).collect();
             let rank = |p: ProviderId| priority.iter().position(|x| *x == p).unwrap_or(usize::MAX);
             // The server would search YouTube for this song first (seconds on
             // a cold server); a search from here takes a few hundred ms. A sure
             // match travels along as the song's YouTube id.
             // The song should come from YouTube: when the server answers
             // without YouTube audio, this computer may try (see below).
-            let youtube_wanted = self.config.providers.youtube_only || t.source == ProviderId::YouTube || priority.first() == Some(&ProviderId::YouTube);
+            let youtube_wanted = yt_enabled && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || priority.first() == Some(&ProviderId::YouTube));
             let hinted;
-            let t = if self.config.providers.youtube_only || priority.first() == Some(&ProviderId::YouTube) {
+            let t = if youtube_wanted && (self.config.providers.youtube_only || priority.first() == Some(&ProviderId::YouTube)) {
                 hinted = self.youtube_id_hint(t).await;
                 hinted.as_ref().unwrap_or(t)
             } else {
@@ -321,7 +323,7 @@ impl Inner {
             match server.resolve_with_mode(t, &priority, self.config.providers.youtube_only).await {
                 Ok(resp) => {
                     let hint = resp.youtube_hint.as_deref();
-                    if let Some(source) = resp.source.clone() {
+                    if let Some(source) = resp.source.clone().filter(|s| enabled.contains(&s.provider())) {
                         if self.config.providers.youtube_only && (source.provider() != ProviderId::YouTube || matches!(source, PlaybackSource::Preview { .. })) {
                             if let Some(r) = self.rescue_on_this_computer(t, hint).await {
                                 return Ok(Some(r));
@@ -403,7 +405,9 @@ impl Inner {
         }
         // The official server out: the direct path below (`break 'server`).
         'server: { if let Some(server) = self.live_server() {
-            let lookup = match server.download_url_with_priority(t, &self.resolver.priority(), self.config.providers.youtube_only).await {
+            let enabled = &self.config.providers.enabled;
+            let priority: Vec<ProviderId> = self.resolver.priority().into_iter().filter(|p| enabled.contains(p)).collect();
+            let lookup = match server.download_url_with_priority(t, &priority, self.config.providers.youtube_only).await {
                 Ok(hit) => hit,
                 Err(e) => {
                     if crate::outage::note(server.base_url(), &e).await.is_some() { tracing::info!("official server out, downloading locally"); break 'server; }
@@ -412,7 +416,7 @@ impl Inner {
                     None
                 }
             };
-            if let Some(hit) = lookup {
+            if let Some(hit) = lookup.filter(|(p, _)| enabled.contains(p)) {
                 if self.config.providers.youtube_only && hit.0 != ProviderId::YouTube {
                     return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE));
                 }
@@ -439,7 +443,7 @@ impl Inner {
         if self.config.providers.youtube_only { return Err(anyhow!(crate::ERR_NOT_ON_YOUTUBE)); }
         const DL: [ProviderId; 4] = [ProviderId::Jamendo, ProviderId::Audius, ProviderId::Archive, ProviderId::YouTube];
         for p in DL {
-            if provider::id_at(p, t).is_some() {
+            if self.config.providers.enabled.contains(&p) && provider::id_at(p, t).is_some() {
                 if let Some(u) = self.download_at(p, t).await {
                     return Ok(Some((p, u)));
                 }

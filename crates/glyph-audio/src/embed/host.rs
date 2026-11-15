@@ -31,8 +31,8 @@ use raw_window_handle::RawWindowHandle;
 use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// YouTube's minimum player size.
 pub const MIN_SIDE: f32 = 200.0;
@@ -105,6 +105,9 @@ pub struct HostQueue {
     attached: AtomicBool,
     /// 0 = idle, 1 = attaching (Windows thread starting), 2 = settled (ok or failed).
     phase: AtomicU8,
+    /// Win32 parent HWND stored by [`attach`] so the child WebView2 is only
+    /// created lazily the first time an embed track actually plays.
+    deferred_hwnd: AtomicIsize,
     sink: Mutex<Option<EventSink>>,
     /// Wakes the thread that owns the webview (Windows).
     waker: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -117,6 +120,14 @@ impl HostQueue {
             w();
         }
     }
+    /// Materialize the deferred child WebView2 on Windows when an embed track
+    /// is actually needed instead of holding an idle ~150+ MB WebView2 at boot.
+    pub fn ensure_attached(self: &Arc<Self>) {
+        #[cfg(target_os = "windows")]
+        spawn_windows_host(self);
+        #[cfg(not(target_os = "windows"))]
+        let _ = self;
+    }
     /// Windows attaches asynchronously (the UI thread must keep pumping its
     /// message loop meanwhile). Wait, off the UI thread, until it settled.
     pub fn wait_settled(&self, max: std::time::Duration) {
@@ -127,6 +138,9 @@ impl HostQueue {
     }
     pub fn is_attached(&self) -> bool {
         self.attached.load(Ordering::SeqCst)
+    }
+    pub fn has_deferred_parent(&self) -> bool {
+        self.deferred_hwnd.load(Ordering::SeqCst) != 0
     }
     pub fn set_sink(&self, sink: EventSink) {
         *self.sink.lock().unwrap() = Some(sink);
@@ -180,12 +194,12 @@ fn to_rect(b: Bounds) -> wry::Rect {
 fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<wry::WebView> {
     let ipc_q = queue.clone();
     let builder = wry::WebViewBuilder::new()
+        .with_devtools(false)
         .with_bounds(to_rect(Bounds { x: 0.0, y: 0.0, w: MIN_SIDE, h: MIN_SIDE }))
         .with_visible(false)
         .with_background_color((0, 0, 0, 255))
         .with_url("about:blank")
         .with_ipc_handler(move |req| {
-            eprintln!("DBG ipc {}", req.body());
             if let Some((s, ev)) = super::parse_message(req.body()) {
                 ipc_q.emit(s, ev);
             }
@@ -193,16 +207,20 @@ fn build_webview(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> 
     #[cfg(target_os = "windows")]
     let builder = {
         use wry::WebViewBuilderExtWindows;
-        builder.with_additional_browser_args(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection              --autoplay-policy=no-user-gesture-required",
-        )
+        builder
+            .with_browser_accelerator_keys(false)
+            .with_default_context_menus(false)
+            .with_additional_browser_args(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection              --autoplay-policy=no-user-gesture-required",
+            )
     };
-    builder.build_as_child(&Parent(parent)).map_err(|e| anyhow!("child webview: {e}"))
+    let webview = builder.build_as_child(&Parent(parent)).map_err(|e| anyhow!("child webview: {e}"))?;
+    super::harden_wry_webview(&webview);
+    Ok(webview)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn apply(st: &mut HostState, c: HostCmd) {
-    eprintln!("DBG apply {:?}", c);
     match c {
         HostCmd::Eval(js) => {
             if let Err(e) = st.webview.evaluate_script(&js) {
@@ -249,6 +267,19 @@ pub fn attach(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Res
 
 #[cfg(target_os = "windows")]
 fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -> Result<()> {
+    let RawWindowHandle::Win32(h) = parent else {
+        return Err(anyhow!("expected a Win32 window handle"));
+    };
+    let hwnd = h.hwnd.get();
+    if hwnd == 0 {
+        return Err(anyhow!("expected a non-null Win32 window handle"));
+    }
+    queue.deferred_hwnd.store(hwnd, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_host(queue: &std::sync::Arc<HostQueue>) {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -257,21 +288,21 @@ fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -
         PM_NOREMOVE, WM_APP,
     };
 
-    let RawWindowHandle::Win32(h) = parent else {
-        return Err(anyhow!("expected a Win32 window handle"));
-    };
-    let hwnd = h.hwnd.get();
     if queue.is_attached() {
-        return Ok(());
+        return;
     }
-    if queue.phase.swap(1, Ordering::SeqCst) == 1 {
-        return Ok(());
+    let hwnd = queue.deferred_hwnd.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    if queue.phase.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return;
     }
     let q = queue.clone();
     // NOTE: must not block the caller. Creating a child of a foreign-thread
     // parent sends messages to the parent, which only the (unblocked) UI
     // thread can answer.
-    std::thread::Builder::new().name("glyph-embed-host".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("glyph-embed-host".into()).spawn(move || {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let mut msg = MSG::default();
@@ -315,8 +346,11 @@ fn attach_threaded(queue: &std::sync::Arc<HostQueue>, parent: RawWindowHandle) -
                 apply(&mut st, c);
             }
         }
-    })?;
-    Ok(())
+    });
+    if let Err(e) = spawned {
+        tracing::error!("embed host thread spawn failed: {e:#}");
+        queue.phase.store(2, Ordering::SeqCst);
+    }
 }
 
 /// Apply queued commands. macOS: must run on the thread that called
@@ -394,5 +428,17 @@ mod tests {
         pump(&q);
         // nothing attached on this thread: commands stay consumed-or-queued, never panic
         assert!(!q.is_attached());
+        assert!(!q.has_deferred_parent());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_attach_defers_webview_creation() {
+        let q = Arc::new(HostQueue::default());
+        let nz = std::num::NonZeroIsize::new(1).unwrap();
+        let raw = RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(nz));
+        attach(&q, raw).expect("valid hwnd registers cleanly");
+        assert!(q.has_deferred_parent());
+        assert!(!q.is_attached(), "child WebView2 must not spawn eagerly at attach");
     }
 }

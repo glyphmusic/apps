@@ -1,19 +1,6 @@
-<!-- @license lucide-static v0.460.0 - ISC -->
-<svg
-  class="lucide lucide-sparkles"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
-  <path d="M20 3v4" />
-  <path d="M22 5h-4" />
-  <path d="M4 17v2" />
-  <path d="M5 18H3" />
+<!-- Glyph icon set, see docs/ICONS.md -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="currentColor" d="M10.46 6.53L11.38 9.63Q11.84 11.16 13.37 11.62L16.47 12.54Q18 13 16.47 13.46L13.37 14.38Q11.84 14.84 11.38 16.37L10.46 19.47Q10 21 9.54 19.47L8.62 16.37Q8.16 14.84 6.63 14.38L3.53 13.46Q2 13 3.53 12.54L6.63 11.62Q8.16 11.16 8.62 9.63L9.54 6.53Q10 5 10.46 6.53Z"/>
+  <path d="M18.5 3v5"/>
+  <path d="M16 5.5h5"/>
 </svg>

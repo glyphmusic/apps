@@ -139,3 +139,29 @@ fn offline_audio_excludes_partial_empty_and_metadata_cache_entries() {
     other_provider.source = ProviderId::Archive;
     assert!(!cached.contains(&other_provider));
 }
+
+#[test]
+fn disabled_deezer_drops_deezer_only_tracks_and_promotes_youtube_matches() {
+    let mut merged = dedupe::test_track(ProviderId::Deezer, "dz-1", "Merged", "Artist", Some(180));
+    merged.external_ids.insert(ProviderId::YouTube, "yt-1".into());
+    merged.external_ids.insert(ProviderId::Deezer, "dz-1".into());
+    let dz_only = dedupe::test_track(ProviderId::Deezer, "dz-2", "DZ Only", "Artist", Some(180));
+    let enabled = [ProviderId::YouTube];
+
+    let Some(SearchEvent::Results { provider, tracks }) = filter_search_event(
+        SearchEvent::Results { provider: ProviderId::Deezer, tracks: vec![merged, dz_only] },
+        &enabled,
+    ) else {
+        panic!("expected filtered results");
+    };
+    assert_eq!(provider, ProviderId::YouTube);
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].source, ProviderId::YouTube);
+    assert_eq!(tracks[0].id, "yt-1");
+    assert_eq!(tracks[0].permalink.as_deref(), Some("https://www.youtube.com/watch?v=yt-1"));
+    assert!(!tracks[0].external_ids.contains_key(&ProviderId::Deezer));
+    assert!(filter_search_event(
+        SearchEvent::ProviderError { provider: ProviderId::Deezer, message: "err".into() },
+        &enabled,
+    ).is_none());
+}

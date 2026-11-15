@@ -11,18 +11,16 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    ignore:
-      # Pinned Zed revision (Cargo.toml): bumped deliberately, with a full test.
-      - dependency-name: "gpui"
-      - dependency-name: "gpui_platform"
+
+  - package-ecosystem: "npm"
+    directory: "/glyph-ui"
+    schedule:
+      interval: "weekly"
 
   - package-ecosystem: "gradle"
     directory: "/mobile/android"
     schedule:
       interval: "weekly"
-    ignore:
-      # Must match android-activity's GameActivity glue in Cargo.toml.
-      - dependency-name: "androidx.games:games-activity"
 
   - package-ecosystem: "github-actions"
     directory: "/"

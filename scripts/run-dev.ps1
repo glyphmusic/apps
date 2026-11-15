@@ -22,8 +22,13 @@ function Invoke-BuildRetention {
 
 # An instance started straight from glyph.exe would lock it.
 if ($Check -and $NoBuild) { throw '-Check and -NoBuild cannot be combined' }
+if (-not (Test-Path (Join-Path $root 'glyph-ui\dist'))) {
+    npm --prefix (Join-Path $root 'glyph-ui') run build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 if (-not $NoBuild) {
-    $cargoArgs = @($(if ($Check) { 'check' } else { 'build' }), '-p', 'glyph')
+    $cargoArgs = @($(if ($Check) { 'check' } else { 'build' }), '-p', 'glyph-tauri')
     if ($Timings) { $cargoArgs += '--timings' }
     $buildTimer = [Diagnostics.Stopwatch]::StartNew()
     & cargo @cargoArgs
