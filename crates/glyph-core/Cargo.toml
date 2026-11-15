@@ -48,7 +48,7 @@ chacha20poly1305 = "0.11"
 # the pairing-code key exchange.
 hkdf = "0.12"
 hmac = "0.12"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 spake2 = "0.4"
 # Glyph's own YouTube audio resolver (in process: no Python start-up).
 r-dlp = { git = "https://github.com/glyphmusic/r-dlp", tag = "v0.2.2" }
