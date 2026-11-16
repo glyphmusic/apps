@@ -222,7 +222,7 @@
   .desk :global(.page-scroll) { -webkit-mask-image: none !important; mask-image: none !important; }
   .tail { height: calc(62px + var(--safe-bottom, env(safe-area-inset-bottom))); }
   .tail.with-mini { height: calc(134px + var(--safe-bottom, env(safe-area-inset-bottom))); }
-  .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 0 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: linear-gradient(to top, rgba(0, 0, 0, .88) 0%, rgba(0, 0, 0, .62) calc(42px + var(--safe-bottom, env(safe-area-inset-bottom))), rgba(0, 0, 0, 0) calc(64px + var(--safe-bottom, env(safe-area-inset-bottom)))); }
-  .bottom.has-mini { background: linear-gradient(to top, rgba(0, 0, 0, .88) 0%, rgba(0, 0, 0, .62) calc(44px + var(--safe-bottom, env(safe-area-inset-bottom))), rgba(0, 0, 0, 0) calc(66px + var(--safe-bottom, env(safe-area-inset-bottom)))); }
+  .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 6px 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: #0a0a0a; }
+  .bottom.has-mini { background: #0a0a0a; }
   .bottom > :global(*) { pointer-events: auto; }
 </style>

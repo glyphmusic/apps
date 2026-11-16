@@ -1427,6 +1427,10 @@ impl Core {
     /// the device is dropped, so it does not start from the network.
     pub fn on_offline_changed(&self, offline: bool) {
         if !offline {
+            glyph_core::outage::clear();
+            if let Some(b) = self.backend() {
+                b.clear_cooldowns();
+            }
             return;
         }
         let stale = {

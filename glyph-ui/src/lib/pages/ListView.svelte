@@ -454,17 +454,20 @@
     </div>
   {:else if recent}
     <div class="rows">
-      {#each recentRows as r, i (i)}
-        {#if r.kind === "artist"}<RecentArtistRow name={r.name} track={r.track} />
-        {:else}<SongRow tracks={recent.songs} index={r.at} from={l} context={title} selected={app.selectedRow === r.at} />{/if}
-      {/each}
+      <VirtualRows count={recentRows.length} pitch={PITCH} overscan={4}>
+        {#snippet row(i)}
+          {@const r = recentRows[i]}
+          {#if r.kind === "artist"}<RecentArtistRow name={r.name} track={r.track} />
+          {:else}<SongRow tracks={recent.songs} index={r.at} from={l} context={title} selected={app.selectedRow === r.at} />{/if}
+        {/snippet}
+      </VirtualRows>
     </div>
   {:else}
     <div class="colwrap" bind:this={colHeadEl}>
       {@render colHead(false)}
     </div>
     <div class="rows" bind:this={listEl} class:settle class:dragging={!!drag}>
-      <VirtualRows count={filteredTracks.length} pitch={PITCH}>
+      <VirtualRows count={filteredTracks.length} pitch={PITCH} overscan={4}>
         {#snippet row(i)}
           {@const entry = filteredTracks[i]}
           <div class="slot">

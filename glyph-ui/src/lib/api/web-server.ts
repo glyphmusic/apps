@@ -39,7 +39,7 @@ export type SearchEvent =
   | { event: "provider_error"; provider: ProviderId; message: string }
   | { event: "done" };
 export interface LyricsResponse { provider: ProviderId; synced: { time_ms: number; text: string }[]; plain?: string | null; instrumental: boolean }
-export interface HealthResponse { server_version: string; protocol_version: number; providers: ProviderId[]; capabilities?: string[]; accounts?: boolean }
+export interface HealthResponse { server_version: string; protocol_version: number; providers: ProviderId[]; capabilities?: string[]; accounts?: boolean; covers?: boolean }
 
 export interface AccountInfo {
   id: string;
@@ -277,6 +277,9 @@ export const server = {
 
   resolve: (track: Track, priority: ProviderId[], youtubeOnly = false) =>
     sendJson<ResolveResponse>("POST", "/v1/resolve?direct=1", { track: wireTrack(track), priority, youtube_only: youtubeOnly }),
+
+  cover: (track: Track) =>
+    sendJson<{ url?: string | null }>("POST", "/v1/cover", wireTrack(track)),
 
   async lyrics(t: Track): Promise<LyricsResponse | null> {
     try {

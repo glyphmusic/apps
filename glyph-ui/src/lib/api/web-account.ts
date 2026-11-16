@@ -177,6 +177,7 @@ export class WebAccountManager {
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private recentTimer: ReturnType<typeof setTimeout> | null = null;
   private webLogins: { domain: string; at: number }[] = [];
+  private refreshing: Promise<string | null> | null = null;
 
   constructor(private host: WebAccountHost) {
     this.session = load<StoredAccountSession>("account") ?? null;
@@ -206,21 +207,66 @@ export class WebAccountManager {
     };
   }
 
+  /** Refreshes the access token once (deduped) or clears a revoked session cleanly. */
+  private async refreshSessionToken(): Promise<string | null> {
+    if (this.refreshing) return this.refreshing;
+    const job = (async () => {
+      const s = this.session;
+      if (!s) return null;
+      try {
+        const next = await server.tokenRefresh(s.refresh_token);
+        this.saveSession(next);
+        return next.access_token;
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 401 || e.code === "unauthorized")) {
+          this.clearSessionAndRestoreGuest();
+          return null;
+        }
+        return s.access_token;
+      } finally {
+        this.refreshing = null;
+      }
+    })();
+    this.refreshing = job;
+    return job;
+  }
+
   /** Valid access token, refreshing automatically when within 60s of expiry. */
   async validToken(): Promise<string> {
     const s = this.session;
     if (!s) throw new Error("signed_out");
     if (s.expires_at - nowSec() > 60) return s.access_token;
+    const next = await this.refreshSessionToken();
+    if (!next || !this.session) throw new Error("signed_out");
+    return next;
+  }
+
+  private isUnauthorized(e: unknown): boolean {
+    return e instanceof ApiError && (e.status === 401 || e.code === "unauthorized");
+  }
+
+  private async runAuthed<T>(fn: (token: string) => Promise<T>): Promise<T> {
+    const token = await this.validToken();
     try {
-      const next = await server.tokenRefresh(s.refresh_token);
-      this.saveSession(next);
-      return next.access_token;
+      return await fn(token);
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 401 || e.code === "unauthorized")) {
+      if (!this.isUnauthorized(e)) throw e;
+      const prevToken = token;
+      const fresh = await this.refreshSessionToken();
+      if (!fresh || !this.session) throw new Error("signed_out");
+      if (fresh === prevToken) {
         this.clearSessionAndRestoreGuest();
         throw new Error("signed_out");
       }
-      return s.access_token;
+      try {
+        return await fn(fresh);
+      } catch (e2) {
+        if (this.isUnauthorized(e2)) {
+          this.clearSessionAndRestoreGuest();
+          throw new Error("signed_out");
+        }
+        throw e2;
+      }
     }
   }
 
@@ -384,12 +430,12 @@ export class WebAccountManager {
   async refreshAccountAndSync() {
     if (!this.session) return;
     try {
-      const token = await this.validToken();
-      const [acc, devs] = await Promise.all([
-        server.accountGet(token).catch(() => null),
-        server.devicesList(token).catch(() => null),
-      ]);
-      if (acc && this.session) {
+      const acc = await this.runAuthed((t) => server.accountGet(t)).catch((e) => {
+        if (String((e as Error)?.message ?? e) === "signed_out") throw e;
+        return null;
+      });
+      if (!this.session) return;
+      if (acc) {
         this.session.account = {
           id: acc.id,
           handle: acc.handle,
@@ -399,13 +445,14 @@ export class WebAccountManager {
         };
         save("account", this.session);
       }
+      const devs = await this.runAuthed((t) => server.devicesList(t)).catch(() => null);
       if (devs && this.session) {
         this.devices = devs.devices;
         this.session.account.device_limit = devs.limit || this.session.account.device_limit;
         save(`devices.${this.session.account.id}`, this.devices);
       }
-      await this.syncNow();
-    } catch { /* offline */ }
+      if (this.session) await this.syncNow();
+    } catch { /* offline or signed out cleanly */ }
   }
 
   // ---- E2E Keyring Resolution & Sync ----
@@ -557,7 +604,7 @@ export class WebAccountManager {
       const journal = this.getJournal(accountId);
 
       // 1. Pull remote changes since journal.rev
-      let pull = await server.syncPull(token, journal.rev);
+      let pull = await this.runAuthed((t) => server.syncPull(t, journal.rev));
       if (pull.reset) {
         journal.rev = 0;
         journal.known = {};
@@ -623,7 +670,7 @@ export class WebAccountManager {
         }
 
         for (const chunk of chunkPushEntries(pushEntries)) {
-          const pushed = await server.syncPush(token, chunk.map((e) => e.sealed));
+          const pushed = await this.runAuthed((t) => server.syncPush(t, chunk.map((e) => e.sealed)));
           journal.rev = pushed.rev;
           for (const entry of chunk) {
             if (entry.plain) {

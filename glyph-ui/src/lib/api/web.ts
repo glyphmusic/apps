@@ -145,6 +145,11 @@ export class WebBackend implements Backend {
   private resolvedCache = new Map<string, { src: PlaybackSource | null; expiresAt: number }>();
   private resolving = new Map<string, Promise<PlaybackSource | null>>();
   private warmedCovers = new Set<string>();
+  private coverCache = new Map<string, { url: string | null; expiresAt: number }>();
+  private coverInflight = new Map<string, Promise<string | null>>();
+  private coverQueue: { t: Track; key: string; resolve: (u: string | null) => void }[] = [];
+  private coverActive = 0;
+  private coversAvailable = true;
   private preloadTimer = 0;
   private preloadCooldownUntil = 0;
   private preloadSeq = 0;
@@ -276,6 +281,7 @@ export class WebBackend implements Backend {
       const h = await server.health();
       this.state = h.protocol_version === 1 ? { kind: "ready", mode: "server" } : { kind: "incompatible", version: h.protocol_version };
       this.account.setAccountsAvailable(Boolean(h.accounts ?? h.capabilities?.includes("accounts") ?? true));
+      this.coversAvailable = Boolean(h.covers ?? h.capabilities?.includes("covers") ?? true);
     } catch (e) {
       this.state = { kind: "offline", reason: String((e as Error)?.message ?? e) };
     }
@@ -297,7 +303,71 @@ export class WebBackend implements Backend {
     return () => this.subs.get(ev)?.delete(cb);
   }
 
-  async cover(t: Track) { return t.cover_url ?? null; }
+  async cover(t: Track): Promise<string | null> {
+    if (t.cover_url) return t.cover_url;
+    if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil || !t.title?.trim() || !t.artist?.trim()) return null;
+    const key = trackKey(t);
+    const now = Date.now();
+    const hit = this.coverCache.get(key);
+    if (hit && hit.expiresAt > now) {
+      this.coverCache.delete(key);
+      this.coverCache.set(key, hit);
+      return hit.url;
+    }
+    const pending = this.coverInflight.get(key);
+    if (pending) return pending;
+
+    const job = new Promise<string | null>((resolve) => {
+      this.coverQueue.push({ t, key, resolve });
+      this.drainCoverQueue();
+    }).finally(() => {
+      this.coverInflight.delete(key);
+    });
+    this.coverInflight.set(key, job);
+    return job;
+  }
+
+  trimCovers(keep = 48) {
+    const cap = Math.max(0, keep);
+    while (this.coverCache.size > cap) {
+      const oldest = this.coverCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.coverCache.delete(oldest);
+    }
+    if (this.warmedCovers.size > cap) {
+      const arr = [...this.warmedCovers];
+      this.warmedCovers = new Set(arr.slice(Math.max(0, arr.length - cap)));
+    }
+  }
+
+  private drainCoverQueue() {
+    while (this.coverActive < 4 && this.coverQueue.length > 0) {
+      const item = this.coverQueue.shift()!;
+      if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil) {
+        item.resolve(null);
+        continue;
+      }
+      this.coverActive++;
+      server.cover(item.t)
+        .then((res) => {
+          const url = res?.url ?? null;
+          if (this.coverCache.size >= 250) {
+            const oldest = this.coverCache.keys().next().value;
+            if (oldest !== undefined) this.coverCache.delete(oldest);
+          }
+          this.coverCache.set(item.key, {
+            url,
+            expiresAt: Date.now() + (url ? 30 * 60_000 : 2 * 60_000),
+          });
+          item.resolve(url);
+        })
+        .catch(() => item.resolve(null))
+        .finally(() => {
+          this.coverActive--;
+          this.drainCoverQueue();
+        });
+    }
+  }
 
   private emit<K extends keyof BackendEvents>(ev: K, p: BackendEvents[K]) {
     this.subs.get(ev)?.forEach((cb) => cb(wire(p)));
@@ -667,7 +737,20 @@ export class WebBackend implements Backend {
   }
   private metadata(t: Track) {
     if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album ?? "", artwork: t.cover_url ? [{ src: t.cover_url }] : [] });
+    const apply = (artworkUrl: string | null) => {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: t.title,
+        artist: t.artist,
+        album: t.album ?? "",
+        artwork: artworkUrl ? [{ src: artworkUrl }] : [],
+      });
+    };
+    apply(t.cover_url ?? null);
+    if (!t.cover_url) {
+      void this.cover(t).then((u) => {
+        if (u && this.player.current && trackKey(this.player.current) === trackKey(t)) apply(u);
+      });
+    }
   }
 
   // ---- data ----

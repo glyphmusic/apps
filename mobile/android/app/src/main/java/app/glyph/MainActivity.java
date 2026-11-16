@@ -138,8 +138,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         NetworkCapabilities caps = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
-        nativeConnectivity(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED));
+        nativeConnectivity(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
     }
 
     @Override

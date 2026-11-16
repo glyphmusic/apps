@@ -59,6 +59,8 @@ thread_local! {
     static DESK: RefCell<Desk> = RefCell::new(Desk::default());
 }
 
+static THEME_ACCENT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
 use glyph_app::i18n::tr;
 
 fn hwnd(app: &tauri::AppHandle) -> Option<usize> {
@@ -349,6 +351,7 @@ pub fn set_theme_icon(accent: u32) {
             return false;
         }
         d.theme_accent = Some(accent);
+        THEME_ACCENT.store(i64::from(accent), Ordering::Release);
         true
     });
     if !changed {
@@ -720,7 +723,7 @@ mod mac_dock {
 /// own that loads the same UI with `#mini`. The bar is 300 x 52; the card
 /// keeps its size in `config.player.mini_card_w / _h`.
 #[tauri::command(rename_all = "snake_case")]
-pub fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>, shown: bool) -> Result<(), String> {
+pub async fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>, shown: bool) -> Result<(), String> {
     let existing = app.get_webview_window("mini");
     if !shown {
         if let Some(w) = existing {
@@ -754,8 +757,11 @@ pub fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>, shown
         .no_redirection_bitmap(true);
     let win = b.build().map_err(|e| e.to_string())?;
     harden_webview(&win);
-    if let Some(icon) = DESK.with(|d| d.borrow().theme_accent).and_then(themed_icon) {
-        let _ = win.set_icon(icon);
+    let accent = THEME_ACCENT.load(Ordering::Acquire);
+    if accent >= 0 {
+        if let Some(icon) = themed_icon(accent as u32) {
+            let _ = win.set_icon(icon);
+        }
     }
     // Closed by the system (alt-F4): the main window's button follows.
     let c = core.inner().clone();

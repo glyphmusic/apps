@@ -6,6 +6,7 @@
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import IconAction from "./IconAction.svelte";
   import PhoneSongRow from "./PhoneSongRow.svelte";
+  import VirtualRows from "../components/VirtualRows.svelte";
   import Skeletons from "../pages/search/Skeletons.svelte";
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
@@ -67,9 +68,11 @@
     <p class="empty">{emptySub}</p>
   {:else}
     <div class="rows">
-      {#each tracks as _, i (i)}
-        <PhoneSongRow {tracks} index={i} from={l.kind === "album" ? null : l} context={app.listTitle(l)} />
-      {/each}
+      <VirtualRows count={tracks.length} pitch={60} overscan={4}>
+        {#snippet row(i)}
+          <PhoneSongRow {tracks} index={i} from={l.kind === "album" ? null : l} context={app.listTitle(l)} />
+        {/snippet}
+      </VirtualRows>
     </div>
   {/if}
   <div style:height="24px"></div>

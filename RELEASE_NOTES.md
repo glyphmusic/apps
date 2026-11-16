@@ -1,7 +1,7 @@
-# Glyph 0.12.1 - 2026-11-16
+# Glyph 0.12.2 - 2026-11-16
 
-- **Web player fixes & improvements**: hides the off-screen YouTube embed properly without compositing artifacts, adds Spotify-style chromeless floating Document PiP mini player (plus instant-close fix), preloads upcoming queue tracks and covers, batches E2E sync uploads, fixes signed-out UI visibility and mobile search tap/focus.
-- **Desktop & Android fixes**: fixes Android startup black screen and white transparent desktop mini player, pauses background ASCII animation during resize/UI changes, and trims Windows tray/minimized memory & EcoQoS power usage.
-- **MCP & UI polish**: adds MCP settings access control (`None` / `Read` / `Write`), session management, `/web#mcp-connect=` flow, recent searches, and artist metadata caching.
+- **Desktop**: fixes a main-window UI freeze/deadlock on Windows when clicking the Mini Player button (`mini_show`).
+- **Mobile & Android**: improves connectivity recovery (`NET_CAPABILITY_INTERNET`) and clears stale provider cooldowns on reconnect so Server search, Local search, and playback recover reliably; hides mobile scrollbars across Home/Search/Library/Player, uses solid colors on the mobile bottom bar & mini player, and removes focus/tap blue boxes.
+- **Web player (`/web`)**: loads missing Last.fm (`[LF]`) covers via `/v1/cover`, cleanly handles stale session `401` errors on `/v1/account` and `/v1/devices`, and progressively loads/unloads playlist entries, covers, and queue rows on scroll.
 
 See CHANGELOG.md for the complete changes.

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.12.2 - 2026-11-16
+
+### Fixed
+
+- **Desktop**: made the `mini_show` command asynchronous and thread-safe so opening the desktop mini player no longer deadlocks or freezes the main WebView2 window while audio keeps playing.
+- **Mobile & Android**: fixed Android connectivity detection (`NET_CAPABILITY_INTERNET` without requiring strict captive-portal validation) and cleared provider cooldowns/server outage state automatically when network connectivity returns so server search, local search, and playback recover cleanly after network switches.
+- **Web player (`/web`)**:
+  - Added `/v1/cover` lookup fallback (with deduplicated concurrency-limited LRU caching) so Last.fm (`[LF]`) and synced tracks load cover artwork on Home and lists.
+  - Handled `401 Unauthorized` responses on `/v1/account`, `/v1/devices`, and `/v1/sync/*` with a single deduplicated token refresh retry and clean session reset when revoked.
+- **UI & Performance**:
+  - Virtualized mobile playlist/album/liked/downloads lists (`PhoneListView`) and desktop Recent lists (`ListView`), unloaded offscreen thumbnails (`Cover` and `ListCover`), loaded playlist mosaic covers progressively as rows scroll into view, and incrementally paginated long queues (`BottomSheet`).
+  - Removed browser/WebView focus rings and mobile tap highlight boxes on click/tap, made the mobile bottom navigation and mini player bar solid surfaces, and hid visible scrollbars in mobile layout across Home, Search, Library, and the Now Playing sheets.
+
 ## 0.12.1 - 2026-11-16
 
 ### Fixed

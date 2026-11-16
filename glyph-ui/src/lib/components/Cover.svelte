@@ -1,24 +1,21 @@
 <script lang="ts" module>
-  // Shared observer so offscreen covers in long lists do not decode until near the viewport.
-  const callbacks = new WeakMap<Element, () => void>();
+  // Shared observer so offscreen covers do not decode until near the viewport,
+  // and scrolled-far-away thumbnails unload cleanly to bound memory.
+  const callbacks = new WeakMap<Element, (visible: boolean) => void>();
   let observer: IntersectionObserver | null = null;
-  function observeNear(el: Element, cb: () => void): () => void {
+  function observeVisibility(el: Element, cb: (visible: boolean) => void): () => void {
     if (typeof IntersectionObserver === "undefined") {
-      cb();
+      cb(true);
       return () => {};
     }
     if (!observer) {
       observer = new IntersectionObserver(
         (entries) => {
           for (const e of entries) {
-            if (!e.isIntersecting) continue;
-            const fn = callbacks.get(e.target);
-            callbacks.delete(e.target);
-            observer?.unobserve(e.target);
-            fn?.();
+            callbacks.get(e.target)?.(e.isIntersecting);
           }
         },
-        { rootMargin: "260px 320px" },
+        { rootMargin: "220px 260px" },
       );
     }
     callbacks.set(el, cb);
@@ -55,7 +52,16 @@
     if (!track) { near = false; return; }
     if (size >= 180) { near = true; return; }
     if (!box) return;
-    return observeNear(box, () => { near = true; });
+    return observeVisibility(box, (visible) => {
+      near = visible;
+      if (!visible) {
+        loadedKey = "";
+        url = null;
+        phase = "loading";
+        timedOut = false;
+        unveiling = false;
+      }
+    });
   });
 
   $effect(() => {

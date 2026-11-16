@@ -105,7 +105,7 @@
 </div>
 
 <style>
-  .mini { position: relative; height: 64px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border-radius: 12px; background: rgba(18, 18, 18, .76); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); overflow: hidden; touch-action: pan-y; transition: transform .16s var(--ease); }
+  .mini { position: relative; height: 64px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border-radius: 12px; background: #141414; overflow: hidden; touch-action: pan-y; transition: transform .16s var(--ease); }
   .open { flex: 1; min-width: 0; height: 100%; position: relative; overflow: hidden; text-align: left; }
   .strip { position: relative; display: block; width: 100%; height: 100%; }
   .strip.settling { transition: transform .2s var(--ease); }

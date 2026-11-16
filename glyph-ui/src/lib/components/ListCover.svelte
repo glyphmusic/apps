@@ -1,3 +1,28 @@
+<script lang="ts" module>
+  const callbacks = new WeakMap<Element, (visible: boolean) => void>();
+  let observer: IntersectionObserver | null = null;
+  function observeMosaic(el: Element, cb: (visible: boolean) => void): () => void {
+    if (typeof IntersectionObserver === "undefined") {
+      cb(true);
+      return () => {};
+    }
+    if (!observer) {
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) callbacks.get(e.target)?.(e.isIntersecting);
+        },
+        { rootMargin: "220px 260px" },
+      );
+    }
+    callbacks.set(el, cb);
+    observer.observe(el);
+    return () => {
+      callbacks.delete(el);
+      observer?.unobserve(el);
+    };
+  }
+</script>
+
 <script lang="ts">
   // lists.rs list_cover: Liked = heart on a dark accent tile, Recent =
   // history icon, Downloads = download icon; playlists get a mosaic of
@@ -12,21 +37,38 @@
   let { list, size = 36 }: { list: ListKey; size?: number } = $props();
   const r = $derived(Math.min(12, Math.max(6, size * 0.06)));
   const accent = $derived(themeColors(app.config?.visuals.theme ?? "glyph").accent);
-  const tracks = $derived(app.listTracks(list).slice(0, 12));
+  const tracks = $derived(app.listTracks(list).slice(0, 8));
   const coverTrack = $derived(list.kind === "album" ? (list.cover ?? tracks[0] ?? null) : (tracks[0] ?? null));
   const own = $derived(list.kind === "playlist" ? app.playlist(list.id) : undefined);
   const mosaic = $derived(list.kind === "playlist" || (list.kind === "album" && list.artist.startsWith("@")));
   let urls = $state<string[]>([]);
+  let box: HTMLElement | undefined = $state();
+  let near = $state(false);
   $effect(() => {
-    if (!mosaic) return;
+    if (!mosaic || own?.cover || size >= 180) { near = true; return; }
+    if (!box) return;
+    return observeMosaic(box, (visible) => {
+      near = visible;
+      if (!visible) urls = [];
+    });
+  });
+  $effect(() => {
+    if (!mosaic || own?.cover || !near) return;
     const ts = tracks;
     let alive = true;
-    Promise.all(ts.map((t) => backend().cover(t))).then((us) => {
-      if (!alive) return;
+    (async () => {
       const out: string[] = [];
-      for (const u of us) if (u && !out.includes(u)) { out.push(u); if (out.length === 4) break; }
-      urls = out;
-    });
+      for (const t of ts) {
+        if (!alive) return;
+        const u = await backend().cover(t);
+        if (!alive) return;
+        if (u && !out.includes(u)) {
+          out.push(u);
+          urls = [...out];
+          if (out.length === 4) break;
+        }
+      }
+    })();
     return () => { alive = false; };
   });
   const tile = $derived(
@@ -43,16 +85,17 @@
 {:else if own?.cover}
   <img class="one" src={own.cover} alt="" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" />
 {:else if mosaic && urls.length >= 2}
-  <div class="mo m{Math.min(4, urls.length)}" style:width="{size}px" style:height="{size}px" style:--r="{r}px">
+  <div bind:this={box} class="mo m{Math.min(4, urls.length)}" style:width="{size}px" style:height="{size}px" style:--r="{r}px">
     {#each urls.slice(0, urls.length === 3 ? 3 : urls.length >= 4 ? 4 : 2) as u, i}<img class="q{i}" src={u} alt="" />{/each}
   </div>
 {:else if coverTrack}
-  <Cover track={coverTrack} {size} radius={r} />
+  <div bind:this={box} class="cv-wrap" style:width="{size}px" style:height="{size}px"><Cover track={coverTrack} {size} radius={r} /></div>
 {:else}
-  <div class="tile" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" style:background="var(--card)"><Icon name={list.kind === "album" ? "disc-3" : "list-music"} size={isz} color="rgba(255,255,255,.5)" /></div>
+  <div bind:this={box} class="tile" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" style:background="var(--card)"><Icon name={list.kind === "album" ? "disc-3" : "list-music"} size={isz} color="rgba(255,255,255,.5)" /></div>
 {/if}
 
 <style>
+  .cv-wrap { flex: none; }
   .tile { flex: none; display: grid; place-items: center; }
   .one { flex: none; object-fit: cover; }
   .mo { position: relative; flex: none; }

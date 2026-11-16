@@ -297,6 +297,10 @@ impl Cooldowns {
     pub fn clear(&self, p: ProviderId) {
         self.until.lock().unwrap().remove(&p);
     }
+
+    pub fn clear_all(&self) {
+        self.until.lock().unwrap().clear();
+    }
 }
 
 #[cfg(test)]

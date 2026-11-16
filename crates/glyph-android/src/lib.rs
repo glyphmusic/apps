@@ -522,6 +522,14 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeConnectivity(
     online: jboolean,
 ) {
     glyph_core::connectivity::set_platform_online(online);
+    if online {
+        glyph_core::outage::clear();
+        if let Some(st) = STATE.get() {
+            if let Some(b) = st.core.backend() {
+                b.clear_cooldowns();
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -1391,6 +1391,11 @@ impl Backend {
         self.cur().cooldowns.is_cooling(provider)
     }
 
+    /// Clears provider cooldowns (e.g. when device connectivity returns).
+    pub fn clear_cooldowns(&self) {
+        self.cur().cooldowns.clear_all();
+    }
+
     /// Providers that are active (enabled, keys present).
     pub fn active_providers(&self) -> Vec<ProviderId> {
         let inner = self.cur();

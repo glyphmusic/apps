@@ -244,7 +244,7 @@
   .pr:hover::before { background: rgba(255, 255, 255, .045); }
   .open, .pc { position: relative; }
   .open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; border-radius: 8px; }
-  .open:focus-visible { outline: 1px solid rgba(255, 255, 255, .35); outline-offset: 4px; }
+  .open:focus-visible { outline: none; }
   .px { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
   .pn, .ps { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pn { font-size: 14px; font-weight: 500; color: #fff; }

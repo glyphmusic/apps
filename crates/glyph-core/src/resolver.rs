@@ -259,6 +259,9 @@ impl Resolver {
     }
 
     fn note_error(&self, p: ProviderId, e: &anyhow::Error) {
+        if crate::connectivity::platform_online() == Some(false) {
+            return;
+        }
         if should_cool_down(e) {
             self.cooldowns.trip(p);
         }

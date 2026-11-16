@@ -27,10 +27,16 @@
   let timerOpen = $state(false);
   let listEl: HTMLDivElement | undefined = $state();
   let dragRow = $state<{ from: number; slot: number; dy: number; h: number } | null>(null);
+  let queueCap = $state(30);
 
   const kind = $derived(app.showDevices ? "devices" : "queue");
   const close = () => { app.showQueue = false; app.showDevices = false; app.jamOpen = false; jam.page = "main"; };
   const up = $derived(app.upNext);
+  const upShown = $derived(editing || dragRow ? up : up.slice(0, queueCap));
+  function onListScroll() {
+    if (!listEl || queueCap >= up.length) return;
+    if (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 260) queueCap += 30;
+  }
   const manual = $derived(Math.min(app.queue.user, up.length));
   const base = $derived((app.queue.index ?? -1) + 1);
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
@@ -188,7 +194,7 @@
       {/if}
     </div>
 
-    <div class="scroll list" bind:this={listEl} use:fadeEdges={{ top: 14, bottom: 14, minOverflow: 8 }}
+    <div class="scroll list" bind:this={listEl} onscroll={onListScroll} use:fadeEdges={{ top: 14, bottom: 14, minOverflow: 8 }}
       use:drag={{ axis: "y", onlyAtTop: () => !dragRow && (listEl?.scrollTop ?? 0) <= 0, move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
       {#if timerOpen}
         {@const onSong = !!app.sleep?.endOfSong}
@@ -218,7 +224,7 @@
         {#if !editing && manual > 0 && up.length > manual}
           <div class="sec">{tf("queue.next_n", { n: manual })}</div>
         {/if}
-        {#each up as u, i (`${u.index}:${u.track.source}:${u.track.id}`)}
+        {#each upShown as u, i (`${u.index}:${u.track.source}:${u.track.id}`)}
           {@const checked = selected.includes(u.index)}
           {@const dragging = dragRow?.from === i}
           {#if !editing && i === manual && manual > 0 && up.length > manual}

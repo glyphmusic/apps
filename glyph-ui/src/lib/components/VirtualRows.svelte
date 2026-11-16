@@ -2,22 +2,30 @@
   // Fixed-pitch viewport virtualization against `#main-scroll` so long track,
   // album and artist lists mount only visible rows + a small overscan window.
   import { onMount, type Snippet } from "svelte";
-  let { count, pitch = 56, overscan = 6, row }: { count: number; pitch?: number; overscan?: number; row: Snippet<[number]> } = $props();
+  import { backend } from "../api/backend";
+  let { count, pitch = 56, overscan = 4, row }: { count: number; pitch?: number; overscan?: number; row: Snippet<[number]> } = $props();
   let host: HTMLDivElement | undefined = $state();
-  let from = $state(0), to = $state(30);
+  let from = $state(0), to = $state(16);
   let raf = 0;
+  let lastTrimAt = 0;
 
   function update() {
     raf = 0;
     const sc = document.getElementById("main-scroll");
     if (!sc || !host) {
       from = 0;
-      to = Math.min(count, 30);
+      to = Math.min(count, 16);
       return;
     }
     const top = host.getBoundingClientRect().top - sc.getBoundingClientRect().top;
-    from = Math.max(0, Math.floor(-top / pitch) - overscan);
-    to = Math.min(count, Math.ceil((sc.clientHeight - top) / pitch) + overscan);
+    const nextFrom = Math.max(0, Math.floor(-top / pitch) - overscan);
+    const nextTo = Math.min(count, Math.ceil((sc.clientHeight - top) / pitch) + overscan);
+    if (Math.abs(nextFrom - lastTrimAt) >= 24) {
+      lastTrimAt = nextFrom;
+      queueMicrotask(() => backend().trimCovers?.(64));
+    }
+    from = nextFrom;
+    to = nextTo;
   }
 
   function schedule() {
