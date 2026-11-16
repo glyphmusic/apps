@@ -9,8 +9,11 @@ use std::path::PathBuf;
 /// Public Glyph server used when `server_url` is empty, so nobody has to set
 /// anything up. `server_url = "off"` switches to direct mode.
 pub const DEFAULT_SERVER_URL: &str = "https://api.glyph.my";
-/// Earlier address of the public server; a saved copy of it means the default.
-const OLD_SERVER_URL: &str = "https://glyph-server.glyphmusic.workers.dev";
+/// Earlier addresses of the public server; a saved copy of either means the default.
+const OLD_SERVER_URLS: &[&str] = &[
+    "https://glyph-server.glyphmusic.workers.dev",
+    "https://server.glyphmusic.workers.dev",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -751,7 +754,7 @@ impl Config {
     pub fn effective_server_url(&self) -> &str {
         match self.server_url.trim() {
             "" => DEFAULT_SERVER_URL,
-            u if u.trim_end_matches('/').eq_ignore_ascii_case(OLD_SERVER_URL) => DEFAULT_SERVER_URL,
+            u if OLD_SERVER_URLS.iter().any(|old| u.trim_end_matches('/').eq_ignore_ascii_case(old)) => DEFAULT_SERVER_URL,
             u if u.eq_ignore_ascii_case("off") || u.eq_ignore_ascii_case("direct") => "",
             u => u,
         }
@@ -895,6 +898,8 @@ glyph_links = false
         c.server_url = " https://mine.example ".into();
         assert_eq!(c.effective_server_url(), "https://mine.example");
         c.server_url = "https://glyph-server.glyphmusic.workers.dev/".into();
+        assert_eq!(c.effective_server_url(), DEFAULT_SERVER_URL);
+        c.server_url = "https://server.glyphmusic.workers.dev/".into();
         assert_eq!(c.effective_server_url(), DEFAULT_SERVER_URL);
     }
 

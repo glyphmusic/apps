@@ -58,6 +58,13 @@ pub enum LiveEvent {
     Closed(Option<u16>),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CoverMeta {
+    pub url: Option<String>,
+    pub raw_url: Option<String>,
+    pub album: Option<String>,
+}
+
 /// Non-2xx answer of the server.
 #[derive(Debug, thiserror::Error)]
 #[error("server error {status}: {code} {message}")]
@@ -323,10 +330,17 @@ impl ServerClient {
             .map(String::from).unwrap_or_else(|_| self.url("/v1/upstream"))
     }
 
-    pub async fn cover_url(&self, track: &Track) -> Result<Option<String>> {
+    pub async fn cover_meta(&self, track: &Track) -> Result<CoverMeta> {
         let resp = Self::check(self.member_request(self.post("/v1/cover")).await.json(track).send().await?).await?;
         let value: serde_json::Value = resp.json().await?;
-        Ok(value["url"].as_str().map(|u| self.upstream_url(u)))
+        let raw_url = value["url"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let url = raw_url.as_deref().map(|u| self.upstream_url(u));
+        let album = value["album"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        Ok(CoverMeta { url, raw_url, album })
+    }
+
+    pub async fn cover_url(&self, track: &Track) -> Result<Option<String>> {
+        Ok(self.cover_meta(track).await?.url)
     }
 
     pub async fn download_url(&self, track: &Track) -> Result<Option<(ProviderId, String)>> {

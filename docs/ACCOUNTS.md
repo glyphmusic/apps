@@ -3,7 +3,7 @@
 Optional. Without an account Glyph works exactly as today: the library stays in
 `library.json` on the device. With an account the same library follows the user
 to every signed-in device (desktop now, Android/iOS later). Everything runs on
-the existing Cloudflare Worker (`glyph-server.glyphmusic.workers.dev`); no other
+the existing Cloudflare Worker (`server.glyphmusic.workers.dev`); no other
 service is needed.
 
 ## 1. Account model

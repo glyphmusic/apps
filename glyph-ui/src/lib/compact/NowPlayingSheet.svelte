@@ -159,7 +159,7 @@
         <button class="side" onclick={() => app.cycleRepeat()} aria-label={t("tip.repeat")}><Icon name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={19} color={app.player.repeat !== "off" ? "var(--accent)" : "var(--dim)"} /></button>
       </div>
       <div class="tools" style:margin-top="{toolsMt}px">
-        {#if !onWeb()}<button class="dv" class:on={!!remote || app.showDevices || app.jamOpen || !!jam.state} onclick={() => (app.showDevices = true)}><Icon name={jam.state ? "users" : remote ? "cast" : "smartphone"} size={16} /><span class="trunc">{remote?.name ?? app.config.audio.output_device ?? t("connect.this_phone")}</span></button>{/if}
+        <button class="dv" class:on={!!remote || app.showDevices || app.jamOpen || !!jam.state} onclick={() => (app.showDevices = true)}><Icon name={jam.state ? "users" : remote ? "cast" : (onWeb() ? "globe" : "smartphone")} size={16} /><span class="trunc">{remote?.name ?? (onWeb() ? t("connect.this_browser") : (app.config.audio.output_device ?? t("connect.this_phone")))}</span></button>
         <IconButton name="share-2" size={20} box={40} notip onclick={() => app.share({ track: cur })} />
         <IconButton name="list-music" size={20} box={40} color={app.showQueue ? "var(--accent)" : undefined} notip onclick={() => (app.showQueue = true)} />
       </div>

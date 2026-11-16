@@ -41,6 +41,8 @@
   let error = $state<string | null>(null);
   let signedOut = $state(false);
   let bannerOk = $state(false);
+  let banEl = $state<HTMLImageElement | null>(null);
+  let lastBanner: string | null | undefined;
 
   $effect(() => {
     const h = handle;
@@ -76,7 +78,13 @@
   });
   const listKeyOf = (pl: Playlist) => ({ kind: "album" as const, title: pl.name, artist: `@${p!.handle}`, tracks: pl.tracks });
 
-  $effect(() => { void p?.banner; bannerOk = false; });
+  $effect(() => {
+    const url = p?.banner;
+    if (url !== lastBanner) {
+      lastBanner = url;
+      bannerOk = Boolean(url && banEl?.complete && banEl.naturalWidth > 0);
+    }
+  });
 
   async function openPlaylist(pl: Playlist) {
     if (!p) return;
@@ -124,7 +132,7 @@
       {#if !p.banner}
         <div class="grad" style:background="linear-gradient(0deg, hsla(300, 40%, 16%, 0), {accentTile(0.22, 0.45, accent)})"></div>
       {:else}
-        <img class="ban" class:on={bannerOk} src={p.banner} alt="" draggable="false" onload={() => (bannerOk = true)} />
+        <img bind:this={banEl} class="ban" class:on={bannerOk} src={p.banner} alt="" draggable="false" onload={() => (bannerOk = true)} />
       {/if}
       {#if app.history.length}<div class="back">{@render backPill()}</div>{/if}
       {#if own}
@@ -142,7 +150,7 @@
         {/if}
       </div>
       <div class="who">
-        <span class="badge mono">[{t(priv ? "profile.badge.private" : "profile.badge")}]</span>
+        <span class="badge">{t(priv ? "profile.badge.private" : "profile.badge")}</span>
         <h1 class="handle trunc">@{p.handle}</h1>
         {#if p.name && p.name.toLowerCase() !== p.handle.toLowerCase()}<div class="pname trunc">{p.name}</div>{/if}
       </div>
@@ -174,7 +182,7 @@
                     <div class="art ph"><Icon name="music-2" size={32} color="rgba(255,255,255,.4)" /></div>
                   {/if}
                   <div class="pn trunc">{pl.name}</div>
-                  <div class="pc mono">{tf("common.n_songs", { n: pl.tracks.length }).toUpperCase()}</div>
+                  <div class="pc">{tf("common.n_songs", { n: pl.tracks.length })}</div>
                 </button>
               {/each}
             </div>
@@ -215,7 +223,7 @@
   </div>
 {/if}
 
-{#if crop.busy}<div class="busy mono" use:ink>[ {t("profile.image.uploading")} ]</div>{/if}
+{#if crop.busy}<div class="busy" use:ink>{t("profile.image.uploading")}</div>{/if}
 <CropDialog />
 
 <style>
@@ -241,7 +249,7 @@
   .pen { position: absolute; inset: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s ease-out; }
   .pic:hover .pen, .pen:focus-visible { opacity: 1; }
   .who { flex: 1; min-width: 0; padding-bottom: 70px; display: flex; flex-direction: column; gap: 6px; }
-  .badge { font-size: 11px; color: rgba(255, 255, 255, .55); }
+  .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .handle { margin: 0; font-size: 36px; line-height: 40px; font-weight: 700; color: #fff; }
   .pname { font-size: var(--md); color: rgba(255, 255, 255, .7); }
   .act { flex: none; padding-bottom: 74px; }

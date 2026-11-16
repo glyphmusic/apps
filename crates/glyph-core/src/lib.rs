@@ -350,6 +350,9 @@ impl ImportMatch {
                 }
             }
             dedupe::prefer_cover(&mut t.cover_url, &m.cover_url);
+            if t.album.is_none() {
+                t.album = m.album.clone();
+            }
             if t.duration_ms.is_none() {
                 t.duration_ms = m.duration_ms;
             }
@@ -494,6 +497,37 @@ impl Backend {
         self.warm.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         Ok(())
+    }
+
+    /// Re-probes the configured server (`/v1/health`) and refreshes the active
+    /// backend state when an offline/outage server comes back after an update.
+    pub async fn refresh_server(&self) -> anyhow::Result<bool> {
+        let old = self.cur();
+        let Some(client) = old.server.as_ref().cloned() else {
+            return Ok(false);
+        };
+        let url = client.base_url().to_string();
+        match self.spawn(async move { client.check_compat().await }).await? {
+            Ok(Compat::Compatible(h)) => {
+                if crate::outage::is_official(&url) {
+                    crate::outage::clear();
+                }
+                let was_offline = matches!(&old.mode, BackendMode::Server { server_version, .. } if server_version == "offline");
+                let version_changed = matches!(&old.mode, BackendMode::Server { server_version, .. } if server_version != &h.server_version);
+                let rates = h.supports(glyph_protocol::capability::RATINGS);
+                let providers_changed = old.server_providers.as_ref() != Some(&h.providers);
+                if was_offline || version_changed || providers_changed || old.server_rates != rates {
+                    self.set_config((*old.config).clone()).await?;
+                }
+                Ok(true)
+            }
+            Ok(Compat::Incompatible(h)) => Err(anyhow!(
+                "incompatible server protocol {} (expected {})",
+                h.protocol_version,
+                glyph_protocol::PROTOCOL_VERSION
+            )),
+            Err(_) => Ok(false),
+        }
     }
 
     /// Unified search over all enabled providers, results arrive as they come
@@ -1211,17 +1245,27 @@ impl Backend {
     /// fallback chain provider → Spotify/Deezer → Cover Art Archive.
     /// `None` = UI draws a generated ASCII pattern.
     pub async fn cover(&self, track: &Track) -> anyhow::Result<Option<PathBuf>> {
+        Ok(self.cover_with_meta(track).await?.map(|r| r.path))
+    }
+
+    pub async fn cover_with_meta(&self, track: &Track) -> anyhow::Result<Option<cover::CoverResult>> {
         if let Some(p) = self.local.cover(track) {
-            return Ok(Some(p));
+            return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
         }
         if self.imports.contains(track) {
             let p = import::local::cover_path(&self.imports, track);
             if p.is_file() {
-                return Ok(Some(p));
+                return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
             }
         }
         let (inner, track) = (self.cur(), track.clone());
-        self.spawn(async move { inner.covers.get(&track).await }).await?
+        self.spawn(async move { inner.covers.get_with_meta(&track).await }).await?
+    }
+
+    /// Progressively resolves missing album / upgraded cover metadata via the cover chain.
+    pub async fn resolve_track_meta(&self, track: &Track) -> anyhow::Result<Option<(Option<String>, Option<String>)>> {
+        let (inner, track) = (self.cur(), track.clone());
+        self.spawn(async move { inner.covers.resolve_meta(&track).await }).await?
     }
 
     pub async fn import(

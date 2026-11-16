@@ -219,7 +219,7 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     }
     for item in lib.recent.iter().rev() {
         let key = match item {
-            crate::library::RecentItem::Song { track } => format!("song:{}", track_id(track)),
+            crate::library::RecentItem::Song { track, .. } => format!("song:{}", track_id(track)),
             crate::library::RecentItem::Artist { name, .. } => format!("artist:{}", name.trim().to_lowercase()),
         };
         push(k(RECENT, key), serde_json::to_value(item).unwrap_or_default());
@@ -474,7 +474,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 use crate::library::RecentItem;
                 lib.recent.retain(|item| {
                     let key = match item {
-                        RecentItem::Song { track } => format!("song:{}", track_id(track)),
+                        RecentItem::Song { track, .. } => format!("song:{}", track_id(track)),
                         RecentItem::Artist { name, .. } => format!("artist:{}", name.trim().to_lowercase()),
                     };
                     key != i.key

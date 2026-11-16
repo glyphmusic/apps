@@ -25,7 +25,7 @@ export type DeviceX = Device & {
 };
 
 /** Icon of a signed-in Glyph app by the platform it runs on. */
-export const platformIcon = (platform?: string) => (platform === "android" || platform === "ios" ? "smartphone" : "monitor");
+export const platformIcon = (platform?: string) => platformIconFor(platform);
 
 export function platformIconFor(platform?: string, name?: string): string {
   const p = (platform ?? "").toLowerCase();
@@ -46,15 +46,15 @@ export function deviceIcon(d: DeviceX): string {
   if (d.icon) return d.icon;
   switch (d.kind) {
     case "this": return thisIcon();
-    case "glyph": case "account": return platformIcon(d.platform);
+    case "glyph": case "account": return platformIconFor(d.platform, d.name);
     case "cast": return "cast";
     case "airplay": return "airplay";
     default: return "speaker";
   }
 }
 
-export const thisIcon = () => (app.platform === "android" || app.platform === "ios" ? "smartphone" : "monitor");
-export const thisName = () => t(app.platform === "android" || app.platform === "ios" ? "connect.this_phone" : "connect.this_computer");
+export const thisIcon = () => (app.platform === "web" ? "globe" : app.platform === "android" || app.platform === "ios" ? "smartphone" : "monitor");
+export const thisName = () => t(app.platform === "web" ? "connect.this_browser" : app.platform === "android" || app.platform === "ios" ? "connect.this_phone" : "connect.this_computer");
 export const isGlyphApp = (d: DeviceX) => d.kind === "glyph" || d.kind === "account";
 
 /** The other device music plays on (icon, name), if any. */

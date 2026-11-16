@@ -53,7 +53,7 @@
           else setListSort(l, s, "asc");
         };
         const dirTag = (s: ListSort) => cur === s ? (dir === "asc" ? " ↑" : " ↓") : "";
-        choice("list-music", l.kind === "liked" ? t("sort.added") : t("sort.custom"), cur === "custom", pickSort("custom"));
+        choice("list-music", l.kind === "liked" ? t("sort.added") : l.kind === "recent" ? t("library.recent") : t("sort.custom"), cur === "custom", pickSort("custom"));
         choice("music-2", `${t("sort.by_title")}${dirTag("title")}`, cur === "title", pickSort("title"));
         choice("user-round", `${t("sort.by_artist")}${dirTag("artist")}`, cur === "artist", pickSort("artist"));
         choice("disc-3", `${t("sort.by_album")}${dirTag("album")}`, cur === "album", pickSort("album"));
@@ -109,7 +109,7 @@
         const cur = app.config.audio.output_device, remote = app.devices.find((d) => d.active && d.kind !== "this");
         const out_ = (dev: string | null) => () => app.setConfig((c) => { c.audio.output_device = dev; c.mpd.enabled = false; });
         choice("speaker", t("sp.output.default"), cur == null && !remote, out_(null));
-        if (!app.outputDevices.length) out.push({ kind: "caption", text: t("ctl.output.searching") });
+        if (!onWeb() && !app.outputDevices.length) out.push({ kind: "caption", text: t("ctl.output.searching") });
         const mpd = app.config.mpd;
         if (mpd.address.trim()) choice("radio", tf("ctl.output.mpd", { host: mpd.address.trim() }), mpd.enabled, () => app.setConfig((c) => { c.mpd.enabled = !mpd.enabled; }));
         for (const name of app.outputDevices) {

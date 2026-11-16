@@ -1,3 +1,45 @@
+<script lang="ts" module>
+  import { backend as getBackend } from "../api/backend";
+  import { trackKey as keyOfTrack, type Track as TrackItem } from "../api/types";
+
+  const attemptedAlbums = new Set<string>();
+  const albumQueue: { track: TrackItem; signal: AbortSignal }[] = [];
+  let albumBusy = false;
+
+  function scheduleAlbumBackfill(track: TrackItem, signal: AbortSignal) {
+    if (track.album?.trim() || !track.title?.trim() || !track.artist?.trim()) return;
+    const k = keyOfTrack(track);
+    if (attemptedAlbums.has(k)) return;
+    if (albumQueue.some((x) => keyOfTrack(x.track) === k)) return;
+    albumQueue.push({ track, signal });
+    if (!albumBusy) void drainAlbumQueue();
+  }
+
+  async function drainAlbumQueue() {
+    albumBusy = true;
+    try {
+      while (albumQueue.length > 0) {
+        const next = albumQueue.shift()!;
+        if (next.signal.aborted) continue;
+        const k = keyOfTrack(next.track);
+        if (attemptedAlbums.has(k) || next.track.album?.trim()) continue;
+        attemptedAlbums.add(k);
+        if (attemptedAlbums.size > 2000) attemptedAlbums.clear();
+        try {
+          await getBackend().call("track_album", { track: next.track });
+        } catch {
+          /* transient/offline ignored */
+        }
+        if (albumQueue.length > 0) {
+          await new Promise((r) => setTimeout(r, 450));
+        }
+      }
+    } finally {
+      albumBusy = false;
+    }
+  }
+</script>
+
 <script lang="ts">
   // lists/rows.rs song_row: h 56, px 10, gap 14, radius 8, hover white 5 %.
   // Number (playing bars while it plays; a play icon on hover) → cover 40
@@ -42,7 +84,12 @@
     hoverTimer = setTimeout(() => { void backend().call("prefetch_hover", { track: tr }); }, 250);
   }
   function hoverOut() { clearTimeout(hoverTimer); }
-  let w = $state(1000);
+  $effect(() => {
+    if (!album || tr.album?.trim()) return;
+    const ac = new AbortController();
+    const timer = setTimeout(() => scheduleAlbumBackfill(tr, ac.signal), 250);
+    return () => { clearTimeout(timer); ac.abort(); };
+  });
   function play() { app.selectedRow = index; if (!blocked) app.play(tracks, index, context); }
   function menu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
@@ -50,7 +97,7 @@
   }
 </script>
 
-<div class="row" class:off={blocked} class:sel={selected} class:menu={app.ctx?.track === tr} bind:clientWidth={w} onclick={play} oncontextmenu={menu}
+<div class="row" class:off={blocked} class:sel={selected} class:menu={app.ctx?.track === tr} onclick={play} oncontextmenu={menu}
   onpointerenter={hoverIn} onpointerleave={hoverOut}
   onpointerdown={(e) => draggable && e.button === 0 && ondragstart?.(e)} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1">
   <span class="num">
@@ -65,7 +112,7 @@
       <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }}>{tr.artist}</button>
     </span>
   </span>
-  {#if album && w >= 700}
+  {#if album}
     <span class="al trunc">{#if tr.album}<button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openAlbum(tr.album!, tr.artist, [], tr); }}>{tr.album}</button>{/if}</span>
   {/if}
   <span class="like" class:keep={liked}><ToggleButton name="heart" size={15} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(tr)} /></span>
@@ -74,7 +121,7 @@
 </div>
 
 <style>
-  .row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; }
+  .row { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; }
   .row:hover, .row.menu { background: rgba(255, 255, 255, .05); transition-duration: .12s; }
   .row:not(:hover) { transition-duration: .24s; }
   .row.sel { background: rgba(255, 255, 255, .08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
@@ -93,6 +140,7 @@
   .link { min-width: 0; max-width: 100%; }
   .link:hover { color: var(--text); text-decoration: underline; }
   .al { flex: 0 1 200px; width: 200px; min-width: 0; display: flex; font-size: var(--sm); color: var(--faint); }
+  @container (max-width: 699px) { .al { display: none; } }
   .like { flex: none; opacity: 0; transition: opacity .12s; }
   .like.keep, .row:hover .like { opacity: 1; }
   .du { flex: none; width: 40px; font-size: var(--sm); color: var(--faint); }

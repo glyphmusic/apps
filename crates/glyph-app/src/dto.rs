@@ -133,7 +133,10 @@ pub fn library(lib: &Library, downloads: &[Track]) -> Value {
         .recent
         .iter()
         .map(|r| match r {
-            RecentItem::Song { track } => json!({ "kind": "song", "track": track }),
+            RecentItem::Song { track, from } => match from {
+                Some(list) => json!({ "kind": "song", "track": track, "from": list }),
+                None => json!({ "kind": "song", "track": track }),
+            },
             RecentItem::Artist { name, track } => json!({ "kind": "artist", "name": name, "track": track }),
         })
         .collect();
@@ -194,6 +197,7 @@ pub fn library(lib: &Library, downloads: &[Track]) -> Value {
     v["followed"] = json!(lib.followed.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
     v["hidden_sidebar"] = json!(lib.sidebar_hidden);
     v["hidden_artists"] = json!(lib.hidden_artists);
+    v["home_top"] = lib.home_top(now);
     v
 }
 

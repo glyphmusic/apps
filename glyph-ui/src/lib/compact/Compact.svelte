@@ -142,7 +142,7 @@
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
       {#snippet actions()}
-        {#if !onWeb()}<IconAction name="monitor-speaker" label={t("connect.title")} color={connectActive ? "var(--accent)" : undefined} onclick={() => { app.showQueue = false; app.showDevices = true; }} />{/if}
+        <IconAction name="monitor-speaker" label={t("connect.title")} color={connectActive ? "var(--accent)" : undefined} onclick={() => { app.showQueue = false; app.showDevices = true; }} />
       {/snippet}
     </Header>
   {:else if app.view === "search"}<PhoneSearch part="bar" bg={clamp01(scrollTop / 24)} />

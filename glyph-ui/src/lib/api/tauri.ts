@@ -5,10 +5,13 @@ import type { BackendEvents, Snapshot, Track } from "./types";
 import { trackKey } from "./types";
 
 const MAX_COVER_CACHE = 300;
+const MAX_COVER_ACTIVE = 3;
 
 export class TauriBackend implements Backend {
   readonly kind = "tauri" as const;
   private covers = new Map<string, Promise<string | null>>();
+  private coverQueue: { t: Track; k: string; signal?: AbortSignal; resolve: (v: string | null) => void }[] = [];
+  private coverActive = 0;
 
   snapshot(): Promise<Snapshot> {
     return invoke<Snapshot>("snapshot");
@@ -34,26 +37,57 @@ export class TauriBackend implements Backend {
   }
 
   /** The core caches covers on disk; the webview loads them through Tauri's asset protocol. */
-  cover(t: Track): Promise<string | null> {
+  cover(t: Track, signal?: AbortSignal): Promise<string | null> {
+    if (signal?.aborted) return Promise.resolve(null);
     const k = trackKey(t);
-    let p = this.covers.get(k);
-    if (p) {
+    const cached = this.covers.get(k);
+    if (cached) {
       // Touch for LRU order.
       this.covers.delete(k);
-      this.covers.set(k, p);
-      return p;
+      this.covers.set(k, cached);
+      return cached;
     }
-    if (this.covers.size >= MAX_COVER_CACHE) {
-      const oldest = this.covers.keys().next().value;
-      if (oldest !== undefined) this.covers.delete(oldest);
+    return new Promise<string | null>((resolve) => {
+      this.coverQueue.push({ t, k, signal, resolve });
+      this.drainCovers();
+    });
+  }
+
+  private drainCovers() {
+    while (this.coverActive < MAX_COVER_ACTIVE && this.coverQueue.length > 0) {
+      const item = this.coverQueue.shift()!;
+      if (item.signal?.aborted) {
+        item.resolve(null);
+        continue;
+      }
+      const existing = this.covers.get(item.k);
+      if (existing) {
+        this.covers.delete(item.k);
+        this.covers.set(item.k, existing);
+        void existing.then(item.resolve);
+        continue;
+      }
+      if (this.covers.size >= MAX_COVER_CACHE) {
+        const oldest = this.covers.keys().next().value;
+        if (oldest !== undefined) this.covers.delete(oldest);
+      }
+      this.coverActive++;
+      // Before the backend is up a miss is no real miss: asked again next time.
+      const p = invoke<string | null>("cover_path", { track: item.t })
+        .then((path) => (path ? convertFileSrc(path) : null))
+        .catch((e) => { if (/backend_offline/.test(String(e))) this.covers.delete(item.k); return null; })
+        .finally(() => {
+          this.coverActive--;
+          this.drainCovers();
+        });
+      this.covers.set(item.k, p);
+      p.then((v) => {
+        if (!v && this.covers.get(item.k) === p) {
+          setTimeout(() => { if (this.covers.get(item.k) === p) this.covers.delete(item.k); }, 15_000);
+        }
+        item.resolve(v);
+      });
     }
-    // Before the backend is up a miss is no real miss: asked again next time.
-    p = invoke<string | null>("cover_path", { track: t })
-      .then((path) => (path ? convertFileSrc(path) : null))
-      .catch((e) => { if (/backend_offline/.test(String(e))) this.covers.delete(k); return null; });
-    this.covers.set(k, p);
-    p.then((v) => { if (!v && this.covers.get(k) === p) setTimeout(() => { if (this.covers.get(k) === p) this.covers.delete(k); }, 30_000); });
-    return p;
   }
 
   trimCovers(keep: number): void {

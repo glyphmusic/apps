@@ -200,7 +200,7 @@
       case "artist": return t("sort.by_artist");
       case "album": return t("sort.by_album");
       case "duration": return t("sort.by_length");
-      default: return l?.kind === "liked" ? t("sort.added") : t("sort.custom");
+      default: return l?.kind === "liked" ? t("sort.added") : l?.kind === "recent" ? t("library.recent") : t("sort.custom");
     }
   });
   function cycleTitleSort() {
@@ -234,9 +234,9 @@
     if (close) searchOpen = false;
   }
 
-  // Recently played mixes songs and artists; the rows follow that order.
+  // Recently played mixes songs and artists in its default chronological order.
   const recent = $derived.by(() => {
-    if (l?.kind !== "recent") return null;
+    if (l?.kind !== "recent" || sort !== "custom") return null;
     const songs: Track[] = [];
     const rows: ({ kind: "song"; at: number } | { kind: "artist"; name: string; track: Track | null })[] = [];
     for (const it of app.library.recent) {

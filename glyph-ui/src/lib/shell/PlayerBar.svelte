@@ -126,7 +126,7 @@
   <!-- right: the controls pill -->
   <div class="side r">
     <div class="pill">
-      {#if !onWeb()}<ToggleButton name="monitor-speaker" on={app.showDevices || elsewhere} accent="var(--accent)" onclick={() => { app.showDevices = !app.showDevices; if (app.showDevices) app.showQueue = false; }} />{/if}
+      <ToggleButton name="monitor-speaker" on={app.showDevices || elsewhere} accent="var(--accent)" onclick={() => { app.showDevices = !app.showDevices; if (app.showDevices) app.showQueue = false; }} />
       {#if folded}
         <div class="vfold" role="group" onpointerenter={() => (volHover = true)} onpointerleave={() => (volHover = false)}>
           <IconButton name={app.volume <= 0.001 ? "volume-x" : "volume-2"} size={15} color={app.controlMenu?.menu === "volume" ? "var(--accent)" : undefined} notip onclick={() => app.toggleMute()} oncontextmenu={menu("volume")} />

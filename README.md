@@ -7,7 +7,7 @@ Glyph searches many legal music sources at once, plays full tracks where the sou
 and keeps your library, playlists and downloads in one flat, fast UI with optional ASCII-art covers.
 
 Server: [glyphmusic/server](https://github.com/glyphmusic/server) — the app uses
-`https://glyph-server.glyphmusic.workers.dev` by default, or any instance you host yourself.
+`https://server.glyphmusic.workers.dev` by default, or any instance you host yourself.
 
 ## Screenshots
 

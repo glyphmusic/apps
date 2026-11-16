@@ -12,7 +12,7 @@ export interface Backend {
   call<T = void>(cmd: string, args?: Record<string, unknown>): Promise<T>;
   on<K extends keyof BackendEvents>(ev: K, cb: (payload: BackendEvents[K]) => void): () => void;
   /** URL of a song's cover picture (cached by the backend), or null. */
-  cover(t: Track): Promise<string | null>;
+  cover(t: Track, signal?: AbortSignal): Promise<string | null>;
   /** Trims cached cover URL lookups down to at most `keep` recent entries. */
   trimCovers?(keep: number): void;
 }

@@ -102,6 +102,8 @@ export function installKeys(focusSearch: () => void): () => void {
       if (!typing && app.history.length) return app.back();
       return;
     }
+    if (k === "alt-left") { e.preventDefault(); app.back(); return; }
+    if (k === "alt-right") { e.preventDefault(); app.forward(); return; }
     const nav = /^secondary-([1-9])$/.exec(k);
     if (nav) { e.preventDefault(); const v = views[+nav[1] - 1]; if (v) app.navigate(v); return; }
     for (const sc of SHORTCUTS) {
@@ -131,6 +133,7 @@ const BLOCKED_BROWSER_KEYS = new Set([
   "cmd-alt-i", "cmd-alt-j", "cmd-alt-c", "cmd-alt-u",
   "secondary-u", "secondary-r", "secondary-f", "secondary-g",
   "secondary-p", "secondary-s", "secondary-o",
+  "alt-left", "alt-right",
 ]);
 
 /** Prevents DevTools and native browser shortcuts in the desktop shell without

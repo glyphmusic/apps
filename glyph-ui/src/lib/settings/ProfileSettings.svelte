@@ -235,11 +235,11 @@
         </div>
         <div class="mini-who">
           <button
-            class="mini-badge mono"
+            class="mini-badge"
             onclick={() => update({ public: !s!.public })}
             use:tip={t("profile.public")}
           >
-            [{t(s.public ? "profile.badge" : "profile.badge.private")}]
+            {t(s.public ? "profile.badge" : "profile.badge.private")}
           </button>
           {#if editingHandle}
             <!-- svelte-ignore a11y_no_static_element_interactions -->

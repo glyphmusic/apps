@@ -1,55 +1,151 @@
 <script lang="ts">
   // views.rs home_cards: flat dark cards (h 56, gap 14, card colour, radius
   // 8, hover white 4 %) as a grid: as many columns as fit at 260 px, each
-  // stretched up to 420; rows are made even (6 cards = 3 + 3). First Liked
-  // Songs (heart tile 56 in `active`), then up to two playlists you listened
-  // to lately, active songs, other playlists until 6 cards are there.
-  // "Active" is approximated from the recent list (the Rust side counts
-  // plays over time, which the UI does not have).
+  // stretched up to 420; rows are made even (6 cards = 3 + 3). Picks Liked
+  // Songs plus the playlists, albums, artists, and songs with the most
+  // listening time & activity (falling back to recent items when stats empty).
   import Icon from "../../components/Icon.svelte";
   import ListCover from "../../components/ListCover.svelte";
   import Cover from "../../components/Cover.svelte";
   import SongTitle from "../../components/SongTitle.svelte";
   import { app } from "../../state.svelte";
   import { t, tf } from "../../i18n.svelte";
-  import { primaryArtist, rating, trackKey, type ListKey, type Track } from "../../api/types";
+  import { fmtListen } from "../stats/types";
+  import { listId, primaryArtist, rating, trackKey, type ListKey, type Playlist, type Track } from "../../api/types";
 
   const MAX = 420;
   // Phones get two columns (150 px) instead of a tall stack.
   const MIN = $derived(app.compact ? 150 : 260), GAP = $derived(app.compact ? 8 : 10);
   let w = $state(1000);
 
-  const hot = $derived.by(() => {
-    const ids: string[] = [];
-    for (const r of app.library.recent) {
-      if (r.kind === "list" && r.list.kind === "playlist" && app.playlist(r.list.id) && !ids.includes(r.list.id)) ids.push(r.list.id);
-      if (ids.length >= 2) break;
+  type CardItem =
+    | { kind: "liked"; key: string }
+    | { kind: "playlist"; list: ListKey; playlist: Playlist; ms: number; key: string }
+    | { kind: "album"; list: Extract<ListKey, { kind: "album" }>; ms: number; key: string }
+    | { kind: "artist"; name: string; track: Track | null; ms: number; key: string }
+    | { kind: "song"; track: Track; ms: number; key: string };
+
+  const cards = $derived.by<CardItem[]>(() => {
+    const top = app.library.home_top;
+    const out: CardItem[] = [];
+    const seen = new Set<string>();
+    const add = (c: CardItem): boolean => {
+      if (out.length >= 6 || seen.has(c.key)) return false;
+      seen.add(c.key);
+      out.push(c);
+      return true;
+    };
+
+    if (app.library.liked.length > 0 || !app.library.playlists.length) {
+      add({ kind: "liked", key: "liked" });
     }
-    return ids;
-  });
-  const active = $derived.by<Track[]>(() => {
-    const out: Track[] = [], seen = new Set<string>();
+
+    // Build ordered candidate pools per category (listening time + activity first, then recent fallback)
+    const playlistPool: CardItem[] = [];
+    const plSeen = new Set<string>();
+    for (const item of top?.playlists ?? []) {
+      if (item.list.kind !== "playlist") continue;
+      const p = app.playlist(item.list.id);
+      if (!p || plSeen.has(p.id)) continue;
+      plSeen.add(p.id);
+      playlistPool.push({ kind: "playlist", list: item.list, playlist: p, ms: item.ms, key: `pl:${p.id}` });
+    }
     for (const r of app.library.recent) {
-      if (r.kind !== "song" || !app.allowed(r.track) || seen.has(trackKey(r.track))) continue;
-      seen.add(trackKey(r.track));
-      out.push(r.track);
-      if (out.length >= 5) break;
+      const l = r.kind === "list" ? r.list : r.kind === "song" ? r.from : undefined;
+      if (l?.kind === "playlist" && !plSeen.has(l.id)) {
+        const p = app.playlist(l.id);
+        if (p) { plSeen.add(p.id); playlistPool.push({ kind: "playlist", list: l, playlist: p, ms: 0, key: `pl:${p.id}` }); }
+      }
+    }
+    for (const p of app.library.playlists) {
+      if (!plSeen.has(p.id)) {
+        plSeen.add(p.id);
+        playlistPool.push({ kind: "playlist", list: { kind: "playlist", id: p.id }, playlist: p, ms: 0, key: `pl:${p.id}` });
+      }
+    }
+
+    const albumPool: CardItem[] = [];
+    const alSeen = new Set<string>();
+    for (const item of top?.albums ?? []) {
+      if (item.list.kind !== "album") continue;
+      const id = listId(item.list);
+      if (alSeen.has(id)) continue;
+      alSeen.add(id);
+      albumPool.push({ kind: "album", list: item.list, ms: item.ms, key: id });
+    }
+    for (const l of app.library.saved_albums) {
+      if (l.kind !== "album") continue;
+      const id = listId(l);
+      if (!alSeen.has(id)) {
+        alSeen.add(id);
+        albumPool.push({ kind: "album", list: l, ms: 0, key: id });
+      }
+    }
+
+    const artistPool: CardItem[] = [];
+    const arSeen = new Set<string>();
+    for (const a of top?.artists ?? []) {
+      const ak = a.name.trim().toLowerCase();
+      if (!ak || arSeen.has(ak)) continue;
+      arSeen.add(ak);
+      artistPool.push({ kind: "artist", name: a.name, track: a.track ?? null, ms: a.ms, key: `ar:${ak}` });
+    }
+    for (const r of app.library.recent) {
+      if (r.kind !== "artist") continue;
+      const ak = r.name.trim().toLowerCase();
+      if (ak && !arSeen.has(ak)) {
+        arSeen.add(ak);
+        artistPool.push({ kind: "artist", name: r.name, track: r.track ?? null, ms: 0, key: `ar:${ak}` });
+      }
+    }
+
+    const songPool: CardItem[] = [];
+    const sSeen = new Set<string>();
+    for (const s of top?.songs ?? []) {
+      if (!app.allowed(s.track)) continue;
+      const sk = trackKey(s.track);
+      if (sSeen.has(sk)) continue;
+      sSeen.add(sk);
+      songPool.push({ kind: "song", track: s.track, ms: s.ms, key: `s:${sk}` });
+    }
+    for (const r of app.library.recent) {
+      if (r.kind !== "song" || !app.allowed(r.track)) continue;
+      const sk = trackKey(r.track);
+      if (!sSeen.has(sk)) {
+        sSeen.add(sk);
+        songPool.push({ kind: "song", track: r.track, ms: 0, key: `s:${sk}` });
+      }
+    }
+
+    // Take up to 2 playlists/albums, up to 2 artists, up to 2 songs in balanced rounds, then fill up to 6.
+    const takeSome = (pool: CardItem[], limit: number) => {
+      let n = 0;
+      for (const item of pool) {
+        if (n >= limit || out.length >= 6) break;
+        if (add(item)) n++;
+      }
+    };
+    takeSome(playlistPool, 2);
+    takeSome(albumPool, 1);
+    takeSome(artistPool, 1);
+    takeSome(songPool, 2);
+    for (const pool of [songPool, playlistPool, albumPool, artistPool]) {
+      for (const item of pool) {
+        if (out.length >= 6) break;
+        add(item);
+      }
     }
     return out;
   });
-  const plIds = $derived.by(() => {
-    const songs = Math.min(active.length, 5 - hot.length);
-    const rest = app.library.playlists.filter((p) => !hot.includes(p.id)).map((p) => p.id).slice(0, 5 - hot.length - songs);
-    return [...hot, ...rest];
-  });
-  const pls = $derived(plIds.map((id) => app.playlist(id)).filter((p) => !!p));
-  const songs = $derived(active.slice(0, Math.max(0, 6 - 1 - pls.length)));
-  const count = $derived(1 + pls.length + songs.length);
+
+  const topSongs = $derived(cards.flatMap((c) => (c.kind === "song" ? [c.track] : [])));
+  const count = $derived(cards.length);
   const fit = $derived(Math.min(Math.max(1, Math.floor((w + GAP) / (MIN + GAP))), Math.max(1, count)));
   const rows = $derived(Math.ceil(count / fit));
   const cols = $derived(Math.ceil(count / rows));
 
   const open = (l: ListKey) => app.openListView(l);
+  const openAlbum = (l: Extract<ListKey, { kind: "album" }>) => app.openAlbum(l.title, l.artist, l.tracks ?? [], l.cover ?? null);
   function listMenu(l: ListKey) { return (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: null, list: l }); }; }
   function songMenu(tr: Track) { return (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: tr }); }; }
   function artistMenu(name: string) { return (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: null, artist: primaryArtist(name) }); }; }
@@ -57,33 +153,55 @@
 
 <div class="wrap" style:--cg="{app.compact ? 10 : 14}px" bind:clientWidth={w}>
   <div class="grid" style:grid-template-columns="repeat({cols}, minmax(0, 1fr))" style:gap="{GAP}px" style:max-width="{cols * MAX + (cols - 1) * GAP}px">
-    <div class="c" onclick={() => open({ kind: "liked" })} oncontextmenu={listMenu({ kind: "liked" })} onkeydown={(e) => e.key === "Enter" && open({ kind: "liked" })} role="button" tabindex="-1">
-      <div class="liked"><Icon name="heart" size={20} color="var(--text)" /></div>
-      <div class="tx">
-        <div class="tl">{t("library.liked")}</div>
-        <div class="sub">{tf("common.n_songs", { n: app.library.liked.length })}</div>
-      </div>
-    </div>
-    {#each pls as p (p.id)}
-      {@const l = { kind: "playlist", id: p.id } as ListKey}
-      <div class="c" onclick={() => open(l)} oncontextmenu={listMenu(l)} onkeydown={(e) => e.key === "Enter" && open(l)} role="button" tabindex="-1">
-        <ListCover list={l} size={56} />
-        <div class="tx">
-          <div class="tl trunc">{p.name}</div>
-          <div class="sub trunc">{tf("common.n_songs", { n: p.tracks.length })}</div>
-        </div>
-      </div>
-    {/each}
-    {#each songs as tr, i (trackKey(tr))}
-      <div class="c" class:off={!app.allowed(tr)} onclick={() => app.allowed(tr) && app.play(songs, i)} oncontextmenu={songMenu(tr)} onkeydown={(e) => e.key === "Enter" && app.play(songs, i)} role="button" tabindex="-1">
-        <Cover track={tr} size={56} radius={8} />
-        <div class="tx">
-          <div class="tl"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></div>
-          <div class="sub">
-            <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }} oncontextmenu={artistMenu(tr.artist)}>{tr.artist}</button>
+    {#each cards as c (c.key)}
+      {#if c.kind === "liked"}
+        <div class="c" onclick={() => open({ kind: "liked" })} oncontextmenu={listMenu({ kind: "liked" })} onkeydown={(e) => e.key === "Enter" && open({ kind: "liked" })} role="button" tabindex="-1">
+          <div class="liked"><Icon name="heart" size={20} color="var(--text)" /></div>
+          <div class="tx">
+            <div class="tl trunc">{t("library.liked")}</div>
+            <div class="sub trunc">{tf("common.n_songs", { n: app.library.liked.length })}</div>
           </div>
         </div>
-      </div>
+      {:else if c.kind === "playlist"}
+        <div class="c" onclick={() => open(c.list)} oncontextmenu={listMenu(c.list)} onkeydown={(e) => e.key === "Enter" && open(c.list)} role="button" tabindex="-1">
+          <ListCover list={c.list} size={56} />
+          <div class="tx">
+            <div class="tl trunc">{c.playlist.name}</div>
+            <div class="sub trunc">{c.ms > 0 ? `${tf("common.n_songs", { n: c.playlist.tracks.length })} · ${fmtListen(c.ms)}` : tf("common.n_songs", { n: c.playlist.tracks.length })}</div>
+          </div>
+        </div>
+      {:else if c.kind === "album"}
+        <div class="c" onclick={() => openAlbum(c.list)} oncontextmenu={listMenu(c.list)} onkeydown={(e) => e.key === "Enter" && openAlbum(c.list)} role="button" tabindex="-1">
+          <ListCover list={c.list} size={56} />
+          <div class="tx">
+            <div class="tl trunc">{c.list.title}</div>
+            <div class="sub trunc">{c.ms > 0 ? `${c.list.artist} · ${fmtListen(c.ms)}` : c.list.artist}</div>
+          </div>
+        </div>
+      {:else if c.kind === "artist"}
+        <div class="c" onclick={() => app.openArtistPage(c.name)} oncontextmenu={artistMenu(c.name)} onkeydown={(e) => e.key === "Enter" && app.openArtistPage(c.name)} role="button" tabindex="-1">
+          {#if c.track}
+            <Cover track={c.track} size={56} radius={28} />
+          {:else}
+            <div class="artist-ph"><Icon name="user-round" size={22} color="rgba(255,255,255,.55)" /></div>
+          {/if}
+          <div class="tx">
+            <div class="tl trunc">{c.name}</div>
+            <div class="sub trunc">{c.ms > 0 ? `${t("search.kind.artist")} · ${fmtListen(c.ms)}` : t("search.kind.artist")}</div>
+          </div>
+        </div>
+      {:else if c.kind === "song"}
+        {@const si = topSongs.findIndex((x) => trackKey(x) === trackKey(c.track))}
+        <div class="c" class:off={!app.allowed(c.track)} onclick={() => app.allowed(c.track) && app.play(topSongs, Math.max(0, si))} oncontextmenu={songMenu(c.track)} onkeydown={(e) => e.key === "Enter" && app.allowed(c.track) && app.play(topSongs, Math.max(0, si))} role="button" tabindex="-1">
+          <Cover track={c.track} size={56} radius={8} />
+          <div class="tx">
+            <div class="tl"><SongTitle rating={rating(c.track)}>{c.track.title}</SongTitle></div>
+            <div class="sub">
+              <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(c.track.artist); }} oncontextmenu={artistMenu(c.track.artist)}>{c.track.artist}</button>
+            </div>
+          </div>
+        </div>
+      {/if}
     {/each}
   </div>
 </div>
@@ -96,6 +214,7 @@
   .c:hover::before { opacity: 1; transition-duration: .12s; }
   .c.off { opacity: .4; }
   .liked { flex: none; width: 56px; height: 56px; display: grid; place-items: center; background: var(--active); }
+  .artist-ph { flex: none; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 50%; background: rgba(255, 255, 255, .06); }
   .tx { position: relative; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 10px; }
   .tl { font-size: var(--md); font-weight: 500; min-width: 0; }
   .sub { display: flex; min-width: 0; font-size: var(--sm); color: var(--dim); }

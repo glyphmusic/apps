@@ -91,6 +91,16 @@ fn image_decode_semaphore() -> &'static tokio::sync::Semaphore {
     SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_IMAGE_DECODES))
 }
 
+#[derive(Debug, Clone)]
+pub struct CoverResult {
+    pub path: PathBuf,
+    pub album: Option<String>,
+    pub cover_url: Option<String>,
+}
+
+const SERVER_REQ_GAP: Duration = Duration::from_millis(180);
+const SERVER_RATE_LIMIT_DEFAULT_SECS: u64 = 15;
+
 pub struct CoverCache {
     server: Option<crate::server_client::ServerClient>,
     server_musicbrainz: Option<Arc<crate::providers::musicbrainz::MusicBrainz>>,
@@ -100,10 +110,16 @@ pub struct CoverCache {
     providers: Arc<Providers>,
     /// Songs for which the whole chain failed (this session only).
     misses: Mutex<HashSet<String>>,
+    /// Tracks whose album metadata was already checked cleanly this session.
+    meta_checked: Mutex<HashSet<String>>,
     /// Non-square cached covers already checked for a non-YouTube upgrade this session.
     upgraded: Mutex<HashSet<String>>,
     last_prune: Mutex<Option<std::time::Instant>>,
     pruning: Arc<AtomicBool>,
+    /// Bounds concurrent network cover lookups so large playlists load progressively.
+    fetch_sem: tokio::sync::Semaphore,
+    last_server_req: tokio::sync::Mutex<Option<std::time::Instant>>,
+    server_cooldown_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl CoverCache {
@@ -116,9 +132,13 @@ impl CoverCache {
             http,
             providers,
             misses: Mutex::new(HashSet::new()),
+            meta_checked: Mutex::new(HashSet::new()),
             upgraded: Mutex::new(HashSet::new()),
             last_prune: Mutex::new(None),
             pruning: Arc::new(AtomicBool::new(false)),
+            fetch_sem: tokio::sync::Semaphore::new(2),
+            last_server_req: tokio::sync::Mutex::new(None),
+            server_cooldown_until: Mutex::new(None),
         }
     }
 
@@ -148,8 +168,61 @@ impl CoverCache {
         self.upgraded.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string())
     }
 
+    fn server_cooling_down(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut g = self.server_cooldown_until.lock().unwrap_or_else(|e| e.into_inner());
+        match *g {
+            Some(until) if until > now => true,
+            Some(_) => { *g = None; false }
+            None => false,
+        }
+    }
+
+    fn note_rate_limit(&self, retry_after_s: Option<u64>) {
+        let secs = retry_after_s.unwrap_or(SERVER_RATE_LIMIT_DEFAULT_SECS).clamp(5, 120);
+        let until = std::time::Instant::now() + Duration::from_secs(secs);
+        let mut g = self.server_cooldown_until.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none_or(|cur| until > cur) {
+            *g = Some(until);
+        }
+    }
+
+    fn note_server_error(&self, err: &anyhow::Error) -> bool {
+        if let Some(se) = err.downcast_ref::<crate::server_client::ServerError>() {
+            if se.status == 429 {
+                self.note_rate_limit(se.retry_after_s);
+                return true;
+            }
+            return se.status >= 500 || se.status == 408;
+        }
+        if let Some(re) = err.downcast_ref::<reqwest::Error>() {
+            if re.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                self.note_rate_limit(None);
+                return true;
+            }
+            return re.is_timeout() || re.is_connect() || re.status().is_some_and(|s| s.is_server_error());
+        }
+        false
+    }
+
+    async fn pace_server(&self) {
+        let mut last = self.last_server_req.lock().await;
+        if let Some(at) = *last {
+            let elapsed = at.elapsed();
+            if elapsed < SERVER_REQ_GAP {
+                tokio::time::sleep(SERVER_REQ_GAP - elapsed).await;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
     /// Cached cover for the song, fetching it through the fallback chain if needed.
     pub async fn get(&self, track: &Track) -> Result<Option<PathBuf>> {
+        Ok(self.get_with_meta(track).await?.map(|r| r.path))
+    }
+
+    /// Cached cover plus any freshly discovered album / cover URL metadata.
+    pub async fn get_with_meta(&self, track: &Track) -> Result<Option<CoverResult>> {
         let key = paths::hash_hex(&track_key(track));
         let path = self.path_for(&key);
         if path.is_file() {
@@ -157,76 +230,178 @@ impl CoverCache {
             // half grey: fetch those again.
             if cached_truncated(&path) {
                 let _ = std::fs::remove_file(&path);
-            } else if !is_roughly_square(&path) && self.try_claim_upgrade(&key) {
-                if self.fetch_non_youtube(track, &path).await {
-                    return Ok(Some(self.finish(path)));
+            } else if !is_roughly_square(&path) && !self.server_cooling_down() && self.try_claim_upgrade(&key) {
+                let _permit = self.fetch_sem.acquire().await?;
+                let (ok, _, album, cover_url) = self.fetch_non_youtube_meta(track, &path).await;
+                if ok {
+                    return Ok(Some(CoverResult { path: self.finish(path), album, cover_url }));
                 }
                 touch(&path);
-                return Ok(Some(path));
+                return Ok(Some(CoverResult { path, album: None, cover_url: None }));
             } else {
                 touch(&path);
-                return Ok(Some(path));
+                return Ok(Some(CoverResult { path, album: None, cover_url: None }));
             }
         }
         if self.misses.lock().unwrap().contains(&key) {
             return Ok(None);
         }
         tokio::fs::create_dir_all(&self.dir).await?;
-        if self.fetch_non_youtube(track, &path).await {
-            return Ok(Some(self.finish(path)));
+        let _permit = self.fetch_sem.acquire().await?;
+        if path.is_file() && !cached_truncated(&path) {
+            touch(&path);
+            return Ok(Some(CoverResult { path, album: None, cover_url: None }));
+        }
+        let (ok, mut transient, album, cover_url) = self.fetch_non_youtube_meta(track, &path).await;
+        if ok {
+            return Ok(Some(CoverResult { path: self.finish(path), album, cover_url }));
         }
         // Last resort: YouTube thumbnail only when no square/non-YouTube cover exists.
         if let Some(u) = track.cover_url.as_deref().filter(|u| is_youtube_cover(u)) {
             if let Some(server) = &self.server {
-                if self.download_and_store(&server.upstream_url(u), &path).await.is_ok() {
-                    return Ok(Some(self.finish(path)));
+                if self.server_cooling_down() {
+                    transient = true;
+                } else {
+                    self.pace_server().await;
+                    match self.download_and_store(&server.upstream_url(u), &path).await {
+                        Ok(()) => return Ok(Some(CoverResult { path: self.finish(path), album: None, cover_url: None })),
+                        Err(e) => { transient |= self.note_server_error(&e); }
+                    }
                 }
             }
             let mut tried = Vec::new();
             if self.try_url(u, &path, &mut tried).await {
-                return Ok(Some(self.finish(path)));
+                return Ok(Some(CoverResult { path: self.finish(path), album: None, cover_url: None }));
             }
         }
-        self.misses.lock().unwrap().insert(key);
+        if !transient {
+            self.misses.lock().unwrap().insert(key);
+        }
         Ok(None)
+    }
+
+    /// Resolves missing album (and upgraded cover URL) progressively when a track's
+    /// cover is already cached locally or has no album tag stored.
+    pub async fn resolve_meta(&self, track: &Track) -> Result<Option<(Option<String>, Option<String>)>> {
+        if track.album.as_deref().is_some_and(|a| !a.trim().is_empty()) {
+            return Ok(None);
+        }
+        if track.title.trim().is_empty() || track.artist.trim().is_empty() {
+            return Ok(None);
+        }
+        let key = paths::hash_hex(&track_key(track));
+        if self.meta_checked.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+            return Ok(None);
+        }
+        if self.server.is_some() && self.server_cooling_down() {
+            return Ok(None);
+        }
+        let _permit = self.fetch_sem.acquire().await?;
+        let mut transient = false;
+        let mut found_album: Option<String> = None;
+        let mut found_cover: Option<String> = None;
+        if let Some(server) = &self.server {
+            if self.server_cooling_down() {
+                return Ok(None);
+            }
+            self.pace_server().await;
+            match server.cover_meta(track).await {
+                Ok(meta) => {
+                    found_album = meta.album;
+                    found_cover = meta.raw_url.filter(|u| !is_youtube_cover(u));
+                }
+                Err(e) => {
+                    transient = self.note_server_error(&e);
+                    tracing::debug!("server meta backfill failed: {e}");
+                }
+            }
+        }
+        if found_album.is_none() && !transient {
+            for (cover, album) in self.metadata_cover_hits(track).await {
+                if found_cover.is_none() && !is_youtube_cover(&cover) {
+                    found_cover = Some(cover);
+                }
+                if found_album.is_none() {
+                    found_album = album.filter(|a| !a.trim().is_empty());
+                }
+                if found_album.is_some() {
+                    break;
+                }
+            }
+        }
+        if !transient {
+            self.meta_checked.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+        }
+        if found_album.is_some() || found_cover.is_some() {
+            Ok(Some((found_cover, found_album)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Fetch a non-YouTube cover into `path`: non-YouTube provider URL,
     /// Spotify/Deezer (via server or directly), then MusicBrainz Cover Art Archive.
-    async fn fetch_non_youtube(&self, track: &Track, path: &Path) -> bool {
+    async fn fetch_non_youtube_meta(&self, track: &Track, path: &Path) -> (bool, bool, Option<String>, Option<String>) {
         let mut server_mb_checked = false;
+        let mut transient = false;
+        if let Some(u) = track.cover_url.as_deref().filter(|u| !is_youtube_cover(u)) {
+            let scaled = if data_saver() { small_cover_url(u) } else { u.to_string() };
+            if let Some(server) = &self.server {
+                if self.server_cooling_down() {
+                    transient = true;
+                } else {
+                    self.pace_server().await;
+                    match self.download_and_store(&server.upstream_url(&scaled), path).await {
+                        Ok(()) => return (true, false, None, None),
+                        Err(e) => { transient |= self.note_server_error(&e); }
+                    }
+                }
+            } else if self.download_and_store(&scaled, path).await.is_ok() {
+                return (true, false, None, None);
+            }
+        }
         if let Some(server) = &self.server {
-            let mut candidate = track.clone();
-            if candidate.cover_url.as_deref().is_some_and(is_youtube_cover) {
+            if self.server_cooling_down() {
+                transient = true;
+            } else {
+                let mut candidate = track.clone();
+                // Own non-YouTube URL was already tried above; ask server to search metadata if missing/failed.
                 candidate.cover_url = None;
-            }
-            if data_saver() {
-                candidate.cover_url = candidate.cover_url.map(|u| small_cover_url(&u));
-            }
-            let mut server_ok = true;
-            for _ in 0..2 {
-                // An older server has no /v1/cover: fall through to the direct chain.
-                let url = match server.cover_url(&candidate).await {
-                    Ok(u) => u,
+                self.pace_server().await;
+                let mut server_ok = true;
+                match server.cover_meta(&candidate).await {
+                    Ok(meta) => {
+                        if let Some(url) = meta.url.filter(|u| !is_youtube_cover(u)) {
+                            self.pace_server().await;
+                            match self.download_and_store(&url, path).await {
+                                Ok(()) => {
+                                    let clean_cover = meta.raw_url.filter(|u| !is_youtube_cover(u));
+                                    return (true, false, meta.album, clean_cover);
+                                }
+                                Err(e) => { transient |= self.note_server_error(&e); }
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::debug!("server cover failed, going direct: {e}");
                         server_ok = false;
-                        break;
-                    }
-                };
-                if let Some(url) = url.filter(|u| !is_youtube_cover(u)) {
-                    if self.download_and_store(&url, path).await.is_ok() {
-                        return true;
+                        transient |= self.note_server_error(&e);
                     }
                 }
-                if candidate.cover_url.take().is_none() { break; }
-            }
-            if server_ok {
-                if let Some(mb) = &self.server_musicbrainz {
-                    server_mb_checked = true;
-                    for url in Self::mb_cover_urls(mb, track).await {
-                        if self.download_and_store(&server.upstream_url(&url), path).await.is_ok() {
-                            return true;
+                if server_ok && !self.server_cooling_down() {
+                    if let Some(mb) = &self.server_musicbrainz {
+                        server_mb_checked = true;
+                        for url in Self::mb_cover_urls(mb, track).await {
+                            self.pace_server().await;
+                            match self.download_and_store(&server.upstream_url(&url), path).await {
+                                Ok(()) => return (true, false, None, None),
+                                Err(e) => {
+                                    if self.note_server_error(&e) {
+                                        transient = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -237,13 +412,13 @@ impl CoverCache {
         // 1. Non-YouTube provider cover
         if let Some(u) = track.cover_url.as_deref().filter(|u| !is_youtube_cover(u)) {
             if self.try_url(u, path, &mut tried).await {
-                return true;
+                return (true, false, None, None);
             }
         }
         // 2. Spotify / Deezer
-        for u in self.metadata_cover_urls(track).await {
+        for (u, album) in self.metadata_cover_hits(track).await {
             if !is_youtube_cover(&u) && self.try_url(&u, path, &mut tried).await {
-                return true;
+                return (true, false, album, Some(u));
             }
         }
         // 3. Cover Art Archive via MusicBrainz
@@ -251,12 +426,12 @@ impl CoverCache {
             if let Some(mb) = &self.providers.musicbrainz {
                 for u in Self::mb_cover_urls(mb, track).await {
                     if self.try_url(&u, path, &mut tried).await {
-                        return true;
+                        return (true, false, None, None);
                     }
                 }
             }
         }
-        false
+        (false, transient, None, None)
     }
 
     async fn mb_cover_urls(mb: &crate::providers::musicbrainz::MusicBrainz, track: &Track) -> Vec<String> {
@@ -302,9 +477,9 @@ impl CoverCache {
         path
     }
 
-    /// Cover URLs from Spotify / Deezer (known ids first, then a text/ISRC match).
-    async fn metadata_cover_urls(&self, track: &Track) -> Vec<String> {
-        let mut urls = Vec::new();
+    /// Cover URLs and album names from Spotify / Deezer (known ids first, then a text/ISRC match).
+    async fn metadata_cover_hits(&self, track: &Track) -> Vec<(String, Option<String>)> {
+        let mut hits_out = Vec::new();
         let wants: [(ProviderId, Option<Arc<dyn MusicProvider>>); 2] = [
             (ProviderId::Deezer, self.providers.get(ProviderId::Deezer)),
             (ProviderId::Spotify, self.providers.get(ProviderId::Spotify)),
@@ -359,11 +534,13 @@ impl CoverCache {
                 None
             }
             .await;
-            if let Some(u) = found.and_then(|t| t.cover_url).filter(|u| !is_youtube_cover(u)) {
-                urls.push(u);
+            if let Some(t) = found {
+                if let Some(u) = t.cover_url.filter(|u| !is_youtube_cover(u)) {
+                    hits_out.push((u, t.album.filter(|a| !a.trim().is_empty())));
+                }
             }
         }
-        urls
+        hits_out
     }
 
     /// Downloads + normalises one URL into `dest`. Returns `true` on success.

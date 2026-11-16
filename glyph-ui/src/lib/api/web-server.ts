@@ -103,8 +103,25 @@ export interface PlaybackOutputWire {
   state: PlaybackStateWire;
 }
 
+export type PlaybackCommandWire =
+  | { action: "transfer"; tracks: Track[]; index: number; position_ms: number; playing: boolean }
+  | { action: "play" }
+  | { action: "pause" }
+  | { action: "stop" }
+  | { action: "next" }
+  | { action: "previous" }
+  | { action: "seek"; position_ms: number }
+  | { action: "volume"; volume: number };
+
+export interface PlaybackDeliveryWire {
+  id: string;
+  command: PlaybackCommandWire;
+}
+
 export interface PlaybackPollResponse {
   devices: PlaybackOutputWire[];
+  commands?: PlaybackCommandWire[];
+  deliveries?: PlaybackDeliveryWire[];
 }
 
 export interface PlaybackReceipt {
@@ -301,7 +318,7 @@ export const server = {
     sendJson<ResolveResponse>("POST", "/v1/resolve?direct=1", { track: wireTrack(track), priority, youtube_only: youtubeOnly }),
 
   cover: (track: Track) =>
-    sendJson<{ url?: string | null }>("POST", "/v1/cover", wireTrack(track)),
+    sendJson<{ url?: string | null; album?: string | null }>("POST", "/v1/cover", wireTrack(track)),
 
   async lyrics(t: Track): Promise<LyricsResponse | null> {
     try {
@@ -394,6 +411,9 @@ export const server = {
 
   playbackReceipt: (token: string, id: string) =>
     sendJson<PlaybackReceipt>("POST", "/v1/devices/playback/receipt", { id, done: false, error: null }, token),
+
+  playbackAck: (token: string, receipt: { id: string; done: boolean; error?: string | null }) =>
+    sendJson<void>("POST", "/v1/devices/playback/ack", receipt, token),
 
   // ---- Sync ----
   syncPull: (token: string, since: number, limit = 1000) =>

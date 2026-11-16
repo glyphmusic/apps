@@ -1,7 +1,7 @@
-# Glyph 0.12.3 - 2026-11-16
+# Glyph 0.12.4 - 2026-11-16
 
-- **Artwork & Playback**: prefers non-YouTube album covers when merging tracks or upgrading cached thumbnails (`cover.rs`), handles `PreloadFailed` cleanly when preloaded next tracks fail to decode, and keeps player position/loading/radio states accurate across switches.
-- **Android**: adds `nativeDetach` / `nativeResumed` lifecycle handling, WebView render-process/load recovery (`MainActivity.java`), media service fixes (`PlaybackService.java`), and instant connectivity transitions (`set_offline_now`).
-- **Web player (`/web`) & UI**: ships PWA manifest + icons, improves background playback recovery and `429`/sync retry handling, guards startup/splash/canvas edge cases, and gives `NowPlayingSheet` a solid background.
+- **Web Connect (`/web`)**: adds remote device playback discovery, control, and transfer to the browser player (`web-connect.ts`).
+- **Home Quick Picks & Metadata Backfill**: adds ranked `home_top` quick-pick cards (`ListCard.svelte`) and automatic `track_album` / cover artwork backfill across library entries.
+- **Fixes**: automatic backoff server/network reconnection, `server.glyphmusic.workers.dev` config migration, Tauri desktop capability/window fixes, and UI/i18n refinements across Home, Artist, Profile, and Player views.
 
 See CHANGELOG.md for the complete changes.

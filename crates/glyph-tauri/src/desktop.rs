@@ -741,16 +741,16 @@ pub async fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>,
         let p = &core.st().config.player;
         (p.mini_on_top, p.mini_large, p.mini_card_w as f64, p.mini_card_h as f64)
     };
-    let (w, h) = if large { (cw, ch) } else { (300.0, 52.0) };
+    let (w, h) = if large { (cw.max(240.0), ch.max(220.0)) } else { (300.0, 52.0) };
     let b = tauri::WebviewWindowBuilder::new(&app, "mini", tauri::WebviewUrl::App("index.html#mini".into()))
         .title("Glyph")
         .devtools(false)
         .inner_size(w, h)
-        .min_inner_size(240.0, 52.0)
+        .min_inner_size(240.0, if large { 220.0 } else { 52.0 })
         .decorations(false)
         .always_on_top(on_top)
         .skip_taskbar(true)
-        .resizable(true)
+        .resizable(large)
         .shadow(false)
         .transparent(true)
         .background_color(tauri::window::Color(0, 0, 0, 0))

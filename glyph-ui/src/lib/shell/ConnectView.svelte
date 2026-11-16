@@ -10,6 +10,7 @@
   import { app } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
   import { jam, watchJam } from "../jam.svelte";
+  import { onWeb } from "../web";
   import { fadeEdges } from "../ui.svelte";
   import { deviceIcon, isGlyphApp, kindLabel, thisIcon, thisName, type DeviceX } from "../connect";
   import { drag } from "../compact/cstate.svelte";
@@ -42,9 +43,10 @@
   let outputs = $state<string[]>([]);
   let stageEl: HTMLDivElement | undefined = $state();
 
+  const web = $derived(onWeb());
   const devices = $derived(app.devices as DeviceX[]);
-  const searchOn = $derived(app.config?.devices.discovery ?? true);
-  const inJam = $derived(jam.state != null);
+  const searchOn = $derived(!web && (app.config?.devices.discovery ?? true));
+  const inJam = $derived(!web && jam.state != null);
   const current = $derived(devices.find((d) => d.active) ?? null);
   const remote = $derived(!!current && current.kind !== "this");
   const curName = $derived(current && current.kind !== "this" ? current.name : thisName());
@@ -72,11 +74,11 @@
     } catch { /* offline */ }
   }
   onMount(() => {
-    if (searchOn) scan();
-    loadOutputs();
+    if (searchOn || (web && signedIn)) scan();
+    if (!web) loadOutputs();
     // Rust polls the account's devices faster while this panel is open.
     backend().call("account_devices_open", { open: true });
-    const stop = watchJam();
+    const stop = web ? () => {} : watchJam();
     return () => { stop(); backend().call("account_devices_open", { open: false }); };
   });
 
@@ -205,7 +207,7 @@
             <h2 class="back trunc">{curName}</h2>
           {:else}
             <h2 class:big={sheet}>{t("connect.title")}</h2>
-            {#if searchOn}<IconButton name="refresh-cw" size={15} label={t("connect.rescan")} onclick={() => scan(true)} />{/if}
+            {#if searchOn || (web && signedIn)}<IconButton name="refresh-cw" size={15} label={t("connect.rescan")} onclick={() => scan(true)} />{/if}
           {/if}
         </div>
       {/key}
@@ -247,7 +249,7 @@
             {/each}
           </div>
 
-          {#if !remote}
+          {#if !remote && !web}
             <div class="sec">{t("sp.output")}</div>
             <div class="card grp">
               <button class="opt" class:on={curOutput === null} onclick={() => app.setConfig((c) => { c.audio.output_device = null; })}>
@@ -275,20 +277,22 @@
             </span>
             <span class="chev"><Icon name="chevron-right" size={16} color="var(--dim)" /></span>
           </button>
-          {#if inJam}
-            <button class="jamrow jamon" onclick={openJam}>
-              <Avatar src={hostAvatar} size={22} flat />
-              <span class="jamhost trunc">{tf("jam.card_title", { who: hostName })}</span>
-              <Icon name="chevron-right" size={15} color="var(--dim)" />
-            </button>
-          {:else}
-            <div class="jamrow">
-              <span class="jamdesc">{t("jam.start.sub")}</span>
-              <button class="jampill" onclick={openJam}>
-                <Icon name="users" size={14} color="#fff" />
-                <span>{t("jam.start")}</span>
+          {#if !web}
+            {#if inJam}
+              <button class="jamrow jamon" onclick={openJam}>
+                <Avatar src={hostAvatar} size={22} flat />
+                <span class="jamhost trunc">{tf("jam.card_title", { who: hostName })}</span>
+                <Icon name="chevron-right" size={15} color="var(--dim)" />
               </button>
-            </div>
+            {:else}
+              <div class="jamrow">
+                <span class="jamdesc">{t("jam.start.sub")}</span>
+                <button class="jampill" onclick={openJam}>
+                  <Icon name="users" size={14} color="#fff" />
+                  <span>{t("jam.start")}</span>
+                </button>
+              </div>
+            {/if}
           {/if}
         </div>
 
@@ -298,7 +302,7 @@
             {#if remote}
               <button class="row" onclick={useLocal}>
                 {@render tile(thisIcon(), false)}
-                <span class="tx"><span class="n trunc">{thisName()}</span><span class="s trunc">{localOut}</span></span>
+                <span class="tx"><span class="n trunc">{thisName()}</span><span class="s trunc">{web ? curQualityLabel : localOut}</span></span>
               </button>
             {/if}
             {#each apps as d (d.id)}
@@ -313,11 +317,17 @@
           </div>
         {/if}
 
+        {#if web && !signedIn}
+          <div class="card disc-off">
+            <div class="note nopad">{t("connect.account.signin")}</div>
+            <div class="fl"><Button onclick={() => { handleClose(); app.openSettings("account"); }}>{t("menu.signin")}</Button></div>
+          </div>
+        {/if}
         {#if signedIn && apps.length === 0}<div class="note">{t("connect.account.none")}</div>{/if}
         {#if error}<div class="note warn">{error}</div>{/if}
         {#if searchOn && searching}<div class="note">{t("ctl.output.searching")}</div>{/if}
         {#if searchOn && !searching && network.length === 0}<div class="note">{t("ctl.output.none")}</div>{/if}
-        {#if !searchOn}
+        {#if !web && !searchOn}
           <div class="card disc-off">
             <div class="note nopad">{t("connect.off")}</div>
             <div class="fl"><Button onclick={() => app.setConfig((c) => (c.devices.discovery = true)).then(() => scan())}>{t("connect.turn_on")}</Button></div>

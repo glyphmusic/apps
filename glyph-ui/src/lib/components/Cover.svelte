@@ -15,7 +15,7 @@
             callbacks.get(e.target)?.(e.isIntersecting);
           }
         },
-        { rootMargin: "220px 260px" },
+        { rootMargin: "120px 160px" },
       );
     }
     callbacks.set(el, cb);
@@ -87,13 +87,14 @@
       unveiling = false;
     }
     let alive = true;
-    const late = setTimeout(() => { if (alive && phase === "loading") timedOut = true; }, 4000);
-    backend().cover(t).then((u) => {
+    const ac = new AbortController();
+    const late = setTimeout(() => { if (alive && phase === "loading") timedOut = true; }, 7000);
+    backend().cover(t, ac.signal).then((u) => {
       if (!alive) return;
       if (!u) { clearTimeout(late); phase = "none"; return; }
       url = u;
     });
-    return () => { alive = false; clearTimeout(late); clearTimeout(veilTimer); };
+    return () => { alive = false; ac.abort(); clearTimeout(late); clearTimeout(veilTimer); };
   });
 
   let veilTimer: ReturnType<typeof setTimeout> | undefined;

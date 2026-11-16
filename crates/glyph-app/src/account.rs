@@ -101,6 +101,7 @@ struct Inner {
 pub struct Acct {
     core: Arc<Core>,
     m: Mutex<Inner>,
+    sync_wake: tokio::sync::Notify,
 }
 
 static JAM_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -110,9 +111,22 @@ static ON_DEVICES: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// Called once at start-up from `glyph_app::setup`.
 pub fn setup(core: &Arc<Core>) {
     glyph_audio::http::set_account_access_provider(Arc::new(glyph_core::account::media_access));
-    let acc = Arc::new(Acct { core: core.clone(), m: Mutex::new(Inner::default()) });
+    let acc = Arc::new(Acct { core: core.clone(), m: Mutex::new(Inner::default()), sync_wake: tokio::sync::Notify::new() });
     core.set_acct(acc.clone());
     crate::rt::spawn(acc.run());
+}
+
+/// Wakes account sync and remote playback after the server reconnects.
+pub fn wake_reconnect(core: &Core) {
+    if let Some(acc) = acct(core) {
+        {
+            let mut g = acc.g();
+            g.sync_failures = 0;
+            g.live_checked = None;
+            g.checked = None;
+        }
+        acc.sync_wake.notify_one();
+    }
 }
 
 fn acct(core: &Core) -> Option<Arc<Acct>> {
@@ -545,7 +559,10 @@ impl Acct {
                         SYNC_EVERY
                     }
                 };
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = me.sync_wake.notified() => {}
+                }
             }
         });
         loop {
@@ -1519,12 +1536,15 @@ impl Acct {
         let (skip, owner_state) = {
             let g = self.g();
             let controlling = g.target.is_some();
+            let has_peers = g.outputs.iter().any(|o| !o.device.current);
             let interval = if g.transfer_to.is_some() {
                 2
-            } else if g.live.is_some() && g.live_states {
-                LIVE_POLL
             } else if DEVICES_OPEN.load(Ordering::Relaxed) || controlling {
                 2
+            } else if g.live.is_some() && (g.live_states || !has_peers) {
+                LIVE_POLL
+            } else if !has_peers && g.received.is_some() {
+                30
             } else if playing {
                 5
             } else if g.live.is_none() {

@@ -16,9 +16,9 @@ export const playlistX = (id: string) => app.playlist(id) as PlaylistX | undefin
 export type ListSort = "custom" | "title" | "artist" | "album" | "duration";
 export type SortDir = "asc" | "desc";
 
-/** ListRef::sort_id: Recent has no sort. */
+/** ListRef::sort_id: stable key for per-list sorting. */
 export function sortId(l: ListKey): string | null {
-  return l.kind === "recent" ? null : listId(l);
+  return listId(l);
 }
 export function listSort(l: ListKey): ListSort {
   const id = sortId(l);
@@ -87,7 +87,11 @@ export function contextOf(l: ListKey | null): string | undefined {
 export function playShuffled(tracks: Track[], context?: string) {
   const ok = tracks.filter((x) => app.allowed(x));
   if (!ok.length) return;
-  return backend().call("play_shuffled", { tracks: ok, context: context ?? null });
+  const l = app.view === "list" ? app.openList : null;
+  const fromList = l && l.kind === "album" ? { ...l, tracks: [] } : l;
+  backend().call("set_playing_from", { list: fromList });
+  const from = { list: fromList, artist: app.view === "artist" ? app.openArtist : null, search: app.view === "search" };
+  return backend().call("play_shuffled", { tracks: ok, context: context ?? null, from });
 }
 /** menus.rs queue_all. */
 export function queueAll(tracks: Track[]) {

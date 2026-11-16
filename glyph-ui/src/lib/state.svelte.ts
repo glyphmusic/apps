@@ -352,14 +352,15 @@ class App {
     const t0 = tracks[index];
     if (!t0) return;
     this.optimistic({ current: t0, status: "loading", position: 0, duration: t0.duration_ms ? t0.duration_ms / 1000 : null });
-    // Started from an open list: its listening counts for the sidebar.
-    if (backend().kind === "tauri") {
-      const l = this.view === "list" ? this.openList : null;
-      backend().call("set_playing_from", { list: l && l.kind === "album" ? { ...l, tracks: [] } : l });
-    }
-    // Where it was started from: the open artist page joins "recently played",
-    // a song picked from the search results is remembered for the search field.
-    const from = { artist: this.view === "artist" ? this.openArtist : null, search: this.view === "search" };
+    // Started from an open list or artist page: counts for Home Recently played & sidebar.
+    const l = this.view === "list" ? this.openList : null;
+    const fromList = l && l.kind === "album" ? { ...l, tracks: [] } : l;
+    backend().call("set_playing_from", { list: fromList });
+    const from = {
+      list: fromList,
+      artist: this.view === "artist" ? this.openArtist : null,
+      search: this.view === "search",
+    };
     return backend().call("play", { tracks, index, context: context ?? null, from });
   }
   playOne(t: Track) { return this.play([t], 0); }

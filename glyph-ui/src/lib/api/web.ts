@@ -10,13 +10,14 @@
 import type { Backend } from "./backend";
 import type { StatsRange } from "../pages/stats/types";
 import type {
-  ArtistInfo, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
+  ArtistInfo, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, HomeTop, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
   RecentItem, Release, SearchResults, Snapshot, Track,
 } from "./types";
 import { PROVIDER_NAME, isYoutubeCover, primaryArtist, sameList, trackKey } from "./types";
 import { WebAccountManager } from "./web-account";
+import { WebConnectManager } from "./web-connect";
 import { WebMcpManager } from "./web-mcp";
-import { ApiError, server, type PlaybackSource, type SearchEvent } from "./web-server";
+import { ApiError, server, type PlaybackCommandWire, type PlaybackSource, type SearchEvent } from "./web-server";
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
 import { cancelSoon, load, save, saveSoon } from "./web-store";
@@ -143,6 +144,7 @@ export class WebBackend implements Backend {
   private lyricsOffsets: Record<string, number>;
   private stats: WebStats;
   private account: WebAccountManager;
+  private connect: WebConnectManager;
   private mcp: WebMcpManager;
   private playTrackState: { key: string; listenedMs: number; countedPlay: boolean; lastPos: number } | null = null;
   private activeAccountId: string | null = null;
@@ -151,13 +153,15 @@ export class WebBackend implements Backend {
   private resolving = new Map<string, Promise<PlaybackSource | null>>();
   private warmedCovers = new Set<string>();
   private coverCache = new Map<string, { url: string | null; expiresAt: number }>();
-  private coverInflight = new Map<string, Promise<string | null>>();
-  private coverQueue: { t: Track; key: string; resolve: (u: string | null) => void }[] = [];
+  private coverInflight = new Map<string, { promise: Promise<string | null>; signals: (AbortSignal | undefined)[] }>();
+  private coverQueue: { t: Track; key: string; signals: (AbortSignal | undefined)[]; resolve: (u: string | null) => void }[] = [];
   private coverActive = 0;
+  private lastCoverReqAt = 0;
   private coversAvailable = true;
   private preloadTimer = 0;
   private preloadCooldownUntil = 0;
   private preloadSeq = 0;
+  private playingFrom: ListKey | null = null;
   private lastMediaPosAt = 0;
   private lastMediaDur: number | null = null;
 
@@ -196,7 +200,7 @@ export class WebBackend implements Backend {
       stats: this.stats,
       emit: (ev, p) => this.emit(ev, p),
       toast: (key, kind, vars) => this.toast(key, kind, vars),
-      onSessionChange: () => this.mcp?.sync(),
+      onSessionChange: () => { this.mcp?.sync(); this.connect?.sync(); },
       onBeforeAccountSwitch: (prevId) => {
         this.activeAccountId = prevId;
         this.saveSessionNow(prevId);
@@ -228,8 +232,24 @@ export class WebBackend implements Backend {
       emit: (ev, p) => this.emit(ev, p),
       toast: (key, kind) => this.toast(key, kind),
     });
+    this.connect = new WebConnectManager({
+      isSignedIn: () => this.account.isSignedIn(),
+      withToken: (fn) => this.account.withToken(fn),
+      getLocalPlayer: () => this.player,
+      isLocalPlaying: () => this.player.status === "playing" || this.player.status === "loading",
+      getUpcoming: (limit) => this.upcomingQueueTracks(limit),
+      emit: (ev, p) => this.emit(ev, p),
+      onApplyCommand: (cmd) => this.applyRemoteCommand(cmd),
+      onResumeLocal: (track, posSec, playing) => {
+        this.queue = { items: [track], index: 0, user: 0, context: null };
+        this.saveQueue();
+        void this.start(track, playing, posSec);
+      },
+      pauseLocal: () => this.pauseAction(),
+    });
     this.engine = new WebEngine({
       time: (position, duration) => {
+        if (this.connect.isControlling()) return;
         const p = this.player;
         const prevPos = this.playTrackState?.lastPos ?? p.position;
         p.position = position;
@@ -275,13 +295,14 @@ export class WebBackend implements Backend {
         }
       },
       playing: (on) => {
+        if (this.connect.isControlling()) return;
         this.setStatus(on ? "playing" : "paused");
         if (on) this.skips = 0;
         else this.saveSessionNow();
       },
-      waiting: () => this.player.status === "playing" && this.setStatus("loading"),
-      ended: () => this.advance(false, true),
-      error: (m) => this.unplayable(m),
+      waiting: () => { if (!this.connect.isControlling() && this.player.status === "playing") this.setStatus("loading"); },
+      ended: () => { if (!this.connect.isControlling()) this.advance(false, true); },
+      error: (m) => { if (!this.connect.isControlling()) this.unplayable(m); },
     });
     this.engine.setVolume(this.player.volume, false);
     this.handlers = this.makeHandlers();
@@ -315,8 +336,9 @@ export class WebBackend implements Backend {
     } catch (e) {
       this.state = { kind: "offline", reason: String((e as Error)?.message ?? e) };
     }
+    this.connect.sync();
     return wire({
-      config: this.config, library: this.library, queue: this.queue, player: this.player, backend: this.state,
+      config: this.config, library: this.libraryWithTop(), queue: this.queue, player: this.player, backend: this.state,
       account: this.account.uiAccount(), version: VERSION, platform: "web", first_run: false, output_devices: [], update: null,
     } satisfies Snapshot);
   }
@@ -333,7 +355,8 @@ export class WebBackend implements Backend {
     return () => this.subs.get(ev)?.delete(cb);
   }
 
-  async cover(t: Track): Promise<string | null> {
+  async cover(t: Track, signal?: AbortSignal): Promise<string | null> {
+    if (signal?.aborted) return null;
     if (t.cover_url && !isYoutubeCover(t.cover_url)) return t.cover_url;
     if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil || !t.title?.trim() || !t.artist?.trim()) {
       return t.cover_url ?? null;
@@ -347,16 +370,20 @@ export class WebBackend implements Backend {
       return hit.url;
     }
     const pending = this.coverInflight.get(key);
-    if (pending) return pending;
+    if (pending) {
+      pending.signals.push(signal);
+      return pending.promise;
+    }
 
-    const job = new Promise<string | null>((resolve) => {
-      this.coverQueue.push({ t, key, resolve });
+    const signals: (AbortSignal | undefined)[] = [signal];
+    const promise = new Promise<string | null>((resolve) => {
+      this.coverQueue.push({ t, key, signals, resolve });
       this.drainCoverQueue();
     }).finally(() => {
       this.coverInflight.delete(key);
     });
-    this.coverInflight.set(key, job);
-    return job;
+    this.coverInflight.set(key, { promise, signals });
+    return promise;
   }
 
   trimCovers(keep = 48) {
@@ -380,41 +407,145 @@ export class WebBackend implements Backend {
   }
 
   private drainCoverQueue() {
-    while (this.coverActive < 4 && this.coverQueue.length > 0) {
+    while (this.coverActive < 2 && this.coverQueue.length > 0) {
       const item = this.coverQueue.shift()!;
+      if (item.signals.length > 0 && item.signals.every((s) => s?.aborted)) {
+        item.resolve(null);
+        continue;
+      }
       if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil) {
         item.resolve(item.t.cover_url ?? null);
         continue;
       }
+      const gap = Math.max(0, 180 - (Date.now() - this.lastCoverReqAt));
       this.coverActive++;
-      server.cover(item.t)
-        .then((res) => {
-          const url = res?.url ?? item.t.cover_url ?? null;
-          if (this.coverCache.size >= 250) {
-            const oldest = this.coverCache.keys().next().value;
-            if (oldest !== undefined) this.coverCache.delete(oldest);
-          }
-          this.coverCache.set(item.key, {
-            url,
-            expiresAt: Date.now() + (url ? 30 * 60_000 : 2 * 60_000),
-          });
-          item.resolve(url);
-        })
-        .catch((e) => {
-          if (isRateLimit(e)) {
-            this.noteRateLimit(e);
-            while (this.coverQueue.length > 0) {
-              const queued = this.coverQueue.shift()!;
-              queued.resolve(queued.t.cover_url ?? null);
-            }
-          }
-          item.resolve(item.t.cover_url ?? null);
-        })
-        .finally(() => {
+      const run = () => {
+        if (item.signals.length > 0 && item.signals.every((s) => s?.aborted)) {
           this.coverActive--;
+          item.resolve(null);
           this.drainCoverQueue();
-        });
+          return;
+        }
+        this.lastCoverReqAt = Date.now();
+        server.cover(item.t)
+          .then((res) => {
+            const url = res?.url ?? item.t.cover_url ?? null;
+            const album = res?.album?.trim() || null;
+            if (album || (res?.url && !isYoutubeCover(res.url))) {
+              this.backfillTrackMeta(item.t, album, res?.url ?? null);
+            }
+            if (this.coverCache.size >= 250) {
+              const oldest = this.coverCache.keys().next().value;
+              if (oldest !== undefined) this.coverCache.delete(oldest);
+            }
+            this.coverCache.set(item.key, {
+              url,
+              expiresAt: Date.now() + (url ? 30 * 60_000 : 2 * 60_000),
+            });
+            item.resolve(url);
+          })
+          .catch((e) => {
+            if (isRateLimit(e)) {
+              this.noteRateLimit(e);
+              while (this.coverQueue.length > 0) {
+                const queued = this.coverQueue.shift()!;
+                queued.resolve(queued.t.cover_url ?? null);
+              }
+            }
+            item.resolve(item.t.cover_url ?? null);
+          })
+          .finally(() => {
+            this.coverActive--;
+            this.drainCoverQueue();
+          });
+      };
+      if (gap > 0) setTimeout(run, gap);
+      else run();
     }
+  }
+
+  private backfillTrackMeta(target: Track, album?: string | null, coverUrl?: string | null): boolean {
+    const k = trackKey(target);
+    const cleanAl = album?.trim() || null;
+    const cleanCv = coverUrl?.trim() && !isYoutubeCover(coverUrl.trim()) ? coverUrl.trim() : null;
+    if (!cleanAl && !cleanCv) return false;
+    const patch = (tr: Track) => {
+      if (trackKey(tr) !== k) return false;
+      let hit = false;
+      if (cleanAl && !tr.album?.trim()) { tr.album = cleanAl; hit = true; }
+      if (cleanCv && (!tr.cover_url?.trim() || isYoutubeCover(tr.cover_url))) { tr.cover_url = cleanCv; hit = true; }
+      return hit;
+    };
+    let changed = false;
+    for (const tr of this.library.liked) changed = patch(tr) || changed;
+    for (const pl of this.library.playlists) {
+      for (const tr of pl.tracks) changed = patch(tr) || changed;
+    }
+    for (const r of this.library.recent) {
+      if (r.kind === "song") changed = patch(r.track) || changed;
+    }
+    if (changed) this.saveLibrary();
+    return changed;
+  }
+
+  private computeHomeTop(): HomeTop {
+    const sum = this.stats.summary("all");
+    const songMs = new Map<string, { track: Track; ms: number; plays: number }>();
+    for (const ts of sum.top_tracks) songMs.set(trackKey(ts.track), { track: ts.track, ms: ts.ms, plays: ts.plays });
+    const listUses = new Map<string, number>();
+    this.library.recent_lists.forEach((l, idx) => {
+      const id = l.kind === "liked" ? "liked" : l.kind === "playlist" ? `pl:${l.id}` : l.kind === "album" ? `al:${norm(l.title)}|${norm(l.artist)}` : "";
+      if (id) listUses.set(id, (this.library.recent_lists.length - idx) * 20_000);
+    });
+    const playlists = this.library.playlists
+      .filter((p) => !p.shared_by)
+      .map((p) => {
+        let ms = 0;
+        for (const tr of p.tracks) ms += songMs.get(trackKey(tr))?.ms ?? 0;
+        const score = ms + (listUses.get(`pl:${p.id}`) ?? 0);
+        return { kind: "list" as const, list: { kind: "playlist" as const, id: p.id }, score, ms };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+
+    const albumMap = new Map<string, { title: string; artist: string; cover: Track | null; ms: number; score: number }>();
+    for (const al of this.library.saved_albums) {
+      if (al.kind !== "album") continue;
+      const k = `${norm(al.title)}|${norm(al.artist)}`;
+      albumMap.set(k, { title: al.title, artist: al.artist, cover: al.cover ?? al.tracks[0] ?? null, ms: 0, score: 30_000 + (listUses.get(`al:${k}`) ?? 0) });
+    }
+    for (const ts of sum.top_tracks) {
+      const al = ts.track.album?.trim();
+      const ar = primaryArtist(ts.track.artist);
+      if (!al || !ar) continue;
+      const k = `${norm(al)}|${norm(ar)}`;
+      const cur = albumMap.get(k) ?? { title: al, artist: ar, cover: ts.track, ms: 0, score: listUses.get(`al:${k}`) ?? 0 };
+      if (!cur.cover) cur.cover = ts.track;
+      cur.ms += ts.ms;
+      cur.score += ts.ms;
+      albumMap.set(k, cur);
+    }
+    const albums = [...albumMap.values()]
+      .filter((a) => a.score > 0 || a.ms > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6)
+      .map((a) => ({ kind: "list" as const, list: { kind: "album" as const, title: a.title, artist: a.artist, tracks: [], cover: a.cover }, score: a.score, ms: a.ms }));
+
+    const artists = sum.top_artists.slice(0, 8).map((a) => {
+      const pic = a.track ?? this.library.recent_artists?.find((x) => norm(x.name) === norm(a.name))?.track ?? this.library.liked.find((t) => norm(primaryArtist(t.artist)) === norm(a.name)) ?? null;
+      return { kind: "artist" as const, name: a.name, track: pic, score: a.ms + a.plays * 30_000, ms: a.ms };
+    });
+    const songs = sum.top_tracks.slice(0, 8).map((x) => ({
+      kind: "song" as const,
+      track: x.track,
+      score: x.ms + x.plays * 30_000,
+      ms: x.ms,
+    }));
+    return { playlists, albums, artists, songs };
+  }
+
+  private libraryWithTop(): Library {
+    return { ...this.library, home_top: this.computeHomeTop() };
   }
 
   private emit<K extends keyof BackendEvents>(ev: K, p: BackendEvents[K]) {
@@ -425,7 +556,7 @@ export class WebBackend implements Backend {
   }
   private saveLibrary() {
     saveSoon("library", () => this.library);
-    this.emit("library", this.library);
+    this.emit("library", this.libraryWithTop());
     this.account.scheduleSync();
   }
 
@@ -866,11 +997,49 @@ export class WebBackend implements Backend {
     this.advance(false);
   }
 
-  private playList(tracks: Track[], index: number, context: string | null) {
+  private playList(tracks: Track[], index: number, context: string | null, startSec = 0, play = true) {
     if (!tracks[index]) return;
     this.queue = { items: [...tracks], index, user: 0, context };
     this.saveQueue();
-    void this.start(tracks[index], true);
+    void this.start(tracks[index], play, startSec);
+  }
+
+  private async applyRemoteCommand(cmd: PlaybackCommandWire) {
+    switch (cmd.action) {
+      case "transfer":
+        this.playList(cmd.tracks, cmd.index ?? 0, null, (cmd.position_ms ?? 0) / 1000, cmd.playing);
+        break;
+      case "play":
+        this.playAction();
+        break;
+      case "pause":
+        this.pauseAction();
+        break;
+      case "stop":
+        this.gen++;
+        this.loaded = false;
+        this.engine.stop();
+        this.player.current = null;
+        this.player.position = 0;
+        this.player.duration = null;
+        this.player.status = "idle";
+        this.saveSessionNow();
+        this.emit("player", { ...this.player });
+        this.syncMediaPlaybackState();
+        break;
+      case "next":
+        this.advance(false);
+        break;
+      case "previous":
+        await this.handlers.previous({});
+        break;
+      case "seek":
+        await this.handlers.seek({ position: (cmd.position_ms ?? 0) / 1000 });
+        break;
+      case "volume":
+        await this.handlers.set_volume({ volume: cmd.volume });
+        break;
+    }
   }
 
   private playAction() {
@@ -909,7 +1078,9 @@ export class WebBackend implements Backend {
 
   private addRecent(t: Track) {
     const k = trackKey(t);
-    this.library.recent = [{ kind: "song", track: t, at: Date.now() } as RecentItem, ...this.library.recent.filter((r) => !(r.kind === "song" && trackKey(r.track) === k))].slice(0, 100);
+    const from = this.playingFrom && this.playingFrom.kind !== "recent" ? this.playingFrom : undefined;
+    const item: RecentItem = from ? { kind: "song", track: t, at: Date.now(), from } : { kind: "song", track: t, at: Date.now() };
+    this.library.recent = [item, ...this.library.recent.filter((r) => !(r.kind === "song" && trackKey(r.track) === k))].slice(0, 100);
     this.saveLibrary();
   }
 
@@ -1125,12 +1296,35 @@ export class WebBackend implements Backend {
     const enc = encodeURIComponent;
     return {
       // ---- player ----
-      play: (a) => this.playList(a.tracks, a.index ?? 0, a.context ?? null),
-      play_recent: () => { const songs = lib().recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])); if (songs.length) this.playList(songs, 0, null); },
-      play_shuffled: (a) => { p().shuffle = true; this.emit("player", { shuffle: true }); this.playList(shuffled(a.tracks), 0, a.context ?? null); },
-      toggle_play: () => this.togglePlay(),
-      next: () => this.advance(false),
+      play: (a) => {
+        if ("from" in a && a.from !== undefined) this.playingFrom = a.from?.list ?? null;
+        if (!this.connect.transferTracks(a.tracks, a.index ?? 0)) this.playList(a.tracks, a.index ?? 0, a.context ?? null);
+      },
+      play_recent: () => {
+        this.playingFrom = null;
+        const songs = lib().recent.flatMap((r) => (r.kind === "song" ? [r.track] : []));
+        if (songs.length && !this.connect.transferTracks(songs, 0)) this.playList(songs, 0, null);
+      },
+      play_shuffled: (a) => {
+        if ("from" in a && a.from !== undefined) this.playingFrom = a.from?.list ?? null;
+        const list = shuffled(a.tracks as Track[]);
+        if (this.connect.transferTracks(list, 0)) return;
+        p().shuffle = true; this.emit("player", { shuffle: true }); this.playList(list, 0, a.context ?? null);
+      },
+      set_playing_from: (a) => {
+        this.playingFrom = (a.list as ListKey | null) ?? null;
+      },
+      toggle_play: () => {
+        if (this.connect.isControlling()) {
+          const rp = this.connect.remotePlayerDto();
+          this.connect.sendCommand({ action: rp?.status === "playing" ? "pause" : "play" });
+          return;
+        }
+        this.togglePlay();
+      },
+      next: () => { if (!this.connect.sendCommand({ action: "next" })) this.advance(false); },
       previous: () => {
+        if (this.connect.sendCommand({ action: "previous" })) return;
         if (p().position > 3 || q().index === 0) {
           this.engine.seek(0);
           p().position = 0;
@@ -1141,6 +1335,7 @@ export class WebBackend implements Backend {
         } else this.advance(true);
       },
       seek: (a) => {
+        if (this.connect.sendCommand({ action: "seek", position_ms: Math.max(0, Math.round((a.position ?? 0) * 1000)) })) return;
         const dur = p().duration ?? (p().current?.duration_ms ? p().current!.duration_ms! / 1000 : null);
         const pos = dur != null ? Math.max(0, Math.min(a.position, dur)) : Math.max(0, a.position);
         p().position = pos;
@@ -1150,8 +1345,18 @@ export class WebBackend implements Backend {
         this.emit("player", { position: pos });
         this.syncMediaPositionState(true);
       },
-      set_volume: (a) => { p().volume = a.volume; p().muted = false; this.engine.setVolume(a.volume, false); this.config.player.volume = a.volume; save("config", this.config); this.emit("player", { volume: a.volume, muted: false }); },
-      toggle_mute: () => { p().muted = !p().muted; this.engine.setVolume(p().volume, p().muted); this.emit("player", { muted: p().muted }); },
+      set_volume: (a) => {
+        if (this.connect.sendCommand({ action: "volume", volume: a.volume })) return;
+        p().volume = a.volume; p().muted = false; this.engine.setVolume(a.volume, false); this.config.player.volume = a.volume; save("config", this.config); this.emit("player", { volume: a.volume, muted: false });
+      },
+      toggle_mute: () => {
+        if (this.connect.isControlling()) {
+          const curVol = this.connect.remoteVolume() ?? 0.8;
+          this.connect.sendCommand({ action: "volume", volume: curVol > 0.001 ? 0 : (this.config.player.volume || 0.8) });
+          return;
+        }
+        p().muted = !p().muted; this.engine.setVolume(p().volume, p().muted); this.emit("player", { muted: p().muted });
+      },
       set_shuffle: (a) => { p().shuffle = !!a.on; this.config.player.shuffle = !!a.on; save("config", this.config); this.emit("player", { shuffle: !!a.on }); this.scheduleQueuePreload(); },
       set_repeat: (a) => { p().repeat = a.mode; this.config.player.repeat = a.mode; save("config", this.config); this.emit("player", { repeat: a.mode }); this.scheduleQueuePreload(); },
       set_loop: (a) => { p().loop_a = a.a; p().loop_b = a.b; this.emit("player", { loop_a: a.a, loop_b: a.b }); },
@@ -1339,6 +1544,21 @@ export class WebBackend implements Backend {
       open_url: (a) => { window.open(String(a.url), "_blank", "noopener,noreferrer"); },
       import_text: () => this.toast("web.app_only", "info"),
       cover_path: (a) => a.track?.cover_url ?? null,
+      track_album: async (a) => {
+        const tr = a.track as Track | undefined;
+        if (!tr || tr.album?.trim() || !this.coversAvailable || Date.now() < this.preloadCooldownUntil || !tr.title?.trim() || !tr.artist?.trim()) return null;
+        try {
+          const res = await server.cover(tr);
+          const album = res?.album?.trim() || null;
+          if (album || (res?.url && !isYoutubeCover(res.url))) {
+            this.backfillTrackMeta(tr, album, res?.url ?? null);
+          }
+          return album;
+        } catch (e) {
+          if (isRateLimit(e)) this.noteRateLimit(e);
+          return null;
+        }
+      },
       prefetch_hover: (a) => this.prefetchTrack(a.track as Track | undefined),
       onboarding_seen: () => save("onboarding_seen", true),
       diagnostics: () => `Glyph ${VERSION} (web) · ${navigator.userAgent}`,
@@ -1347,6 +1567,12 @@ export class WebBackend implements Backend {
       stats_recap: (a) => (this.config.stats.enabled ? this.stats.recap(String(a.year ?? new Date().getFullYear())) : null),
       ...this.account.handlers(),
       ...this.mcp.handlers(),
+      // ---- connect / remote playback ----
+      devices_rescan: () => this.connect.rescan(),
+      account_devices_open: (a) => this.connect.setPanelOpen(Boolean(a.open)),
+      device_connect: (a) => this.connect.connect(String(a.id ?? "")),
+      device_use_local: () => this.connect.useLocal(),
+      device_select: () => this.connect.devicesJson(),
       // ---- not in a browser: answers that keep the UI calm ----
       download: (a) => {
         for (const t of (a.tracks ?? []) as Track[]) this.emit("download", { key: trackKey(t), progress: null, done: true });

@@ -215,6 +215,7 @@
   .es { padding: 8px 14px; }
   .sec { flex: none; padding: 12px 4px 6px; display: flex; align-items: center; font-size: 11.5px; font-weight: 600; color: rgba(255, 255, 255, .45); text-transform: uppercase; letter-spacing: .02em; }
   .grp { padding: 4px; display: flex; flex-direction: column; }
+  .qitem { content-visibility: auto; contain-intrinsic-size: auto 44px; }
   .qitem.sep { border-top: 1px solid rgba(255, 255, 255, .06); }
   .gap { flex: none; }
   .foot { flex: none; padding: 12px 16px 14px; border-top: 1px solid rgba(255, 255, 255, .06); }

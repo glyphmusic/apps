@@ -76,5 +76,18 @@ export async function setWindowSize(w: number, h: number) {
   const { LogicalSize } = await import("@tauri-apps/api/dpi");
   await cw.setSize(new LogicalSize(Math.round(w), Math.round(h)));
 }
+/** Mini player window: switch between slim bar and resizable card without fighting live corner drags. */
+export async function syncMiniWindowMode(big: boolean, w: number, h: number) {
+  if (isWeb()) {
+    await setWindowSize(w, h);
+    return;
+  }
+  const cw = await win();
+  if (!cw) return;
+  const { LogicalSize } = await import("@tauri-apps/api/dpi");
+  await cw.setMinSize(new LogicalSize(240, big ? 220 : 52));
+  await cw.setResizable(big);
+  await cw.setSize(new LogicalSize(Math.round(w), Math.round(h)));
+}
 /** Mini player window: resize from the bottom right corner. */
 export const startResize = async () => (await win())?.startResizeDragging("SouthEast");

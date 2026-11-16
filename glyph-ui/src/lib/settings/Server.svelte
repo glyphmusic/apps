@@ -41,11 +41,16 @@
     loadInfo();
     if (sub === 2) { loadReport(); const id = setInterval(loadReport, 3000); return () => clearInterval(id); }
   });
+  $effect(() => {
+    void app.backendState;
+    loadInfo();
+  });
 
   const modeText = $derived.by(() => {
     const s = info ?? ({ kind: "offline", auth_required: false } as ServerInfo);
     if (app.backendState.kind === "connecting") return "";
     if (s.kind === "server") {
+      if (s.version === "offline") return t("status.backend_offline");
       const u = (s.url ?? "").replace(/\/+$/, "");
       const name = u === DEFAULT_URL ? t("settings.server.public") : u.split("://")[1] ?? u;
       return tf("settings.server.connected", { name, v: s.version ?? "" });

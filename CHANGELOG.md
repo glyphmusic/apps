@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.12.4 - 2026-11-16
+
+### Added
+
+- **Web Connect (`/web`)**: added browser remote playback support (`web-connect.ts`) over `/v1/devices/playback/*` so web listeners can view their online desktop/mobile devices and control or transfer playback from the Connect panel.
+- **Home Quick Picks & Metadata Backfill**: tracks playback source list (`RecentItem::Song.from`), scores ranked quick-pick cards for Home (`home_top`, `ListCard.svelte`), and adds `track_album` / `backfill_track_meta` to populate missing album names and upgrade YouTube thumbnails to album art across library entries.
+
+### Fixed
+
+- **Reconnect & Server URL Migration**: added automatic exponential-backoff reconnection when returning online or recovering from server outages (`controller.rs`), and migrated legacy `server.glyphmusic.workers.dev` URLs to `https://api.glyph.my` (`config.rs`, docs).
+- **Desktop & UI**: refined Tauri window capabilities/desktop state handling, player/queue/artist/album/profile views, cover fallback consistency, keyboard shortcuts, and English/German localization strings.
+
 ## 0.12.3 - 2026-11-16
 
 ### Fixed

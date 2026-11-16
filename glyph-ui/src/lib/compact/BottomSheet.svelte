@@ -161,12 +161,10 @@
             </div>
             {#if !editing}
               {#if app.queue.context}<span class="sub trunc">{t("np.playing_from")} „{app.queue.context}“</span>{/if}
-              {#if !onWeb()}
-                <button class="dev-line" onclick={() => { app.showQueue = false; app.showDevices = true; }}>
-                  <Icon name={remote ? (DEV_ICON[remote.kind] ?? "cast") : "headphones"} size={13} color="var(--accent)" />
-                  <span class="trunc">{devName}</span>
-                </button>
-              {/if}
+              <button class="dev-line" onclick={() => { app.showQueue = false; app.showDevices = true; }}>
+                <Icon name={remote ? (DEV_ICON[remote.kind] ?? "cast") : (onWeb() ? "globe" : "headphones")} size={13} color="var(--accent)" />
+                <span class="trunc">{devName}</span>
+              </button>
             {/if}
           </div>
           {#if editing}

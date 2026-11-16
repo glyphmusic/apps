@@ -111,7 +111,7 @@ pub fn start(plugin: &Installed, calls: flume::Sender<HostCall>, server_url: &st
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     let active = Arc::new(AtomicBool::new(true));
     let thread_active = active.clone();
-    let blocked_hosts = [crate::config::DEFAULT_SERVER_URL, "https://glyph-server.glyphmusic.workers.dev", server_url]
+    let blocked_hosts = [crate::config::DEFAULT_SERVER_URL, "https://server.glyphmusic.workers.dev", "https://glyph-server.glyphmusic.workers.dev", server_url]
         .iter().filter_map(|s| reqwest::Url::parse(s).ok()?.host_str().map(str::to_string)).collect::<Vec<_>>();
     let path = plugin.code_path().ok_or_else(|| anyhow!("{} has no code", plugin.manifest.id))?;
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;

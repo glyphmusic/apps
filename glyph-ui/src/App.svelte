@@ -5,7 +5,8 @@
   // over the page (the UI behind fades out). Menus, dialogs, toasts and
   // tooltips float on top.
   import { onMount, tick } from "svelte";
-  import { slide } from "svelte/transition";
+  import { fly, slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { app } from "./lib/state.svelte";
   import { applyTheme } from "./lib/theme";
   import { fx, setUiSuspended, startRevealClock, suspendBackground } from "./lib/ui.svelte";
@@ -235,18 +236,29 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = side === "left" ? leftW : rightW;
+    let latestX = startX;
+    let rafId = 0;
     resizing = side;
     document.documentElement.style.cursor = "col-resize";
-    const move = (ev: PointerEvent) => {
+    const applyWidth = () => {
+      rafId = 0;
       if (side === "left") {
         const max = Math.max(64, Math.min(280, winW - (rightOpen ? rightW : 0) - 340));
-        app.setLeftSidebarW(Math.min(max, startW + (ev.clientX - startX)));
+        app.setLeftSidebarW(Math.min(max, startW + (latestX - startX)));
       } else {
         const max = Math.max(260, Math.min(580, winW - leftW - 340));
-        app.setRightSidebarW(Math.min(max, startW + (startX - ev.clientX)));
+        app.setRightSidebarW(Math.min(max, startW + (startX - latestX)));
       }
     };
+    const move = (ev: PointerEvent) => {
+      latestX = ev.clientX;
+      if (!rafId) rafId = requestAnimationFrame(applyWidth);
+    };
     const end = () => {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        applyWidth();
+      }
       removeEventListener("pointermove", move);
       removeEventListener("pointerup", end);
       removeEventListener("pointercancel", end);
@@ -285,7 +297,7 @@
   {#if app.compact}
     <Compact />
   {:else}
-    <div class="root" class:dim={app.settingsOpen || app.onboarding}>
+    <div class="root" class:dim={app.settingsOpen || app.onboarding} class:resizing={resizing !== null}>
       {#if zen}<div class="tb-space"></div>{:else}<Titlebar bind:search />{/if}
       <div class="body" class:with-bar={showBar}>
         {#if !zen}
@@ -299,7 +311,7 @@
         {#if rightOpen}
           <div class="sash" class:on={resizing === "right"} role="separator" aria-orientation="vertical" aria-label="Resize right sidebar"
             onpointerdown={(e) => startResize(e, "right")} ondblclick={() => app.setRightSidebarW(320, true)}></div>
-          <aside class="right" style:width="{rightW}px" transition:slide={{ axis: "x", duration: 250 }}><RightPanel /></aside>
+          <aside class="right" style:width="{rightW}px" in:fly={{ x: 24, duration: 160, opacity: 0, easing: cubicOut }}><RightPanel /></aside>
         {/if}
       </div>
       {#if showBar}
@@ -315,6 +327,7 @@
 
 <style>
   .root { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; transition: opacity .2s ease-out, filter .18s ease-out; }
+  .root.resizing .main, .root.resizing .right, .root.resizing :global(nav.sb) { pointer-events: none; }
   /* Blur the background UI directly so WebView2 never drops backdrop-filter after transitions settle. */
   .root.dim { pointer-events: none; filter: blur(14px) saturate(1.1); }
   .mini-err { margin: 0; padding: 10px 12px; border-radius: 12px; background: #141414; color: var(--text); font-size: 11px; }

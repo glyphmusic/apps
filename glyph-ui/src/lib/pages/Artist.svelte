@@ -101,9 +101,9 @@
 
   const meta = $derived.by(() => {
     const parts: string[] = [];
-    if (has) parts.push(`${String(tracks.length).padStart(2, "0")} ${t("list.songs_caps")}`);
+    if (has) parts.push(tf("common.n_songs", { n: tracks.length }));
     if (fans) parts.push(tf("artist.fans", { n: compactCount(fans) }));
-    return parts.length ? `[ ${parts.join(" · ")} ]` : "";
+    return parts.join(" · ");
   });
   // One of this artist's songs is on: the button pauses / resumes it.
   const here = $derived(!!app.player.current && (app.player.current.artist.toLowerCase() === name.toLowerCase() || playingFrom(tracks)));
@@ -171,13 +171,13 @@
     {#if compact}<div class="scrim"></div>{/if}
     <div class="back"><BackPill /></div>
     <div class="hinfo" class:mob={compact} style:right={compact ? undefined : `${showAbout ? 400 : 32}px`}>
-      {#if !compact}<span class="badge mono"><Decode text="[{t('artist.badge')}]" key="artist:badge:{name}" dur={0.4} /></span>{/if}
+      {#if !compact}<span class="badge">{t("artist.badge")}</span>{/if}
       <div class="nrow">
         <h1 class="name" class:trunc={!compact}><Decode text={name} key="artist:name:{name}" dur={0.7} /></h1>
         {#if verified}<VerifiedBadge size={compact ? 20 : 24} />{/if}
       </div>
       {#if !compact}
-        {#if meta}<span class="hmeta mono">{meta}</span>{/if}
+        {#if meta}<span class="hmeta">{meta}</span>{/if}
         <div class="hacts">
           {#if has}
             <span class="pl"><RoundPlay size={48} playing={here && app.playing} loading={here && app.loading} onclick={play} /></span>
@@ -310,11 +310,11 @@
   .back { position: absolute; top: 20px; left: 32px; }
   .hinfo { position: absolute; left: 32px; bottom: 40px; display: flex; flex-direction: column; min-width: 0; }
   .hinfo.mob { left: var(--page-x, 16px); right: var(--page-x, 16px); bottom: 16px; }
-  .badge { font-size: 11px; line-height: 14px; color: rgba(255, 255, 255, .55); }
+  .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .nrow { padding-top: 2px; display: flex; align-items: center; gap: 12px; min-width: 0; }
   .name { margin: 0; font-size: 46px; line-height: 52px; font-weight: 700; color: #fff; }
   .hinfo.mob .name { font-size: clamp(28px, 8.5vw, 38px); line-height: 1.08; display: -webkit-box; line-clamp: 2; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .hmeta { padding-top: 6px; font-size: 11.5px; color: rgba(255, 255, 255, .6); }
+  .hmeta { padding-top: 6px; font-size: 13px; color: rgba(255, 255, 255, .65); }
   .hacts { padding-top: 18px; display: flex; align-items: center; gap: 10px; }
   .mob-bar { display: flex; flex-direction: column; gap: 12px; }
   .mob-meta { font-size: 13px; color: var(--dim); font-weight: 500; }

@@ -272,6 +272,11 @@ pub async fn cover_path(core: C<'_>, track: Track) -> Res<Option<String>> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn track_album(core: C<'_>, track: Track) -> Res<Option<String>> {
+    commands::track_album(&core, track).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn set_config(core: C<'_>, config: Value) -> Res {
     commands::set_config(&core, config).await
 }

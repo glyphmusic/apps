@@ -303,6 +303,11 @@ export class WebAccountManager {
     return next;
   }
 
+  /** Runs `fn` with a valid access token, refreshing once on 401. */
+  withToken<T>(fn: (token: string) => Promise<T>): Promise<T> {
+    return this.runAuthed(fn);
+  }
+
   private isUnauthorized(e: unknown): boolean {
     return e instanceof ApiError && (e.status === 401 || e.code === "unauthorized");
   }

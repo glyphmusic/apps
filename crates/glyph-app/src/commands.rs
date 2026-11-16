@@ -1311,7 +1311,34 @@ pub async fn lyrics(core: C<'_>, track: Track) -> Res<Option<Value>> {
 
 pub async fn cover_path(core: C<'_>, track: Track) -> Res<Option<String>> {
     let b = core.backend_or_err()?;
-    Ok(b.cover(&track).await.map_err(err)?.map(|p| p.to_string_lossy().into_owned()))
+    let Some(res) = b.cover_with_meta(&track).await.map_err(err)? else {
+        return Ok(None);
+    };
+    if res.album.is_some() || res.cover_url.is_some() {
+        let changed = {
+            let mut st = core.st();
+            st.library.backfill_track_meta(&track, res.album.as_deref(), res.cover_url.as_deref())
+        };
+        if changed {
+            core.library_changed();
+        }
+    }
+    Ok(Some(res.path.to_string_lossy().into_owned()))
+}
+
+pub async fn track_album(core: C<'_>, track: Track) -> Res<Option<String>> {
+    let b = core.backend_or_err()?;
+    let Some((cover_url, album)) = b.resolve_track_meta(&track).await.map_err(err)? else {
+        return Ok(None);
+    };
+    let changed = {
+        let mut st = core.st();
+        st.library.backfill_track_meta(&track, album.as_deref(), cover_url.as_deref())
+    };
+    if changed {
+        core.library_changed();
+    }
+    Ok(album)
 }
 
 // ---- settings, system ----

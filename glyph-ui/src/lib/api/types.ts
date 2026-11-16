@@ -129,9 +129,19 @@ export interface Playlist {
 }
 
 export type RecentItem =
-  | { kind: "song"; track: Track; at?: number }
+  | { kind: "song"; track: Track; at?: number; from?: ListKey }
   | { kind: "artist"; name: string; track?: Track | null; at?: number }
   | { kind: "list"; list: ListKey; at?: number };
+
+export interface HomeTopList { kind: "list"; list: ListKey; score: number; ms: number }
+export interface HomeTopSong { kind: "song"; track: Track; score: number; ms: number }
+export interface HomeTopArtist { kind: "artist"; name: string; track?: Track | null; score: number; ms: number }
+export interface HomeTop {
+  playlists: HomeTopList[];
+  albums: HomeTopList[];
+  artists: HomeTopArtist[];
+  songs: HomeTopSong[];
+}
 
 export type SearchItem =
   | { kind: "song"; track: Track }
@@ -161,6 +171,8 @@ export interface Library {
   recent_artists?: { name: string; track?: Track | null }[];
   /** How much each sidebar entry is used (list / artist id -> weight). */
   sidebar_weights?: Record<string, number>;
+  /** Ranked candidates for Home's top cards (most listening time & activity). */
+  home_top?: HomeTop;
 }
 
 export type RepeatMode = "off" | "all" | "one";

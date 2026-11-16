@@ -165,3 +165,69 @@ fn disabled_deezer_drops_deezer_only_tracks_and_promotes_youtube_matches() {
         &enabled,
     ).is_none());
 }
+
+#[tokio::test]
+async fn refresh_server_recovers_from_offline_after_server_update() {
+    use std::io::{Read, Write};
+    let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
+    std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+
+    let fixture = std::thread::spawn(move || {
+        // Initial Backend::new retries /v1/health 3 times while the server restarts,
+        // then subsequent refresh_server() probes succeed with the updated version.
+        let replies = [
+            (503, serde_json::json!({"code":"unavailable","message":"restarting"}).to_string()),
+            (503, serde_json::json!({"code":"unavailable","message":"restarting"}).to_string()),
+            (503, serde_json::json!({"code":"unavailable","message":"restarting"}).to_string()),
+            (200, serde_json::json!({"server_version":"0.2.0","protocol_version":1,"providers":["audius","youtube"]}).to_string()),
+            (200, serde_json::json!({"server_version":"0.2.0","protocol_version":1,"providers":["audius","youtube"]}).to_string()),
+        ];
+        for (status, body) in replies {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("missing server request: {e}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).unwrap();
+                if n == 0 { break; }
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|v| v == b"\r\n\r\n") { break; }
+            }
+            write!(
+                socket,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).unwrap();
+        }
+    });
+
+    let mut config = Config::default();
+    config.server_url = base;
+    let backend = Backend::new(config).await.unwrap();
+    assert!(matches!(backend.mode(), BackendMode::Server { ref server_version, .. } if server_version == "offline"));
+    assert!(backend.active_providers().is_empty());
+
+    assert!(backend.refresh_server().await.unwrap());
+    assert!(matches!(backend.mode(), BackendMode::Server { ref server_version, .. } if server_version == "0.2.0"));
+    assert!(backend.active_providers().contains(&ProviderId::YouTube));
+
+    fixture.join().unwrap();
+    std::env::remove_var("GLYPH_DATA_DIR");
+    std::env::remove_var("GLYPH_CACHE_DIR");
+}

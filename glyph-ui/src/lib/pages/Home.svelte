@@ -11,13 +11,60 @@
   import HScroll from "./home/HScroll.svelte";
   import SongCard from "./home/SongCard.svelte";
   import ArtistCard from "./home/ArtistCard.svelte";
+  import ListCard from "./home/ListCard.svelte";
   import ReleaseCard from "./home/ReleaseCard.svelte";
   import CardSkeleton from "./home/CardSkeleton.svelte";
   import { app } from "../state.svelte";
   import { t } from "../i18n.svelte";
-  import { trackKey } from "../api/types";
+  import { listId, trackKey, type ListKey, type Track } from "../api/types";
 
-  const recent = $derived(app.library.recent.slice(0, 12));
+  type HomeRecentEntry =
+    | { kind: "song"; track: Track; key: string }
+    | { kind: "artist"; name: string; track: Track | null; key: string }
+    | { kind: "list"; list: ListKey; key: string };
+
+  function validList(l: ListKey): boolean {
+    if (l.kind === "recent") return false;
+    if (l.kind === "playlist") return !!app.playlist(l.id);
+    return true;
+  }
+
+  // Collapse songs played from a list/playlist into that list's card while
+  // keeping standalone songs (search, home, radio) and artist entries visible.
+  const recent = $derived.by<HomeRecentEntry[]>(() => {
+    const out: HomeRecentEntry[] = [];
+    const seenLists = new Set<string>();
+    const seenArtists = new Set<string>();
+    const seenSongs = new Set<string>();
+    for (const r of app.library.recent) {
+      if (r.kind === "list") {
+        if (!validList(r.list)) continue;
+        const id = listId(r.list);
+        if (seenLists.has(id)) continue;
+        seenLists.add(id);
+        out.push({ kind: "list", list: r.list, key: `l:${id}` });
+      } else if (r.kind === "artist") {
+        const ak = r.name.trim().toLowerCase();
+        if (!ak || seenArtists.has(ak)) continue;
+        seenArtists.add(ak);
+        out.push({ kind: "artist", name: r.name, track: r.track ?? null, key: `a:${ak}` });
+      } else if (r.kind === "song") {
+        if (r.from && validList(r.from)) {
+          const id = listId(r.from);
+          if (seenLists.has(id)) continue;
+          seenLists.add(id);
+          out.push({ kind: "list", list: r.from, key: `l:${id}` });
+        } else {
+          const sk = trackKey(r.track);
+          if (seenSongs.has(sk)) continue;
+          seenSongs.add(sk);
+          out.push({ kind: "song", track: r.track, key: `s:${sk}` });
+        }
+      }
+      if (out.length >= 12) break;
+    }
+    return out;
+  });
   /** Recently played songs only (what a click on a song plays from). */
   const recentSongs = $derived(app.library.recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])));
   const recs = $derived(app.home.recs.filter((x) => app.allowed(x)));
@@ -25,11 +72,8 @@
   const releases = $derived(app.home.new_releases);
   const loading = $derived(app.home.loading && !recs.length && !trending.length);
 
-  function playRecent(i: number) {
-    const it = recent[i];
-    if (it?.kind === "artist") return app.openArtistPage(it.name);
-    if (it?.kind !== "song") return;
-    const k = trackKey(it.track);
+  function playRecent(tr: Track) {
+    const k = trackKey(tr);
     app.play(recentSongs, Math.max(0, recentSongs.findIndex((x) => trackKey(x) === k)));
   }
   const showAll = (title: string, icon: string, tracks: typeof recs) => () => app.openSection({ title, icon, tracks });
@@ -45,11 +89,13 @@
       <EmptyState title={t("home.empty.title")} sub={t("home.empty.sub")} />
     {:else}
       <HScroll>
-        {#each recent as it, i (i + (it.kind === "song" ? trackKey(it.track) : it.kind === "artist" ? it.name : "l"))}
+        {#each recent as it, i (it.key)}
           {#if it.kind === "song"}
-            <SongCard track={it.track} onplay={() => playRecent(i)} from={{ list: { kind: "recent" }, index: i }} />
+            <SongCard track={it.track} onplay={() => playRecent(it.track)} from={{ list: { kind: "recent" }, index: i }} />
           {:else if it.kind === "artist"}
-            <ArtistCard name={it.name} track={it.track ?? null} />
+            <ArtistCard name={it.name} track={it.track} />
+          {:else if it.kind === "list"}
+            <ListCard list={it.list} />
           {/if}
         {/each}
       </HScroll>

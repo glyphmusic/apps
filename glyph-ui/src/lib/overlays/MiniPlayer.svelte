@@ -19,6 +19,7 @@
   // shuffle, prev, play 38, next, repeat, share and the seek bar; title 17
   // bold + artist 12.5 + like 18 below; hover bar on top: smaller / grip /
   // close). Cover colour background needs the palette; not available here.
+  import { untrack } from "svelte";
   import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import ToggleButton from "../components/ToggleButton.svelte";
@@ -30,11 +31,12 @@
   import { fmtTime } from "../fmt";
   import { press, tip } from "../ui.svelte";
   import { tipFor } from "../i18n.svelte";
-  import { inMiniWindow, setWindowSize, startDrag, startResize } from "../window";
-  import { isTauri } from "../api/backend";
+  import { inMiniWindow, setWindowSize, startDrag, startResize, syncMiniWindowMode } from "../window";
+  import { isTauri, isWeb } from "../api/backend";
 
   let { pipWindow }: { pipWindow?: Window } = $props();
   const windowed = $derived(inMiniWindow() || !!pipWindow);
+  const showTopbar = $derived(!(windowed && isWeb()));
   // The saved card size (config.player.mini_card_w / _h) is the first size.
   if (!cardLoaded) {
     cardLoaded = true;
@@ -57,28 +59,52 @@
 
   const MINI_W = 300, MINI_H = 52, CARD_PAD = 12, TOP_INSET = 4, TOP_BTN = 24, CARD_TOP = TOP_INSET * 2 + TOP_BTN, INFO_H = 40, INFO_GAP = 10;
   const big = $derived(app.config.player.mini_large);
+  const cardTop = $derived(showTopbar ? CARD_TOP : CARD_PAD);
   const cur = $derived(app.player.current);
   const dur = $derived(app.player.duration);
   const frac = $derived(dur ? app.position / dur : 0);
   const W = $derived(big ? card.w : MINI_W);
   const H = $derived(big ? card.h : MINI_H);
   const liked = $derived(cur ? app.isLiked(cur) : false);
-  let vw = $state(1200);
-  let vh = $state(800);
+  let vw = $state(untrack(() => pipWindow?.innerWidth) || (typeof window !== "undefined" ? window.innerWidth : 300));
+  let vh = $state(untrack(() => pipWindow?.innerHeight) || (typeof window !== "undefined" ? window.innerHeight : 384));
   let volPinned = $state(false), volHover = $state(false);
   let resizing = $state(false);
   const volOpen = $derived(volPinned || volHover);
 
+  function resizePip(target: Window, w: number, h: number) {
+    try {
+      const diffW = target.outerWidth > target.innerWidth ? target.outerWidth - target.innerWidth : 0;
+      const diffH = target.outerHeight > target.innerHeight ? target.outerHeight - target.innerHeight : 0;
+      target.resizeTo(Math.round(w + diffW), Math.round(h + diffH));
+    } catch {}
+  }
+
   $effect(() => {
     const win = pipWindow ?? (typeof window !== "undefined" ? window : null);
     if (!win) return;
+    let raf = 0;
     const syncSize = () => {
-      vw = win.innerWidth || vw;
-      vh = win.innerHeight || vh;
+      raf = 0;
+      const nw = win.innerWidth || vw;
+      const nh = win.innerHeight || vh;
+      vw = nw;
+      vh = nh;
+      // Record user-driven window resizes in card mode without echoing setSize back to the OS.
+      if (windowed && big && nw >= 240 && nh >= 200) {
+        card.w = Math.min(1200, Math.max(240, nw));
+        card.h = Math.min(1200, Math.max(220, nh));
+      }
+    };
+    const onResize = () => {
+      if (!raf) raf = requestAnimationFrame(syncSize);
     };
     syncSize();
-    win.addEventListener("resize", syncSize);
-    return () => win.removeEventListener("resize", syncSize);
+    win.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      win.removeEventListener("resize", onResize);
+    };
   });
 
   // First place: bottom right, 24 px from the edges.
@@ -95,17 +121,20 @@
   // Tauri / Document PiP: the mini player is a window of its own and fills it.
   const left = $derived(windowed ? 0 : Math.min(Math.max(0, pos.x), Math.max(0, vw - W)));
   const top = $derived(windowed ? 0 : Math.min(Math.max(0, pos.y), Math.max(0, vh - H)));
-  // The window follows the look (bar / card); the card follows the window.
+  // Only resize the native/PiP window when switching between bar and card modes.
+  let prevBig: boolean | undefined;
   $effect(() => {
-    if (!windowed) return;
-    const w = big ? card.w : MINI_W, h = big ? card.h : MINI_H;
-    if (pipWindow) {
-      try { pipWindow.resizeTo(Math.round(w), Math.round(h)); } catch {}
-    } else {
-      void setWindowSize(w, h);
-    }
+    const b = big;
+    if (!windowed) { prevBig = b; return; }
+    if (prevBig === b) return;
+    const initial = prevBig === undefined;
+    prevBig = b;
+    if (initial) return;
+    const w = b ? untrack(() => card.w) : MINI_W;
+    const h = b ? untrack(() => card.h) : MINI_H;
+    if (pipWindow) resizePip(pipWindow, w, h);
+    else void syncMiniWindowMode(b, w, h);
   });
-  $effect(() => { if (windowed && big && vw > 0 && vh > 0) { card.w = vw; card.h = vh; } });
 
   /** Drag the window by this element (not by its buttons). */
   function grab(e: PointerEvent) {
@@ -137,11 +166,7 @@
   }
   const setBig = (b: boolean) => {
     app.setConfig((c) => { c.player.mini_large = b; });
-    if (pipWindow) {
-      try {
-        pipWindow.resizeTo(Math.round(b ? card.w : MINI_W), Math.round(b ? card.h : MINI_H));
-      } catch {}
-    }
+    if (pipWindow) resizePip(pipWindow, b ? card.w : MINI_W, b ? card.h : MINI_H);
   };
   const closeMini = () => {
     app.miniShown = false;
@@ -149,7 +174,9 @@
       try { pipWindow.close(); } catch {}
     }
   };
-  const side = $derived(Math.max(60, Math.min(card.w - CARD_PAD * 2, card.h - CARD_TOP - CARD_PAD - INFO_GAP - INFO_H)));
+  const liveW = $derived(windowed ? vw : card.w);
+  const liveH = $derived(windowed ? vh : card.h);
+  const side = $derived(Math.max(60, Math.min(liveW - CARD_PAD * 2, liveH - cardTop - CARD_PAD - INFO_GAP - INFO_H)));
   const wheelVol = $derived(app.config.ui.wheel_volume_pct / 100);
   const wheelSeek = $derived(dur ? app.config.ui.wheel_seek_s / dur : 0);
   const title = $derived(cur?.title ?? t("mini.idle"));
@@ -157,7 +184,7 @@
 
 {#if !big}
   <!-- the slim bar -->
-  <div class="mini bar" class:pip={!!pipWindow} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
+  <div class="mini bar" class:pip={!!pipWindow} class:win={windowed} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
     <div class="grp">
       <div class="art" onpointerdown={grab} role="presentation">
         {#if cur}<Cover track={cur} size={34} radius={6} />{:else}<span class="ph"><Icon name="music-2" size={16} color="var(--faint)" /></span>{/if}
@@ -178,12 +205,14 @@
   </div>
 {:else}
   <!-- the card -->
-  <div class="mini cardw" class:pip={!!pipWindow} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{CARD_TOP}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
-    <div class="topbar" style:height="{CARD_TOP}px" style:padding="{TOP_INSET}px">
-      <button class="tbtn" aria-label={tipFor("minimize-2")} use:tip={tipFor("minimize-2")} onclick={() => setBig(false)}><Icon name="minimize-2" size={14} /></button>
-      <div class="gripbar" onpointerdown={grab} role="presentation"><Icon name="grip-horizontal" size={16} color="var(--dim)" /></div>
-      <button class="tbtn" aria-label={tipFor("x")} use:tip={tipFor("x")} onclick={closeMini}><Icon name="x" size={14} /></button>
-    </div>
+  <div class="mini cardw" class:pip={!!pipWindow} class:win={windowed} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{cardTop}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
+    {#if showTopbar}
+      <div class="topbar" style:height="{CARD_TOP}px" style:padding="{TOP_INSET}px">
+        <button class="tbtn" aria-label={tipFor("minimize-2")} use:tip={tipFor("minimize-2")} onclick={() => setBig(false)}><Icon name="minimize-2" size={14} /></button>
+        <div class="gripbar" onpointerdown={grab} role="presentation"><Icon name="grip-horizontal" size={16} color="var(--dim)" /></div>
+        <button class="tbtn" aria-label={tipFor("x")} use:tip={tipFor("x")} onclick={closeMini}><Icon name="x" size={14} /></button>
+      </div>
+    {/if}
 
     <div class="cover" class:pinned={volPinned} style:width="{side}px" style:height="{side}px" onpointerleave={() => (volPinned = false)} role="presentation">
       {#if cur}<Cover track={cur} size={side} radius={8} />{:else}<div class="cph"><Icon name="music-2" size={48} color="var(--faint)" /></div>{/if}
@@ -226,7 +255,8 @@
 
 <style>
   .mini { position: fixed; z-index: 80; border-radius: 12px; overflow: hidden; font-family: var(--font); color: var(--text); animation: rise-in .25s var(--ease); --ink: 242, 242, 242; }
-  .mini.pip { border-radius: 0; animation: none; }
+  .mini.win { animation: none; }
+  .mini.pip { border-radius: 0; }
   /* ---- bar ---- */
   .bar { display: flex; align-items: center; gap: 2px; padding: 0 8px 0 9px; background: hsl(0 0% 6% / .98); }
   .grp { flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 10px; }

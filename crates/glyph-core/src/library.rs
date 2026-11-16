@@ -138,7 +138,11 @@ impl SearchItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecentItem {
-    Song { track: Track },
+    Song {
+        track: Track,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<ListKey>,
+    },
     Artist {
         name: String,
         /// A song of theirs, for the picture until the artist page has a photo.
@@ -151,7 +155,7 @@ impl RecentItem {
     /// The song behind this entry (an artist's first song as its picture).
     pub fn track(&self) -> Option<&Track> {
         match self {
-            RecentItem::Song { track } => Some(track),
+            RecentItem::Song { track, .. } => Some(track),
             RecentItem::Artist { track, .. } => track.as_ref(),
         }
     }
@@ -165,7 +169,7 @@ impl RecentItem {
 
     fn same(&self, other: &RecentItem) -> bool {
         match (self, other) {
-            (RecentItem::Song { track: a }, RecentItem::Song { track: b }) => same_entry(a, b),
+            (RecentItem::Song { track: a, .. }, RecentItem::Song { track: b, .. }) => same_entry(a, b),
             (RecentItem::Artist { name: a, .. }, RecentItem::Artist { name: b, .. }) => a.eq_ignore_ascii_case(b.trim()),
             _ => false,
         }
@@ -190,7 +194,7 @@ where
         .into_iter()
         .map(|r| match r {
             RecentItemCompat::Item(i) => i,
-            RecentItemCompat::Song(track) => RecentItem::Song { track },
+            RecentItemCompat::Song(track) => RecentItem::Song { track, from: None },
         })
         .collect())
 }
@@ -615,14 +619,19 @@ impl Library {
     /// Songs in "recently played", newest first (artists are skipped).
     pub fn recent_tracks(&self) -> impl Iterator<Item = &Track> + '_ {
         self.recent.iter().filter_map(|i| match i {
-            RecentItem::Song { track } => Some(track),
+            RecentItem::Song { track, .. } => Some(track),
             RecentItem::Artist { .. } => None,
         })
     }
 
+    /// Push to front, dedupe, cap at 50 (keeps the list playback started from, if any).
+    pub fn push_recent_from(&mut self, track: Track, from: Option<ListKey>) {
+        self.push_recent_item(RecentItem::Song { track, from });
+    }
+
     /// Push to front, dedupe, cap at 50.
     pub fn push_recent(&mut self, track: Track) {
-        self.push_recent_item(RecentItem::Song { track });
+        self.push_recent_from(track, None);
     }
 
     /// Remember that playback started from an artist's page, so the artist
@@ -644,7 +653,7 @@ impl Library {
     /// Removes the song from "recently played" (the artist entry stays).
     pub fn remove_recent_song(&mut self, track: &Track) {
         self.recent.retain(|i| match i {
-            RecentItem::Song { track: t } => !same_entry(t, track),
+            RecentItem::Song { track: t, .. } => !same_entry(t, track),
             RecentItem::Artist { .. } => true,
         });
     }
@@ -939,7 +948,7 @@ impl Library {
 
     /// Where `track` sits in "recently played" (artists counted too).
     pub fn recent_song_index(&self, track: &Track) -> Option<usize> {
-        self.recent.iter().position(|i| matches!(i, RecentItem::Song { track: t } if same_entry(t, track)))
+        self.recent.iter().position(|i| matches!(i, RecentItem::Song { track: t, .. } if same_entry(t, track)))
     }
 
     /// Puts a removed song back into "recently played" at `index` (undo).
@@ -948,7 +957,224 @@ impl Library {
             return;
         }
         let at = index.min(self.recent.len());
-        self.recent.insert(at, RecentItem::Song { track });
+        self.recent.insert(at, RecentItem::Song { track, from: None });
+    }
+
+    /// Fills missing album name or upgrades a YouTube-only cover URL across library entries.
+    pub fn backfill_track_meta(&mut self, target: &Track, album: Option<&str>, cover_url: Option<&str>) -> bool {
+        fn patch(t: &mut Track, target: &Track, album: Option<&str>, cover_url: Option<&str>) -> bool {
+            if !same_entry(t, target) {
+                return false;
+            }
+            let mut changed = false;
+            if t.album.as_deref().is_none_or(|a| a.trim().is_empty()) {
+                if let Some(a) = album.map(str::trim).filter(|a| !a.is_empty()) {
+                    t.album = Some(a.to_string());
+                    changed = true;
+                }
+            }
+            if let Some(c) = cover_url.map(str::trim).filter(|c| !c.is_empty() && !crate::cover::is_youtube_cover(c)) {
+                if t.cover_url.as_deref().is_none_or(|cur| cur.trim().is_empty() || crate::cover::is_youtube_cover(cur)) {
+                    t.cover_url = Some(c.to_string());
+                    changed = true;
+                }
+            }
+            changed
+        }
+        let mut changed = false;
+        for t in &mut self.liked {
+            changed |= patch(t, target, album, cover_url);
+        }
+        for pl in &mut self.playlists {
+            for t in &mut pl.tracks {
+                changed |= patch(t, target, album, cover_url);
+            }
+        }
+        for r in &mut self.recent {
+            if let RecentItem::Song { track, .. } = r {
+                changed |= patch(track, target, album, cover_url);
+            }
+        }
+        changed
+    }
+
+    /// Ranked candidates for Home's top quick-pick cards (playlists, albums,
+    /// artists, and songs scored by listening time and recent activity).
+    pub fn home_top(&self, now: u64) -> serde_json::Value {
+        use std::collections::HashMap;
+        let all = self.stats.summary(crate::stats::Range::All, crate::stats::When::now());
+
+        let mut song_ms: HashMap<String, (Track, u64, u32)> = HashMap::new();
+        for ts in all.tracks.values() {
+            let k = format!(
+                "{}|{}",
+                crate::dedupe::normalize_title(&ts.track.title),
+                crate::dedupe::normalize_artist(&ts.track.artist)
+            );
+            song_ms
+                .entry(k)
+                .and_modify(|e| {
+                    e.1 = e.1.saturating_add(ts.ms);
+                    e.2 = e.2.saturating_add(ts.plays);
+                })
+                .or_insert_with(|| (ts.track.clone(), ts.ms, ts.plays));
+        }
+        let song_score = |t: &Track| -> (f64, u64) {
+            let k = format!(
+                "{}|{}",
+                crate::dedupe::normalize_title(&t.title),
+                crate::dedupe::normalize_artist(&t.artist)
+            );
+            let ms = song_ms.get(&k).map_or(0, |v| v.1);
+            let act = self.song_activity.get(&k).map_or(0.0, |a| a.weight(now));
+            let score = (ms as f64) + act * 60_000.0;
+            (score, ms)
+        };
+
+        // 1. Playlists ranked by list activity + constituent track listening time/activity
+        let mut playlists: Vec<serde_json::Value> = self
+            .playlists
+            .iter()
+            .filter(|p| p.shared_by.is_none())
+            .map(|p| {
+                let lw = self.list_weight(&ListKey::Playlist { id: p.id.clone() }, now);
+                let (mut sum_score, mut sum_ms) = (lw * 120_000.0, 0u64);
+                for t in &p.tracks {
+                    let (s, ms) = song_score(t);
+                    sum_score += s;
+                    sum_ms = sum_ms.saturating_add(ms);
+                }
+                serde_json::json!({
+                    "kind": "list",
+                    "list": { "kind": "playlist", "id": p.id },
+                    "score": sum_score,
+                    "ms": sum_ms,
+                })
+            })
+            .collect();
+        playlists.sort_by(|a, b| {
+            b["score"].as_f64().unwrap_or(0.0).total_cmp(&a["score"].as_f64().unwrap_or(0.0))
+        });
+
+        // 2. Albums (saved + albums heard in stats / activity / library)
+        let mut album_acc: HashMap<String, (String, String, Option<Track>, f64, u64)> = HashMap::new();
+        for al in &self.saved_albums {
+            if let ListKey::Album { title, artist, tracks } = al {
+                let key = format!("{}|{}", title.trim().to_lowercase(), artist.trim().to_lowercase());
+                let w = self.list_weight(al, now) * 120_000.0 + 30_000.0;
+                album_acc.insert(key, (title.clone(), artist.clone(), tracks.first().cloned(), w, 0));
+            }
+        }
+        let mut add_album_track = |t: &Track, extra_score: f64, extra_ms: u64| {
+            let Some(al) = t.album.as_deref().map(str::trim).filter(|a| !a.is_empty()) else { return };
+            let ar = crate::dedupe::primary_artist(&t.artist);
+            if ar.is_empty() { return; }
+            let key = format!("{}|{}", al.to_lowercase(), ar.to_lowercase());
+            let entry = album_acc.entry(key).or_insert_with(|| {
+                let lw = self.use_weight(&format!("al:{}|{}", al.to_lowercase(), ar.to_lowercase()), now) * 120_000.0;
+                (al.to_string(), ar, Some(t.clone()), lw, 0)
+            });
+            if entry.2.is_none() {
+                entry.2 = Some(t.clone());
+            }
+            entry.3 += extra_score;
+            entry.4 = entry.4.saturating_add(extra_ms);
+        };
+        for (t, ms, _) in song_ms.values() {
+            add_album_track(t, *ms as f64, *ms);
+        }
+        for a in self.song_activity.values() {
+            add_album_track(&a.track, a.weight(now) * 60_000.0, 0);
+        }
+        let mut albums: Vec<serde_json::Value> = album_acc
+            .into_values()
+            .filter(|(_, _, _, s, ms)| *ms > 0 || *s > 0.0)
+            .map(|(title, artist, cover, score, ms)| {
+                serde_json::json!({
+                    "kind": "list",
+                    "list": { "kind": "album", "title": title, "artist": artist, "tracks": [], "cover": cover },
+                    "score": score,
+                    "ms": ms,
+                })
+            })
+            .collect();
+        albums.sort_by(|a, b| {
+            b["score"].as_f64().unwrap_or(0.0).total_cmp(&a["score"].as_f64().unwrap_or(0.0))
+        });
+
+        // 3. Songs ranked by listening ms + decayed activity
+        let mut songs_map: HashMap<String, (Track, f64, u64)> = HashMap::new();
+        for (k, (t, ms, plays)) in &song_ms {
+            let act = self.song_activity.get(k).map_or(0.0, |a| a.weight(now));
+            let score = (*ms as f64) + (*plays as f64) * 30_000.0 + act * 60_000.0;
+            songs_map.insert(k.clone(), (t.clone(), score, *ms));
+        }
+        for (k, a) in &self.song_activity {
+            let act = a.weight(now);
+            songs_map.entry(k.clone()).or_insert_with(|| (a.track.clone(), act * 60_000.0, 0));
+        }
+        let mut songs: Vec<(Track, f64, u64)> = songs_map.into_values().filter(|(_, s, _)| *s > 0.0).collect();
+        songs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let songs_json: Vec<serde_json::Value> = songs
+            .into_iter()
+            .take(8)
+            .map(|(track, score, ms)| serde_json::json!({ "kind": "song", "track": track, "score": score, "ms": ms }))
+            .collect();
+
+        // 4. Artists ranked by listening ms + plays + page/sidebar activity
+        let mut artist_scores: HashMap<String, (String, Option<Track>, f64, u64)> = HashMap::new();
+        let find_artist_track = |norm_name: &str| -> Option<Track> {
+            self.recent_artists
+                .iter()
+                .chain(self.followed.iter())
+                .find(|a| a.name.trim().eq_ignore_ascii_case(norm_name))
+                .and_then(|a| a.track.clone())
+                .or_else(|| {
+                    song_ms
+                        .values()
+                        .find(|(t, _, _)| crate::dedupe::primary_artist(&t.artist).eq_ignore_ascii_case(norm_name))
+                        .map(|(t, _, _)| t.clone())
+                })
+                .or_else(|| {
+                    self.liked
+                        .iter()
+                        .find(|t| crate::dedupe::primary_artist(&t.artist).eq_ignore_ascii_case(norm_name))
+                        .cloned()
+                })
+        };
+        for (norm, (display, st)) in &all.artists {
+            let norm_l = norm.trim().to_lowercase();
+            if norm_l.is_empty() { continue; }
+            let plays = self.artist_plays.get(&norm_l).copied().unwrap_or(0).max(st.plays);
+            let uw = self.use_weight(&Self::artist_id(&norm_l), now);
+            let score = (st.ms as f64) + (plays as f64) * 30_000.0 + uw * 60_000.0;
+            let tr = find_artist_track(&norm_l);
+            artist_scores.insert(norm_l, (display.clone(), tr, score, st.ms));
+        }
+        for (norm, plays) in &self.artist_plays {
+            let norm_l = norm.trim().to_lowercase();
+            if norm_l.is_empty() { continue; }
+            artist_scores.entry(norm_l.clone()).or_insert_with(|| {
+                let uw = self.use_weight(&Self::artist_id(&norm_l), now);
+                let tr = find_artist_track(&norm_l);
+                let display = tr.as_ref().map(|t| crate::dedupe::primary_artist(&t.artist)).unwrap_or_else(|| norm.clone());
+                (display, tr, (*plays as f64) * 30_000.0 + uw * 60_000.0, 0)
+            });
+        }
+        let mut artists: Vec<(String, Option<Track>, f64, u64)> = artist_scores.into_values().filter(|(_, _, s, _)| *s > 0.0).collect();
+        artists.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let artists_json: Vec<serde_json::Value> = artists
+            .into_iter()
+            .take(8)
+            .map(|(name, track, score, ms)| serde_json::json!({ "kind": "artist", "name": name, "track": track, "score": score, "ms": ms }))
+            .collect();
+
+        serde_json::json!({
+            "playlists": playlists.into_iter().take(6).collect::<Vec<_>>(),
+            "albums": albums.into_iter().take(6).collect::<Vec<_>>(),
+            "artists": artists_json,
+            "songs": songs_json,
+        })
     }
 
     pub fn move_in_playlist(&mut self, id: &str, from: usize, to: usize) {
@@ -1380,5 +1606,34 @@ mod tests {
 
         loaded.save_to(&path).unwrap();
         assert!(!Library::activity_path_for(&path).exists());
+    }
+
+    #[test]
+    fn recent_from_list_backfill_and_home_top_work() {
+        let mut lib = Library::default();
+        let mut s1 = tr("1", "Track One");
+        s1.album = None;
+        s1.cover_url = Some("https://i.ytimg.com/vi/abc/hqdefault.jpg".into());
+        lib.liked.push(s1.clone());
+        lib.push_recent_from(s1.clone(), Some(ListKey::Liked));
+        assert!(matches!(
+            lib.recent.first(),
+            Some(RecentItem::Song { from: Some(ListKey::Liked), .. })
+        ));
+
+        assert!(lib.backfill_track_meta(&s1, Some("Album X"), Some("https://e-cdns-images.dzcdn.net/cover.jpg")));
+        assert_eq!(lib.liked[0].album.as_deref(), Some("Album X"));
+        assert_eq!(lib.liked[0].cover_url.as_deref(), Some("https://e-cdns-images.dzcdn.net/cover.jpg"));
+
+        let now = crate::paths::now_unix();
+        let when = crate::stats::When::now();
+        let enriched = lib.liked[0].clone();
+        lib.stats.add_time(&enriched, 180_000, when.clone());
+        lib.stats.add_play(&enriched, when);
+        lib.record_listen(&enriched, now);
+        let top = lib.home_top(now);
+        assert_eq!(top["artists"].as_array().unwrap().len(), 1);
+        assert_eq!(top["songs"].as_array().unwrap().len(), 1);
+        assert_eq!(top["albums"].as_array().unwrap()[0]["list"]["title"], "Album X");
     }
 }

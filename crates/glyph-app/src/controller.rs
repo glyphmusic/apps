@@ -237,6 +237,7 @@ impl Core {
 
     /// Starts glyph-core in the background; the UI shows "connecting" until then.
     pub fn start_backend(self: &Arc<Self>) {
+        self.ensure_reconnect_monitor();
         let core = self.clone();
         let config = self.st().config.clone();
         crate::rt::spawn(async move {
@@ -257,11 +258,74 @@ impl Core {
                     *core.backend.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(b));
                     core.set_backend_state(json!({ "kind": "ready", "mode": mode }));
                     core.on_backend_ready();
+                    crate::account::wake_reconnect(&core);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "backend: could not start");
                     core.set_backend_state(json!({ "kind": "offline", "reason": e.to_string() }));
                     core.on_backend_failed();
+                }
+            }
+        });
+    }
+
+    /// Automatically reconnects when backend startup failed or a configured server
+    /// was temporarily offline (e.g. during a server update), so the user does
+    /// not have to open Server settings and click Apply manually.
+    fn ensure_reconnect_monitor(self: &Arc<Self>) {
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        if STARTED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let core = self.clone();
+        crate::rt::spawn(async move {
+            let mut backoff_secs = 5u64;
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let connecting = core.backend_state.lock().unwrap_or_else(|e| e.into_inner())["kind"] == "connecting";
+                if connecting {
+                    continue;
+                }
+                let Some(b) = core.backend() else {
+                    if core.st().config.effective_server_url().trim().is_empty() {
+                        continue;
+                    }
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    let still_missing = core.backend().is_none()
+                        && core.backend_state.lock().unwrap_or_else(|e| e.into_inner())["kind"] != "connecting";
+                    if still_missing {
+                        backoff_secs = (backoff_secs * 2).min(30);
+                        core.set_backend_state(json!({ "kind": "connecting" }));
+                        core.start_backend();
+                    }
+                    continue;
+                };
+                let server_offline = matches!(
+                    b.mode(),
+                    glyph_core::BackendMode::Server { ref server_version, .. } if server_version == "offline"
+                );
+                let outage_offline = glyph_core::outage::current()
+                    .is_some_and(|o| o.kind == glyph_core::outage::Kind::Offline);
+                if !server_offline && !outage_offline {
+                    backoff_secs = 5;
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                match b.refresh_server().await {
+                    Ok(true) => {
+                        backoff_secs = 5;
+                        glyph_audio::http::set_server_access(b.server_media_credentials());
+                        core.set_backend_state(json!({ "kind": "ready", "mode": "server" }));
+                        core.on_backend_ready();
+                        crate::account::wake_reconnect(&core);
+                    }
+                    Ok(false) => {
+                        backoff_secs = (backoff_secs * 2).min(30);
+                    }
+                    Err(e) => {
+                        backoff_secs = 30;
+                        core.set_backend_state(json!({ "kind": "offline", "reason": e.to_string() }));
+                    }
                 }
             }
         });
@@ -633,7 +697,11 @@ impl Core {
             let from_artist = st.recent_artist_ctx.as_ref().is_some_and(|a| glyph_core::dedupe::by_artist(&track.artist, a))
                 && !st.queue.current_is_manual();
             if !from_artist {
-                st.library.push_recent(track.clone());
+                let from_list = (!st.queue.current_is_manual())
+                    .then(|| st.playing_from.clone())
+                    .flatten()
+                    .filter(|l| !matches!(l, glyph_core::ListKey::Recent));
+                st.library.push_recent_from(track.clone(), from_list);
             }
             st.library.record_play(&track);
             if let Some((name, art)) = artist_ctx {

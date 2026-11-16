@@ -107,7 +107,7 @@ export class DemoBackend implements Backend, DemoCtx {
   async snapshot(): Promise<Snapshot> {
     return wire({
       config: this.config, library: this.library, queue: this.queue, player: this.player,
-      backend: { kind: "ready", mode: "server" }, account: null, version: "0.12.3-demo", platform: "web",
+      backend: { kind: "ready", mode: "server" }, account: null, version: "0.12.4-demo", platform: "web",
       first_run: false, output_devices: ["System default", "Speakers (Demo)", "Headphones (Demo)"], update: null,
     } satisfies Snapshot);
   }

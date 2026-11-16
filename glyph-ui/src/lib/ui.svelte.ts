@@ -144,6 +144,7 @@ const inked = new Set<HTMLElement>();
 let inkTimer = 0;
 let staticDarkInk = false;
 const glowSuspensions = new Set<string>();
+const uiResumeListeners = new Set<() => void>();
 let glowSuspendTimer = 0;
 let glowTransient = false;
 
@@ -151,11 +152,20 @@ function syncGlowSuspension() {
   glow?.setSuspended(glowSuspensions.size > 0 || glowTransient);
 }
 
-/** Suspends background canvas drawing while a named UI interaction (e.g. sidebar resize) is active. */
+/** True while an interactive layout resize (e.g. sidebar sash drag) is active. */
+export function isUiSuspended(): boolean {
+  return glowSuspensions.size > 0;
+}
+
+/** Suspends background canvas drawing and heavy layout observers while a UI interaction (e.g. sidebar resize) is active. */
 export function setUiSuspended(key: string, suspended: boolean) {
+  const was = glowSuspensions.size > 0;
   if (suspended) glowSuspensions.add(key);
   else glowSuspensions.delete(key);
   syncGlowSuspension();
+  if (was && glowSuspensions.size === 0) {
+    for (const cb of uiResumeListeners) cb();
+  }
 }
 
 /** Temporarily pauses background canvas drawing while UI panels or views finish changing. */
@@ -324,9 +334,11 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
   };
 
   const schedule = () => {
+    if (isUiSuspended()) return;
     if (!raf) raf = requestAnimationFrame(update);
   };
 
+  uiResumeListeners.add(schedule);
   const ro = new ResizeObserver(schedule);
   const observeChildren = () => {
     ro.disconnect();
@@ -352,6 +364,7 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
     },
     destroy() {
       cancelAnimationFrame(raf);
+      uiResumeListeners.delete(schedule);
       el.removeEventListener("scroll", update);
       ro.disconnect();
       mo.disconnect();
