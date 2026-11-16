@@ -196,10 +196,19 @@ public class PlaybackService extends Service {
         }
         session = new MediaSessionCompat(this, "Glyph");
         session.setCallback(new MediaSessionCompat.Callback() {
-            @Override public void onPlay() { nativeMediaKey(KEY_PLAY); }
+            @Override public void onPlay() {
+                promoteFromMediaAction();
+                nativeMediaKey(KEY_PLAY);
+            }
             @Override public void onPause() { nativeMediaKey(KEY_PAUSE); }
-            @Override public void onSkipToNext() { nativeMediaKey(KEY_NEXT); }
-            @Override public void onSkipToPrevious() { nativeMediaKey(KEY_PREVIOUS); }
+            @Override public void onSkipToNext() {
+                promoteFromMediaAction();
+                nativeMediaKey(KEY_NEXT);
+            }
+            @Override public void onSkipToPrevious() {
+                promoteFromMediaAction();
+                nativeMediaKey(KEY_PREVIOUS);
+            }
             @Override public void onStop() { nativeMediaKey(KEY_STOP); }
             @Override public void onCustomAction(String action, android.os.Bundle extras) {
                 if (ACTION_LIKE.equals(action)) {
@@ -208,6 +217,17 @@ public class PlaybackService extends Service {
             }
         });
         session.setActive(true);
+    }
+
+    /**
+     * Promotes to foreground synchronously inside a MediaSession user callback so Android 12+
+     * does not reject background startForeground/network work before Rust ticks.
+     */
+    private void promoteFromMediaAction() {
+        if (!foreground && !title.isEmpty()) {
+            buffering = true;
+            apply(true);
+        }
     }
 
     @Override
@@ -316,7 +336,10 @@ public class PlaybackService extends Service {
                 if (wifiLock == null) {
                     WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                     if (wm != null) {
-                        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "glyph:playback");
+                        int mode = Build.VERSION.SDK_INT >= 29
+                                ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                                : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                        wifiLock = wm.createWifiLock(mode, "glyph:playback");
                         wifiLock.setReferenceCounted(false);
                     }
                 }

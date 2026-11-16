@@ -114,6 +114,8 @@ pub enum PlayerEvent {
     /// Fired ~10 s before the end of a native track: UI should call
     /// `preload_next` for gapless playback.
     NearEnd,
+    /// A preloaded next track failed to open or decode and was dropped.
+    PreloadFailed,
     Error(String),
 }
 

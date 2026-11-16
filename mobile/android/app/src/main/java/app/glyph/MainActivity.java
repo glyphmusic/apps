@@ -27,7 +27,9 @@ import android.view.Display;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -56,10 +58,15 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -98,19 +105,33 @@ public class MainActivity extends AppCompatActivity {
     };
 
     private native void nativeInit(MainActivity activity, String filesDir);
+    private native void nativeDetach(MainActivity activity);
     private native void nativeInvoke(long id, String cmd, String argsJson);
     private native void nativeInsets(int top, int right, int bottom, int left,
                                      int imeTop, int imeRight, int imeBottom, int imeLeft);
     /** A glyph:// link is waiting; Rust takes it with gpuiTakeOpenUrl. */
     private native void nativeUrlWaiting();
     private native void nativeConnectivity(boolean online);
+    private native void nativeResumed();
+
+    private volatile boolean activityPaused;
+    private static final int MAX_PENDING_EVENTS = 128;
+    private static final int MAX_MAIN_FRAME_RETRIES = 3;
+    private static final ExecutorService THEME_EXECUTOR = Executors.newSingleThreadExecutor();
 
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback networkCallback;
     private WebView webView;
     private boolean pageReady;
+    private boolean showingFallbackError;
+    private boolean mainFrameErrorThisLoad;
+    private int mainFrameRetries;
+    private int readyPageToken;
+    private final AtomicInteger nextPageToken = new AtomicInteger(0);
+    private final AtomicInteger latestPageToken = new AtomicInteger(0);
     private String lastInsetsJs;
-    private final List<String> pendingScripts = new ArrayList<>();
+    private final List<String> pendingInvokes = new ArrayList<>();
+    private final List<String> pendingEvents = new ArrayList<>();
     private final Handler themeHandler = new Handler(Looper.getMainLooper());
     private int lastAccentRgb = -1;
     private String pendingAlias;
@@ -159,105 +180,7 @@ public class MainActivity extends AppCompatActivity {
             reportConnectivity();
         }
 
-        webView = new WebView(this);
-        webView.setBackgroundColor(Color.BLACK);
-        webView.setLayoutParams(new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            WebView.setWebContentsDebuggingEnabled(true);
-        }
-
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
-
-        webView.addJavascriptInterface(new Bridge(), "__GLYPH_ANDROID__");
-        webView.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
-                Log.d("glyph-web", consoleMessage.message() + " ["
-                        + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + "]");
-                return true;
-            }
-
-            @Override
-            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
-                if (fileChooserCallback != null) {
-                    fileChooserCallback.onReceiveValue(null);
-                }
-                fileChooserCallback = callback;
-                try {
-                    fileChooserLauncher.launch(params.createIntent());
-                    return true;
-                } catch (Exception e) {
-                    fileChooserCallback = null;
-                    return false;
-                }
-            }
-        });
-        webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
-                if (request != null && request.isForMainFrame()) {
-                    Log.e("glyph-web", "Main frame error: " + error.getDescription() + " code=" + error.getErrorCode());
-                } else if (request != null) {
-                    Log.w("glyph-web", "Resource error: " + error.getDescription() + " url=" + request.getUrl());
-                }
-            }
-
-            @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return interceptWebRequest(request);
-            }
-
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
-                    return false;
-                }
-                if (uri != null) {
-                    gpuiOpenUrl(uri.toString());
-                }
-                return true;
-            }
-
-            @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                pageReady = false;
-            }
-
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                pageReady = true;
-                if (lastInsetsJs != null) {
-                    webView.evaluateJavascript(lastInsetsJs, null);
-                }
-                if (!pendingScripts.isEmpty()) {
-                    List<String> copy = new ArrayList<>(pendingScripts);
-                    pendingScripts.clear();
-                    for (String js : copy) {
-                        webView.evaluateJavascript(js, null);
-                    }
-                }
-            }
-        });
-
-        ViewCompat.setOnApplyWindowInsetsListener(webView, (v, insets) -> {
-            Insets safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
-            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            nativeInsets(safe.top, safe.right, safe.bottom, safe.left, ime.top, ime.right, ime.bottom, ime.left);
-            applyCssInsets(safe, ime);
-            return WindowInsetsCompat.CONSUMED;
-        });
-
-        setContentView(webView);
-        ViewCompat.requestApplyInsets(webView);
+        setupWebView();
 
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
@@ -276,7 +199,6 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        webView.loadUrl(APP_ORIGIN + "/index.html");
         takeLink(getIntent());
 
         // The playback notification needs this on Android 13+.
@@ -284,6 +206,241 @@ public class MainActivity extends AppCompatActivity {
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
+    }
+
+    private void setupWebView() {
+        WebView view = new WebView(this);
+        view.setBackgroundColor(Color.BLACK);
+        view.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
+
+        WebSettings settings = view.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+
+        view.addJavascriptInterface(new Bridge(), "__GLYPH_ANDROID__");
+        view.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
+                Log.d("glyph-web", consoleMessage.message() + " ["
+                        + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + "]");
+                return true;
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (fileChooserCallback != null) {
+                    fileChooserCallback.onReceiveValue(null);
+                }
+                fileChooserCallback = callback;
+                try {
+                    fileChooserLauncher.launch(params.createIntent());
+                    return true;
+                } catch (Exception e) {
+                    fileChooserCallback = null;
+                    return false;
+                }
+            }
+        });
+        view.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onReceivedError(WebView wv, WebResourceRequest request, android.webkit.WebResourceError error) {
+                if (wv != webView) {
+                    return;
+                }
+                if (request != null && request.isForMainFrame()) {
+                    String desc = error != null && error.getDescription() != null
+                            ? error.getDescription().toString()
+                            : "Unknown error";
+                    int code = error != null ? error.getErrorCode() : -1;
+                    Log.e("glyph-web", "Main frame error: " + desc + " code=" + code);
+                    handleMainFrameFailure("Error " + code + ": " + desc);
+                } else if (request != null) {
+                    Log.w("glyph-web", "Resource error: " + error.getDescription() + " url=" + request.getUrl());
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView wv, WebResourceRequest request, WebResourceResponse errorResponse) {
+                if (wv != webView) {
+                    return;
+                }
+                if (request != null && request.isForMainFrame() && errorResponse != null
+                        && errorResponse.getStatusCode() >= 400) {
+                    int status = errorResponse.getStatusCode();
+                    Log.e("glyph-web", "Main frame HTTP error: status=" + status + " url=" + request.getUrl());
+                    handleMainFrameFailure("HTTP " + status);
+                }
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView wv, RenderProcessGoneDetail detail) {
+                boolean crashed = detail != null && detail.didCrash();
+                Log.e("glyph-web", "WebView renderer gone (didCrash=" + crashed + "); recreating");
+                if (wv != webView) {
+                    return true;
+                }
+                pageReady = false;
+                mainFrameRetries = 0;
+                recreateWebView();
+                return true;
+            }
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView wv, WebResourceRequest request) {
+                return interceptWebRequest(request);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView wv, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if (uri != null && APP_HOST.equalsIgnoreCase(uri.getHost())) {
+                    return false;
+                }
+                if (uri != null) {
+                    gpuiOpenUrl(uri.toString());
+                }
+                return true;
+            }
+
+            @Override
+            public void onPageStarted(WebView wv, String url, android.graphics.Bitmap favicon) {
+                if (wv != webView) {
+                    return;
+                }
+                mainFrameErrorThisLoad = false;
+                if (readyPageToken < latestPageToken.get()) {
+                    pageReady = false;
+                }
+            }
+
+            @Override
+            public void onPageFinished(WebView wv, String url) {
+                if (wv != webView) {
+                    return;
+                }
+                if (!mainFrameErrorThisLoad && !showingFallbackError && url != null && url.startsWith(APP_ORIGIN)) {
+                    mainFrameRetries = 0;
+                    int latest = latestPageToken.get();
+                    if (latest > 0 && readyPageToken < latest) {
+                        readyPageToken = latest;
+                    }
+                    pageReady = true;
+                    flushPending();
+                }
+            }
+        });
+
+        ViewCompat.setOnApplyWindowInsetsListener(view, (v, insets) -> {
+            Insets safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+            nativeInsets(safe.top, safe.right, safe.bottom, safe.left, ime.top, ime.right, ime.bottom, ime.left);
+            applyCssInsets(safe, ime);
+            return WindowInsetsCompat.CONSUMED;
+        });
+
+        webView = view;
+        setContentView(view);
+        ViewCompat.requestApplyInsets(view);
+        loadAppPage();
+    }
+
+    private void loadAppPage() {
+        if (webView == null) {
+            return;
+        }
+        showingFallbackError = false;
+        mainFrameErrorThisLoad = false;
+        pageReady = false;
+        webView.loadUrl(APP_ORIGIN + "/index.html");
+    }
+
+    private void recreateWebView() {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        WebView old = webView;
+        webView = null;
+        pageReady = false;
+        pendingInvokes.clear();
+        pendingEvents.clear();
+        if (old != null) {
+            try {
+                ViewParent parent = old.getParent();
+                if (parent instanceof ViewGroup) {
+                    ((ViewGroup) parent).removeView(old);
+                }
+                old.destroy();
+            } catch (Throwable t) {
+                Log.w("glyph-web", "Failed destroying dead WebView", t);
+            }
+        }
+        setupWebView();
+    }
+
+    private void handleMainFrameFailure(String reason) {
+        mainFrameErrorThisLoad = true;
+        pageReady = false;
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (mainFrameRetries < MAX_MAIN_FRAME_RETRIES) {
+            int attempt = ++mainFrameRetries;
+            themeHandler.postDelayed(() -> {
+                if (webView != null && !isFinishing() && !isDestroyed()) {
+                    loadAppPage();
+                }
+            }, 250L * attempt);
+        } else {
+            showWebFallbackError(reason);
+        }
+    }
+
+    private void showWebFallbackError(String reason) {
+        if (webView == null || isFinishing() || isDestroyed()) {
+            return;
+        }
+        showingFallbackError = true;
+        pageReady = false;
+        String safe = escapeHtml(reason == null || reason.isEmpty() ? "Unable to load interface." : reason);
+        String html = "<!doctype html><html><head><meta charset='utf-8'>"
+                + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<style>html,body{margin:0;height:100%;background:#030303;color:#f5f5f5;"
+                + "font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;"
+                + "justify-content:center;padding:24px;box-sizing:border-box}"
+                + ".card{max-width:360px;width:100%;background:#111;border:1px solid #262626;"
+                + "border-radius:16px;padding:20px;text-align:center}"
+                + "h1{margin:0 0 8px;font-size:17px;font-weight:600}"
+                + "p{margin:0 0 16px;font-size:13px;color:#a3a3a3;word-break:break-word}"
+                + "a{display:inline-block;padding:10px 20px;border-radius:999px;background:#fff;"
+                + "color:#000;text-decoration:none;font-size:14px;font-weight:600}</style></head>"
+                + "<body><div class='card'><h1>Glyph</h1><p>" + safe + "</p>"
+                + "<a href='" + APP_ORIGIN + "/index.html'>Retry</a></div></body></html>";
+        webView.loadDataWithBaseURL(APP_ORIGIN + "/", html, "text/html", "utf-8", null);
+    }
+
+    private static String escapeHtml(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&': out.append("&amp;"); break;
+                case '<': out.append("&lt;"); break;
+                case '>': out.append("&gt;"); break;
+                case '"': out.append("&quot;"); break;
+                case '\'': out.append("&#39;"); break;
+                default: out.append(c); break;
+            }
+        }
+        return out.toString();
     }
 
     private void applyCssInsets(Insets safe, Insets ime) {
@@ -305,20 +462,69 @@ public class MainActivity extends AppCompatActivity {
 
     private final class Bridge {
         @JavascriptInterface
+        public void ready(int token) {
+            runOnUiThread(() -> markBridgeReady(token));
+        }
+
+        @JavascriptInterface
         public void invoke(long id, String cmd, String argsJson) {
             nativeInvoke(id, cmd == null ? "" : cmd, argsJson == null ? "{}" : argsJson);
         }
     }
 
-    private void evalJs(String js) {
+    private void markBridgeReady(int token) {
+        if (token <= 0 || token < latestPageToken.get() || webView == null) {
+            return;
+        }
+        showingFallbackError = false;
+        mainFrameRetries = 0;
+        readyPageToken = token;
+        pageReady = true;
+        flushPending();
+    }
+
+    private void flushPending() {
+        if (webView == null) {
+            return;
+        }
+        if (lastInsetsJs != null) {
+            webView.evaluateJavascript(lastInsetsJs, null);
+        }
+        if (!pendingInvokes.isEmpty()) {
+            List<String> copy = new ArrayList<>(pendingInvokes);
+            pendingInvokes.clear();
+            for (String js : copy) {
+                webView.evaluateJavascript(js, null);
+            }
+        }
+        if (!pendingEvents.isEmpty()) {
+            List<String> copy = new ArrayList<>(pendingEvents);
+            pendingEvents.clear();
+            for (String js : copy) {
+                webView.evaluateJavascript(js, null);
+            }
+        }
+    }
+
+    private void evalInvokeJs(String js) {
         runOnUiThread(() -> {
             if (webView != null && pageReady) {
                 webView.evaluateJavascript(js, null);
-            } else {
-                if (pendingScripts.size() >= 128) {
-                    pendingScripts.remove(0);
+            } else if (!isFinishing() && !isDestroyed()) {
+                pendingInvokes.add(js);
+            }
+        });
+    }
+
+    private void evalEventJs(String js) {
+        runOnUiThread(() -> {
+            if (webView != null && pageReady) {
+                webView.evaluateJavascript(js, null);
+            } else if (!isFinishing() && !isDestroyed()) {
+                if (pendingEvents.size() >= MAX_PENDING_EVENTS) {
+                    pendingEvents.remove(0);
                 }
-                pendingScripts.add(js);
+                pendingEvents.add(js);
             }
         });
     }
@@ -357,7 +563,7 @@ public class MainActivity extends AppCompatActivity {
             }
             return serveLocalAssetFile(filePath);
         }
-        return serveUiAsset(path);
+        return serveUiAsset(path, request.isForMainFrame());
     }
 
     private WebResourceResponse serveLocalAssetFile(String filePath) {
@@ -378,7 +584,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private WebResourceResponse serveUiAsset(String rawPath) {
+    private WebResourceResponse serveUiAsset(String rawPath, boolean mainFrame) {
         String rel = rawPath.startsWith("/") ? rawPath.substring(1) : rawPath;
         if (rel.isEmpty() || rel.endsWith("/")) {
             rel = rel + "index.html";
@@ -389,16 +595,16 @@ public class MainActivity extends AppCompatActivity {
         try {
             InputStream stream = getAssets().open("ui/" + rel);
             if ("index.html".equals(rel)) {
-                return injectBridge(stream);
+                return injectBridge(stream, mainFrame);
             }
             return new WebResourceResponse(mimeTypeFor(rel), "utf-8", stream);
         } catch (IOException notFound) {
             // Client-side route without file extension falls back to index.html.
             int slash = rel.lastIndexOf('/');
             String tail = slash >= 0 ? rel.substring(slash + 1) : rel;
-            if (!tail.contains(".")) {
+            if (mainFrame && !tail.contains(".")) {
                 try {
-                    return injectBridge(getAssets().open("ui/index.html"));
+                    return injectBridge(getAssets().open("ui/index.html"), true);
                 } catch (IOException ignored) {
                 }
             }
@@ -406,7 +612,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private WebResourceResponse injectBridge(InputStream stream) throws IOException {
+    private WebResourceResponse injectBridge(InputStream stream, boolean mainFrame) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
         int n;
@@ -414,20 +620,29 @@ public class MainActivity extends AppCompatActivity {
             out.write(buf, 0, n);
         }
         stream.close();
+        int token = mainFrame ? nextPageToken.incrementAndGet() : 0;
+        if (token > 0) {
+            latestPageToken.set(token);
+        }
         String html = out.toString(StandardCharsets.UTF_8.name());
-        String script = "<script>" + tauriShimScript() + "</script>";
+        String script = "<script>" + tauriShimScript(token) + "</script>";
         int idx = html.indexOf("<head>");
         String patched = idx >= 0
                 ? html.substring(0, idx + 6) + script + html.substring(idx + 6)
                 : script + html;
-        return new WebResourceResponse("text/html", "utf-8",
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", "no-store, no-cache, must-revalidate");
+        return new WebResourceResponse("text/html", "utf-8", 200, "OK", headers,
                 new ByteArrayInputStream(patched.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private static String tauriShimScript() {
+    private static String tauriShimScript(int pageToken) {
+        long initialReq = pageToken > 0 ? (long) pageToken * 1000000L + 1L : 1L;
         return "(function(){"
-                + "if(window.__TAURI_INTERNALS__)return;"
-                + "var nextCb=1,nextReq=1,cbs=new Map(),pending=new Map(),listeners=new Map();"
+                + "if(window.__TAURI_INTERNALS__){"
+                + (pageToken > 0 ? "try{window.__GLYPH_ANDROID__.ready(" + pageToken + ");}catch(_e){}" : "")
+                + "return;}"
+                + "var nextCb=1,nextReq=" + initialReq + ",cbs=new Map(),pending=new Map(),listeners=new Map();"
                 + "window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:function(){}};"
                 + "function runCb(id,arg){var fn=cbs.get(id);if(fn){try{fn(arg);}catch(e){console.error(e);}}}"
                 + "function winNoop(cmd){"
@@ -465,6 +680,7 @@ public class MainActivity extends AppCompatActivity {
                 + "catch(e){pending.delete(id);reject(e);}"
                 + "});}"
                 + "};"
+                + (pageToken > 0 ? "try{window.__GLYPH_ANDROID__.ready(" + pageToken + ");}catch(_e){}" : "")
                 + "})();";
     }
 
@@ -511,10 +727,12 @@ public class MainActivity extends AppCompatActivity {
     /** Back from the permission screen: go on with the update once allowed. */
     @Override
     protected void onResume() {
+        activityPaused = false;
         super.onResume();
         if (webView != null) {
             webView.onResume();
         }
+        nativeResumed();
         if (connectivity != null) {
             reportConnectivity();
         }
@@ -527,14 +745,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
-        if (webView != null) {
-            webView.onPause();
-        }
         super.onPause();
     }
 
     @Override
     protected void onStop() {
+        activityPaused = true;
+        if (webView != null) {
+            webView.onPause();
+        }
         super.onStop();
         if (pendingAlias != null) {
             themeHandler.removeCallbacks(applyAliasRunnable);
@@ -544,14 +763,26 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        themeHandler.removeCallbacks(applyAliasRunnable);
+        themeHandler.removeCallbacksAndMessages(null);
         if (connectivity != null && networkCallback != null) {
-            connectivity.unregisterNetworkCallback(networkCallback);
+            try {
+                connectivity.unregisterNetworkCallback(networkCallback);
+            } catch (Exception ignored) {
+            }
+            networkCallback = null;
         }
         if (webView != null) {
-            webView.destroy();
+            try {
+                ViewParent parent = webView.getParent();
+                if (parent instanceof ViewGroup) {
+                    ((ViewGroup) parent).removeView(webView);
+                }
+                webView.destroy();
+            } catch (Throwable ignored) {
+            }
             webView = null;
         }
+        nativeDetach(this);
         super.onDestroy();
     }
 
@@ -646,11 +877,14 @@ public class MainActivity extends AppCompatActivity {
     // ------------------------------------------------------------ called from Rust
 
     public void gpuiCompleteInvoke(long id, boolean ok, String payloadJson) {
-        evalJs("window.__glyphResolve(" + id + "," + ok + "," + toSafeJsLiteral(payloadJson) + ");");
+        evalInvokeJs("window.__glyphResolve(" + id + "," + ok + "," + toSafeJsLiteral(payloadJson) + ");");
     }
 
     public void gpuiEmitEvent(String name, String payloadJson) {
-        evalJs("window.__glyphEmit(" + JSONObject.quote(name == null ? "" : name)
+        if (activityPaused && ("glyph://spectrum".equals(name) || "glyph://player".equals(name))) {
+            return;
+        }
+        evalEventJs("window.__glyphEmit(" + JSONObject.quote(name == null ? "" : name)
                 + "," + toSafeJsLiteral(payloadJson) + ");");
     }
 
@@ -866,32 +1100,35 @@ public class MainActivity extends AppCompatActivity {
         if (targetAlias == null) {
             return;
         }
-        try {
-            PackageManager pm = getPackageManager();
-            String pkg = getPackageName();
-            if (!isAliasEnabled(pm, pkg, targetAlias, LAUNCHER_ALIASES[0].equals(targetAlias))) {
-                pm.setComponentEnabledSetting(
-                        new ComponentName(pkg, targetAlias),
-                        PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                        PackageManager.DONT_KILL_APP
-                );
-            }
-            for (int i = 0; i < LAUNCHER_ALIASES.length; i++) {
-                String cls = LAUNCHER_ALIASES[i];
-                if (cls.equals(targetAlias)) {
-                    continue;
-                }
-                if (isAliasEnabled(pm, pkg, cls, i == 0)) {
+        final Context appCtx = getApplicationContext();
+        THEME_EXECUTOR.execute(() -> {
+            try {
+                PackageManager pm = appCtx.getPackageManager();
+                String pkg = appCtx.getPackageName();
+                if (!isAliasEnabled(pm, pkg, targetAlias, LAUNCHER_ALIASES[0].equals(targetAlias))) {
                     pm.setComponentEnabledSetting(
-                            new ComponentName(pkg, cls),
-                            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                            new ComponentName(pkg, targetAlias),
+                            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                             PackageManager.DONT_KILL_APP
                     );
                 }
+                for (int i = 0; i < LAUNCHER_ALIASES.length; i++) {
+                    String cls = LAUNCHER_ALIASES[i];
+                    if (cls.equals(targetAlias)) {
+                        continue;
+                    }
+                    if (isAliasEnabled(pm, pkg, cls, i == 0)) {
+                        pm.setComponentEnabledSetting(
+                                new ComponentName(pkg, cls),
+                                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                PackageManager.DONT_KILL_APP
+                        );
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w("GlyphTheme", "launcher alias update failed", t);
             }
-        } catch (Throwable t) {
-            Log.w("GlyphTheme", "launcher alias update failed", t);
-        }
+        });
     }
 
     private static boolean isAliasEnabled(PackageManager pm, String pkg, String cls, boolean defaultEnabled) {

@@ -125,17 +125,38 @@
     let offRoutes: (() => void) | undefined;
     let offSettingsHash: (() => void) | undefined;
     let cleanupWebMini: (() => void) | undefined;
+    const clearStartupListeners = () => {
+      window.removeEventListener("error", onStartupError);
+      window.removeEventListener("unhandledrejection", onStartupRejection);
+    };
+    const onStartupError = (ev: ErrorEvent) => {
+      if (dead || app.ready || error) return;
+      error = ev.error ? String(ev.error) : (ev.message || "Unexpected startup error");
+      clearStartupListeners();
+      void reveal();
+    };
+    const onStartupRejection = (ev: PromiseRejectionEvent) => {
+      if (dead || app.ready || error) return;
+      error = String(ev.reason ?? "Unhandled startup rejection");
+      clearStartupListeners();
+      void reveal();
+    };
+    window.addEventListener("error", onStartupError);
+    window.addEventListener("unhandledrejection", onStartupRejection);
     if (isWeb()) cleanupWebMini = setupWebMiniMain(app);
     // Page addresses (/search?q=, /artist/..., ...) only where there is an address bar;
     // the settings URL fragment (`#settings/...`) stays synced everywhere so reloads keep it open.
     app.init().then(async () => {
       if (dead) return;
+      clearStartupListeners();
       if (backend().kind !== "tauri") offRoutes = installRoutes();
       offSettingsHash = installSettingsHash();
       if (backend().kind !== "web") loadPlugins();
       if (backend().kind === "tauri" || backend().kind === "web") installAccountEvents();
       await reveal();
     }).catch(async (e) => {
+      if (dead) return;
+      clearStartupListeners();
       error = String(e);
       await reveal();
     });
@@ -152,6 +173,7 @@
     window.addEventListener("hashchange", onHashChange);
     return () => {
       dead = true;
+      clearStartupListeners();
       offRoutes?.();
       offSettingsHash?.();
       cleanupWebMini?.();

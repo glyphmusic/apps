@@ -93,7 +93,14 @@ export async function signIn(browser: boolean) {
     if (seq !== loginSeq) return;
     if (Date.now() > deadline) { ac.login = { kind: "failed", text: t("account.login.expired") }; return; }
     let r: LoginPoll | undefined;
-    try { r = await backend().call<LoginPoll>("account_login_poll", { login_id: start.login_id }); } catch { continue; }
+    try { r = await backend().call<LoginPoll>("account_login_poll", { login_id: start.login_id }); }
+    catch (e: any) {
+      const retry = typeof e?.retryAfter === "number" ? e.retryAfter : 0;
+      if (e?.status === 429 || errText(e) === "rate_limited" || retry > 0) {
+        await new Promise((res) => setTimeout(res, Math.min(60, Math.max(5, retry || 10)) * 1000));
+      }
+      continue;
+    }
     if (!r) continue;
     if (r.state === "device_limit") ac.login = { kind: "waiting", start, full: true };
     else if (r.state === "expired") { ac.login = { kind: "failed", text: t("account.login.expired") }; return; }

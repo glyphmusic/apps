@@ -198,6 +198,13 @@ export class ApiError extends Error {
   }
 }
 
+let optionalAuth: (() => string | undefined) | null = null;
+
+/** Registers a provider for the signed-in access token on public/member endpoints. */
+export function setOptionalAuth(fn: (() => string | undefined) | null) {
+  optionalAuth = fn;
+}
+
 function headers(json = false, token?: string): HeadersInit {
   const h: Record<string, string> = { "x-glyph-install-id": installId(), accept: "application/json" };
   if (json) h["content-type"] = "application/json";
@@ -216,20 +223,35 @@ async function fail(r: Response): Promise<never> {
   throw new ApiError(r.status, code, message, retry);
 }
 
-async function getJson<T>(path: string, params: Record<string, string | number | undefined> = {}, signal?: AbortSignal, token?: string): Promise<T> {
+async function getJson<T>(
+  path: string,
+  params: Record<string, string | number | undefined> = {},
+  signal?: AbortSignal,
+  token?: string,
+  allowOptionalAuth = true,
+): Promise<T> {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
   const qs = q.toString();
-  const r = await fetch(`${BASE}${path}${qs ? `?${qs}` : ""}`, { headers: headers(false, token), signal, credentials: "omit" });
+  const auth = token ?? (allowOptionalAuth ? optionalAuth?.() : undefined);
+  const r = await fetch(`${BASE}${path}${qs ? `?${qs}` : ""}`, { headers: headers(false, auth), signal, credentials: "omit" });
   if (!r.ok) return fail(r);
   return r.json() as Promise<T>;
 }
 
-async function sendJson<T>(method: string, path: string, body?: unknown, token?: string, signal?: AbortSignal): Promise<T> {
+async function sendJson<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  token?: string,
+  signal?: AbortSignal,
+  allowOptionalAuth = true,
+): Promise<T> {
   const hasBody = body !== undefined;
+  const auth = token ?? (allowOptionalAuth ? optionalAuth?.() : undefined);
   const r = await fetch(`${BASE}${path}`, {
     method,
-    headers: headers(hasBody, token),
+    headers: headers(hasBody, auth),
     body: hasBody ? JSON.stringify(body) : undefined,
     signal,
     credentials: "omit",
@@ -247,11 +269,11 @@ export function wireTrack(t: Track): Track {
 }
 
 export const server = {
-  health: () => getJson<HealthResponse>("/v1/health"),
+  health: () => getJson<HealthResponse>("/v1/health", {}, undefined, undefined, false),
 
   /** `/v1/search?q=` NDJSON: calls `onEvent` for every line until `done`. */
   async search(q: string, page: number, onEvent: (e: SearchEvent) => void, signal?: AbortSignal): Promise<void> {
-    const r = await fetch(`${BASE}/v1/search?${new URLSearchParams({ q, page: String(page) })}`, { headers: headers(), signal, credentials: "omit" });
+    const r = await fetch(`${BASE}/v1/search?${new URLSearchParams({ q, page: String(page) })}`, { headers: headers(false, optionalAuth?.()), signal, credentials: "omit" });
     if (!r.ok) return fail(r);
     const reader = r.body?.getReader();
     if (!reader) {
@@ -301,22 +323,22 @@ export const server = {
 
   // ---- Account & Auth ----
   loginStart: (device_name: string, platform: string, pake?: string) =>
-    sendJson<LoginStartResponse>("POST", "/v1/account/login/start", { device_name, platform, ...(pake ? { pake } : {}) }),
+    sendJson<LoginStartResponse>("POST", "/v1/account/login/start", { device_name, platform, ...(pake ? { pake } : {}) }, undefined, undefined, false),
 
   loginPoll: (login_id: string) =>
-    getJson<LoginPollResponse>("/v1/account/login/poll", { login_id }),
+    getJson<LoginPollResponse>("/v1/account/login/poll", { login_id }, undefined, undefined, false),
 
   tokenRefresh: (refresh_token: string) =>
-    sendJson<AccountSession>("POST", "/v1/account/token/refresh", { refresh_token }),
+    sendJson<AccountSession>("POST", "/v1/account/token/refresh", { refresh_token }, undefined, undefined, false),
 
   passwordSalt: (handle: string) =>
-    getJson<{ salt: string }>(`/v1/account/password/salt/${encodeURIComponent(handle)}`),
+    getJson<{ salt: string }>(`/v1/account/password/salt/${encodeURIComponent(handle)}`, {}, undefined, undefined, false),
 
   passwordRegister: (req: { handle: string; salt: string; key: string; device_name: string; platform: string }) =>
-    sendJson<{ session: AccountSession; recovery_code: string } | AccountSession>("POST", "/v1/account/password/register", req),
+    sendJson<{ session: AccountSession; recovery_code: string } | AccountSession>("POST", "/v1/account/password/register", req, undefined, undefined, false),
 
   passwordLogin: (req: { handle: string; key: string; device_name: string; platform: string }) =>
-    sendJson<AccountSession>("POST", "/v1/account/password/login", req),
+    sendJson<AccountSession>("POST", "/v1/account/password/login", req, undefined, undefined, false),
 
   passwordCheck: (token: string, key: string) =>
     sendJson<void>("POST", "/v1/account/password/check", { key }, token),
@@ -374,8 +396,8 @@ export const server = {
     sendJson<PlaybackReceipt>("POST", "/v1/devices/playback/receipt", { id, done: false, error: null }, token),
 
   // ---- Sync ----
-  syncPull: (token: string, since: number) =>
-    getJson<SyncPullResponse>("/v1/sync/pull", { since }, undefined, token),
+  syncPull: (token: string, since: number, limit = 1000) =>
+    getJson<SyncPullResponse>("/v1/sync/pull", { since, limit }, undefined, token),
 
   syncPush: (token: string, items: SyncItem[]) =>
     sendJson<SyncPushResponse>("POST", "/v1/sync/push", { items }, token),

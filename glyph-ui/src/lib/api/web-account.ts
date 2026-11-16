@@ -11,14 +11,14 @@ import {
   sealToDevice, splitPairCode, suspiciousSignInSalt, SYNC_KIND, type SyncItem, unwrapWithPassword, wrapWithPassword,
 } from "./web-e2e";
 import {
-  ApiError, server, serverOrigin, wireTrack,
+  ApiError, server, serverOrigin, setOptionalAuth, wireTrack,
   type AccountSession, type DeviceInfo, type ProfileSettingsWire, type PublicProfile,
 } from "./web-server";
 import type { MonthStats, WebStats } from "./web-stats";
 import { installId, load, remove, save } from "./web-store";
 
-const MAX_PUSH_ITEMS = 250;
-const MAX_PUSH_BYTES = 1_400_000;
+const MAX_PUSH_ITEMS = 500;
+const MAX_PUSH_BYTES = 1_500_000;
 const MAX_SINGLE_ITEM_BYTES = 980_000;
 
 interface PushEntry {
@@ -112,18 +112,70 @@ function detectDeviceName(): string {
   return `Glyph Web (${browser})`;
 }
 
+function trackSyncId(t: Track): string {
+  return `${t.source}:${t.id}`;
+}
+
+function canonicalTrack(t: Track): Track {
+  const w = wireTrack(t);
+  const out: Track = { id: w.id, source: w.source, title: w.title, artist: w.artist };
+  if (w.album != null) out.album = w.album;
+  if (w.duration_ms != null) out.duration_ms = w.duration_ms;
+  if (w.cover_url != null) out.cover_url = w.cover_url;
+  if (w.isrc != null) out.isrc = w.isrc;
+  if (w.permalink != null) out.permalink = w.permalink;
+  if (w.external_ids && Object.keys(w.external_ids).length > 0) out.external_ids = w.external_ids;
+  if (w.explicit) out.explicit = true;
+  return out;
+}
+
+function playlistSyncValue(p: Playlist) {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description ?? "",
+    tracks: p.tracks.map(canonicalTrack),
+    created_at: p.created_at ?? 0,
+  };
+}
+
 function listSyncKey(l: ListKey): string {
   return listId(l);
 }
 
 function searchSyncKey(s: SearchItem): string {
+  if (s.kind === "query") return `query:${norm(s.text)}`;
+  if (s.kind === "artist") return `artist:${norm(s.name)}`;
+  return `song:${trackSyncId(s.track)}`;
+}
+
+function legacySearchSyncKey(s: SearchItem): string {
   if (s.kind === "query") return `q:${norm(s.text)}`;
   if (s.kind === "artist") return `a:${norm(s.name)}`;
   return `t:${trackKey(s.track)}`;
 }
 
+function canonicalValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonicalValue);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      const val = (v as Record<string, unknown>)[k];
+      if (val !== undefined) out[k] = canonicalValue(val);
+    }
+    return out;
+  }
+  return v;
+}
+
 function quickHash(v: unknown): string {
-  return JSON.stringify(v);
+  return JSON.stringify(canonicalValue(v));
+}
+
+function pickJournalKey(journal: SyncJournal, kind: string, primary: string, fallback?: string): string {
+  if (journal.known[`${kind}\0${primary}`]) return primary;
+  if (fallback && journal.known[`${kind}\0${fallback}`]) return fallback;
+  return primary;
 }
 
 function normalizeSections(raw?: readonly string[] | null): ("playlists" | "recent")[] {
@@ -176,12 +228,15 @@ export class WebAccountManager {
   private accountsAvailable = true;
   private syncTimer: ReturnType<typeof setTimeout> | null = null;
   private recentTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncCooldownUntil = 0;
+  private resyncPending = false;
   private webLogins: { domain: string; at: number }[] = [];
   private refreshing: Promise<string | null> | null = null;
 
   constructor(private host: WebAccountHost) {
     this.session = load<StoredAccountSession>("account") ?? null;
     this.webLogins = load<{ domain: string; at: number }[]>("web_logins") ?? [];
+    setOptionalAuth(() => this.optionalToken());
     if (this.session) {
       // Load cached devices and kick off an initial refresh + sync
       this.devices = load<DeviceInfo[]>(`devices.${this.session.account.id}`) ?? [];
@@ -189,6 +244,13 @@ export class WebAccountManager {
         void this.refreshAccountAndSync();
       }, 150);
     }
+  }
+
+  /** Cached non-expired access token for public/member requests (never blocks on refresh). */
+  optionalToken(): string | undefined {
+    if (!this.accountsAvailable || !this.session) return undefined;
+    if (this.session.expires_at - nowSec() <= 15) return undefined;
+    return this.session.access_token;
   }
 
   setAccountsAvailable(ok: boolean) {
@@ -567,13 +629,52 @@ export class WebAccountManager {
     return out;
   }
 
+  private async withSyncRetry<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (e) {
+        if (!this.session) throw new Error("signed_out");
+        if (e instanceof ApiError && e.status === 429) {
+          if (e.code === "temporarily_blocked") {
+            const waitMs = Math.min(900_000, Math.max(5_000, (e.retryAfter ?? 60) * 1000));
+            this.syncCooldownUntil = Math.max(this.syncCooldownUntil, Date.now() + waitMs);
+            throw e;
+          }
+          if (attempt < 4) {
+            const waitMs = Math.min(65_000, Math.max(1_000, (e.retryAfter ?? 5) * 1000));
+            await new Promise((r) => setTimeout(r, waitMs));
+            if (!this.session) throw new Error("signed_out");
+            continue;
+          }
+          this.syncCooldownUntil = Math.max(
+            this.syncCooldownUntil,
+            Date.now() + Math.min(65_000, Math.max(2_000, (e.retryAfter ?? 10) * 1000)),
+          );
+          throw e;
+        }
+        if (e instanceof ApiError && (e.status === 502 || e.status === 503 || e.status === 504) && attempt < 3) {
+          await new Promise((r) => setTimeout(r, (1 << attempt) * 1500));
+          if (!this.session) throw new Error("signed_out");
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+
   scheduleSync(delayMs = 1500) {
     if (!this.session) return;
+    if (this.syncing) {
+      this.resyncPending = true;
+      return;
+    }
     if (this.syncTimer) clearTimeout(this.syncTimer);
+    const wait = Math.max(delayMs, this.syncCooldownUntil - Date.now());
     this.syncTimer = setTimeout(() => {
       this.syncTimer = null;
       void this.syncNow();
-    }, delayMs);
+    }, wait);
   }
 
   scheduleRecentUpdate() {
@@ -583,38 +684,40 @@ export class WebAccountManager {
       this.recentTimer = null;
       if (!this.session) return;
       try {
-        const token = await this.validToken();
         const songs = this.host
           .getLibrary()
           .recent.flatMap((r) => (r.kind === "song" ? [r.track] : []))
           .slice(0, 12);
-        await server.profilePutRecent(token, songs);
+        await this.runAuthed((token) => server.profilePutRecent(token, songs));
       } catch { /* ignore */ }
     }, 2500);
   }
 
   async syncNow(): Promise<void> {
-    if (!this.session || this.syncing) return;
+    if (!this.session) return;
+    if (this.syncing) {
+      this.resyncPending = true;
+      return;
+    }
     this.syncing = true;
     this.syncError = null;
     const s = this.session;
     const accountId = s.account.id;
     try {
-      const token = await this.validToken();
       const journal = this.getJournal(accountId);
 
       // 1. Pull remote changes since journal.rev
-      let pull = await this.runAuthed((t) => server.syncPull(t, journal.rev));
+      let pull = await this.runAuthed((t) => this.withSyncRetry(() => server.syncPull(t, journal.rev, 1000)));
       if (pull.reset) {
         journal.rev = 0;
         journal.known = {};
-        pull = await server.syncPull(token, 0);
+        pull = await this.runAuthed((t) => this.withSyncRetry(() => server.syncPull(t, 0, 1000)));
       }
       const allPulled: SyncItem[] = [...pull.items];
       let latestRev = pull.rev;
       let guard = 0;
-      while (pull.more && guard++ < 20) {
-        pull = await server.syncPull(token, latestRev);
+      while (pull.more && guard++ < 200) {
+        pull = await this.runAuthed((t) => this.withSyncRetry(() => server.syncPull(t, latestRev, 1000)));
         allPulled.push(...pull.items);
         latestRev = pull.rev;
       }
@@ -670,7 +773,7 @@ export class WebAccountManager {
         }
 
         for (const chunk of chunkPushEntries(pushEntries)) {
-          const pushed = await this.runAuthed((t) => server.syncPush(t, chunk.map((e) => e.sealed)));
+          const pushed = await this.runAuthed((t) => this.withSyncRetry(() => server.syncPush(t, chunk.map((e) => e.sealed))));
           journal.rev = pushed.rev;
           for (const entry of chunk) {
             if (entry.plain) {
@@ -695,6 +798,10 @@ export class WebAccountManager {
       this.syncError = String((e as Error)?.message ?? e);
     } finally {
       this.syncing = false;
+      if (this.resyncPending && this.session) {
+        this.resyncPending = false;
+        this.scheduleSync(1500);
+      }
     }
   }
 
@@ -705,23 +812,29 @@ export class WebAccountManager {
     let libChanged = false;
     let offsetsChanged = false;
 
-    for (const it of items) {
+    const recordKnown = (it: SyncItem, hashSource: unknown) => {
       const kKey = `${it.kind}\0${it.key}`;
       if (it.deleted || it.value == null) {
         delete journal.known[kKey];
       } else {
         journal.known[kKey] = {
-          hash: quickHash(it.value),
+          hash: quickHash(hashSource),
           rev: it.rev ?? pullRev,
           updated_at: it.updated_at,
         };
       }
+    };
+
+    for (const it of items) {
+      let hashSource: unknown = it.value;
 
       switch (it.kind) {
         case SYNC_KIND.LIKED: {
-          lib.liked = lib.liked.filter((t) => trackKey(t) !== it.key);
+          lib.liked = lib.liked.filter((t) => trackSyncId(t) !== it.key && trackKey(t) !== it.key);
           if (!it.deleted && it.value?.id && it.value?.title) {
-            lib.liked.unshift(it.value as Track);
+            const tr = canonicalTrack(it.value as Track);
+            lib.liked.unshift(tr);
+            hashSource = tr;
           }
           libChanged = true;
           break;
@@ -733,24 +846,30 @@ export class WebAccountManager {
               id: it.key,
               name: String(it.value.name),
               description: it.value.description ?? "",
-              tracks: Array.isArray(it.value.tracks) ? it.value.tracks : [],
-              created_at: Number(it.value.created_at) || Date.now(),
+              tracks: Array.isArray(it.value.tracks) ? it.value.tracks.map(canonicalTrack) : [],
+              created_at: Number(it.value.created_at) || 0,
               local_only: false,
             };
             lib.playlists.push(pl);
+            hashSource = playlistSyncValue(pl);
           }
           libChanged = true;
           break;
         }
         case SYNC_KIND.ALBUM: {
-          lib.saved_albums = lib.saved_albums.filter((a) => !(a.kind === "album" && `${norm(a.artist)}|${norm(a.title)}` === it.key));
+          lib.saved_albums = lib.saved_albums.filter(
+            (a) => !(a.kind === "album" && (`${norm(a.title)}|${norm(a.artist)}` === it.key || `${norm(a.artist)}|${norm(a.title)}` === it.key)),
+          );
           if (!it.deleted && it.value?.title && it.value?.artist) {
+            const title = String(it.value.title);
+            const artist = String(it.value.artist);
             lib.saved_albums.push({
               kind: "album",
-              title: String(it.value.title),
-              artist: String(it.value.artist),
+              title,
+              artist,
               tracks: [],
             });
+            hashSource = { title, artist };
           }
           libChanged = true;
           break;
@@ -759,17 +878,24 @@ export class WebAccountManager {
           const name = typeof it.value === "string" ? it.value : it.value?.name;
           lib.followed = lib.followed.filter((a) => norm(a) !== it.key);
           if (!it.deleted && typeof name === "string" && name.trim()) {
-            lib.followed.push(name.trim());
+            const clean = name.trim();
+            lib.followed.push(clean);
+            hashSource = { name: clean };
           }
           libChanged = true;
           break;
         }
         case SYNC_KIND.RECENT: {
-          const tr: Track | null = it.value?.track ?? (it.value?.id ? it.value : null);
-          lib.recent = lib.recent.filter((r) => !(r.kind === "song" && trackKey(r.track) === it.key));
-          if (!it.deleted && tr?.id && tr?.title) {
-            lib.recent.unshift({ kind: "song", track: tr, at: Number(it.value?.played_at) || it.updated_at * 1000 });
+          const trRaw: Track | null = it.value?.track ?? (it.value?.id ? it.value : null);
+          lib.recent = lib.recent.filter(
+            (r) => !(r.kind === "song" && (`song:${trackSyncId(r.track)}` === it.key || trackSyncId(r.track) === it.key || trackKey(r.track) === it.key)),
+          );
+          if (!it.deleted && trRaw?.id && trRaw?.title) {
+            const tr = canonicalTrack(trRaw);
+            const playedAt = Number(it.value?.played_at) || 0;
+            lib.recent.unshift({ kind: "song", track: tr, at: playedAt || it.updated_at * 1000 });
             lib.recent = lib.recent.slice(0, 100);
+            hashSource = { track: tr, played_at: playedAt || it.updated_at * 1000 };
           }
           libChanged = true;
           break;
@@ -792,7 +918,7 @@ export class WebAccountManager {
           break;
         }
         case SYNC_KIND.SEARCH: {
-          lib.search_history = lib.search_history.filter((s) => searchSyncKey(s) !== it.key);
+          lib.search_history = lib.search_history.filter((s) => searchSyncKey(s) !== it.key && legacySearchSyncKey(s) !== it.key);
           if (!it.deleted && it.value?.kind) {
             lib.search_history.unshift(it.value as SearchItem);
             lib.search_history = lib.search_history.slice(0, 20);
@@ -807,9 +933,12 @@ export class WebAccountManager {
           break;
         }
         case SYNC_KIND.HIDDEN_ARTIST: {
+          const ha = typeof it.value === "string" ? it.value : it.value?.name;
           lib.hidden_artists = (lib.hidden_artists ?? []).filter((a) => norm(a) !== it.key);
-          if (!it.deleted && typeof it.value === "string") {
-            lib.hidden_artists.push(it.value);
+          if (!it.deleted && typeof ha === "string" && ha.trim()) {
+            const clean = ha.trim();
+            lib.hidden_artists.push(clean);
+            hashSource = clean;
           }
           libChanged = true;
           break;
@@ -825,6 +954,8 @@ export class WebAccountManager {
           break;
         }
       }
+
+      recordKnown(it, hashSource);
     }
 
     if (libChanged) this.host.setLibrary(lib);
@@ -844,38 +975,38 @@ export class WebAccountManager {
       current.set(`${kind}\0${key}`, { kind, key, value });
     };
 
-    for (const t of lib.liked) put(SYNC_KIND.LIKED, trackKey(t), wireTrack(t));
+    for (const t of lib.liked) {
+      const k = pickJournalKey(journal, SYNC_KIND.LIKED, trackSyncId(t), trackKey(t));
+      put(SYNC_KIND.LIKED, k, canonicalTrack(t));
+    }
     for (const p of lib.playlists) {
       if (p.local_only) continue;
-      put(SYNC_KIND.PLAYLIST, p.id, {
-        id: p.id,
-        name: p.name,
-        description: p.description ?? "",
-        tracks: p.tracks.map(wireTrack),
-        created_at: p.created_at ?? now * 1000,
-        updated_at: now,
-      });
+      put(SYNC_KIND.PLAYLIST, p.id, playlistSyncValue(p));
     }
     for (const a of lib.saved_albums) {
       if (a.kind !== "album") continue;
-      put(SYNC_KIND.ALBUM, `${norm(a.artist)}|${norm(a.title)}`, {
+      const k = pickJournalKey(journal, SYNC_KIND.ALBUM, `${norm(a.title)}|${norm(a.artist)}`, `${norm(a.artist)}|${norm(a.title)}`);
+      put(SYNC_KIND.ALBUM, k, {
         title: a.title,
         artist: a.artist,
-        cover_url: a.tracks[0]?.cover_url ?? null,
       });
     }
     for (const f of lib.followed) put(SYNC_KIND.FOLLOWED, norm(f), { name: f });
-    for (const r of lib.recent.slice(0, 50)) {
+    for (const r of lib.recent.slice(0, 100)) {
       if (r.kind === "song") {
-        put(SYNC_KIND.RECENT, trackKey(r.track), {
-          track: wireTrack(r.track),
-          played_at: r.at ?? now * 1000,
+        const k = pickJournalKey(journal, SYNC_KIND.RECENT, `song:${trackSyncId(r.track)}`, trackKey(r.track));
+        put(SYNC_KIND.RECENT, k, {
+          track: canonicalTrack(r.track),
+          played_at: r.at ?? 0,
         });
       }
     }
     for (const p of lib.pinned) put(SYNC_KIND.PINNED, listSyncKey(p), p);
     for (const rl of lib.recent_lists) put(SYNC_KIND.RECENT_LIST, listSyncKey(rl), rl);
-    for (const s of lib.search_history) put(SYNC_KIND.SEARCH, searchSyncKey(s), s);
+    for (const s of lib.search_history) {
+      const k = pickJournalKey(journal, SYNC_KIND.SEARCH, searchSyncKey(s), legacySearchSyncKey(s));
+      put(SYNC_KIND.SEARCH, k, s);
+    }
     for (const h of lib.hidden_sidebar) put(SYNC_KIND.HIDDEN_SIDEBAR, h, h);
     for (const ha of lib.hidden_artists ?? []) put(SYNC_KIND.HIDDEN_ARTIST, norm(ha), ha);
     for (const [tk, off] of Object.entries(offsets)) put(SYNC_KIND.LYRICS_OFFSET, tk, off);

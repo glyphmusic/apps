@@ -38,6 +38,35 @@ declare global {
 
 const YT_API = "https://www.youtube.com/iframe_api";
 
+/** Builds a 1-second silent 16-bit mono PCM WAV Blob URL (allowed by `media-src blob:`). */
+function createSilentWavUrl(): string | null {
+  if (typeof URL === "undefined" || typeof Blob === "undefined" || typeof URL.createObjectURL !== "function") {
+    return null;
+  }
+  const sampleRate = 8000;
+  const numSamples = sampleRate;
+  const dataBytes = numSamples * 2;
+  const buf = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buf);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataBytes, true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
 /** A URL that would stream through glyph-server (same origin, `/v1/audio/...`, a short link's audio). */
 export function serverAudio(url: string): boolean {
   try {
@@ -80,50 +109,124 @@ export class WebEngine {
   private gen = 0;
   /** Initial seek offset applied once the `<audio>` element has metadata. */
   private pendingStart = 0;
+  /** True once `this.audio` has been started by a play request. */
+  private audioUnlocked = false;
+  /** Silent blob WAV keepalive active while resolving the next track asynchronously. */
+  private keepalive = false;
+  /** Suppresses transient `<audio>` pause events fired while swapping `src` during load. */
+  private loadingAudio = false;
+  private silentUrl: string | null = null;
+  private ytWantedPlaying = false;
+  private ytAutoResumeUsed = false;
+  private ytResumeTimer = 0;
+  private hiddenAt = 0;
 
   constructor(private hooks: EngineHooks) {
     this.bindAudio(this.audio);
-    this.bindAudio(this.nextAudio);
+    this.nextAudio.preload = "auto";
+    this.nextAudio.muted = true;
+    this.nextAudio.crossOrigin = null;
+    this.nextAudio.addEventListener("error", () => {
+      if (this.nextAudio.src && this.preloadedUrl === this.nextAudio.src) {
+        this.preloadedUrl = null;
+      }
+    });
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          this.hiddenAt = performance.now();
+          this.ytAutoResumeUsed = false;
+        } else {
+          this.ytAutoResumeUsed = false;
+          clearTimeout(this.ytResumeTimer);
+        }
+      });
+    }
   }
 
   private bindAudio(a: HTMLAudioElement) {
     a.preload = "auto";
     a.crossOrigin = null;
+    a.setAttribute("playsinline", "");
     a.addEventListener("loadedmetadata", () => {
-      if (a !== this.audio || this.mode !== "audio" || this.pendingStart <= 0) return;
+      if (this.keepalive || this.mode !== "audio" || this.pendingStart <= 0) return;
       const target = Number.isFinite(a.duration) ? Math.min(this.pendingStart, a.duration) : this.pendingStart;
       this.pendingStart = 0;
       try { a.currentTime = target; } catch { /* ignore */ }
     });
-    a.addEventListener("timeupdate", () => a === this.audio && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
-    a.addEventListener("durationchange", () => a === this.audio && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
-    a.addEventListener("playing", () => a === this.audio && this.mode === "audio" && this.hooks.playing(true));
-    a.addEventListener("pause", () => a === this.audio && this.mode === "audio" && !a.ended && this.hooks.playing(false));
-    a.addEventListener("waiting", () => a === this.audio && this.mode === "audio" && this.hooks.waiting());
-    a.addEventListener("ended", () => a === this.audio && this.mode === "audio" && this.hooks.ended());
+    a.addEventListener("timeupdate", () => !this.keepalive && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
+    a.addEventListener("durationchange", () => !this.keepalive && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
+    a.addEventListener("playing", () => {
+      this.loadingAudio = false;
+      if (!this.keepalive && this.mode === "audio") this.hooks.playing(true);
+    });
+    a.addEventListener("pause", () => !this.keepalive && !this.loadingAudio && this.mode === "audio" && !a.ended && this.hooks.playing(false));
+    a.addEventListener("waiting", () => !this.keepalive && this.mode === "audio" && this.hooks.waiting());
+    a.addEventListener("ended", () => {
+      this.loadingAudio = false;
+      if (!this.keepalive && this.mode === "audio") this.hooks.ended();
+    });
     a.addEventListener("error", () => {
-      if (a !== this.audio || this.mode !== "audio" || !a.src) return;
+      this.loadingAudio = false;
+      if (this.keepalive || this.mode !== "audio" || !a.src) return;
       this.hooks.error(a.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "format_unsupported" : "playback_failed");
     });
   }
 
-  /** Pre-buffer the next direct audio stream without interrupting current playback. */
+  private getSilentWavUrl(): string | null {
+    if (!this.silentUrl) this.silentUrl = createSilentWavUrl();
+    return this.silentUrl;
+  }
+
+  /** Pre-buffer the next direct audio stream (or warm the YouTube API) without interrupting playback. */
   preload(src: PlaybackSource | null) {
-    if (!src || src.kind === "embed" || serverAudio(src.url)) return;
-    if (this.preloadedUrl === src.url) return;
+    if (!src) return;
+    if (src.kind === "embed") {
+      if (src.provider === "youtube") void loadYouTubeApi().catch(() => {});
+      return;
+    }
+    if (serverAudio(src.url) || this.preloadedUrl === src.url) return;
     this.preloadedUrl = src.url;
     this.nextAudio.src = src.url;
     this.nextAudio.load();
   }
 
+  /** Keep the blessed `<audio>` session active during an async track resolution. */
+  beginTransition() {
+    this.gen++;
+    clearTimeout(this.ytResumeTimer);
+    if (this.mode !== "audio" || !this.audioUnlocked) {
+      this.stopAudio();
+      this.stopYouTube();
+      this.mode = null;
+      return;
+    }
+    this.stopYouTube();
+    const url = this.getSilentWavUrl();
+    if (!url) {
+      if (!this.audio.paused) this.audio.pause();
+      return;
+    }
+    this.mode = "audio";
+    this.pendingStart = 0;
+    this.keepalive = true;
+    const a = this.audio;
+    a.loop = true;
+    if (a.src !== url) a.src = url;
+    void a.play().catch(() => {});
+  }
+
   /** Play (or only load, `autoplay` false) a resolved source from `start` seconds. */
   async load(src: PlaybackSource, autoplay: boolean, start = 0) {
     const gen = ++this.gen;
+    clearTimeout(this.ytResumeTimer);
     if (src.kind === "embed") {
       if (src.provider !== "youtube") throw new Error("embed_unsupported");
       this.stopAudio();
       this.mode = "youtube";
-      const yt = await this.youtube();
+      this.ytWantedPlaying = autoplay;
+      this.ytAutoResumeUsed = false;
+      const yt = this.yt ?? await this.youtube();
       if (gen !== this.gen) return;
       this.showBox(true);
       const o = { videoId: src.embed_id, startSeconds: start || undefined };
@@ -135,16 +238,15 @@ export class WebEngine {
     if (serverAudio(src.url)) throw new Error("server_audio");
     this.stopYouTube();
     this.mode = "audio";
-    if (this.preloadedUrl === src.url && this.nextAudio.readyState >= 1) {
-      const old = this.audio;
-      old.pause();
-      old.removeAttribute("src");
-      old.load();
-      this.audio = this.nextAudio;
-      this.nextAudio = old;
+    this.keepalive = false;
+    this.loadingAudio = true;
+    if (this.preloadedUrl === src.url) {
       this.preloadedUrl = null;
+      this.nextAudio.removeAttribute("src");
+      this.nextAudio.load();
     }
     const a = this.audio;
+    a.loop = false;
     this.pendingStart = start > 0 ? start : 0;
     if (a.src !== src.url) {
       a.src = src.url;
@@ -153,20 +255,40 @@ export class WebEngine {
       try { a.currentTime = start; } catch { /* applied on loadedmetadata */ }
     }
     this.applyVolume();
-    if (autoplay) await a.play().catch((e: unknown) => { if (gen === this.gen) this.autoplayBlocked(e); });
+    if (autoplay) {
+      this.audioUnlocked = true;
+      await a.play().catch((e: unknown) => {
+        this.loadingAudio = false;
+        if (gen === this.gen) this.autoplayBlocked(e);
+      });
+    } else {
+      this.loadingAudio = false;
+    }
   }
 
   play() {
-    if (this.mode === "audio") this.audio.play().catch((e: unknown) => this.autoplayBlocked(e));
-    else if (this.mode === "youtube") this.yt?.playVideo();
+    if (this.mode === "audio") {
+      this.audioUnlocked = true;
+      this.audio.play().catch((e: unknown) => this.autoplayBlocked(e));
+    } else if (this.mode === "youtube") {
+      this.ytWantedPlaying = true;
+      this.yt?.playVideo();
+    }
   }
   pause() {
-    if (this.mode === "audio") this.audio.pause();
-    else if (this.mode === "youtube") this.yt?.pauseVideo();
+    clearTimeout(this.ytResumeTimer);
+    if (this.mode === "audio") {
+      this.keepalive = false;
+      this.audio.loop = false;
+      this.audio.pause();
+    } else if (this.mode === "youtube") {
+      this.ytWantedPlaying = false;
+      this.yt?.pauseVideo();
+    }
   }
   seek(s: number) {
     this.pendingStart = 0;
-    if (this.mode === "audio") this.audio.currentTime = s;
+    if (this.mode === "audio" && !this.keepalive) this.audio.currentTime = s;
     else if (this.mode === "youtube") this.yt?.seekTo(s, true);
   }
   setVolume(v: number, muted: boolean) {
@@ -176,6 +298,7 @@ export class WebEngine {
   }
   stop() {
     this.gen++;
+    clearTimeout(this.ytResumeTimer);
     this.stopAudio();
     this.stopYouTube();
     this.mode = null;
@@ -198,7 +321,10 @@ export class WebEngine {
 
   private stopAudio() {
     const a = this.audio;
+    this.keepalive = false;
+    this.loadingAudio = false;
     this.pendingStart = 0;
+    a.loop = false;
     if (!a.src) return;
     a.pause();
     a.removeAttribute("src");
@@ -207,6 +333,9 @@ export class WebEngine {
 
   private stopYouTube() {
     clearInterval(this.poll);
+    clearTimeout(this.ytResumeTimer);
+    this.ytWantedPlaying = false;
+    this.ytAutoResumeUsed = false;
     if (this.yt) { try { this.yt.stopVideo(); } catch { /* player not ready */ } }
     this.showBox(false);
   }
@@ -260,12 +389,38 @@ export class WebEngine {
     clearInterval(this.poll);
     switch (s) {
       case 1: // playing
+        this.ytAutoResumeUsed = false;
         report();
         this.poll = window.setInterval(report, 250);
         this.hooks.playing(true);
         break;
-      case 2: report(); this.hooks.playing(false); break; // paused
+      case 2: // paused
+        if (
+          this.ytWantedPlaying
+          && typeof document !== "undefined"
+          && document.hidden
+          && !this.ytAutoResumeUsed
+          && performance.now() - this.hiddenAt < 1500
+        ) {
+          this.ytAutoResumeUsed = true;
+          clearTimeout(this.ytResumeTimer);
+          this.ytResumeTimer = window.setTimeout(() => {
+            if (this.mode === "youtube" && this.ytWantedPlaying && this.yt) {
+              try { this.yt.playVideo(); } catch { /* ignore */ }
+            }
+          }, 120);
+          return;
+        }
+        this.ytWantedPlaying = false;
+        report();
+        this.hooks.playing(false);
+        break;
       case 3: this.hooks.waiting(); break; // buffering
+      case 5: // cued (can happen in background tab after loadVideoById)
+        if (this.ytWantedPlaying) {
+          try { yt.playVideo(); } catch { /* ignore */ }
+        }
+        break;
       case 0: this.hooks.ended(); break; // ended
     }
   }

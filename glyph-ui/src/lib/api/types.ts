@@ -30,6 +30,25 @@ export function trackKey(t: Track): string {
   return `${t.title.trim().toLowerCase()}|${t.artist.trim().toLowerCase()}`;
 }
 
+/** True when `url` (or its `/v1/upstream?url=` target) points to a YouTube image host. */
+export function isYoutubeCover(url?: string | null): boolean {
+  if (!url) return false;
+  const ytHost = (host: string) => {
+    const h = host.toLowerCase();
+    return ["ytimg.com", "youtube.com", "ggpht.com"].some((s) => h === s || h.endsWith(`.${s}`));
+  };
+  try {
+    const parsed = new URL(url, typeof location !== "undefined" ? location.origin : "https://glyph.my");
+    if (parsed.pathname.endsWith("/v1/upstream")) {
+      const inner = parsed.searchParams.get("url");
+      if (inner) return ytHost(new URL(inner).hostname);
+    }
+    return ytHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function sources(t: Track): ProviderId[] {
   const v: ProviderId[] = [t.source];
   for (const p of Object.keys(t.external_ids ?? {}) as ProviderId[]) if (p !== t.source) v.push(p);

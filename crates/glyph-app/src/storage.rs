@@ -645,7 +645,21 @@ fn audio() -> &'static RwLock<glyph_core::OfflineAudio> {
 
 /// No internet (only ever true on phones, like the GPUI app).
 pub fn is_offline() -> bool {
-    OFFLINE.load(Ordering::Relaxed)
+    match glyph_core::connectivity::platform_online() {
+        Some(online) => !online,
+        None => OFFLINE.load(Ordering::Relaxed),
+    }
+}
+
+/// Applies a platform connectivity transition right away instead of waiting
+/// up to 15 s for `spawn_connectivity`.
+pub fn set_offline_now(core: Option<&Arc<Core>>, online: bool) {
+    let was = OFFLINE.swap(!online, Ordering::Relaxed);
+    if was != !online {
+        if let Some(c) = core {
+            c.on_offline_changed(!online);
+        }
+    }
 }
 
 /// Saved (downloaded, imported, local) or cached for offline play (phones).

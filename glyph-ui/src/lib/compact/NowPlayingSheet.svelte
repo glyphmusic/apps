@@ -195,7 +195,7 @@
 </div>
 
 <style>
-  .sheet { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; overflow: hidden; background: rgba(8, 8, 8, .62); backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px); }
+  .sheet { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; overflow: hidden; background: #080808; }
   .sheet.settle { transition: transform .24s var(--ease), border-radius .22s var(--ease); }
   .hdr { position: relative; flex: none; height: calc(52px + var(--safe-top, env(safe-area-inset-top))); padding-top: var(--safe-top, env(safe-area-inset-top)); touch-action: none; }
   .normal { position: absolute; inset: var(--safe-top, env(safe-area-inset-top)) 0 0; padding: 0 4px; display: flex; align-items: center; gap: 4px; }

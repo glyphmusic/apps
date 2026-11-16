@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.12.3 - 2026-11-16
+
+### Fixed
+
+- **Artwork & Deduplication**: prefer non-YouTube cover artwork when merging or importing tracks across providers (`prefer_cover`) and automatically upgrade cached 4:3 YouTube thumbnails on disk to square album covers (`cover.rs`).
+- **Playback, Preload & Radio**: emit `PreloadFailed` when a preloaded next track fails to open or decode so preload state resets cleanly (`glyph-audio`), clear stale player position/loading flags on track switches (`player_stale`, `restored_pos`), and surface `radio_loading` / offline guards properly during radio continuation.
+- **Android Lifecycle & Connectivity**: added `nativeDetach` / `nativeResumed` Activity hooks, bounded event queuing and WebView render-process / main-frame retry recovery (`MainActivity.java`), media service resilience (`PlaybackService.java`), and immediate `set_offline_now` state propagation on platform connectivity changes.
+- **Web Player (`/web`) & UI**:
+  - Added web PWA manifest (`manifest.webmanifest`) and app icons (`icon-256.png`, `icon-512.png`).
+  - Improved web audio background/visibility playback recovery, sync journal canonicalization with `429` retry/cooldown backoff (`web-account.ts`), and `429` backoff during login polling (`account-state.svelte.ts`).
+  - Guarded startup against uncaught window errors/rejections (`App.svelte`), added a splash safety timeout (`Splash.svelte`), guarded missing 2D canvas contexts (`glow.ts`), and made `NowPlayingSheet` solid (`#080808`) without translucent blur artifacts.
+
 ## 0.12.2 - 2026-11-16
 
 ### Fixed

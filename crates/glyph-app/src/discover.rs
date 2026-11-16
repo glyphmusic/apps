@@ -215,6 +215,13 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
     let mut skip = exclude;
     skip.extend(seeds.iter().map(track_key));
     let ended_on = core.st().current.as_ref().map(track_key);
+    if append {
+        let mut st = core.st();
+        st.radio_loading = true;
+        st.error = None;
+        drop(st);
+        core.emit_player();
+    }
     toast(core, "toast.radio", Some(json!({ "title": title })), None, "ok");
     let core = core.clone();
     crate::rt::spawn(async move {
@@ -252,6 +259,7 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
                 // Something else started meanwhile: that wins.
                 let first = {
                     let mut st = core.st();
+                    st.radio_loading = false;
                     let still_ended = st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none();
                     if still_ended {
                         st.queue.append(tracks);
@@ -266,11 +274,29 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
                 };
                 if let Some(t) = first {
                     core.start_track(t);
+                } else {
+                    core.emit_player();
                 }
             }
             (false, _) => core.play_list(tracks, 0, Some(label)),
-            (true, Some(e)) => toast(&core, "toast.radio_error", Some(json!({ "e": e })), None, "info"),
-            (true, None) => toast(&core, "toast.radio_empty", None, None, "info"),
+            (true, e) => {
+                let err_msg = e.as_deref().unwrap_or("radio_empty").to_string();
+                if append {
+                    let mut st = core.st();
+                    st.radio_loading = false;
+                    if st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none() {
+                        st.error = Some(err_msg.clone());
+                    }
+                }
+                if let Some(e) = e {
+                    toast(&core, "toast.radio_error", Some(json!({ "e": e })), None, "info");
+                } else {
+                    toast(&core, "toast.radio_empty", None, None, "info");
+                }
+                if append {
+                    core.emit_player();
+                }
+            }
         }
     });
 }
@@ -292,7 +318,7 @@ pub fn on_queue_end(core: &Arc<Core>) -> bool {
         }
         g.radio_on
     };
-    if !radio {
+    if !radio || crate::storage::is_offline() || core.backend().is_none() {
         return false;
     }
     let (current, played) = {

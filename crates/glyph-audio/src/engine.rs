@@ -626,9 +626,12 @@ impl Engine {
             self.emit(PlayerEvent::Error(message));
         } else if self.pending_next.as_ref().is_some_and(|p| p.id == id) {
             tracing::warn!("preload failed: {message}");
-            self.pending_next = None;
+            self.drop_next();
+            self.emit(PlayerEvent::PreloadFailed);
         } else if self.next.as_ref().is_some_and(|n| n.id == id) {
             tracing::warn!("preloaded track failed: {message}");
+            self.drop_next();
+            self.emit(PlayerEvent::PreloadFailed);
         }
     }
 
@@ -1209,6 +1212,8 @@ impl Engine {
             self.emit(PlayerEvent::Ended);
         } else {
             self.cur = None;
+            self.pending_next = None;
+            self.next_load = None;
             if let Some(p) = self.player.take() {
                 p.stop();
             }
@@ -1292,5 +1297,68 @@ mod tests {
             ev,
             vec![PlayerEvent::StatusChanged(Status::Idle), PlayerEvent::Error("embedding disabled".into())]
         );
+    }
+
+    #[test]
+    fn preload_decode_error_drops_next_and_notifies() {
+        let (events_tx, events_rx) = flume::unbounded();
+        let shared = Arc::new(Shared {
+            host: Arc::new(crate::embed::host::HostQueue::default()),
+            state: std::sync::Mutex::new(st()),
+            spectrum: std::sync::Mutex::new([0.0; crate::SPECTRUM_BANDS]),
+            events_tx,
+            events_rx: events_rx.clone(),
+        });
+        let (cmd_tx, cmd_rx) = flume::unbounded();
+        let mut engine = Engine::new(shared, cmd_rx, cmd_tx);
+        let mk_track = |id: &str| Track {
+            id: id.into(),
+            source: glyph_protocol::ProviderId::Deezer,
+            title: id.into(),
+            artist: "Artist".into(),
+            album: None,
+            duration_ms: Some(120_000),
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+            explicit: false,
+        };
+        engine.cur = Some(Slot {
+            id: 1,
+            track: mk_track("cur"),
+            is_preview: false,
+            shared: Arc::new(TrackShared::default()),
+            ctl: Arc::new(native::DecodeCtl::default()),
+            rate: 48_000,
+            duration: Some(Duration::from_secs(120)),
+            near_end_sent: true,
+            queued_at: Instant::now(),
+        });
+        engine.pending_next = Some(Pending { id: 42, track: mk_track("next1"), is_preview: false });
+        engine.on_decode_error(42, "network reset".into());
+        assert!(engine.pending_next.is_none());
+        assert!(!engine.cur.as_ref().unwrap().near_end_sent);
+        assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::PreloadFailed));
+
+        // Already-decoded `self.next` that hits an HTTP range error later is also dropped.
+        let ctl = Arc::new(native::DecodeCtl::default());
+        engine.cur.as_mut().unwrap().near_end_sent = true;
+        engine.next = Some(Slot {
+            id: 43,
+            track: mk_track("next2"),
+            is_preview: false,
+            shared: Arc::new(TrackShared::default()),
+            ctl: ctl.clone(),
+            rate: 48_000,
+            duration: Some(Duration::from_secs(120)),
+            near_end_sent: false,
+            queued_at: Instant::now(),
+        });
+        engine.on_decode_error(43, "403 Forbidden".into());
+        assert!(engine.next.is_none());
+        assert!(ctl.stop.load(Ordering::SeqCst));
+        assert!(!engine.cur.as_ref().unwrap().near_end_sent);
+        assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::PreloadFailed));
     }
 }

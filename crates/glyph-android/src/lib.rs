@@ -232,14 +232,23 @@ impl Host for AndroidHost {
         let (current, liked, playing, buffering, position, remote_volume) = {
             let st = core.st();
             let ps = core.player_state();
-            let current = st.current.clone().or_else(|| ps.as_ref().and_then(|s| s.track.clone()));
+            let active_ps = (!st.player_stale).then_some(ps.as_ref()).flatten();
+            let current = st.current.clone().or_else(|| active_ps.and_then(|s| s.track.clone()));
             let liked = current.as_ref().is_some_and(|c| st.library.is_liked(c));
             let hold = glyph_app::jam::hold_play();
-            let loading = ps.as_ref().is_some_and(|s| s.status == Status::Loading);
-            let playing = (ps.as_ref().is_some_and(|s| s.status == Status::Playing) && !st.resolving)
-                || (st.resolving && !hold);
-            let buffering = (st.resolving || loading) && !hold;
-            let pos = ps.as_ref().map_or(Duration::ZERO, |s| s.position);
+            let loading_src = active_ps.is_some_and(|s| s.status == Status::Loading);
+            let ended = active_ps.is_some_and(|s| s.status == Status::Ended);
+            let loading = st.resolving || st.radio_loading;
+            let playing = (active_ps.is_some_and(|s| s.status == Status::Playing) && !loading)
+                || (loading && !hold);
+            let buffering = (loading || loading_src) && !hold;
+            let pos = if loading || st.error.is_some() || ended {
+                st.resume_at.unwrap_or(Duration::ZERO)
+            } else if let Some(restored) = st.restored_pos {
+                restored
+            } else {
+                active_ps.map_or(Duration::ZERO, |s| s.position)
+            };
             let remote_vol = if glyph_app::jam::remote_on() {
                 ps.as_ref().map(|s| (s.volume.clamp(0.0, 1.0) * 100.0).round() as u8)
             } else {
@@ -454,6 +463,27 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
     });
 }
 
+/// Clears the cached Activity reference when `activity` is destroyed, without
+/// disturbing a newer instance if one was already created.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeDetach<'local>(
+    mut env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    activity: JObject<'local>,
+) {
+    let removed = env
+        .with_env(|env| -> jni::errors::Result<Option<Global<JObject<'static>>>> {
+            let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+            let same = match guard.as_ref() {
+                Some(g) => env.is_same_object(g.as_ref(), &activity)?,
+                None => false,
+            };
+            Ok(if same { guard.take() } else { None })
+        })
+        .resolve::<LogErrorAndDefault>();
+    drop(removed);
+}
+
 /// Asynchronous command bridge called from WebView `window.__GLYPH_ANDROID__.invoke`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_glyph_MainActivity_nativeInvoke<'local>(
@@ -522,13 +552,26 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeConnectivity(
     online: jboolean,
 ) {
     glyph_core::connectivity::set_platform_online(online);
+    let core = STATE.get().map(|st| &st.core);
+    glyph_app::storage::set_offline_now(core, online);
     if online {
         glyph_core::outage::clear();
-        if let Some(st) = STATE.get() {
-            if let Some(b) = st.core.backend() {
+        if let Some(c) = core {
+            if let Some(b) = c.backend() {
                 b.clear_cooldowns();
             }
         }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeResumed(
+    _env: EnvUnowned,
+    _this: JObject,
+) {
+    if let Some(st) = STATE.get() {
+        st.core.emit_player();
+        st.core.emit_queue();
     }
 }
 

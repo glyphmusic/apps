@@ -5,7 +5,7 @@ import { mount, unmount } from "svelte";
 import MiniPlayer from "./overlays/MiniPlayer.svelte";
 import { inMiniWindow } from "./window";
 import { isWeb, backend } from "./api/backend";
-import type { Track } from "./api/types";
+import { isYoutubeCover, type Track } from "./api/types";
 
 const CHANNEL_NAME = "glyph-web-mini";
 
@@ -395,7 +395,7 @@ export function setupWebMiniPopup(app: any): () => void {
         return Promise.resolve() as any;
       };
       b.cover = (track: Track) => {
-        if (track?.cover_url) return Promise.resolve(track.cover_url);
+        if (track?.cover_url && !isYoutubeCover(track.cover_url)) return Promise.resolve(track.cover_url);
         return new Promise<string | null>((resolve) => {
           const id = Math.random().toString(36).slice(2);
           const onMsg = (e: MessageEvent) => {

@@ -1,8 +1,9 @@
 //! Cover cache: size-normalised JPEGs on disk (LRU, 500 MB) with the fallback
-//! chain provider cover -> Spotify/Deezer -> MusicBrainz Cover Art Archive.
+//! chain non-YouTube cover -> Spotify/Deezer -> MusicBrainz Cover Art Archive,
+//! falling back to YouTube thumbnails only when no other cover exists.
 //! If everything fails the UI draws a generated ASCII pattern (`None`).
 
-use crate::dedupe::{artist_similarity, title_similarity, track_key};
+use crate::dedupe::{artist_similarity, normalize_artist, normalize_title, title_similarity, track_key};
 use crate::paths;
 use crate::provider::MusicProvider;
 use crate::providers::Providers;
@@ -47,6 +48,36 @@ pub fn small_cover_url(url: &str) -> String {
     u
 }
 
+/// `true` when `url` (or its `/v1/upstream?url=` target) points to a YouTube
+/// image host (`ytimg.com`, `youtube.com`, `ggpht.com`).
+pub fn is_youtube_cover(url: &str) -> bool {
+    fn yt_host(host: &str) -> bool {
+        const YT_HOSTS: &[&str] = &["ytimg.com", "youtube.com", "ggpht.com"];
+        let h = host.to_ascii_lowercase();
+        YT_HOSTS.iter().any(|s| h == *s || h.ends_with(&format!(".{s}")))
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.path().ends_with("/v1/upstream") {
+        if let Some((_, inner)) = parsed.query_pairs().find(|(k, _)| k == "url") {
+            if let Ok(inner_url) = reqwest::Url::parse(&inner) {
+                return inner_url.host_str().is_some_and(yt_host);
+            }
+        }
+    }
+    parsed.host_str().is_some_and(yt_host)
+}
+
+/// `true` when the cached file's header dimensions are within 10% of 1:1
+/// (so 4:3 and 16:9 YouTube thumbnails are detected without decoding pixels).
+fn is_roughly_square(path: &Path) -> bool {
+    match image::image_dimensions(path) {
+        Ok((w, h)) if w > 0 && h > 0 => w.min(h) * 100 >= w.max(h) * 90,
+        _ => true,
+    }
+}
+
 pub const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024;
 /// Longest edge of a cached cover.
 pub const COVER_PX: u32 = 512;
@@ -69,6 +100,8 @@ pub struct CoverCache {
     providers: Arc<Providers>,
     /// Songs for which the whole chain failed (this session only).
     misses: Mutex<HashSet<String>>,
+    /// Non-square cached covers already checked for a non-YouTube upgrade this session.
+    upgraded: Mutex<HashSet<String>>,
     last_prune: Mutex<Option<std::time::Instant>>,
     pruning: Arc<AtomicBool>,
 }
@@ -83,6 +116,7 @@ impl CoverCache {
             http,
             providers,
             misses: Mutex::new(HashSet::new()),
+            upgraded: Mutex::new(HashSet::new()),
             last_prune: Mutex::new(None),
             pruning: Arc::new(AtomicBool::new(false)),
         }
@@ -110,6 +144,10 @@ impl CoverCache {
         self.dir.join(format!("validated-v2-{key}.jpg"))
     }
 
+    fn try_claim_upgrade(&self, key: &str) -> bool {
+        self.upgraded.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string())
+    }
+
     /// Cached cover for the song, fetching it through the fallback chain if needed.
     pub async fn get(&self, track: &Track) -> Result<Option<PathBuf>> {
         let key = paths::hash_hex(&track_key(track));
@@ -119,6 +157,12 @@ impl CoverCache {
             // half grey: fetch those again.
             if cached_truncated(&path) {
                 let _ = std::fs::remove_file(&path);
+            } else if !is_roughly_square(&path) && self.try_claim_upgrade(&key) {
+                if self.fetch_non_youtube(track, &path).await {
+                    return Ok(Some(self.finish(path)));
+                }
+                touch(&path);
+                return Ok(Some(path));
             } else {
                 touch(&path);
                 return Ok(Some(path));
@@ -128,64 +172,106 @@ impl CoverCache {
             return Ok(None);
         }
         tokio::fs::create_dir_all(&self.dir).await?;
+        if self.fetch_non_youtube(track, &path).await {
+            return Ok(Some(self.finish(path)));
+        }
+        // Last resort: YouTube thumbnail only when no square/non-YouTube cover exists.
+        if let Some(u) = track.cover_url.as_deref().filter(|u| is_youtube_cover(u)) {
+            if let Some(server) = &self.server {
+                if self.download_and_store(&server.upstream_url(u), &path).await.is_ok() {
+                    return Ok(Some(self.finish(path)));
+                }
+            }
+            let mut tried = Vec::new();
+            if self.try_url(u, &path, &mut tried).await {
+                return Ok(Some(self.finish(path)));
+            }
+        }
+        self.misses.lock().unwrap().insert(key);
+        Ok(None)
+    }
+
+    /// Fetch a non-YouTube cover into `path`: non-YouTube provider URL,
+    /// Spotify/Deezer (via server or directly), then MusicBrainz Cover Art Archive.
+    async fn fetch_non_youtube(&self, track: &Track, path: &Path) -> bool {
+        let mut server_mb_checked = false;
         if let Some(server) = &self.server {
             let mut candidate = track.clone();
+            if candidate.cover_url.as_deref().is_some_and(is_youtube_cover) {
+                candidate.cover_url = None;
+            }
             if data_saver() {
                 candidate.cover_url = candidate.cover_url.map(|u| small_cover_url(&u));
             }
+            let mut server_ok = true;
             for _ in 0..2 {
                 // An older server has no /v1/cover: fall through to the direct chain.
                 let url = match server.cover_url(&candidate).await {
                     Ok(u) => u,
                     Err(e) => {
                         tracing::debug!("server cover failed, going direct: {e}");
+                        server_ok = false;
                         break;
                     }
                 };
-                if let Some(url) = url {
-                    if self.download_and_store(&url, &path).await.is_ok() {
-                        return Ok(Some(self.finish(path)));
+                if let Some(url) = url.filter(|u| !is_youtube_cover(u)) {
+                    if self.download_and_store(&url, path).await.is_ok() {
+                        return true;
                     }
                 }
                 if candidate.cover_url.take().is_none() { break; }
             }
-            if let Some(mb) = &self.server_musicbrainz {
-                for url in mb.cover_urls(&track.artist, &track.title).await.unwrap_or_default() {
-                    if self.download_and_store(&server.upstream_url(&url), &path).await.is_ok() {
-                        return Ok(Some(self.finish(path)));
+            if server_ok {
+                if let Some(mb) = &self.server_musicbrainz {
+                    server_mb_checked = true;
+                    for url in Self::mb_cover_urls(mb, track).await {
+                        if self.download_and_store(&server.upstream_url(&url), path).await.is_ok() {
+                            return true;
+                        }
                     }
                 }
             }
         }
 
         let mut tried: Vec<String> = Vec::new();
-        // 1. provider cover
-        if let Some(u) = &track.cover_url {
-            if self.try_url(u, &path, &mut tried).await {
-                return Ok(Some(self.finish(path)));
+        // 1. Non-YouTube provider cover
+        if let Some(u) = track.cover_url.as_deref().filter(|u| !is_youtube_cover(u)) {
+            if self.try_url(u, path, &mut tried).await {
+                return true;
             }
         }
         // 2. Spotify / Deezer
         for u in self.metadata_cover_urls(track).await {
-            if self.try_url(&u, &path, &mut tried).await {
-                return Ok(Some(self.finish(path)));
+            if !is_youtube_cover(&u) && self.try_url(&u, path, &mut tried).await {
+                return true;
             }
         }
         // 3. Cover Art Archive via MusicBrainz
-        if let Some(mb) = &self.providers.musicbrainz {
-            match mb.cover_urls(&track.artist, &track.title).await {
-                Ok(urls) => {
-                    for u in urls {
-                        if self.try_url(&u, &path, &mut tried).await {
-                            return Ok(Some(self.finish(path)));
-                        }
+        if !server_mb_checked {
+            if let Some(mb) = &self.providers.musicbrainz {
+                for u in Self::mb_cover_urls(mb, track).await {
+                    if self.try_url(&u, path, &mut tried).await {
+                        return true;
                     }
                 }
-                Err(e) => tracing::debug!("musicbrainz cover lookup failed: {e}"),
             }
         }
-        self.misses.lock().unwrap().insert(key);
-        Ok(None)
+        false
+    }
+
+    async fn mb_cover_urls(mb: &crate::providers::musicbrainz::MusicBrainz, track: &Track) -> Vec<String> {
+        match mb.cover_urls(&track.artist, &track.title).await {
+            Ok(urls) if !urls.is_empty() => return urls,
+            Ok(_) => {}
+            Err(e) => tracing::debug!("musicbrainz cover lookup failed: {e}"),
+        }
+        let (na, nt) = (normalize_artist(&track.artist), normalize_title(&track.title));
+        if !na.is_empty() && !nt.is_empty() && (!na.eq_ignore_ascii_case(&track.artist) || !nt.eq_ignore_ascii_case(&track.title)) {
+            if let Ok(urls) = mb.cover_urls(&na, &nt).await {
+                return urls;
+            }
+        }
+        Vec::new()
     }
 
     fn try_claim_prune(&self) -> bool {
@@ -223,30 +309,57 @@ impl CoverCache {
             (ProviderId::Deezer, self.providers.get(ProviderId::Deezer)),
             (ProviderId::Spotify, self.providers.get(ProviderId::Spotify)),
         ];
+        let matches_track = |h: &Track| {
+            h.cover_url.as_deref().is_some_and(|u| !is_youtube_cover(u))
+                && title_similarity(&track.title, &h.title) >= 0.85
+                && artist_similarity(&track.artist, &h.artist) >= 0.8
+        };
         for (id, provider) in wants {
             let Some(p) = provider else { continue };
-            if track.source == id {
+            if track.source == id && track.cover_url.as_deref().is_some_and(|u| !is_youtube_cover(u)) {
                 continue; // that cover was step 1
             }
             let found: Option<Track> = async {
+                if track.source == id {
+                    if let Ok(t) = p.track(&track.id).await {
+                        if t.cover_url.as_deref().is_some_and(|u| !is_youtube_cover(u)) {
+                            return Some(t);
+                        }
+                    }
+                }
                 if let Some(known) = track.external_ids.get(&id) {
                     if let Ok(t) = p.track(known).await {
-                        return Some(t);
+                        if t.cover_url.as_deref().is_some_and(|u| !is_youtube_cover(u)) {
+                            return Some(t);
+                        }
                     }
                 }
                 if let Some(isrc) = &track.isrc {
                     if let Ok(Some(t)) = p.find_by_isrc(isrc).await {
-                        return Some(t);
+                        if t.cover_url.as_deref().is_some_and(|u| !is_youtube_cover(u)) {
+                            return Some(t);
+                        }
                     }
                 }
                 let q = format!("{} {}", track.artist, track.title);
-                let hits = p.search(&q).await.ok()?;
-                hits.into_iter().find(|h| {
-                    title_similarity(&track.title, &h.title) >= 0.85 && artist_similarity(&track.artist, &h.artist) >= 0.8
-                })
+                if let Ok(hits) = p.search(&q).await {
+                    if let Some(hit) = hits.into_iter().find(matches_track) {
+                        return Some(hit);
+                    }
+                }
+                let (na, nt) = (normalize_artist(&track.artist), normalize_title(&track.title));
+                let clean_q = format!("{na} {nt}");
+                if !na.is_empty() && !nt.is_empty() && !clean_q.eq_ignore_ascii_case(&q) {
+                    if let Ok(hits) = p.search(&clean_q).await {
+                        if let Some(hit) = hits.into_iter().find(matches_track) {
+                            return Some(hit);
+                        }
+                    }
+                }
+                None
             }
             .await;
-            if let Some(u) = found.and_then(|t| t.cover_url) {
+            if let Some(u) = found.and_then(|t| t.cover_url).filter(|u| !is_youtube_cover(u)) {
                 urls.push(u);
             }
         }
@@ -602,5 +715,106 @@ mod tests {
         assert!(!cache.try_claim_prune(), "second concurrent/immediate prune must coalesce");
         cache.pruning.store(false, Ordering::Release);
         assert!(!cache.try_claim_prune(), "cooldown must skip immediate repeat prune");
+    }
+
+    #[test]
+    fn detects_youtube_cover_urls() {
+        assert!(is_youtube_cover("https://i.ytimg.com/vi/abc/hqdefault.jpg"));
+        assert!(is_youtube_cover("https://i1.ytimg.com/vi/abc/maxresdefault.jpg"));
+        assert!(is_youtube_cover("https://img.youtube.com/vi/abc/0.jpg"));
+        assert!(is_youtube_cover("https://yt3.ggpht.com/abc=s900"));
+        assert!(is_youtube_cover("https://glyph.my/v1/upstream?url=https%3A%2F%2Fi.ytimg.com%2Fvi%2Fabc%2Fhqdefault.jpg"));
+        assert!(!is_youtube_cover("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg"));
+        assert!(!is_youtube_cover("https://i.scdn.co/image/ab67616d0000b273"));
+        assert!(!is_youtube_cover("https://coverartarchive.org/release/123/front-500"));
+        assert!(!is_youtube_cover("https://evil-ytimg.com/vi/abc/hqdefault.jpg"));
+        assert!(!is_youtube_cover("https://glyph.my/v1/upstream?url=https%3A%2F%2Fe-cdns-images.dzcdn.net%2Fx.jpg"));
+    }
+
+    #[tokio::test]
+    async fn prefers_metadata_cover_over_youtube_and_upgrades_non_square_cache() {
+        use async_trait::async_trait;
+        use glyph_protocol::{Capabilities, PlaybackSource};
+        use std::io::{Read, Write};
+
+        struct MockDeezer {
+            cover: String,
+        }
+        #[async_trait]
+        impl MusicProvider for MockDeezer {
+            fn id(&self) -> ProviderId { ProviderId::Deezer }
+            fn capabilities(&self) -> Capabilities { Capabilities::MetadataOnly }
+            async fn search(&self, _q: &str) -> Result<Vec<Track>> {
+                Ok(vec![Track {
+                    id: "dz1".into(),
+                    source: ProviderId::Deezer,
+                    title: "Get Lucky".into(),
+                    artist: "Daft Punk".into(),
+                    album: Some("RAM".into()),
+                    duration_ms: Some(248_000),
+                    cover_url: Some(self.cover.clone()),
+                    isrc: None,
+                    permalink: None,
+                    external_ids: Default::default(),
+                    explicit: false,
+                }])
+            }
+            async fn track(&self, _id: &str) -> Result<Track> { Err(anyhow!("unused")) }
+            async fn playback_source(&self, _t: &Track) -> Result<PlaybackSource> { Err(anyhow!("unused")) }
+        }
+
+        let square = image::RgbImage::from_pixel(32, 32, image::Rgb([40, 180, 90]));
+        let mut square_jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut square_jpeg).encode_image(&square).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut req = [0; 4096];
+                let _ = stream.read(&mut req);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    square_jpeg.len()
+                ).unwrap();
+                stream.write_all(&square_jpeg).unwrap();
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut providers = Providers::default();
+        providers.insert(Arc::new(MockDeezer { cover: format!("http://{addr}/cover.jpg") }));
+        let cache = CoverCache::new(dir.path().to_path_buf(), reqwest::Client::new(), Arc::new(providers));
+
+        let yt_track = Track {
+            id: "yt1".into(),
+            source: ProviderId::YouTube,
+            title: "Get Lucky (Official Video)".into(),
+            artist: "Daft Punk - Topic".into(),
+            album: None,
+            duration_ms: Some(248_000),
+            cover_url: Some("https://i.ytimg.com/vi/yt1/hqdefault.jpg".into()),
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+            explicit: false,
+        };
+
+        // 1. Fresh lookup skips YouTube and caches Deezer's 32x32 square cover.
+        let path = cache.get(&yt_track).await.unwrap().unwrap();
+        assert_eq!(image::image_dimensions(&path).unwrap(), (32, 32));
+
+        // 2. Previously cached 4:3 (64x48) thumbnail on disk is upgraded to 32x32 square.
+        let rect = image::RgbImage::from_pixel(64, 48, image::Rgb([10, 10, 10]));
+        let mut rect_jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut rect_jpeg).encode_image(&rect).unwrap();
+        std::fs::write(&path, &rect_jpeg).unwrap();
+        assert_eq!(image::image_dimensions(&path).unwrap(), (64, 48));
+
+        let upgraded = cache.get(&yt_track).await.unwrap().unwrap();
+        assert_eq!(image::image_dimensions(&upgraded).unwrap(), (32, 32));
+        server.join().unwrap();
     }
 }

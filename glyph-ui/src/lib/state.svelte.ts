@@ -2,7 +2,7 @@
 // lives in the Rust core (config, library, queue, player) is mirrored from
 // backend events; everything else (which page, open menus, dialogs) is UI
 // state kept here.
-import { backend, connect } from "./api/backend";
+import { backend, connect, type Backend } from "./api/backend";
 import type {
   Account, ArtistPage, BackendState, Config, Device, HomeFeeds, Library, ListKey, Lyrics, PlayerState, Playlist,
   QueueState, RecentItem, RepeatMode, SearchResults, Snapshot, Track, UpdateInfo,
@@ -161,7 +161,7 @@ class App {
 
   async init() {
     const api = await connect();
-    const snap = await api.snapshot();
+    const snap = await fetchInitialSnapshot(api);
     this.config = normalizeConfig(snap.config);
     if (typeof document !== "undefined") {
       applyTheme(this.config.visuals.theme, this.config.ui.text_scale);
@@ -229,7 +229,16 @@ class App {
     if (!inMiniWindow()) api.on("shared", (text) => this.importText(text));
 
     if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", () => this.scheduleClock());
+      document.addEventListener("visibilitychange", () => {
+        this.scheduleClock();
+        if (!document.hidden && this.ready && backend().kind === "tauri") {
+          void backend().call<Snapshot>("snapshot").then((s) => {
+            if (!s) return;
+            if (s.player) this.setPlayer(s.player);
+            if (s.queue) this.queue = s.queue;
+          }).catch(() => {});
+        }
+      });
     }
     this.clock = performance.now();
     this.scheduleClock();
@@ -925,6 +934,64 @@ function loadWidth(key: string, def: number, min: number, max: number): number {
 }
 function saveWidth(key: string, w: number) {
   try { localStorage.setItem(key, String(w)); } catch { /* ignore */ }
+}
+
+async function fetchInitialSnapshot(api: Backend): Promise<Snapshot> {
+  if (api.kind !== "tauri") return api.snapshot();
+  return new Promise<Snapshot>((resolve, reject) => {
+    let settled = false;
+    let activeMs = 0;
+    let retried = false;
+    let inFlight = 0;
+    let lastTick = performance.now();
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", syncClock);
+      }
+      fn();
+    };
+    const launch = () => {
+      inFlight++;
+      api.snapshot().then(
+        (snap) => {
+          inFlight--;
+          finish(() => resolve(snap));
+        },
+        (err) => {
+          inFlight--;
+          if (settled) return;
+          if (!retried) {
+            retried = true;
+            launch();
+            return;
+          }
+          if (inFlight === 0) finish(() => reject(err));
+        },
+      );
+    };
+    const syncClock = () => {
+      const now = performance.now();
+      if (typeof document === "undefined" || !document.hidden) {
+        activeMs += Math.min(500, Math.max(0, now - lastTick));
+      }
+      lastTick = now;
+      if (activeMs >= 3500 && !retried) {
+        retried = true;
+        launch();
+      }
+      if (activeMs >= 10000) {
+        finish(() => reject(new Error("Timed out waiting for app snapshot")));
+      }
+    };
+    const timer = setInterval(syncClock, 250);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", syncClock);
+    }
+    launch();
+  });
 }
 
 export const app = new App();

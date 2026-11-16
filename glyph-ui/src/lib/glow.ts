@@ -291,10 +291,10 @@ export function renderGlowPreview(
 
 /** The background field. `spectrum()` gives bass / mids / highs 0..1. */
 export class Glow {
-  private gctx: CanvasRenderingContext2D;
-  private actx: CanvasRenderingContext2D;
+  private gctx: CanvasRenderingContext2D | null;
+  private actx: CanvasRenderingContext2D | null;
   private W = 0; private H = 0; private iw = 0; private ih = 0;
-  private img!: ImageData; private aimg: ImageData | null = null;
+  private img: ImageData | null = null; private aimg: ImageData | null = null;
   private bright = new Float32Array(0);
   private cols: Float32Array = new Float32Array(0);
   private lum = new Float32Array(0);
@@ -353,8 +353,9 @@ export class Glow {
   onFrame: (() => void) | null = null;
 
   constructor(private glowEl: HTMLCanvasElement, private asciiEl: HTMLCanvasElement) {
-    this.gctx = glowEl.getContext("2d")!;
-    this.actx = asciiEl.getContext("2d")!;
+    this.gctx = glowEl.getContext("2d");
+    this.actx = asciiEl.getContext("2d");
+    if (!this.gctx) return;
     this.resize();
     addEventListener("resize", this.onResize);
     document.addEventListener("visibilitychange", this.onVis);
@@ -397,11 +398,12 @@ export class Glow {
   }
 
   private resize() {
+    if (!this.gctx) return;
     this.W = Math.max(1, innerWidth); this.H = Math.max(1, innerHeight);
     this.iw = Math.max(2, Math.ceil(this.W / PITCH)); this.ih = Math.max(2, Math.ceil(this.H / PITCH));
     this.glowEl.width = this.iw; this.glowEl.height = this.ih;
     this.img = this.gctx.createImageData(this.iw, this.ih);
-    if (this.opts.solid || this.opts.reduce) {
+    if (this.opts.solid || this.opts.reduce || !this.actx) {
       this.releaseAsciiBuffer();
     } else {
       this.asciiEl.width = this.W; this.asciiEl.height = this.H;
@@ -416,6 +418,7 @@ export class Glow {
   private loop() {
     clearTimeout(this.timer);
     this.timer = 0;
+    if (!this.gctx) return;
     const tick = () => {
       if (this.paused || this.resizing || this.uiPaused || this.opts.solid || document.hidden) {
         if (document.hidden) {
@@ -488,6 +491,7 @@ export class Glow {
   }
 
   draw() {
+    if (!this.gctx || !this.img) return;
     const now = performance.now();
     const dt = Math.min(0.25, (now - this.last) / 1000);
     this.last = now;
@@ -579,7 +583,7 @@ export class Glow {
     this.gctx.putImageData(this.img, 0, 0);
 
     // ASCII layer and titlebar dots at half cadence (6-12 fps) without per-pixel tuple allocations.
-    if ((!this.aimg || this.frame++ % 2 === 0) && !o.reduce) {
+    if ((!this.aimg || this.frame++ % 2 === 0) && !o.reduce && this.actx) {
       if (!this.aimg || this.aimg.width !== W || this.aimg.height !== H) {
         this.asciiEl.width = W; this.asciiEl.height = H;
         this.aimg = this.actx.createImageData(W, H);
@@ -627,7 +631,7 @@ export class Glow {
         }
       }
       this.actx.putImageData(this.aimg, 0, 0);
-    } else if (o.reduce && this.frame === 1) {
+    } else if (o.reduce && this.frame === 1 && this.actx) {
       this.actx.clearRect(0, 0, W, H);
     }
     this.onFrame?.();

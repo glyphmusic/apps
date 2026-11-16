@@ -114,6 +114,10 @@ pub struct State {
     pub resume_at: Option<Duration>,
     /// User asked to pause while the restored/new song was resolving.
     pub hold_play: bool,
+    /// `player_state()` still holds a previous track (fade-out or failure) rather than `current`.
+    pub player_stale: bool,
+    /// Radio tracks are being fetched asynchronously after the queue ended.
+    pub radio_loading: bool,
     pub search: SearchCache,
     pub feeds: Feeds,
 }
@@ -200,6 +204,8 @@ impl Core {
                 restored_duration: None,
                 resume_at: None,
                 hold_play: false,
+                player_stale: false,
+                radio_loading: false,
                 search: SearchCache::default(),
                 feeds: Feeds::default(),
             }),
@@ -345,10 +351,12 @@ impl Core {
         let ps = self.player_state();
         let st = self.st();
         let volume = st.muted_volume.unwrap_or_else(|| ps.as_ref().map_or(st.config.player.volume, |s| s.volume));
+        let active_ps = (!st.player_stale).then_some(ps.as_ref()).flatten();
         dto::player(dto::PlayerInput {
-            state: ps.as_ref(),
+            state: active_ps,
             current: st.current.as_ref(),
             resolving: st.resolving,
+            radio_loading: st.radio_loading,
             muted: st.muted_volume.is_some(),
             volume,
             queue: &st.queue,
@@ -611,6 +619,8 @@ impl Core {
             st.playback_seq += 1;
             st.current = Some(track.clone());
             st.resolving = adopted.is_none();
+            st.radio_loading = false;
+            st.player_stale = adopted.is_none();
             st.error = None;
             st.loop_ab = None;
             st.listen_counted = false;
@@ -666,7 +676,17 @@ impl Core {
                 self.st().pending_start = true;
                 return;
             }
-            self.st().resolving = false;
+            {
+                let mut st = self.st();
+                st.resolving = false;
+                st.resume_at = None;
+                st.hold_play = false;
+                st.player_stale = true;
+                st.error = Some("offline".into());
+            }
+            if let Some(p) = &self.player {
+                p.stop();
+            }
             self.toast_key("status.backend_offline", "info");
             self.emit_player();
             return;
@@ -694,9 +714,14 @@ impl Core {
                         let mut st = core.st();
                         st.resume_at = None;
                         st.hold_play = false;
+                        st.player_stale = true;
                     }
                     crate::jam::no_source(&core, &key);
                     if !core.skip_unplayable() {
+                        core.st().error = Some("no_source".into());
+                        if let Some(p) = &core.player {
+                            p.stop();
+                        }
                         core.toast_key("toast.no_source", "info");
                     }
                 }
@@ -705,9 +730,14 @@ impl Core {
                         let mut st = core.st();
                         st.resume_at = None;
                         st.hold_play = false;
+                        st.player_stale = true;
                     }
                     let e = e.to_string();
                     if !core.skip_unplayable() {
+                        core.st().error = Some(e.clone());
+                        if let Some(p) = &core.player {
+                            p.stop();
+                        }
                         let (key, vars) = resolve_error(&e);
                         core.toast_vars(key, vars, "info");
                     } else {
@@ -723,6 +753,7 @@ impl Core {
     fn output_load(&self, res: glyph_core::Resolved) {
         let (resume_at, hold) = {
             let mut st = self.st();
+            st.player_stale = false;
             (st.resume_at.take(), std::mem::take(&mut st.hold_play))
         };
         if !crate::jam::route_load(self, &res.track, &res.source) {
@@ -766,7 +797,15 @@ impl Core {
     pub fn on_backend_failed(&self) {
         let waiting = std::mem::take(&mut self.st().pending_start);
         if waiting {
-            self.st().resolving = false;
+            {
+                let mut st = self.st();
+                st.resolving = false;
+                st.player_stale = true;
+                st.error = Some("offline".into());
+            }
+            if let Some(p) = &self.player {
+                p.stop();
+            }
             self.toast_key("status.backend_offline", "info");
             self.emit_player();
         }
@@ -826,8 +865,13 @@ impl Core {
             tracing::warn!("playback error, skipped: {e}");
             return;
         }
-        if output_error(&e) || self.player_idle() {
-            self.st().error = Some(e.clone());
+        let ended = self.player_state().is_some_and(|s| s.status == glyph_audio::Status::Ended);
+        if output_error(&e) || self.player_idle() || ended {
+            let mut st = self.st();
+            st.error = Some(e.clone());
+            if ended {
+                st.player_stale = true;
+            }
         }
         self.toast_vars("toast.player_error", json!({ "e": e }), "info");
         self.emit_player();
@@ -939,9 +983,14 @@ impl Core {
         if crate::jam::route_next(self, auto) {
             return;
         }
-        let skipped = !auto && self.player_state().is_some_and(|s| s.position < Duration::from_secs(30));
+        let ps_now = self.player_state();
+        let skipped = !auto && ps_now.as_ref().is_some_and(|s| s.position < Duration::from_secs(30));
+        let playing_track = ps_now
+            .filter(|s| !matches!(s.status, glyph_audio::Status::Ended | glyph_audio::Status::Idle))
+            .and_then(|s| s.track);
         let offline = crate::storage::is_offline();
         let relaxed = crate::account::controlling(self) || crate::jam::remote_on();
+        let mut offline_blocked: Option<Track> = None;
         let (next, preloaded) = {
             let mut st = self.st();
             if skipped {
@@ -950,25 +999,73 @@ impl Core {
                 }
             }
             let preloaded = st.preloaded.take();
-            let mut next = if auto { st.queue.next().cloned() } else { st.queue.skip_next().cloned() };
-            // A queue created online can still contain unavailable songs after
-            // a network loss. Bound the scan even when repeat-all wraps around.
-            if offline && !relaxed {
+            let preloaded_playing = auto
+                && preloaded.as_ref().is_some_and(|(k, r)| {
+                    st.queue.peek_next().is_some_and(|n| glyph_core::dedupe::track_key(n) == *k)
+                        && playing_track.as_ref().is_some_and(|p| p.id == r.id && p.source == r.source)
+                });
+            let mut next = None;
+            if offline && !relaxed && !preloaded_playing {
                 let hide = st.config.audio.hide_explicit;
                 let ok = |t: &Track| !(t.maybe_explicit() && hide) && crate::storage::available_offline(self, t);
-                let limit = st.queue.upcoming().len() + 1;
-                for _ in 0..limit {
-                    if !next.as_ref().is_some_and(|t| !ok(t)) {
-                        break;
+                let repeat = st.queue.repeat();
+                let has_offline = if auto && repeat == glyph_core::RepeatMode::One {
+                    st.queue.current().is_some_and(ok)
+                } else {
+                    st.queue.upcoming().into_iter().any(ok)
+                        || (repeat == glyph_core::RepeatMode::All
+                            && (st.queue.history().into_iter().any(ok) || st.queue.current().is_some_and(ok)))
+                };
+                if has_offline {
+                    let mut cand = if auto { st.queue.next().cloned() } else { st.queue.skip_next().cloned() };
+                    let limit = st.queue.upcoming().len() + 1;
+                    for _ in 0..limit {
+                        if !cand.as_ref().is_some_and(|t| !ok(t)) {
+                            break;
+                        }
+                        cand = st.queue.skip_next().cloned();
                     }
-                    next = st.queue.skip_next().cloned();
+                    if cand.as_ref().is_some_and(&ok) {
+                        next = cand;
+                    }
+                } else {
+                    // Keep the rest of the queue intact instead of skipping over all online songs.
+                    offline_blocked = if auto { st.queue.next().cloned() } else { st.queue.skip_next().cloned() };
+                    if let Some(ref blocked) = offline_blocked {
+                        st.preloaded = None;
+                        st.preload_attempt = None;
+                        st.resolving = false;
+                        st.radio_loading = false;
+                        st.player_stale = true;
+                        st.error = Some("offline".into());
+                        st.hold_play = false;
+                        st.resume_at = None;
+                        st.restored_pos = None;
+                        st.restored_duration = None;
+                        st.playback_seq += 1;
+                        st.current = Some(blocked.clone());
+                    }
                 }
-                if next.as_ref().is_some_and(|t| !ok(t)) {
-                    next = None;
-                }
+            } else {
+                next = if auto { st.queue.next().cloned() } else { st.queue.skip_next().cloned() };
             }
             (next, preloaded)
         };
+        if offline_blocked.is_some() {
+            if skipped {
+                crate::discover::on_skip(self);
+                self.library_changed();
+            }
+            if let Some(p) = &self.player {
+                p.stop();
+            }
+            *self.playback_pos_saved.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.playback_changed();
+            self.toast_key("offline.unavailable", "info");
+            self.emit_queue();
+            self.emit_player();
+            return;
+        }
         if skipped {
             crate::discover::on_skip(self);
             self.library_changed();
@@ -1074,9 +1171,13 @@ impl Core {
             self.emit_player();
             return;
         }
-        let was_playing = self.player_state().is_some_and(|s| s.status == glyph_audio::Status::Playing);
+        let (stale, has_err) = {
+            let st = self.st();
+            (st.player_stale, st.error.is_some())
+        };
+        let was_playing = !stale && self.player_state().is_some_and(|s| s.status == glyph_audio::Status::Playing);
         if let Some(p) = &self.player {
-            let idle = self.player_state().map_or(true, |s| matches!(s.status, glyph_audio::Status::Idle | glyph_audio::Status::Ended));
+            let idle = stale || has_err || self.player_state().map_or(true, |s| matches!(s.status, glyph_audio::Status::Idle | glyph_audio::Status::Ended));
             if idle {
                 // Nothing loaded (after a failed song, or a restart): load it.
                 let cur = self.st().current.clone();
@@ -1375,7 +1476,7 @@ impl Core {
             if st.preloaded.as_ref().is_some_and(|(k, _)| k == &want) {
                 return;
             }
-            if st.preload_attempt.as_ref().is_some_and(|(c, n, at)| c == &cur && n == &want && at.elapsed() < Duration::from_secs(15)) {
+            if st.preload_attempt.as_ref().is_some_and(|(c, n, at)| c == &cur && n == &want && at.elapsed() < Duration::from_secs(10)) {
                 return;
             }
             st.preload_attempt = Some((cur.clone(), want.clone(), attempt));
@@ -1401,6 +1502,11 @@ impl Core {
                 p.preload_next(res.track, res.source);
             }
         });
+    }
+
+    /// The audio engine dropped a preloaded track after an error: clear `preloaded` so it can retry.
+    pub fn on_preload_failed(&self) {
+        self.st().preloaded = None;
     }
 
     /// After a queue edit: a preloaded song that is no longer next must not
@@ -1476,6 +1582,7 @@ impl Core {
                                 PlayerEvent::Error(e) => core.on_player_error(e),
                                 PlayerEvent::StatusChanged(_) => core.emit_player(),
                                 PlayerEvent::NearEnd => core.preload_next(),
+                                PlayerEvent::PreloadFailed => core.on_preload_failed(),
                             }
                         }
                     }
@@ -1484,8 +1591,11 @@ impl Core {
                             last = Some(s);
                             core.emit_player();
                         }
-                        // Resolve the next song early, leaving time for a slow source.
-                        if last.as_ref().is_some_and(|s| s.status == glyph_audio::Status::Playing) {
+                        // Open the next audio stream near the end (~30 s left) so mobile links/TCP do not stall while locked.
+                        if last.as_ref().is_some_and(|s| {
+                            s.status == glyph_audio::Status::Playing
+                                && s.duration.is_some_and(|d| d.saturating_sub(s.position) <= Duration::from_secs(30))
+                        }) {
                             core.preload_next();
                         }
                     }
@@ -1604,6 +1714,7 @@ impl Core {
         }
         let ps = self.player_state();
         let st = self.st();
+        let ps = if st.player_stale { None } else { ps };
         let path = st.library.storage_path.0.clone().unwrap_or_else(Library::path);
         let current = st.current.clone();
         let (position_ms, duration_ms, activity_recorded) = if current.is_some() {
@@ -1649,6 +1760,7 @@ impl Core {
         }
         let ps = self.player_state();
         let st = self.st();
+        let ps = if st.player_stale { None } else { ps };
         let track = st.current.as_ref()?;
         let path = st.library.storage_path.0.clone().unwrap_or_else(Library::path);
         let ended = ps.as_ref().is_some_and(|s| s.status == glyph_audio::Status::Ended);

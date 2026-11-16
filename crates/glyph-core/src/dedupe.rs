@@ -278,6 +278,15 @@ impl TrackIndex {
     }
 }
 
+/// Keeps `into` unless it is missing or a YouTube thumbnail and `incoming` is
+/// a non-YouTube cover.
+pub fn prefer_cover(into: &mut Option<String>, incoming: &Option<String>) {
+    let Some(next) = incoming.as_deref() else { return };
+    if into.as_deref().is_none_or(|cur| crate::cover::is_youtube_cover(cur) && !crate::cover::is_youtube_cover(next)) {
+        *into = Some(next.to_string());
+    }
+}
+
 /// Merges `incoming` into `into` (same song): records the other source id and
 /// fills missing metadata.
 pub fn merge_track(into: &mut Track, incoming: &Track) {
@@ -296,9 +305,7 @@ pub fn merge_track(into: &mut Track, incoming: &Track) {
     if into.duration_ms.is_none() {
         into.duration_ms = incoming.duration_ms;
     }
-    if into.cover_url.is_none() {
-        into.cover_url = incoming.cover_url.clone();
-    }
+    prefer_cover(&mut into.cover_url, &incoming.cover_url);
     if into.isrc.is_none() {
         into.isrc = incoming.isrc.clone();
     }
@@ -453,5 +460,21 @@ mod tests {
         assert!(similarity("hello world", "hello") > 0.7);
         assert!(similarity("foo", "bar") < 0.1);
         assert!(artist_similarity("Daft Punk - Topic", "Daft Punk") > 0.9);
+    }
+
+    #[test]
+    fn merge_prefers_non_youtube_cover() {
+        let mut yt = t(ProviderId::YouTube, "yt1", "Song", "Band", Some(200_000));
+        yt.cover_url = Some("https://i.ytimg.com/vi/yt1/hqdefault.jpg".into());
+        let mut dz = t(ProviderId::Deezer, "dz1", "Song", "Band", Some(200_000));
+        dz.cover_url = Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg".into());
+
+        let mut merged = yt.clone();
+        merge_track(&mut merged, &dz);
+        assert_eq!(merged.cover_url, dz.cover_url);
+
+        // Does not overwrite a non-YouTube cover with a YouTube thumbnail.
+        merge_track(&mut merged, &yt);
+        assert_eq!(merged.cover_url, dz.cover_url);
     }
 }

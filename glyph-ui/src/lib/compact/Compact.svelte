@@ -138,7 +138,7 @@
   {/if}
 {/snippet}
 
-<div class="phone" class:under={phone.npOpen} class:fading={phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
+<div class="phone" class:under={phone.npOpen} class:fading={!phone.npOpen || phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
       {#snippet actions()}

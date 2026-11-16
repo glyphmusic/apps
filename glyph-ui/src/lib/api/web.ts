@@ -13,7 +13,7 @@ import type {
   ArtistInfo, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
   RecentItem, Release, SearchResults, Snapshot, Track,
 } from "./types";
-import { PROVIDER_NAME, primaryArtist, sameList, trackKey } from "./types";
+import { PROVIDER_NAME, isYoutubeCover, primaryArtist, sameList, trackKey } from "./types";
 import { WebAccountManager } from "./web-account";
 import { WebMcpManager } from "./web-mcp";
 import { ApiError, server, type PlaybackSource, type SearchEvent } from "./web-server";
@@ -83,7 +83,10 @@ function mergeInto(list: Track[], add: Track[]): Track[] {
     const cur = list[i];
     const ids = { ...(t.external_ids ?? {}), ...(cur.external_ids ?? {}) };
     if (t.source !== cur.source) ids[t.source] = t.id;
-    list[i] = { ...cur, external_ids: ids, cover_url: cur.cover_url ?? t.cover_url, album: cur.album ?? t.album, duration_ms: cur.duration_ms ?? t.duration_ms, isrc: cur.isrc ?? t.isrc, explicit: cur.explicit || t.explicit };
+    const cover_url = (!cur.cover_url || (isYoutubeCover(cur.cover_url) && t.cover_url && !isYoutubeCover(t.cover_url)))
+      ? (t.cover_url ?? cur.cover_url)
+      : cur.cover_url;
+    list[i] = { ...cur, external_ids: ids, cover_url, album: cur.album ?? t.album, duration_ms: cur.duration_ms ?? t.duration_ms, isrc: cur.isrc ?? t.isrc, explicit: cur.explicit || t.explicit };
   }
   return list;
 }
@@ -100,6 +103,8 @@ function direct(src: PlaybackSource | null): PlaybackSource | null {
 }
 
 const kindOf = (n: number): Release["kind"] => (n <= 3 ? "single" : n <= 6 ? "ep" : "album");
+const isRateLimit = (e: unknown): e is ApiError =>
+  e instanceof ApiError && (e.status === 429 || e.code === "rate_limited" || e.code === "temporarily_blocked");
 
 function albumsOf(tracks: Track[], artist?: string): Release[] {
   const groups = new Map<string, Track[]>();
@@ -153,6 +158,8 @@ export class WebBackend implements Backend {
   private preloadTimer = 0;
   private preloadCooldownUntil = 0;
   private preloadSeq = 0;
+  private lastMediaPosAt = 0;
+  private lastMediaDur: number | null = null;
 
   constructor() {
     this.config = { ...webConfig(), ...(load<Config>("config") ?? {}) };
@@ -246,6 +253,23 @@ export class WebBackend implements Backend {
         }
         if (p.loop_a != null && p.loop_b != null && position >= p.loop_b) this.engine.seek(p.loop_a);
         this.emit("player", { position, duration: p.duration });
+        this.syncMediaPositionState(duration != null && duration !== this.lastMediaDur);
+        if (
+          p.status === "playing"
+          && p.duration != null
+          && p.duration - position <= 25
+          && Date.now() >= this.preloadCooldownUntil
+        ) {
+          const next = this.upcomingQueueTracks(1)[0];
+          if (next) {
+            const cached = this.peekResolvedTrack(next);
+            if (cached === undefined) {
+              void this.preloadQueue(++this.preloadSeq);
+            } else if (cached) {
+              this.engine.preload(cached);
+            }
+          }
+        }
         if (p.current && Math.abs(position - this.lastSavedPos) >= 5) {
           this.saveSessionNow();
         }
@@ -269,7 +293,13 @@ export class WebBackend implements Backend {
       window.addEventListener("beforeunload", flush);
       if (typeof document !== "undefined") {
         document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "hidden") this.saveSessionNow();
+          if (document.visibilityState === "hidden") {
+            this.saveSessionNow();
+          } else {
+            this.emit("player", { ...this.player });
+            this.syncMediaPlaybackState();
+            this.syncMediaPositionState(true);
+          }
         });
       }
     }
@@ -304,8 +334,10 @@ export class WebBackend implements Backend {
   }
 
   async cover(t: Track): Promise<string | null> {
-    if (t.cover_url) return t.cover_url;
-    if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil || !t.title?.trim() || !t.artist?.trim()) return null;
+    if (t.cover_url && !isYoutubeCover(t.cover_url)) return t.cover_url;
+    if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil || !t.title?.trim() || !t.artist?.trim()) {
+      return t.cover_url ?? null;
+    }
     const key = trackKey(t);
     const now = Date.now();
     const hit = this.coverCache.get(key);
@@ -340,17 +372,24 @@ export class WebBackend implements Backend {
     }
   }
 
+  private noteRateLimit(e: ApiError) {
+    this.preloadCooldownUntil = Math.max(
+      this.preloadCooldownUntil,
+      Date.now() + Math.min(300, Math.max(5, e.retryAfter ?? 30)) * 1000,
+    );
+  }
+
   private drainCoverQueue() {
     while (this.coverActive < 4 && this.coverQueue.length > 0) {
       const item = this.coverQueue.shift()!;
       if (!this.coversAvailable || Date.now() < this.preloadCooldownUntil) {
-        item.resolve(null);
+        item.resolve(item.t.cover_url ?? null);
         continue;
       }
       this.coverActive++;
       server.cover(item.t)
         .then((res) => {
-          const url = res?.url ?? null;
+          const url = res?.url ?? item.t.cover_url ?? null;
           if (this.coverCache.size >= 250) {
             const oldest = this.coverCache.keys().next().value;
             if (oldest !== undefined) this.coverCache.delete(oldest);
@@ -361,7 +400,16 @@ export class WebBackend implements Backend {
           });
           item.resolve(url);
         })
-        .catch(() => item.resolve(null))
+        .catch((e) => {
+          if (isRateLimit(e)) {
+            this.noteRateLimit(e);
+            while (this.coverQueue.length > 0) {
+              const queued = this.coverQueue.shift()!;
+              queued.resolve(queued.t.cover_url ?? null);
+            }
+          }
+          item.resolve(item.t.cover_url ?? null);
+        })
         .finally(() => {
           this.coverActive--;
           this.drainCoverQueue();
@@ -483,6 +531,17 @@ export class WebBackend implements Backend {
     return `${trackKey(t)}\0${youtubeOnly ? "1" : "0"}\0${priority.join(",")}`;
   }
 
+  private peekResolvedTrack(t: Track): PlaybackSource | null | undefined {
+    const { enabled, priority, youtubeOnly } = this.resolveParams();
+    if (!priority.length && !(youtubeOnly && enabled.includes("youtube"))) return null;
+    const cacheKey = this.resolveCacheKey(t, priority, youtubeOnly);
+    const cached = this.resolvedCache.get(cacheKey);
+    if (!cached || cached.expiresAt <= Date.now()) return undefined;
+    this.resolvedCache.delete(cacheKey);
+    this.resolvedCache.set(cacheKey, cached);
+    return cached.src;
+  }
+
   private resolveTrack(t: Track, throwOnRateLimit = false): Promise<PlaybackSource | null> {
     const { enabled, priority, youtubeOnly } = this.resolveParams();
     if (!priority.length && !(youtubeOnly && enabled.includes("youtube"))) return Promise.resolve(null);
@@ -511,9 +570,11 @@ export class WebBackend implements Backend {
         this.resolvedCache.set(cacheKey, { src, expiresAt: Date.now() + ttlMs });
         return src;
       } catch (e) {
-        if (e instanceof ApiError && e.code === "rate_limited") {
-          this.preloadCooldownUntil = Date.now() + (e.retryAfter ?? 30) * 1000;
+        if (isRateLimit(e)) {
+          this.noteRateLimit(e);
           if (throwOnRateLimit) throw e;
+        } else if (e instanceof ApiError && e.status < 500 && e.status >= 400) {
+          this.resolvedCache.set(cacheKey, { src: null, expiresAt: Date.now() + 60_000 });
         }
         return null;
       } finally {
@@ -526,7 +587,7 @@ export class WebBackend implements Backend {
   }
 
   private warmCover(t: Track) {
-    if (!t.cover_url || typeof Image === "undefined" || this.warmedCovers.has(t.cover_url)) return;
+    if (!t.cover_url || isYoutubeCover(t.cover_url) || typeof Image === "undefined" || this.warmedCovers.has(t.cover_url)) return;
     if (this.warmedCovers.size >= 150) this.warmedCovers.clear();
     this.warmedCovers.add(t.cover_url);
     const img = new Image();
@@ -559,21 +620,29 @@ export class WebBackend implements Backend {
     clearTimeout(this.preloadTimer);
     if (!this.queue.items.length || this.queue.index == null) return;
     const seq = ++this.preloadSeq;
+    const effectiveDelay = typeof document !== "undefined" && document.hidden ? 0 : delayMs;
+    if (effectiveDelay <= 0) {
+      void this.preloadQueue(seq);
+      return;
+    }
     this.preloadTimer = window.setTimeout(() => {
       void this.preloadQueue(seq);
-    }, delayMs);
+    }, effectiveDelay);
   }
 
   private async preloadQueue(seq: number) {
     if (seq !== this.preloadSeq || Date.now() < this.preloadCooldownUntil) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
     const upcoming = this.upcomingQueueTracks(3);
+    const p = this.player;
+    const nearEnd = p.duration != null && p.duration - p.position <= 35;
     for (let i = 0; i < upcoming.length; i++) {
       if (seq !== this.preloadSeq || Date.now() < this.preloadCooldownUntil) return;
       const tr = upcoming[i];
       this.warmCover(tr);
       const src = await this.resolveTrack(tr, false);
       if (seq !== this.preloadSeq) return;
-      if (i === 0 && src) this.engine.preload(src);
+      if (i === 0 && src && nearEnd) this.engine.preload(src);
     }
   }
 
@@ -584,11 +653,56 @@ export class WebBackend implements Backend {
   }
 
   // ---- playback ----
+  private syncMediaPlaybackState() {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const s = this.player.status;
+    navigator.mediaSession.playbackState =
+      s === "playing" || s === "loading" ? "playing" : s === "paused" ? "paused" : "none";
+  }
+
+  private syncMediaPositionState(force = false) {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    if (typeof ms.setPositionState !== "function") return;
+    const dur = this.player.duration;
+    if (!this.player.current || dur == null || !Number.isFinite(dur) || dur <= 0) {
+      if (force) {
+        this.lastMediaDur = null;
+        try { ms.setPositionState(); } catch { /* ignore */ }
+      }
+      return;
+    }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (!force && this.lastMediaDur === dur && now - this.lastMediaPosAt < 1000) return;
+    this.lastMediaPosAt = now;
+    this.lastMediaDur = dur;
+    try {
+      ms.setPositionState({
+        duration: dur,
+        playbackRate: this.player.status === "playing" ? 1 : 0,
+        position: Math.max(0, Math.min(this.player.position, dur)),
+      });
+    } catch { /* ignore */ }
+  }
+
   private setStatus(s: PlayerState["status"]) {
     if (this.player.status === s) return;
     this.player.status = s;
     this.emit("player", { status: s, position: this.player.position });
-    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = s === "playing" ? "playing" : s === "paused" ? "paused" : "none";
+    this.syncMediaPlaybackState();
+    this.syncMediaPositionState(true);
+  }
+
+  private async loadResolved(gen: number, src: PlaybackSource, start: number) {
+    try {
+      await this.engine.load(src, true, start);
+      if (gen === this.gen) {
+        this.loaded = true;
+        this.scheduleQueuePreload(typeof document !== "undefined" && document.hidden ? 0 : 250);
+      }
+    } catch (e) {
+      if (gen === this.gen) this.unplayable(String((e as Error)?.message ?? e));
+    }
   }
 
   /** Make `t` the current song and, with `play`, start it from `start` seconds. */
@@ -597,40 +711,62 @@ export class WebBackend implements Backend {
     const p = this.player;
     const key = trackKey(t);
     const resumingRestored = !this.loaded && this.playTrackState?.key === key && start > 0;
+    const cached = play ? this.peekResolvedTrack(t) : undefined;
     this.loaded = false;
-    this.engine.stop();
+    if (!play || cached === null) {
+      this.engine.stop();
+    } else if (cached === undefined) {
+      this.engine.beginTransition();
+    }
     this.playTrackState = resumingRestored
       ? { ...this.playTrackState!, lastPos: start }
       : { key, listenedMs: 0, countedPlay: false, lastPos: start };
-    Object.assign(p, { current: t, position: start, duration: t.duration_ms ? t.duration_ms / 1000 : (resumingRestored ? p.duration : null), source: t.source, preview: false, error: null, loop_a: null, loop_b: null, status: play ? "loading" : "paused" });
+    Object.assign(p, {
+      current: t,
+      position: start,
+      duration: t.duration_ms ? t.duration_ms / 1000 : (resumingRestored ? p.duration : null),
+      source: cached ? cached.provider : t.source,
+      preview: cached ? cached.kind === "preview" : false,
+      error: null,
+      loop_a: null,
+      loop_b: null,
+      status: play ? "loading" : "paused",
+    });
     this.saveSessionNow();
     this.emit("player", { ...p });
+    this.syncMediaPlaybackState();
+    this.syncMediaPositionState(true);
     this.metadata(t);
     if (!play) return;
     this.addRecent(t);
     this.account.scheduleRecentUpdate();
+    if (cached === null) return this.unplayable("no_source");
+    if (cached !== undefined) {
+      await this.loadResolved(gen, cached, start);
+      return;
+    }
     let src: PlaybackSource | null = null;
     try {
       src = await this.resolveTrack(t, true);
       if (gen !== this.gen) return;
     } catch (e) {
       if (gen !== this.gen) return;
-      if (e instanceof ApiError && e.code === "rate_limited") { this.toast("toast.server_out.offline", "info"); this.setStatus("error"); return; }
+      if (isRateLimit(e)) {
+        this.engine.stop();
+        this.toast("toast.server_out.offline", "info");
+        this.setStatus("error");
+        return;
+      }
       src = null;
     }
-    if (!src) return this.unplayable("no_source");
+    if (!src) {
+      this.engine.stop();
+      return this.unplayable("no_source");
+    }
     p.source = src.provider;
     p.preview = src.kind === "preview";
     this.emit("player", { source: p.source, preview: p.preview });
-    try {
-      await this.engine.load(src, true, start);
-      if (gen === this.gen) {
-        this.loaded = true;
-        this.scheduleQueuePreload(400);
-      }
-    } catch (e) {
-      if (gen === this.gen) this.unplayable(String((e as Error)?.message ?? e));
-    }
+    await this.loadResolved(gen, src, start);
   }
 
   /** No source, or the source failed: say so, then go on (sp.skip_unplayable) or stop. */
@@ -646,9 +782,13 @@ export class WebBackend implements Backend {
       return;
     }
     this.skips = 0;
+    this.engine.stop();
     this.toast(reason === "no_source" ? "toast.no_source" : "toast.skipped", "info");
+    p.position = 0;
     p.status = "error";
-    this.emit("player", { status: "error", error: reason });
+    this.emit("player", { status: "error", error: reason, position: 0 });
+    this.syncMediaPlaybackState();
+    this.syncMediaPositionState(true);
   }
 
   private hasNext() {
@@ -671,6 +811,8 @@ export class WebBackend implements Backend {
         this.playTrackState.lastPos = 0;
       }
       this.engine.seek(0);
+      p.position = 0;
+      this.syncMediaPositionState(true);
       this.engine.play();
       return;
     }
@@ -679,7 +821,15 @@ export class WebBackend implements Backend {
     if (i >= q.items.length) {
       if (p.repeat === "all") i = 0;
       else if (this.radio && p.current) { void this.extendRadio(p.current); return; }
-      else { this.engine.pause(); this.setStatus("paused"); this.saveSessionNow(); return; }
+      else {
+        this.engine.pause();
+        this.loaded = false;
+        p.position = 0;
+        this.emit("player", { position: 0 });
+        this.setStatus("paused");
+        this.saveSessionNow();
+        return;
+      }
     }
     if (i < 0) i = 0;
     q.index = i;
@@ -690,10 +840,28 @@ export class WebBackend implements Backend {
 
   /** Queue ran out with "continue with similar songs" on. */
   private async extendRadio(seed: Track) {
+    const p = this.player;
+    this.engine.beginTransition();
+    this.loaded = false;
+    p.position = 0;
+    p.error = null;
+    p.duration = seed.duration_ms ? seed.duration_ms / 1000 : p.duration;
+    p.status = "loading";
+    this.emit("player", { status: "loading", position: 0, duration: p.duration, error: null });
+    this.syncMediaPlaybackState();
+    this.syncMediaPositionState(true);
     const more = await server.similar(primaryArtist(seed.artist), seed.title).catch(() => [] as Track[]);
     const have = new Set(this.queue.items.map(trackKey));
     const add = more.filter((t) => !have.has(trackKey(t))).slice(0, 20);
-    if (!add.length) { this.setStatus("paused"); return; }
+    if (!add.length) {
+      this.engine.stop();
+      p.position = 0;
+      p.error = "radio_empty";
+      this.toast("toast.radio_empty", "info");
+      this.emit("player", { position: 0, error: p.error });
+      this.setStatus("error");
+      return;
+    }
     this.queue.items.push(...add);
     this.advance(false);
   }
@@ -705,17 +873,38 @@ export class WebBackend implements Backend {
     void this.start(tracks[index], true);
   }
 
+  private playAction() {
+    const p = this.player;
+    if (!p.current || p.status === "playing") return;
+    if (!this.loaded || p.status === "error") {
+      const start = p.duration != null && p.position >= Math.max(0, p.duration - 0.5) ? 0 : p.position;
+      void this.start(p.current, true, start);
+      return;
+    }
+    this.engine.play();
+  }
+
+  private pauseAction() {
+    const p = this.player;
+    if (!p.current) return;
+    if (!this.loaded) {
+      this.gen++;
+      this.engine.stop();
+    } else {
+      this.engine.pause();
+    }
+    this.setStatus("paused");
+    this.saveSessionNow();
+  }
+
   private togglePlay() {
     const p = this.player;
     if (!p.current) return;
     if (p.status === "playing" || p.status === "loading") {
-      this.engine.pause();
-      this.setStatus("paused");
-      this.saveSessionNow();
+      this.pauseAction();
       return;
     }
-    if (!this.loaded) { void this.start(p.current, true, p.position); return; }
-    this.engine.play();
+    this.playAction();
   }
 
   private addRecent(t: Track) {
@@ -729,11 +918,14 @@ export class WebBackend implements Backend {
     const ms = typeof navigator !== "undefined" ? navigator.mediaSession : undefined;
     if (!ms) return;
     const on = (a: MediaSessionAction, f: (d: MediaSessionActionDetails) => void) => { try { ms.setActionHandler(a, f); } catch { /* not supported */ } };
-    on("play", () => this.togglePlay());
-    on("pause", () => this.togglePlay());
+    on("play", () => this.playAction());
+    on("pause", () => this.pauseAction());
+    on("stop", () => this.pauseAction());
     on("nexttrack", () => this.advance(false));
     on("previoustrack", () => this.handlers.previous({}));
     on("seekto", (d) => d.seekTime != null && this.handlers.seek({ position: d.seekTime }));
+    on("seekbackward", (d) => this.handlers.seek({ position: Math.max(0, this.player.position - (d.seekOffset ?? 10)) }));
+    on("seekforward", (d) => this.handlers.seek({ position: this.player.position + (d.seekOffset ?? 10) }));
   }
   private metadata(t: Track) {
     if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
@@ -745,8 +937,9 @@ export class WebBackend implements Backend {
         artwork: artworkUrl ? [{ src: artworkUrl }] : [],
       });
     };
-    apply(t.cover_url ?? null);
-    if (!t.cover_url) {
+    const directCover = t.cover_url && !isYoutubeCover(t.cover_url) ? t.cover_url : null;
+    apply(directCover);
+    if (!directCover) {
       void this.cover(t).then((u) => {
         if (u && this.player.current && trackKey(this.player.current) === trackKey(t)) apply(u);
       });
@@ -944,6 +1137,7 @@ export class WebBackend implements Backend {
           if (this.playTrackState) this.playTrackState.lastPos = 0;
           this.saveSessionNow();
           this.emit("player", { position: 0 });
+          this.syncMediaPositionState(true);
         } else this.advance(true);
       },
       seek: (a) => {
@@ -954,6 +1148,7 @@ export class WebBackend implements Backend {
         if (this.loaded) this.engine.seek(pos);
         this.saveSessionSoon(150);
         this.emit("player", { position: pos });
+        this.syncMediaPositionState(true);
       },
       set_volume: (a) => { p().volume = a.volume; p().muted = false; this.engine.setVolume(a.volume, false); this.config.player.volume = a.volume; save("config", this.config); this.emit("player", { volume: a.volume, muted: false }); },
       toggle_mute: () => { p().muted = !p().muted; this.engine.setVolume(p().volume, p().muted); this.emit("player", { muted: p().muted }); },

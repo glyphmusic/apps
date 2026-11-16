@@ -29,6 +29,7 @@ pub struct PlayerInput<'a> {
     pub state: Option<&'a PlayerState>,
     pub current: Option<&'a Track>,
     pub resolving: bool,
+    pub radio_loading: bool,
     pub muted: bool,
     pub volume: f32,
     pub queue: &'a Queue,
@@ -56,7 +57,8 @@ pub fn repeat_from(s: &str) -> RepeatMode {
 }
 
 pub fn player(i: PlayerInput) -> Player {
-    let status = if i.resolving {
+    let loading_track = i.resolving || i.radio_loading;
+    let status = if loading_track {
         "loading"
     } else if i.error.is_some() {
         "error"
@@ -74,16 +76,26 @@ pub fn player(i: PlayerInput) -> Player {
         .or(i.restored_duration)
         .map(|d| d.as_secs_f64())
         .or_else(|| i.current.and_then(|t| t.duration_ms).map(|ms| ms as f64 / 1000.0));
+    let position = if loading_track {
+        i.resume_at.map_or(0.0, |d| d.as_secs_f64())
+    } else if i.error.is_some() {
+        match i.state {
+            Some(s) if !matches!(s.status, Status::Ended | Status::Idle) => s.position.as_secs_f64(),
+            _ => 0.0,
+        }
+    } else if let Some(pos) = i.restored_pos {
+        pos.as_secs_f64()
+    } else {
+        match i.state {
+            Some(s) if s.status == Status::Ended => 0.0,
+            Some(s) => s.position.as_secs_f64(),
+            None => 0.0,
+        }
+    };
     Player {
         status,
         current: i.current.cloned(),
-        position: if i.resolving {
-            i.resume_at.map_or(0.0, |d| d.as_secs_f64())
-        } else if let Some(pos) = i.restored_pos {
-            pos.as_secs_f64()
-        } else {
-            i.state.map_or(0.0, |s| s.position.as_secs_f64())
-        },
+        position,
         duration,
         volume: i.volume,
         muted: i.muted,
@@ -224,4 +236,104 @@ fn date_text(t: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", rem / 3600, rem % 3600 / 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glyph_audio::BackendKind;
+    use std::time::Duration;
+
+    fn track(id: &str, dur_ms: u64) -> Track {
+        Track {
+            id: id.into(),
+            source: ProviderId::Deezer,
+            title: id.into(),
+            artist: "Artist".into(),
+            album: None,
+            duration_ms: Some(dur_ms),
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+            explicit: false,
+        }
+    }
+
+    fn state(status: Status, pos_s: u64, dur_s: u64, t: Track) -> PlayerState {
+        PlayerState {
+            status,
+            track: Some(t),
+            provider: Some(ProviderId::Deezer),
+            backend: Some(BackendKind::Native),
+            is_preview: false,
+            position: Duration::from_secs(pos_s),
+            duration: Some(Duration::from_secs(dur_s)),
+            volume: 0.8,
+        }
+    }
+
+    #[test]
+    fn ended_and_error_states_do_not_appear_stuck_at_end() {
+        let q = Queue::default();
+        let a = track("a", 210_000);
+        let b = track("b", 180_000);
+        let ended_state = state(Status::Ended, 209, 210, a.clone());
+
+        // Finished queue without next track resets position to 0 instead of 209/210.
+        let p = player(PlayerInput {
+            state: Some(&ended_state),
+            current: Some(&a),
+            resolving: false,
+            radio_loading: false,
+            muted: false,
+            volume: 0.8,
+            queue: &q,
+            error: None,
+            loop_ab: None,
+            restored_pos: None,
+            restored_duration: None,
+            resume_at: None,
+        });
+        assert_eq!(p.status, "paused");
+        assert_eq!(p.position, 0.0);
+
+        // Radio extending after queue end shows loading at 0:00.
+        let r = player(PlayerInput {
+            state: Some(&ended_state),
+            current: Some(&a),
+            resolving: false,
+            radio_loading: true,
+            muted: false,
+            volume: 0.8,
+            queue: &q,
+            error: None,
+            loop_ab: None,
+            restored_pos: None,
+            restored_duration: None,
+            resume_at: None,
+        });
+        assert_eq!(r.status, "loading");
+        assert_eq!(r.position, 0.0);
+
+        // Failed next track with stale state cleared shows error and new duration at 0:00.
+        let err = "no_source".to_string();
+        let e = player(PlayerInput {
+            state: None,
+            current: Some(&b),
+            resolving: false,
+            radio_loading: false,
+            muted: false,
+            volume: 0.8,
+            queue: &q,
+            error: Some(&err),
+            loop_ab: None,
+            restored_pos: None,
+            restored_duration: None,
+            resume_at: None,
+        });
+        assert_eq!(e.status, "error");
+        assert_eq!(e.position, 0.0);
+        assert_eq!(e.duration, Some(180.0));
+    }
 }

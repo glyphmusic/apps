@@ -349,9 +349,7 @@ impl ImportMatch {
                     t.external_ids.entry(*p).or_insert_with(|| id.clone());
                 }
             }
-            if t.cover_url.is_none() {
-                t.cover_url = m.cover_url.clone();
-            }
+            dedupe::prefer_cover(&mut t.cover_url, &m.cover_url);
             if t.duration_ms.is_none() {
                 t.duration_ms = m.duration_ms;
             }
