@@ -11,6 +11,7 @@ import { listId, primaryArtist, sameList, trackKey } from "./api/types";
 import { setLang, t, tf } from "./i18n.svelte";
 import { trimReveals } from "./ui.svelte";
 import { inMiniWindow } from "./window";
+import { applyTheme } from "./theme";
 
 export type View =
   | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local";
@@ -112,7 +113,7 @@ class App {
   showLyrics = $state(true);
   lyricsOnly = $state(false);
   zen = $state(false);
-  miniShown = $state(false);
+  miniShown = $state(inMiniWindow());
   compact = $state(false);
   leftSidebarW = $state(loadWidth("glyph.sidebar.left", 64, 64, 280));
   rightSidebarW = $state(loadWidth("glyph.sidebar.right", 320, 260, 580));
@@ -162,6 +163,9 @@ class App {
     const api = await connect();
     const snap = await api.snapshot();
     this.config = normalizeConfig(snap.config);
+    if (typeof document !== "undefined") {
+      applyTheme(this.config.visuals.theme, this.config.ui.text_scale);
+    }
     this.library = snap.library;
     this.queue = snap.queue;
     this.setPlayer(snap.player);

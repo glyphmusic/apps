@@ -305,13 +305,43 @@ export class Glow {
   private theme: Palette | null = null; private prevTheme: Palette | null = null; private themeSince = -1e9;
   private palFrom: Palette | null = null; private palTo: Palette | null = null; private palSince = -1e9;
   private timer = 0;
+  private resizeTimer = 0;
   private paused = false;
+  private resizing = false;
+  private uiPaused = false;
   private solidKey = "";
   private lumScratch: number[] = [];
-  private onResize = () => { this.resize(); this.draw(); };
+  private onResize = () => {
+    // Freeze background rendering while the window is actively resizing so we
+    // don't reallocate buffers or rasterize ASCII frames on every drag event.
+    this.resizing = true;
+    clearTimeout(this.timer);
+    this.timer = 0;
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = 0;
+      this.resizing = false;
+      if (document.hidden || this.opts.solid) return;
+      this.resize();
+      this.last = performance.now();
+      if (!this.paused && !this.uiPaused) {
+        this.loop();
+      } else {
+        this.draw();
+      }
+    }, 220);
+  };
   private onVis = () => {
     clearTimeout(this.timer);
-    if (!this.paused && !this.opts.solid && !document.hidden) {
+    this.timer = 0;
+    if (document.hidden) {
+      this.releaseAsciiBuffer();
+      return;
+    }
+    if (!this.paused && !this.resizing && !this.uiPaused && !this.opts.solid) {
+      if (this.W !== Math.max(1, innerWidth) || this.H !== Math.max(1, innerHeight)) {
+        this.resize();
+      }
       this.last = performance.now();
       this.loop();
     }
@@ -387,18 +417,23 @@ export class Glow {
     clearTimeout(this.timer);
     this.timer = 0;
     const tick = () => {
-      if (this.paused || this.opts.solid || document.hidden) return;
+      if (this.paused || this.resizing || this.uiPaused || this.opts.solid || document.hidden) {
+        if (document.hidden) {
+          this.releaseAsciiBuffer();
+        }
+        return;
+      }
       const slow = this.opts.throttleUnfocused && !document.hasFocus();
       const fps = slow ? 6 : this.playing ? 24 : 12;
       this.draw();
-      if (!this.paused && !this.opts.solid && !document.hidden) {
+      if (!this.paused && !this.resizing && !this.uiPaused && !this.opts.solid && !document.hidden) {
         this.timer = window.setTimeout(tick, 1000 / fps);
       }
     };
     tick();
   }
 
-  /** Pause the 30 fps loop while an opaque overlay (like the startup splash) covers the canvas. */
+  /** Pause the loop while an opaque overlay (like the startup splash) covers the canvas. */
   setPaused(p: boolean) {
     if (this.paused === p) return;
     this.paused = p;
@@ -406,17 +441,36 @@ export class Glow {
     this.timer = 0;
     if (p) {
       // Ensure one frame with the current theme/palette is ready underneath.
-      this.draw();
-    } else if (!this.opts.solid && !document.hidden) {
+      if (!this.resizing && !this.uiPaused) this.draw();
+    } else if (!this.resizing && !this.uiPaused && !this.opts.solid && !document.hidden) {
       this.last = performance.now();
       this.loop();
     }
   }
 
-  isPaused() { return this.paused; }
+  /** Suspend drawing cleanly during transient UI layout changes without forcing a synchronous redraw. */
+  setSuspended(p: boolean) {
+    if (this.uiPaused === p) return;
+    this.uiPaused = p;
+    clearTimeout(this.timer);
+    this.timer = 0;
+    if (!p && !this.paused && !this.resizing && !this.opts.solid && !document.hidden) {
+      if (this.W !== Math.max(1, innerWidth) || this.H !== Math.max(1, innerHeight)) {
+        this.resize();
+      }
+      this.last = performance.now();
+      this.loop();
+    }
+  }
+
+  isPaused() { return this.paused || this.resizing || this.uiPaused; }
 
   destroy() {
     clearTimeout(this.timer);
+    this.timer = 0;
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = 0;
+    this.releaseAsciiBuffer();
     removeEventListener("resize", this.onResize);
     document.removeEventListener("visibilitychange", this.onVis);
   }
@@ -525,7 +579,7 @@ export class Glow {
     this.gctx.putImageData(this.img, 0, 0);
 
     // ASCII layer and titlebar dots at half cadence (6-12 fps) without per-pixel tuple allocations.
-    if (this.frame++ % 2 === 0 && !o.reduce) {
+    if ((!this.aimg || this.frame++ % 2 === 0) && !o.reduce) {
       if (!this.aimg || this.aimg.width !== W || this.aimg.height !== H) {
         this.asciiEl.width = W; this.asciiEl.height = H;
         this.aimg = this.actx.createImageData(W, H);

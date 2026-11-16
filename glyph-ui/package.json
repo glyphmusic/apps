@@ -1,7 +1,7 @@
 {
   "name": "glyph-ui",
   "private": true,
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "description": "Glyph's user interface (Svelte), shown by the Tauri shell.",
   "scripts": {
@@ -13,7 +13,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.4"
+    "@tauri-apps/api": "^2.12.4",
+    "hash-wasm": "^4.13.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

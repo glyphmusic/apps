@@ -165,6 +165,10 @@ public class MainActivity extends AppCompatActivity {
         webView.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
+
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -175,6 +179,13 @@ public class MainActivity extends AppCompatActivity {
 
         webView.addJavascriptInterface(new Bridge(), "__GLYPH_ANDROID__");
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
+                Log.d("glyph-web", consoleMessage.message() + " ["
+                        + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + "]");
+                return true;
+            }
+
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (fileChooserCallback != null) {
@@ -191,6 +202,15 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    Log.e("glyph-web", "Main frame error: " + error.getDescription() + " code=" + error.getErrorCode());
+                } else if (request != null) {
+                    Log.w("glyph-web", "Resource error: " + error.getDescription() + " url=" + request.getUrl());
+                }
+            }
+
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return interceptWebRequest(request);
@@ -466,6 +486,9 @@ public class MainActivity extends AppCompatActivity {
         if (lower.endsWith(".webp")) return "image/webp";
         if (lower.endsWith(".gif")) return "image/gif";
         if (lower.endsWith(".woff2")) return "font/woff2";
+        if (lower.endsWith(".woff")) return "font/woff";
+        if (lower.endsWith(".ttf")) return "font/ttf";
+        if (lower.endsWith(".otf")) return "font/otf";
         if (lower.endsWith(".wasm")) return "application/wasm";
         if (lower.endsWith(".mp3")) return "audio/mpeg";
         if (lower.endsWith(".flac")) return "audio/flac";

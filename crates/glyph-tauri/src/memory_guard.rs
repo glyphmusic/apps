@@ -133,6 +133,104 @@ fn compute_working_set_caps(procs: &[ProcMem], cap_private: usize) -> Vec<(u32, 
     out
 }
 
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DormantController {
+    pub is_dormant: bool,
+    pub candidate_since: Option<Instant>,
+    pub last_dormant_trim: Option<Instant>,
+}
+
+impl DormantController {
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Evaluates window state transition.
+    /// Returns true if dormant state was immediately cancelled.
+    pub fn on_window_state_change(&mut self, is_hidden_or_minimized: bool, now: Instant) -> bool {
+        if is_hidden_or_minimized {
+            if !self.is_dormant && self.candidate_since.is_none() {
+                self.candidate_since = Some(now);
+            }
+            false
+        } else {
+            self.candidate_since = None;
+            if self.is_dormant {
+                self.is_dormant = false;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Evaluates if debounce threshold (1.5s) has elapsed and enters dormancy.
+    /// Returns true if transitioned from active to dormant.
+    pub fn check_enter_dormant(&mut self, is_hidden_or_minimized: bool, now: Instant, debounce: Duration) -> bool {
+        if !is_hidden_or_minimized {
+            self.candidate_since = None;
+            return false;
+        }
+        if self.is_dormant {
+            return false;
+        }
+        if let Some(candidate) = self.candidate_since {
+            if now.duration_since(candidate) >= debounce {
+                self.is_dormant = true;
+                self.candidate_since = None;
+                self.last_dormant_trim = Some(now);
+                return true;
+            }
+        } else {
+            self.candidate_since = Some(now);
+        }
+        false
+    }
+
+    /// Returns true if a periodic dormant trim (every 20s) is due.
+    pub fn should_periodic_trim(&mut self, now: Instant, interval: Duration) -> bool {
+        if !self.is_dormant {
+            return false;
+        }
+        match self.last_dormant_trim {
+            Some(last) if now.duration_since(last) >= interval => {
+                self.last_dormant_trim = Some(now);
+                true
+            }
+            None => {
+                self.last_dormant_trim = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Determines QoS throttle state for a process within the tree.
+    /// Child processes are always throttled when dormant.
+    /// Root process is throttled ONLY when dormant AND audio is NOT playing.
+    pub fn should_throttle_process(is_dormant: bool, is_root: bool, audio_playing: bool) -> bool {
+        if !is_dormant {
+            return false;
+        }
+        if is_root {
+            !audio_playing
+        } else {
+            true
+        }
+    }
+}
+
+/// Notifies the memory guard of window resize, minimize, focus, or visibility changes.
+pub fn notify_window_state(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    win::handle_window_state_change(app);
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
 /// Starts the background 500 MB RAM cap monitor and enforcer for the desktop app.
 pub fn start(app: tauri::AppHandle, core: Arc<Core>) {
     #[cfg(windows)]
@@ -150,7 +248,9 @@ pub fn start(app: tauri::AppHandle, core: Arc<Core>) {
 mod win {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
+    use tauri::Manager;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -166,6 +266,44 @@ mod win {
         GetCurrentProcessId, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
         PROCESS_SET_QUOTA,
     };
+
+    static DORMANT: Mutex<DormantController> = Mutex::new(DormantController {
+        is_dormant: false,
+        candidate_since: None,
+        last_dormant_trim: None,
+    });
+    static DORMANT_NOTIFY: Condvar = Condvar::new();
+
+    pub(super) fn handle_window_state_change(app: &tauri::AppHandle) {
+        let Some(win) = app.get_webview_window("main") else { return };
+        let is_hidden_or_minimized = win.is_minimized().unwrap_or(false) || !win.is_visible().unwrap_or(true);
+        let exited_dormant = {
+            let mut ctrl = DORMANT.lock().unwrap();
+            ctrl.on_window_state_change(is_hidden_or_minimized, Instant::now())
+        };
+        if exited_dormant {
+            let root_pid = unsafe { GetCurrentProcessId() };
+            crate::playback_qos::set_process_efficiency_mode(root_pid, false);
+            for pid in collect_tree_pids(root_pid) {
+                if pid != root_pid {
+                    crate::playback_qos::set_process_efficiency_mode(pid, false);
+                }
+            }
+            crate::desktop::resume_main_webview(app);
+            crate::desktop::set_webview_low_memory(app, false);
+            tracing::debug!("memory_guard: exited dormant mode (WebView resumed, EcoQoS disabled)");
+        }
+        DORMANT_NOTIFY.notify_all();
+    }
+
+    pub(super) fn is_audio_playing(core: &Core) -> bool {
+        let ps = core.player_state();
+        let st = core.st();
+        (ps.as_ref().is_some_and(|s| {
+            s.status == glyph_audio::Status::Playing || s.status == glyph_audio::Status::Loading
+        }) && !st.resolving)
+            || (st.resolving && !glyph_app::jam::hold_play())
+    }
 
     pub(super) struct OwnedHandle(HANDLE);
     impl Drop for OwnedHandle {
@@ -301,86 +439,145 @@ mod win {
 
         loop {
             let pids = collect_tree_pids(root_pid);
-            let entries: Vec<(OwnedHandle, bool, ProcMem)> = pids.into_iter().filter_map(read_proc_mem).collect();
+            let entries: Vec<(OwnedHandle, bool, ProcMem)> = pids.iter().copied().filter_map(read_proc_mem).collect();
             let stats: Vec<ProcMem> = entries.iter().map(|e| e.2).collect();
             let total_priv: usize = stats.iter().map(|s| s.private_ws).sum();
             let total_commit: usize = stats.iter().map(|s| s.commit).sum();
 
-            let pressure = classify_pressure(total_priv, total_commit, low_target);
-            match pressure {
-                Pressure::Low => {
-                    if low_target {
-                        low_target = false;
-                        crate::desktop::set_webview_low_memory(&app, false);
-                    }
-                    if hard_pinned {
-                        hard_pinned = false;
-                        clear_hard_ws(&entries);
+            let is_hidden_or_minimized = app.get_webview_window("main").map_or(false, |w| {
+                w.is_minimized().unwrap_or(false) || !w.is_visible().unwrap_or(true)
+            });
+            let now = Instant::now();
+            let (just_entered_dormant, is_dormant, do_dormant_trim) = {
+                let mut ctrl = DORMANT.lock().unwrap();
+                let entered = ctrl.check_enter_dormant(is_hidden_or_minimized, now, Duration::from_millis(1500));
+                let periodic_trim = ctrl.should_periodic_trim(now, Duration::from_secs(20));
+                (entered, ctrl.is_dormant, periodic_trim)
+            };
+
+            let audio_playing = is_audio_playing(&core);
+
+            if just_entered_dormant {
+                crate::desktop::set_webview_low_memory(&app, true);
+                crate::desktop::suspend_main_webview(&app);
+                for &pid in &pids {
+                    let throttle = DormantController::should_throttle_process(true, pid == root_pid, audio_playing);
+                    crate::playback_qos::set_process_efficiency_mode(pid, throttle);
+                }
+                core.trim_memory(true);
+                for (h, can_quota, _) in &entries {
+                    if *can_quota {
+                        unsafe { let _ = EmptyWorkingSet(h.0); }
                     }
                 }
-                Pressure::Soft => {
-                    if !low_target {
-                        low_target = true;
-                        crate::desktop::set_webview_low_memory(&app, true);
-                    }
-                    if last_soft_trim.elapsed() >= Duration::from_secs(8) {
-                        last_soft_trim = Instant::now();
-                        core.trim_memory(false);
+                tracing::debug!(audio_playing, "memory_guard: entered dormant mode (WebView suspended, EcoQoS enabled)");
+            } else if is_dormant {
+                if !is_hidden_or_minimized {
+                    handle_window_state_change(&app);
+                    continue;
+                }
+                let root_throttle = DormantController::should_throttle_process(true, true, audio_playing);
+                crate::playback_qos::set_process_efficiency_mode(root_pid, root_throttle);
+                for &pid in &pids {
+                    if pid != root_pid {
+                        crate::playback_qos::set_process_efficiency_mode(pid, true);
                     }
                 }
-                Pressure::HardTrim | Pressure::EnforceCap => {
-                    let enforce = pressure == Pressure::EnforceCap;
-                    if !low_target {
-                        low_target = true;
-                        crate::desktop::set_webview_low_memory(&app, true);
-                    }
-                    if last_hard_trim.elapsed() >= Duration::from_secs(if enforce { 2 } else { 5 }) {
-                        last_hard_trim = Instant::now();
-                        core.trim_memory(true);
-                        for (h, can_quota, m) in &entries {
-                            if *can_quota && m.private_ws > 24 * 1024 * 1024 {
-                                // SAFETY: moves excess clean/reclaimable pages from process working set.
-                                unsafe { let _ = EmptyWorkingSet(h.0); }
-                            }
+
+                if do_dormant_trim {
+                    core.trim_memory(true);
+                    for (h, can_quota, m) in &entries {
+                        if *can_quota && (!audio_playing || m.pid != root_pid) {
+                            unsafe { let _ = EmptyWorkingSet(h.0); }
                         }
-                        if enforce {
-                            let caps = compute_working_set_caps(&stats, ENFORCE_CAP_BYTES);
-                            for (pid, max_ws) in caps {
-                                if let Some((h, true, _)) = entries.iter().find(|e| e.2.pid == pid) {
-                                    let min_ws = (4 * 1024 * 1024).min(max_ws / 2);
-                                    // SAFETY: hard-caps process physical working set below its share of the 500 MB budget.
-                                    let res = unsafe {
-                                        SetProcessWorkingSetSizeEx(
-                                            h.0,
-                                            min_ws,
-                                            max_ws,
-                                            QUOTA_LIMITS_HARDWS_MAX_ENABLE,
-                                        )
-                                    };
-                                    if res.is_ok() {
-                                        hard_pinned = true;
-                                    }
+                    }
+                    tracing::debug!("memory_guard: dormant periodic 20s memory trim");
+                }
+            } else {
+                let pressure = classify_pressure(total_priv, total_commit, low_target);
+                match pressure {
+                    Pressure::Low => {
+                        if low_target {
+                            low_target = false;
+                            crate::desktop::set_webview_low_memory(&app, false);
+                        }
+                        if hard_pinned {
+                            hard_pinned = false;
+                            clear_hard_ws(&entries);
+                        }
+                    }
+                    Pressure::Soft => {
+                        if !low_target {
+                            low_target = true;
+                            crate::desktop::set_webview_low_memory(&app, true);
+                        }
+                        if last_soft_trim.elapsed() >= Duration::from_secs(8) {
+                            last_soft_trim = Instant::now();
+                            core.trim_memory(false);
+                        }
+                    }
+                    Pressure::HardTrim | Pressure::EnforceCap => {
+                        let enforce = pressure == Pressure::EnforceCap;
+                        if !low_target {
+                            low_target = true;
+                            crate::desktop::set_webview_low_memory(&app, true);
+                        }
+                        if last_hard_trim.elapsed() >= Duration::from_secs(if enforce { 2 } else { 5 }) {
+                            last_hard_trim = Instant::now();
+                            core.trim_memory(true);
+                            for (h, can_quota, m) in &entries {
+                                if *can_quota && m.private_ws > 24 * 1024 * 1024 {
+                                    // SAFETY: moves excess clean/reclaimable pages from process working set.
+                                    unsafe { let _ = EmptyWorkingSet(h.0); }
                                 }
                             }
-                            tracing::info!(
-                                priv_mb = total_priv / (1024 * 1024),
-                                commit_mb = total_commit / (1024 * 1024),
-                                cap_mb = RAM_CAP_BYTES / (1024 * 1024),
-                                "memory_guard: enforced 500 MB working-set cap"
-                            );
-                        } else {
-                            tracing::debug!(
-                                priv_mb = total_priv / (1024 * 1024),
-                                commit_mb = total_commit / (1024 * 1024),
-                                "memory_guard: trimmed process working sets"
-                            );
+                            if enforce {
+                                let caps = compute_working_set_caps(&stats, ENFORCE_CAP_BYTES);
+                                for (pid, max_ws) in caps {
+                                    if let Some((h, true, _)) = entries.iter().find(|e| e.2.pid == pid) {
+                                        let min_ws = (4 * 1024 * 1024).min(max_ws / 2);
+                                        // SAFETY: hard-caps process physical working set below its share of the 500 MB budget.
+                                        let res = unsafe {
+                                            SetProcessWorkingSetSizeEx(
+                                                h.0,
+                                                min_ws,
+                                                max_ws,
+                                                QUOTA_LIMITS_HARDWS_MAX_ENABLE,
+                                            )
+                                        };
+                                        if res.is_ok() {
+                                            hard_pinned = true;
+                                        }
+                                    }
+                                }
+                                tracing::info!(
+                                    priv_mb = total_priv / (1024 * 1024),
+                                    commit_mb = total_commit / (1024 * 1024),
+                                    cap_mb = RAM_CAP_BYTES / (1024 * 1024),
+                                    "memory_guard: enforced 500 MB working-set cap"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    priv_mb = total_priv / (1024 * 1024),
+                                    commit_mb = total_commit / (1024 * 1024),
+                                    "memory_guard: trimmed process working sets"
+                                );
+                            }
                         }
                     }
                 }
             }
 
-            let sleep_ms = if matches!(pressure, Pressure::HardTrim | Pressure::EnforceCap) { 1500 } else { 2500 };
-            std::thread::sleep(Duration::from_millis(sleep_ms));
+            let pressure = classify_pressure(total_priv, total_commit, low_target);
+            let sleep_ms = if is_dormant {
+                500
+            } else if matches!(pressure, Pressure::HardTrim | Pressure::EnforceCap) {
+                1500
+            } else {
+                2500
+            };
+            let guard = DORMANT.lock().unwrap();
+            let _ = DORMANT_NOTIFY.wait_timeout(guard, Duration::from_millis(sleep_ms)).unwrap();
         }
     }
 }
@@ -447,5 +644,62 @@ mod tests {
         let (_h, _quota, mem) = win::read_proc_mem(pid).expect("read_proc_mem on self");
         assert!(mem.working_set > 0);
         assert!(mem.private_ws > 0);
+    }
+
+    #[test]
+    fn dormant_controller_debounces_and_cancels_immediately() {
+        let mut ctrl = DormantController::new();
+        let t0 = Instant::now();
+        let debounce = Duration::from_millis(1500);
+
+        // Window minimized: candidate marked, not yet dormant
+        assert!(!ctrl.on_window_state_change(true, t0));
+        assert!(!ctrl.check_enter_dormant(true, t0 + Duration::from_millis(500), debounce));
+        assert!(!ctrl.is_dormant);
+
+        // Alt-tab back before 1.5s: cancelled, not dormant
+        assert!(!ctrl.on_window_state_change(false, t0 + Duration::from_millis(600)));
+        assert_eq!(ctrl.candidate_since, None);
+        assert!(!ctrl.is_dormant);
+
+        // Minimized again:
+        let t1 = t0 + Duration::from_millis(1000);
+        assert!(!ctrl.on_window_state_change(true, t1));
+        assert!(!ctrl.check_enter_dormant(true, t1 + Duration::from_millis(1490), debounce));
+        assert!(!ctrl.is_dormant);
+
+        // After 1.5s: enters dormant
+        assert!(ctrl.check_enter_dormant(true, t1 + Duration::from_millis(1501), debounce));
+        assert!(ctrl.is_dormant);
+
+        // Re-trim interval 20s
+        assert!(!ctrl.should_periodic_trim(
+            t1 + Duration::from_millis(1501) + Duration::from_secs(19),
+            Duration::from_secs(20)
+        ));
+        assert!(ctrl.should_periodic_trim(
+            t1 + Duration::from_millis(1501) + Duration::from_secs(21),
+            Duration::from_secs(20)
+        ));
+
+        // Unminimize: cancelled immediately (<50ms synchronous)
+        let unminimized = ctrl.on_window_state_change(false, t1 + Duration::from_secs(25));
+        assert!(unminimized);
+        assert!(!ctrl.is_dormant);
+    }
+
+    #[test]
+    fn dormant_controller_qos_throttling_rules() {
+        // Not dormant: nobody throttled
+        assert!(!DormantController::should_throttle_process(false, true, false));
+        assert!(!DormantController::should_throttle_process(false, false, false));
+
+        // Dormant + Audio playing: child throttled, root NOT throttled!
+        assert!(!DormantController::should_throttle_process(true, true, true));
+        assert!(DormantController::should_throttle_process(true, false, true));
+
+        // Dormant + Audio paused: child throttled, root throttled
+        assert!(DormantController::should_throttle_process(true, true, false));
+        assert!(DormantController::should_throttle_process(true, false, false));
     }
 }

@@ -36,7 +36,9 @@
   $effect(() => { app.searchFocused = focused; });
 </script>
 
-<div class="sf" class:focused class:wide={width == null} style:width={width ? `${width}px` : undefined} data-no-drag>
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="sf" class:focused class:wide={width == null} style:width={width ? `${width}px` : undefined} data-no-drag
+  onclick={(e) => { if (!(e.target as HTMLElement)?.closest("button, .dd")) input?.focus(); }}>
   <Icon name="search" size={width == null ? 16 : 15} color="rgba(255,255,255,.55)" />
   <input bind:this={input} id="search-input" value={app.searchQuery} placeholder={t("search.placeholder")} spellcheck="false" autocomplete="off"
     oninput={(e) => app.setQuery(e.currentTarget.value)} onfocus={() => (focused = true)} onblur={() => setTimeout(() => (focused = false), 120)} onkeydown={key} />

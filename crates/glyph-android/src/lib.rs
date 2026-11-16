@@ -404,19 +404,32 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
     );
 
     let init_info = env
-        .with_env(|env| -> jni::errors::Result<Option<(JavaVM, Global<JObject<'static>>, String)>> {
+        .with_env(|env| -> jni::errors::Result<Option<(JavaVM, Global<JObject<'static>>, Global<JObject<'static>>, String)>> {
             let vm = env.get_java_vm()?;
             let global = env.new_global_ref(&activity)?;
+            let app_ctx = env
+                .call_method(&activity, jni_str!("getApplicationContext"), jni_sig!("()Landroid/content/Context;"), &[])?
+                .l()?;
+            let global_app = env.new_global_ref(&app_ctx)?;
             let dir = files_dir.try_to_string(env)?;
-            Ok(Some((vm, global, dir)))
+            Ok(Some((vm, global, global_app, dir)))
         })
         .resolve::<LogErrorAndDefault>();
 
-    let Some((vm, global_act, files_dir)) = init_info else {
+    let Some((vm, global_act, global_app, files_dir)) = init_info else {
         return;
     };
-    let _ = JVM.set(vm);
+    let _ = JVM.set(vm.clone());
     *ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(global_act);
+
+    static INIT_NDK: std::sync::Once = std::sync::Once::new();
+    INIT_NDK.call_once(|| unsafe {
+        ndk_context::initialize_android_context(
+            vm.get_raw().cast(),
+            global_app.as_raw().cast(),
+        );
+        std::mem::forget(global_app);
+    });
 
     STATE.get_or_init(|| {
         std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
@@ -476,10 +489,27 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInvoke<'local>(
 
     let core = Arc::clone(&state.core);
     state.rt.spawn(async move {
-        let result = glyph_app::dispatch::dispatch(&core, &cmd, args).await;
-        let (ok, json) = match result {
-            Ok(v) => (true, serde_json::to_string(&v).unwrap_or_else(|_| "null".into())),
-            Err(e) => (false, serde_json::to_string(&e).unwrap_or_else(|_| "\"error\"".into())),
+        use futures::FutureExt;
+        let panic_res = std::panic::AssertUnwindSafe(async {
+            glyph_app::dispatch::dispatch(&core, &cmd, args).await
+        })
+        .catch_unwind()
+        .await;
+
+        let (ok, json) = match panic_res {
+            Ok(Ok(v)) => (true, serde_json::to_string(&v).unwrap_or_else(|_| "null".into())),
+            Ok(Err(e)) => (false, serde_json::to_string(&e).unwrap_or_else(|_| "\"error\"".into())),
+            Err(panic_err) => {
+                let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    format!("panic in command `{cmd}`")
+                };
+                log::error!("command `{cmd}` panicked: {msg}");
+                (false, serde_json::to_string(&msg).unwrap_or_else(|_| "\"panic\"".into()))
+            }
         };
         call_complete_invoke(id as i64, ok, &json);
     });

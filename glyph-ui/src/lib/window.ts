@@ -1,7 +1,7 @@
 // Window actions. Tauri: the frameless window's own controls; browser
 // preview: nothing to do.
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
-import { isTauri } from "./api/backend";
+import { isTauri, isWeb } from "./api/backend";
 
 let cached: TauriWindow | null = null;
 let loading: Promise<TauriWindow | null> | null = null;
@@ -57,10 +57,20 @@ export function titlebarDown(e: MouseEvent) {
   else void startDrag();
 }
 
-/** This webview is the mini player window (Tauri opens it with `#mini`). */
-export const inMiniWindow = () => isTauri() && location.hash === "#mini";
+/** This webview or popup is the mini player window (Tauri opens `#mini`, Web opens `/web/#mini`). */
+export const inMiniWindow = () => (isTauri() || isWeb()) && typeof location !== "undefined" && location.hash === "#mini";
 /** Mini player window: new size in CSS pixels. */
 export async function setWindowSize(w: number, h: number) {
+  if (isWeb() && typeof window !== "undefined") {
+    try {
+      const diffW = window.outerWidth > window.innerWidth ? window.outerWidth - window.innerWidth : 0;
+      const diffH = window.outerHeight > window.innerHeight ? window.outerHeight - window.innerHeight : 0;
+      window.resizeTo(Math.round(w + diffW), Math.round(h + diffH));
+    } catch {
+      window.resizeTo(Math.round(w), Math.round(h));
+    }
+    return;
+  }
   const cw = await win();
   if (!cw) return;
   const { LogicalSize } = await import("@tauri-apps/api/dpi");

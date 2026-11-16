@@ -8,7 +8,7 @@
   import { slide } from "svelte/transition";
   import { app } from "./lib/state.svelte";
   import { applyTheme } from "./lib/theme";
-  import { fx, startRevealClock } from "./lib/ui.svelte";
+  import { fx, setUiSuspended, startRevealClock, suspendBackground } from "./lib/ui.svelte";
   import { installKeys } from "./lib/keys";
   import Background from "./lib/shell/Background.svelte";
   import Titlebar from "./lib/shell/Titlebar.svelte";
@@ -30,7 +30,15 @@
   import Icon from "./lib/components/Icon.svelte";
   import { t } from "./lib/i18n.svelte";
   import { isMac, minimize, close as closeWindow, titlebarDown, inMiniWindow } from "./lib/window";
-  import { isTauri } from "./lib/api/backend";
+  import { isTauri, isWeb } from "./lib/api/backend";
+  import { mcpq, type McpApproval } from "./lib/settings/plugin-events.svelte";
+  import {
+    setupWebMiniMain,
+    setupWebMiniPopup,
+    syncWebMiniShown,
+    notifyWebMiniClosed,
+    requestWebMiniSync,
+  } from "./lib/web-mini.svelte";
   import MiniPlayer from "./lib/overlays/MiniPlayer.svelte";
   import type SearchField from "./lib/shell/SearchField.svelte";
 
@@ -39,10 +47,52 @@
   let narrow = $state(false);
   let winW = $state(typeof window !== "undefined" ? window.innerWidth : 1280);
   let resizing = $state<"left" | "right" | null>(null);
+  let pendingMcpConnectId = $state<string | null>(null);
+
+  function checkMcpConnectHash() {
+    if (typeof window === "undefined" || !isWeb()) return;
+    const hash = window.location.hash || "";
+    const m = hash.match(/^#mcp-connect=([^&]+)/);
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    const rest = hash.slice(m[0].length);
+    const newHash = rest ? (rest.startsWith("&") ? "#" + rest.slice(1) : rest) : "";
+    const newUrl = window.location.pathname + window.location.search + newHash;
+    window.history.replaceState(null, "", newUrl);
+    pendingMcpConnectId = id;
+    if (!app.account) {
+      app.toast(t("sp.mcp.web_connect.signin"), "info");
+      app.openSettings("account");
+    }
+  }
+
+  $effect(() => {
+    if (isWeb() && app.account && pendingMcpConnectId) {
+      const id = pendingMcpConnectId;
+      pendingMcpConnectId = null;
+      backend()
+        .call<McpApproval>("mcp_claim_oauth", { id })
+        .then((approval) => {
+          if (approval && !mcpq.approvals.some((a) => a.id === approval.id)) {
+            mcpq.approvals = [approval, ...mcpq.approvals];
+          }
+        })
+        .catch(() => {
+          app.toast(t("sp.mcp.web_connect.failed"), "info");
+        });
+    }
+  });
 
   // Tauri opens the mini player as a window of its own (`#mini`).
   const mini = inMiniWindow();
-  if (mini) document.documentElement.classList.add("mini-window");
+  if (mini) {
+    document.documentElement.classList.add("mini-window");
+    if (isWeb()) {
+      document.documentElement.style.background = "#0c0c0c";
+      document.body.style.background = "#0c0c0c";
+      document.documentElement.style.colorScheme = "dark";
+    }
+  }
 
   // Desktop windows never switch to the mobile layout (`compact`), even when
   // narrow or on coarse-pointer touch laptops; web and phones still do.
@@ -54,9 +104,16 @@
 
   onMount(() => {
     if (mini) {
-      app.init().catch((e) => (error = String(e)));
+      let offWebMini: (() => void) | undefined;
+      if (isWeb()) offWebMini = setupWebMiniPopup(app);
+      app.init().then(() => {
+        if (isWeb()) requestWebMiniSync();
+      }).catch((e) => (error = String(e)));
       startRevealClock();
-      return;
+      return () => {
+        offWebMini?.();
+        if (isWeb()) notifyWebMiniClosed();
+      };
     }
     const fontReady = document.fonts ? document.fonts.load('700 10px "JetBrains Mono"').catch(() => {}) : Promise.resolve();
     const reveal = async () => {
@@ -67,6 +124,8 @@
     let dead = false;
     let offRoutes: (() => void) | undefined;
     let offSettingsHash: (() => void) | undefined;
+    let cleanupWebMini: (() => void) | undefined;
+    if (isWeb()) cleanupWebMini = setupWebMiniMain(app);
     // Page addresses (/search?q=, /artist/..., ...) only where there is an address bar;
     // the settings URL fragment (`#settings/...`) stays synced everywhere so reloads keep it open.
     app.init().then(async () => {
@@ -88,12 +147,17 @@
     const rm = matchMedia("(prefers-reduced-motion: reduce)");
     fx.reduce = rm.matches;
     const offKeys = installKeys(() => search?.focus());
+    checkMcpConnectHash();
+    const onHashChange = () => checkMcpConnectHash();
+    window.addEventListener("hashchange", onHashChange);
     return () => {
       dead = true;
       offRoutes?.();
       offSettingsHash?.();
+      cleanupWebMini?.();
       mq.removeEventListener("change", sync);
       offKeys();
+      window.removeEventListener("hashchange", onHashChange);
     };
   });
 
@@ -101,7 +165,18 @@
   // close button tells the main window).
   $effect(() => {
     const shown = app.miniShown;
-    if (isTauri() && app.ready) backend().call("mini_show", { shown });
+    if (isTauri() && app.ready) {
+      void backend().call("mini_show", { shown });
+    } else if (isWeb() && app.ready) {
+      if (mini) {
+        if (!shown) {
+          notifyWebMiniClosed();
+          window.close();
+        }
+      } else {
+        syncWebMiniShown(app, shown);
+      }
+    }
   });
 
   $effect(() => {
@@ -117,6 +192,21 @@
   const zen = $derived(app.zen && app.view === "now_playing" && !!app.player.current && !app.settingsOpen);
   const leftW = $derived(Math.min(app.leftSidebarW, Math.max(64, winW - (rightOpen ? 260 : 0) - 340)));
   const rightW = $derived(Math.min(app.rightSidebarW, Math.max(260, winW - leftW - 340)));
+
+  $effect(() => {
+    setUiSuspended("sash", resizing !== null);
+    return () => setUiSuspended("sash", false);
+  });
+
+  let layoutInit = false;
+  $effect(() => {
+    void app.view;
+    void rightOpen;
+    void showBar;
+    void app.compact;
+    if (!layoutInit) { layoutInit = true; return; }
+    suspendBackground(260);
+  });
 
   function startResize(e: PointerEvent, side: "left" | "right") {
     if (e.button !== 0) return;

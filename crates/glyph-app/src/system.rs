@@ -207,7 +207,7 @@ pub fn mcp_rotate_token(core: C) {
 }
 
 pub async fn mcp_server_token(core: C<'_>) -> Res {
-    crate::mcp_tools::request_server_token(core).await;
+    crate::mcp_tools::request_server_token(core, None).await;
     Ok(())
 }
 

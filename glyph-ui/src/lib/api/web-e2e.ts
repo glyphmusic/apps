@@ -1,8 +1,8 @@
 // Browser E2E cryptography compatible with glyph_core::e2e and glyph_core::e2e_sync.
 // Uses WebCrypto (HKDF-SHA256, HMAC-SHA256, SHA-256, CSPRNG),
 // CompressionStream/DecompressionStream("deflate-raw"), pure-TS XChaCha20-Poly1305
-// & X25519, and lazy-loaded hash-wasm Argon2id (same CDN bundle as /account/login)
-// for password KDFs.
+// & X25519, and hash-wasm Argon2id for password KDFs.
+import { argon2id } from "hash-wasm";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -578,41 +578,11 @@ export async function openFromDevice(deviceId: string, dk: DeviceKey, v: any): P
 
 // ---- Password KDFs via hash-wasm Argon2id ----
 
-let argon2Promise: Promise<any> | null = null;
-
-function loadArgon2(): Promise<any> {
-  const g = globalThis as any;
-  if (g.hashwasm?.argon2id) return Promise.resolve(g.hashwasm);
-  if (argon2Promise) return argon2Promise;
-  argon2Promise = new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/argon2.umd.min.js";
-    s.integrity = "sha384-Hor276p+84231+c933P5285a0A3+y2M+J8W3x9iN2V6uF/R+O/B/z/vC2T6c1u2";
-    s.crossOrigin = "anonymous";
-    s.onload = () => (g.hashwasm?.argon2id ? resolve(g.hashwasm) : reject(new Error("argon2 unavailable")));
-    s.onerror = () => {
-      // Retry without SRI in case CDN minifier differs
-      const s2 = document.createElement("script");
-      s2.src = "https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/argon2.umd.min.js";
-      s2.crossOrigin = "anonymous";
-      s2.onload = () => (g.hashwasm?.argon2id ? resolve(g.hashwasm) : reject(new Error("argon2 unavailable")));
-      s2.onerror = () => {
-        argon2Promise = null;
-        reject(new Error("Failed to load Argon2 library"));
-      };
-      document.head.appendChild(s2);
-    };
-    document.head.appendChild(s);
-  });
-  return argon2Promise;
-}
-
 /** glyph_protocol::password_kdf (M=19456 KiB, T=2, P=1, len=32). Returns base64url key. */
 export async function deriveLoginKey(password: string, saltB64: string): Promise<string> {
   const salt = unb64url(saltB64);
   if (!salt || salt.length < 8) throw new Error("invalid salt");
-  const hw = await loadArgon2();
-  const key: Uint8Array = await hw.argon2id({
+  const key: Uint8Array = await argon2id({
     password,
     salt,
     parallelism: 1,
@@ -628,8 +598,7 @@ export async function deriveLoginKey(password: string, saltB64: string): Promise
 export async function derivePasswordKey(password: string, accountId: string): Promise<Uint8Array> {
   const fullSalt = await sha256(`glyph-vault-v2:${accountId}`);
   const salt = fullSalt.subarray(0, 16);
-  const hw = await loadArgon2();
-  const key: Uint8Array = await hw.argon2id({
+  const key: Uint8Array = await argon2id({
     password,
     salt,
     secret: enc.encode("glyph-vault-v2"),

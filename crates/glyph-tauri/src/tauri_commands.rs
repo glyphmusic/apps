@@ -5,7 +5,7 @@ use glyph_app::jam::{Perms, Reaction};
 use glyph_app::transfer::PickedFile;
 use glyph_app::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer};
 use glyph_core::{ListKey, SearchItem};
-use glyph_protocol::mcp::Approval;
+use glyph_protocol::mcp::{Approval, Session as McpSession};
 use glyph_protocol::Track;
 use serde_json::Value;
 use std::sync::Arc;
@@ -578,8 +578,8 @@ pub fn mcp_rotate_token(core: C) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn mcp_server_token(core: C<'_>) -> Res {
-    system::mcp_server_token(&core).await
+pub async fn mcp_server_token(core: C<'_>, name: Option<String>) -> Res {
+    commands::mcp_server_token(&core, name).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -627,6 +627,26 @@ pub fn mcp_pending() -> Vec<Approval> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn mcp_approve(core: C<'_>, id: String, allow: bool) -> Res {
     mcp_tools::mcp_approve(&core, id, allow).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mcp_sessions(core: C<'_>) -> Res<Vec<McpSession>> {
+    commands::mcp_sessions(&core).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mcp_rename_session(core: C<'_>, id: String, name: String) -> Res<McpSession> {
+    commands::mcp_rename_session(&core, id, name).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mcp_revoke_session(core: C<'_>, id: String) -> Res {
+    commands::mcp_revoke_session(&core, id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn mcp_claim_oauth(core: C<'_>, id: String) -> Res<Approval> {
+    commands::mcp_claim_oauth(&core, id).await
 }
 
 // ---- account / profile / privacy / server ----

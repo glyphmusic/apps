@@ -105,7 +105,10 @@ const COMPONENTS: Record<SettingsPage, Component<{ sub?: number }>> = {
 /** A page is shown at all (phones have no autostart/tray or integrations; Web player shows a smaller set). */
 export function pageShown(p: SettingsPage): boolean {
   // The web player has no equalizer, server, storage, plugins or system settings.
-  if (onWeb()) return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "integrations" || p === "about";
+  if (onWeb()) {
+    if (p === "integrations") return app.account != null;
+    return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "about";
+  }
   if (p === "system" || p === "integrations") return !isMobile();
   return true;
 }
@@ -176,6 +179,7 @@ export const OPTIONS: [SettingsPage, number, string, string][] = [
   ["integrations", 1, "sp.mcp", "mcp model context protocol ai claude assistant ki agent"],
   ["integrations", 1, "sp.mcp.access.playback", "mcp ai assistant permissions berechtigungen rechte scopes tools read write lesen schreiben"],
   ["integrations", 1, "sp.mcp.access.settings", "mcp ai assistant settings einstellungen appearance theme equalizer audio playback sync"],
+  ["integrations", 1, "sp.mcp.sessions", "mcp ai session sessions sitzungen revoke widerrufen rename umbenennen token connect verbinden"],
   ["plugins", 1, "plugins.catalog", "plugins plugin erweiterungen extensions addons add-ons themes farbschema github topic community"],
   ["plugins", 0, "plugins.publish", "plugin erstellen create publish veröffentlichen developer entwickler github"],
   ["storage", 0, "sp.storage.limit", "cache limit size größe"],

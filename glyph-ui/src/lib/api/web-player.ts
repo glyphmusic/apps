@@ -67,6 +67,8 @@ function loadYouTubeApi(): Promise<YTNamespace> {
 
 export class WebEngine {
   private audio = new Audio();
+  private nextAudio = new Audio();
+  private preloadedUrl: string | null = null;
   private mode: "audio" | "youtube" | null = null;
   private yt: YTPlayer | null = null;
   private ytReady: Promise<YTPlayer> | null = null;
@@ -80,25 +82,38 @@ export class WebEngine {
   private pendingStart = 0;
 
   constructor(private hooks: EngineHooks) {
-    const a = this.audio;
+    this.bindAudio(this.audio);
+    this.bindAudio(this.nextAudio);
+  }
+
+  private bindAudio(a: HTMLAudioElement) {
     a.preload = "auto";
     a.crossOrigin = null;
     a.addEventListener("loadedmetadata", () => {
-      if (this.mode !== "audio" || this.pendingStart <= 0) return;
+      if (a !== this.audio || this.mode !== "audio" || this.pendingStart <= 0) return;
       const target = Number.isFinite(a.duration) ? Math.min(this.pendingStart, a.duration) : this.pendingStart;
       this.pendingStart = 0;
       try { a.currentTime = target; } catch { /* ignore */ }
     });
-    a.addEventListener("timeupdate", () => this.mode === "audio" && hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
-    a.addEventListener("durationchange", () => this.mode === "audio" && hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
-    a.addEventListener("playing", () => this.mode === "audio" && hooks.playing(true));
-    a.addEventListener("pause", () => this.mode === "audio" && !a.ended && hooks.playing(false));
-    a.addEventListener("waiting", () => this.mode === "audio" && hooks.waiting());
-    a.addEventListener("ended", () => this.mode === "audio" && hooks.ended());
+    a.addEventListener("timeupdate", () => a === this.audio && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
+    a.addEventListener("durationchange", () => a === this.audio && this.mode === "audio" && this.hooks.time(a.currentTime, Number.isFinite(a.duration) ? a.duration : null));
+    a.addEventListener("playing", () => a === this.audio && this.mode === "audio" && this.hooks.playing(true));
+    a.addEventListener("pause", () => a === this.audio && this.mode === "audio" && !a.ended && this.hooks.playing(false));
+    a.addEventListener("waiting", () => a === this.audio && this.mode === "audio" && this.hooks.waiting());
+    a.addEventListener("ended", () => a === this.audio && this.mode === "audio" && this.hooks.ended());
     a.addEventListener("error", () => {
-      if (this.mode !== "audio" || !a.src) return;
-      hooks.error(a.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "format_unsupported" : "playback_failed");
+      if (a !== this.audio || this.mode !== "audio" || !a.src) return;
+      this.hooks.error(a.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "format_unsupported" : "playback_failed");
     });
+  }
+
+  /** Pre-buffer the next direct audio stream without interrupting current playback. */
+  preload(src: PlaybackSource | null) {
+    if (!src || src.kind === "embed" || serverAudio(src.url)) return;
+    if (this.preloadedUrl === src.url) return;
+    this.preloadedUrl = src.url;
+    this.nextAudio.src = src.url;
+    this.nextAudio.load();
   }
 
   /** Play (or only load, `autoplay` false) a resolved source from `start` seconds. */
@@ -120,9 +135,20 @@ export class WebEngine {
     if (serverAudio(src.url)) throw new Error("server_audio");
     this.stopYouTube();
     this.mode = "audio";
+    if (this.preloadedUrl === src.url && this.nextAudio.readyState >= 1) {
+      const old = this.audio;
+      old.pause();
+      old.removeAttribute("src");
+      old.load();
+      this.audio = this.nextAudio;
+      this.nextAudio = old;
+      this.preloadedUrl = null;
+    }
     const a = this.audio;
     this.pendingStart = start > 0 ? start : 0;
-    a.src = src.url;
+    if (a.src !== src.url) {
+      a.src = src.url;
+    }
     if (start > 0) {
       try { a.currentTime = start; } catch { /* applied on loadedmetadata */ }
     }
@@ -185,16 +211,16 @@ export class WebEngine {
     this.showBox(false);
   }
 
-  /** The visible box that holds YouTube's player (at least 200 px high, as YouTube asks). */
+  /** Hidden audio-only YouTube IFrame host (kept laid out for playback without showing a video box). */
   private showBox(on: boolean) {
     if (!this.box) {
       if (!on) return;
       const b = document.createElement("div");
       b.className = "glyph-yt";
-      b.setAttribute("aria-label", "YouTube");
+      b.setAttribute("aria-hidden", "true");
       Object.assign(b.style, {
-        position: "fixed", right: "16px", bottom: "112px", zIndex: "25", width: "min(356px, calc(100vw - 32px))", height: "200px",
-        borderRadius: "12px", overflow: "hidden", background: "#000", transition: "opacity .2s ease-out",
+        position: "fixed", left: "-240px", bottom: "0", zIndex: "-9999", width: "200px", height: "200px",
+        opacity: "0", clipPath: "inset(50%)", pointerEvents: "none", overflow: "hidden",
       } satisfies Partial<CSSStyleDeclaration>);
       const inner = document.createElement("div");
       b.appendChild(inner);
@@ -212,9 +238,12 @@ export class WebEngine {
       const p = new YT.Player(el, {
         host: "https://www.youtube-nocookie.com",
         width: "100%", height: "100%",
-        playerVars: { playsinline: 1, rel: 0, controls: 1, origin: location.origin },
+        playerVars: { playsinline: 1, rel: 0, controls: 0, origin: location.origin },
         events: {
-          onReady: () => { this.yt = p; this.applyVolume(); resolve(p); },
+          onReady: () => {
+            this.box?.querySelector("iframe")?.setAttribute("tabindex", "-1");
+            this.yt = p; this.applyVolume(); resolve(p);
+          },
           onStateChange: (e: { data: number }) => this.ytState(e.data),
           onError: (e: { data: number }) => this.mode === "youtube" && this.hooks.error(e.data === 101 || e.data === 150 ? "embed_blocked" : "playback_failed"),
         },

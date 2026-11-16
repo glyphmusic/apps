@@ -1547,8 +1547,48 @@ impl Backend {
 impl Backend {
     /// A new MCP token for AI assistants reaching this account's app
     /// through the server.
-    pub async fn mcp_token(&self) -> Result<glyph_protocol::mcp::TokenResponse> {
-        self.profile_call(|c, t| async move { c.mcp_token(&t).await }).await
+    pub async fn mcp_token(&self, name: Option<&str>) -> Result<glyph_protocol::mcp::TokenResponse> {
+        let name = name.map(str::to_string);
+        self.profile_call(move |c, t| {
+            let name = name.clone();
+            async move { c.mcp_token(&t, name.as_deref()).await }
+        })
+        .await
+    }
+
+    /// Connected AI assistant sessions.
+    pub async fn mcp_sessions(&self) -> Result<Vec<glyph_protocol::mcp::Session>> {
+        self.profile_call(|c, t| async move { c.mcp_sessions(&t).await }).await
+    }
+
+    /// Rename an assistant session.
+    pub async fn mcp_rename_session(&self, id: &str, name: &str) -> Result<glyph_protocol::mcp::Session> {
+        let (id, name) = (id.to_string(), name.to_string());
+        self.profile_call(move |c, t| {
+            let (id, name) = (id.clone(), name.clone());
+            async move { c.mcp_rename_session(&t, &id, &name).await }
+        })
+        .await
+    }
+
+    /// Revoke an assistant session.
+    pub async fn mcp_revoke_session(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.profile_call(move |c, t| {
+            let id = id.clone();
+            async move { c.mcp_revoke_session(&t, &id).await }
+        })
+        .await
+    }
+
+    /// Claim an OAuth assistant approval.
+    pub async fn mcp_claim_oauth(&self, id: &str) -> Result<glyph_protocol::mcp::Approval> {
+        let id = id.to_string();
+        self.profile_call(move |c, t| {
+            let id = id.clone();
+            async move { c.mcp_claim_oauth(&t, &id).await }
+        })
+        .await
     }
 
     /// Waits (long poll) for tool calls queued on the server.

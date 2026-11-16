@@ -86,7 +86,7 @@
 {/if}
 
 <style>
-  .bg { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; transition: filter .18s ease-out; }
+  .bg { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; contain: strict; transition: filter .18s ease-out; }
   .bg.solid { z-index: 0; transition: none; }
   .bg.blurred { filter: blur(14px) saturate(1.1); }
   .glow { z-index: 0; image-rendering: auto; }

@@ -22,6 +22,8 @@
   import { requestSignOut } from "../settings/account-state.svelte";
   import { listSort, listSortDir, setListSort, type ListSort } from "../pages/lists/actions";
   import type { RepeatMode } from "../api/types";
+  import { onWeb } from "../web";
+  import { openWebMini } from "../web-mini.svelte";
 
   type Row = { kind: "row"; icon: string; label: string; on?: boolean; danger?: boolean; run: () => void } | { kind: "account_head"; handle: string; avatar: string | null } | { kind: "caption"; text: string } | { kind: "sep" };
   // Kept after the menu closed so the fade-out can still draw it.
@@ -69,7 +71,11 @@
       }
       case "mini": {
         const big = app.config.player.mini_large, shown = app.miniShown;
-        const open = (large: boolean) => () => { app.setConfig((c) => { c.player.mini_large = large; }); app.miniShown = true; };
+        const open = (large: boolean) => () => {
+          app.setConfig((c) => { c.player.mini_large = large; });
+          if (onWeb()) openWebMini(app);
+          else app.miniShown = true;
+        };
         choice("picture-in-picture-2", t("ctl.mini.card"), shown && big, open(true));
         choice("panel-bottom", t("ctl.mini.bar"), shown && !big, open(false));
         if (shown) { out.push({ kind: "sep" }); plain("x", t("ctl.mini.close"), () => (app.miniShown = false)); }

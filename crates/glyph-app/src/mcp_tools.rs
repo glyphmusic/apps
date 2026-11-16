@@ -226,7 +226,7 @@ pub fn rotate_token(core: &Arc<Core>) {
 }
 
 /// Asks the server for a token for its MCP endpoint.
-pub async fn request_server_token(core: &Arc<Core>) {
+pub async fn request_server_token(core: &Arc<Core>, name: Option<String>) {
     let Some(b) = core.backend() else { return };
     {
         let mut s = state();
@@ -235,7 +235,7 @@ pub async fn request_server_token(core: &Arc<Core>) {
         }
         s.token_loading = true;
     }
-    let r = b.mcp_token().await;
+    let r = b.mcp_token(name.as_deref()).await;
     let mut s = state();
     s.token_loading = false;
     match r {
@@ -245,6 +245,26 @@ pub async fn request_server_token(core: &Arc<Core>) {
         }
         Err(e) => s.error = Some(format!("{e:#}")),
     }
+}
+
+pub async fn sessions(core: &Arc<Core>) -> Result<Vec<glyph_protocol::mcp::Session>, String> {
+    let b = core.backend_or_err()?;
+    b.mcp_sessions().await.map_err(|e| format!("{e:#}"))
+}
+
+pub async fn rename_session(core: &Arc<Core>, id: String, name: String) -> Result<glyph_protocol::mcp::Session, String> {
+    let b = core.backend_or_err()?;
+    b.mcp_rename_session(&id, &name).await.map_err(|e| format!("{e:#}"))
+}
+
+pub async fn revoke_session(core: &Arc<Core>, id: String) -> Result<(), String> {
+    let b = core.backend_or_err()?;
+    b.mcp_revoke_session(&id).await.map_err(|e| format!("{e:#}"))
+}
+
+pub async fn claim_oauth(core: &Arc<Core>, id: String) -> Result<glyph_protocol::mcp::Approval, String> {
+    let b = core.backend_or_err()?;
+    b.mcp_claim_oauth(&id).await.map_err(|e| format!("{e:#}"))
 }
 
 /// The user answers an assistant's access request (relay mode).
@@ -1596,6 +1616,24 @@ fn apply_settings_patch_with(cfg: &mut glyph_core::config::Config, installed_the
 mod tests {
     use super::*;
     use glyph_core::config::{AudioQuality, Config, ListSort, ShuffleStyle};
+
+    #[test]
+    fn settings_permissions_enforce_none_read_write() {
+        use glyph_protocol::mcp::{Access, Permissions};
+        let mut p = Permissions::default();
+
+        p.settings = Access::None;
+        assert!(!p.allows("get_settings"));
+        assert!(!p.allows("set_settings"));
+
+        p.settings = Access::Read;
+        assert!(p.allows("get_settings"));
+        assert!(!p.allows("set_settings"));
+
+        p.settings = Access::Write;
+        assert!(p.allows("get_settings"));
+        assert!(p.allows("set_settings"));
+    }
 
     #[test]
     fn settings_snapshot_filters_and_exposes_available() {

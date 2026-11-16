@@ -143,12 +143,40 @@ let glow: Glow | null = null;
 const inked = new Set<HTMLElement>();
 let inkTimer = 0;
 let staticDarkInk = false;
+const glowSuspensions = new Set<string>();
+let glowSuspendTimer = 0;
+let glowTransient = false;
+
+function syncGlowSuspension() {
+  glow?.setSuspended(glowSuspensions.size > 0 || glowTransient);
+}
+
+/** Suspends background canvas drawing while a named UI interaction (e.g. sidebar resize) is active. */
+export function setUiSuspended(key: string, suspended: boolean) {
+  if (suspended) glowSuspensions.add(key);
+  else glowSuspensions.delete(key);
+  syncGlowSuspension();
+}
+
+/** Temporarily pauses background canvas drawing while UI panels or views finish changing. */
+export function suspendBackground(ms = 240) {
+  glowTransient = true;
+  syncGlowSuspension();
+  clearTimeout(glowSuspendTimer);
+  glowSuspendTimer = window.setTimeout(() => {
+    glowSuspendTimer = 0;
+    glowTransient = false;
+    syncGlowSuspension();
+  }, ms);
+}
+
 export function setGlow(g: Glow | null, solidDarkInk = false) {
   glow = g;
   staticDarkInk = g ? false : solidDarkInk;
   clearInterval(inkTimer);
   inkTimer = 0;
   if (g) {
+    syncGlowSuspension();
     inkTimer = window.setInterval(updateInks, 450);
   } else {
     for (const el of inked) el.classList.toggle("ink-dark", staticDarkInk);

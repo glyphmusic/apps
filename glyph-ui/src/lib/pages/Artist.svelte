@@ -43,7 +43,7 @@
   const tracks = $derived(page?.tracks ?? []);
   const loading = $derived(page?.loading ?? true);
   const info = $derived(page?.info ?? null);
-  const infoLoading = $derived(loading && !info);
+  const infoLoading = $derived((page as any)?.info_loading ?? (loading && !info));
   const compact = $derived(app.compact);
   const has = $derived(tracks.length > 0);
   const fans = $derived(info?.fans && info.fans > 0 ? info.fans : null);
@@ -57,18 +57,18 @@
   let showAll = $state(false);
   let aboutOpen = $state(false);
 
-  // Hero picture: the photo, else the top song's cover (only once the info
+  // Hero picture: the photo/banner, else the top song's cover (only once the info
   // is in, so it never flashes before the photo).
   let coverUrl = $state<string | null>(null);
   $effect(() => {
     const first = tracks[0];
     coverUrl = null;
-    if (!first || info?.photo) return;
+    if (!first || (info as any)?.banner || info?.photo || infoLoading) return;
     let alive = true;
     backend().cover(first).then((u) => alive && (coverUrl = u));
     return () => { alive = false; };
   });
-  const src = $derived(info?.photo ?? (!infoLoading ? coverUrl : null));
+  const src = $derived((info as any)?.banner ?? info?.photo ?? (!infoLoading ? coverUrl : null));
   let loaded = $state<string | null>(null);
   $effect(() => {
     const s = src;

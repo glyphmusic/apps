@@ -17,6 +17,39 @@ import {
 import type { MonthStats, WebStats } from "./web-stats";
 import { installId, load, remove, save } from "./web-store";
 
+const MAX_PUSH_ITEMS = 250;
+const MAX_PUSH_BYTES = 1_400_000;
+const MAX_SINGLE_ITEM_BYTES = 980_000;
+
+interface PushEntry {
+  sealed: SyncItem;
+  plain?: SyncItem;
+}
+
+function chunkPushEntries(entries: PushEntry[]): PushEntry[][] {
+  const enc = new TextEncoder();
+  const chunks: PushEntry[][] = [];
+  let cur: PushEntry[] = [];
+  let curBytes = 12; // `{"items":[]}` overhead
+  for (const entry of entries) {
+    const itemBytes = enc.encode(JSON.stringify(entry.sealed)).length;
+    if (itemBytes > MAX_SINGLE_ITEM_BYTES) {
+      console.warn("[sync] skipping oversized sync item:", entry.sealed.kind, itemBytes);
+      continue;
+    }
+    const nextBytes = curBytes + (cur.length > 0 ? 1 : 0) + itemBytes;
+    if (cur.length > 0 && (cur.length >= MAX_PUSH_ITEMS || nextBytes > MAX_PUSH_BYTES)) {
+      chunks.push(cur);
+      cur = [];
+      curBytes = 12;
+    }
+    cur.push(entry);
+    curBytes += (cur.length > 1 ? 1 : 0) + itemBytes;
+  }
+  if (cur.length > 0) chunks.push(cur);
+  return chunks;
+}
+
 interface StoredAccountSession {
   access_token: string;
   refresh_token: string;
@@ -579,29 +612,32 @@ export class WebAccountManager {
       if (dataKey) {
         const keyringOut = await this.buildKeyringOutbox(accountId, s.device_id, s.account.has_password, dataKey, journal);
         const plainDiff = this.collectLocalDiff(journal);
-        const pushItems: SyncItem[] = [...keyringOut];
+        const pushEntries: PushEntry[] = keyringOut.map((sealed) => ({ sealed }));
 
         for (const pItem of plainDiff) {
           const sealed = await dataKey.sealItem(pItem);
           journal.blind[sealed.key] = [pItem.kind, pItem.key];
           const blindKnown = journal.known[`${sealed.kind}\0${sealed.key}`];
           sealed.rev = blindKnown?.rev ?? pItem.rev ?? 0;
-          pushItems.push(sealed);
+          pushEntries.push({ sealed, plain: pItem });
         }
 
-        if (pushItems.length > 0) {
-          const pushed = await server.syncPush(token, pushItems);
+        for (const chunk of chunkPushEntries(pushEntries)) {
+          const pushed = await server.syncPush(token, chunk.map((e) => e.sealed));
           journal.rev = pushed.rev;
-          for (const pItem of plainDiff) {
-            const kKey = `${pItem.kind}\0${pItem.key}`;
-            if (pItem.deleted) delete journal.known[kKey];
-            else journal.known[kKey] = { hash: quickHash(pItem.value), rev: pushed.rev, updated_at: pItem.updated_at };
-          }
-          for (const sItem of pushItems) {
+          for (const entry of chunk) {
+            if (entry.plain) {
+              const pItem = entry.plain;
+              const kKey = `${pItem.kind}\0${pItem.key}`;
+              if (pItem.deleted) delete journal.known[kKey];
+              else journal.known[kKey] = { hash: quickHash(pItem.value), rev: pushed.rev, updated_at: pItem.updated_at };
+            }
+            const sItem = entry.sealed;
             const kKey = `${sItem.kind}\0${sItem.key}`;
             if (sItem.deleted) delete journal.known[kKey];
             else journal.known[kKey] = { hash: quickHash(sItem.value), rev: pushed.rev, updated_at: sItem.updated_at };
           }
+          this.saveJournal(accountId, journal);
         }
       }
 

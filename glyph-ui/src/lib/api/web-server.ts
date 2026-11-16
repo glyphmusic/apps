@@ -6,6 +6,7 @@
 // server audio path.
 import type { ProviderId, Track } from "./types";
 import type { SyncItem } from "./web-e2e";
+import type { McpSession } from "../settings/types";
 import { installId } from "./web-store";
 
 const BASE = String(import.meta.env.VITE_GLYPH_SERVER ?? "").replace(/\/+$/, "");
@@ -21,6 +22,18 @@ export type PlaybackSource =
   | { kind: "preview"; provider: ProviderId; url: string };
 
 export interface ResolveResponse { matched: Track | null; source: PlaybackSource | null; confidence: number; youtube_hint?: string | null }
+export interface ServerArtistResponse {
+  name: string;
+  bio?: string | null;
+  url?: string | null;
+  photo?: string | null;
+  banner?: string | null;
+  fans?: number | null;
+  verified?: boolean;
+  tags?: string[];
+  similar?: string[];
+  links?: { label: string; url: string }[];
+}
 export type SearchEvent =
   | { event: "results"; provider: ProviderId; tracks: Track[] }
   | { event: "provider_error"; provider: ProviderId; message: string }
@@ -279,6 +292,10 @@ export const server = {
   /** Popular songs right now (Deezer's public chart). Empty on servers without `/v1/chart`. */
   chart: () => getJson<{ tracks: Track[] }>("/v1/chart").then((r) => r.tracks ?? [], () => [] as Track[]),
 
+  /** Look up normalized artist metadata (bio, photo, banner, fans, etc.) cached on the server. */
+  artist: (name: string, lang = "en") =>
+    getJson<ServerArtistResponse>("/v1/artist", { name, lang }),
+
   // ---- Account & Auth ----
   loginStart: (device_name: string, platform: string, pake?: string) =>
     sendJson<LoginStartResponse>("POST", "/v1/account/login/start", { device_name, platform, ...(pake ? { pake } : {}) }),
@@ -401,8 +418,20 @@ export const server = {
     getJson<SharedItem>(`/v1/share/${encodeURIComponent(id)}`),
 
   // ---- MCP Relay ----
-  mcpToken: (token: string) =>
-    sendJson<{ token: string; url: string }>("POST", "/v1/mcp/token", {}, token),
+  mcpToken: (token: string, name?: string) =>
+    sendJson<{ token: string; url: string; session_id?: string }>("POST", "/v1/mcp/token", { name: name?.trim() || undefined }, token),
+
+  mcpSessions: (token: string) =>
+    getJson<McpSession[]>("/v1/mcp/sessions", {}, undefined, token),
+
+  mcpRenameSession: (token: string, id: string, name: string) =>
+    sendJson<McpSession>("PATCH", `/v1/mcp/sessions/${encodeURIComponent(id)}`, { name }, token),
+
+  mcpRevokeSession: (token: string, id: string) =>
+    sendJson<void>("DELETE", `/v1/mcp/sessions/${encodeURIComponent(id)}`, undefined, token),
+
+  mcpClaimOAuth: (token: string, id: string) =>
+    sendJson<McpApproval>("POST", "/v1/mcp/oauth/claim", { id }, token),
 
   mcpPull: (token: string, signal?: AbortSignal) =>
     getJson<McpPullResponse>("/v1/mcp/pull", {}, signal, token),

@@ -1068,6 +1068,7 @@ struct ArtistBuild {
     name: String,
     tracks: Vec<Track>,
     loading: bool,
+    info_loading: bool,
     info: Option<Value>,
     stats: Option<glyph_core::catalog::ArtistStats>,
     similar: Vec<String>,
@@ -1086,7 +1087,7 @@ impl ArtistBuild {
             }
         };
         json!({
-            "name": self.name, "tracks": self.tracks, "loading": self.loading, "info": info,
+            "name": self.name, "tracks": self.tracks, "loading": self.loading, "info_loading": self.info_loading, "info": info,
             "similar": self.similar, "releases": self.releases.iter().map(dto::release).collect::<Vec<_>>(),
         })
     }
@@ -1117,7 +1118,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         core.library_changed();
     }
     let lang = core.st().config.resolved_language().to_string();
-    let page = std::sync::Mutex::new(ArtistBuild { name: name.clone(), tracks: vec![], loading: true, info: None, stats: None, similar: vec![], releases: vec![] });
+    let page = std::sync::Mutex::new(ArtistBuild { name: name.clone(), tracks: vec![], loading: true, info_loading: true, info: None, stats: None, similar: vec![], releases: vec![] });
     let lock = || page.lock().unwrap_or_else(|e| e.into_inner());
     // Songs: a normal search for the name, keeping the artist's own songs.
     let songs = async {
@@ -1170,7 +1171,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
             if p.tracks.is_empty() {
                 p.tracks = found;
             }
-            p.loading = false;
+            p.loading = p.info_loading;
         }
         artist_event(&core, &page);
     };
@@ -1194,14 +1195,26 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         }
     };
     let info = async {
-        if let Ok(Some(i)) = b.artist_info(&name, &lang).await {
-            let photo = i.image.as_ref().map(|p| crate::host::asset_url(p));
-            let links: Vec<Value> = if i.url.is_empty() { vec![] } else { vec![json!({ "label": "Wikipedia", "url": i.url })] };
-            lock().info = Some(json!({ "name": name, "bio": i.about, "photo": photo, "links": links }));
-            artist_event(&core, &page);
+        let res = b.artist_info(&name, &lang).await;
+        {
+            let mut p = lock();
+            p.info_loading = false;
+            p.loading = false;
+            if let Ok(Some(i)) = res {
+                let photo = i.image.as_ref().map(|p| crate::host::asset_url(p));
+                let banner = i.banner.as_ref().map(|p| crate::host::asset_url(p)).or_else(|| photo.clone());
+                let links: Vec<Value> = if i.url.is_empty() { vec![] } else { vec![json!({ "label": "Wikipedia", "url": i.url })] };
+                p.info = Some(json!({ "name": name, "bio": i.about, "photo": photo, "banner": banner, "links": links }));
+            }
         }
+        artist_event(&core, &page);
     };
     futures::join!(songs, stats, similar, releases, info);
+    {
+        let mut p = lock();
+        p.loading = false;
+        p.info_loading = false;
+    }
     let v = lock().json();
     Ok(v)
 }
@@ -1354,4 +1367,27 @@ pub fn reveal_data_dir() -> Res {
 
 pub fn downloaded_bytes(core: C, tracks: Vec<Track>) -> u64 {
     core.backend().map_or(0, |b| b.downloaded_bytes(&tracks))
+}
+
+// ---- mcp ----
+
+pub async fn mcp_server_token(core: C<'_>, name: Option<String>) -> Res {
+    crate::mcp_tools::request_server_token(core, name).await;
+    Ok(())
+}
+
+pub async fn mcp_sessions(core: C<'_>) -> Res<Vec<glyph_protocol::mcp::Session>> {
+    crate::mcp_tools::sessions(core).await
+}
+
+pub async fn mcp_rename_session(core: C<'_>, id: String, name: String) -> Res<glyph_protocol::mcp::Session> {
+    crate::mcp_tools::rename_session(core, id, name).await
+}
+
+pub async fn mcp_revoke_session(core: C<'_>, id: String) -> Res {
+    crate::mcp_tools::revoke_session(core, id).await
+}
+
+pub async fn mcp_claim_oauth(core: C<'_>, id: String) -> Res<glyph_protocol::mcp::Approval> {
+    crate::mcp_tools::claim_oauth(core, id).await
 }

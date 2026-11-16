@@ -16,6 +16,7 @@
   import { app, type ControlMenu } from "../state.svelte";
   import { jam } from "../jam.svelte";
   import { onWeb } from "../web";
+  import { toggleWebMini } from "../web-mini.svelte";
   import { t } from "../i18n.svelte";
   import { fmtTime } from "../fmt";
   import { press } from "../ui.svelte";
@@ -140,7 +141,7 @@
         </div>
       {/if}
       <ToggleButton name="timer" on={app.sleep != null || app.controlMenu?.menu === "sleep"} accent="var(--accent)" onclick={menu("sleep")} oncontextmenu={menu("sleep")} />
-      {#if !onWeb()}<ToggleButton name="picture-in-picture-2" on={app.miniShown || app.controlMenu?.menu === "mini"} accent="var(--accent)" onclick={() => (app.miniShown = !app.miniShown)} oncontextmenu={menu("mini")} />{/if}
+      <ToggleButton name="picture-in-picture-2" on={app.miniShown || app.controlMenu?.menu === "mini"} accent="var(--accent)" onclick={() => (onWeb() ? toggleWebMini(app) : (app.miniShown = !app.miniShown))} oncontextmenu={menu("mini")} />
       <ToggleButton name="list-music" on={app.showQueue} accent="var(--accent)" onclick={() => { app.showQueue = !app.showQueue; if (app.showQueue) app.showDevices = false; }} />
     </div>
     <StatusStrip />

@@ -7,6 +7,7 @@
 use crate::paths;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
+use glyph_protocol::mcp::{ClaimRequest, Session, SessionPatch, TokenRequest, TokenResponse};
 use glyph_protocol::*;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -25,6 +26,28 @@ pub struct SharedPlaylist {
     /// Handle of the account that shared it (none for artist albums).
     #[serde(default)]
     pub author: Option<String>,
+}
+
+/// `GET /v1/artist`: cached artist metadata from the server.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ServerArtist {
+    pub name: String,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
+    #[serde(default)]
+    pub fans: Option<u64>,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub similar: Vec<String>,
 }
 
 /// What a jam's push socket delivers.
@@ -351,6 +374,15 @@ impl ServerClient {
         Ok(Self::check(resp).await?.json().await?)
     }
 
+    /// `GET /v1/artist`.
+    pub async fn artist(&self, name: &str, lang: &str) -> Result<Option<ServerArtist>> {
+        let resp = self.member_request(self.get("/v1/artist")).await.query(&[("name", name), ("lang", lang)]).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(Self::check(resp).await?.json().await?))
+    }
+
     /// `POST /v1/import/spotify` (public Spotify / Deezer / YouTube playlist links).
     pub async fn import(&self, url: &str) -> Result<ImportResponse> {
         self.import_with_progress(url, None).await
@@ -479,8 +511,32 @@ impl ServerClient {
     }
 
     /// `POST /v1/mcp/token`: a new MCP token for AI assistants (replaces the old one).
-    pub async fn mcp_token(&self, token: &str) -> Result<glyph_protocol::mcp::TokenResponse> {
-        Self::json_of(self.authed(reqwest::Method::POST, "/v1/mcp/token", token)).await
+    pub async fn mcp_token(&self, bearer: &str, name: Option<&str>) -> Result<TokenResponse> {
+        let req = TokenRequest { name: name.map(str::to_string) };
+        Self::json_of(self.authed(reqwest::Method::POST, "/v1/mcp/token", bearer).json(&req)).await
+    }
+
+    /// `GET /v1/mcp/sessions`: connected AI assistant sessions.
+    pub async fn mcp_sessions(&self, bearer: &str) -> Result<Vec<Session>> {
+        Self::json_of(self.authed(reqwest::Method::GET, "/v1/mcp/sessions", bearer)).await
+    }
+
+    /// `PATCH /v1/mcp/sessions/{id}`: rename a session.
+    pub async fn mcp_rename_session(&self, bearer: &str, id: &str, name: &str) -> Result<Session> {
+        let req = SessionPatch { name: name.to_string() };
+        Self::json_of(self.authed(reqwest::Method::PATCH, &format!("/v1/mcp/sessions/{id}"), bearer).json(&req)).await
+    }
+
+    /// `DELETE /v1/mcp/sessions/{id}`: revoke a session.
+    pub async fn mcp_revoke_session(&self, bearer: &str, id: &str) -> Result<()> {
+        Self::check(self.authed(reqwest::Method::DELETE, &format!("/v1/mcp/sessions/{id}"), bearer).send().await?).await?;
+        Ok(())
+    }
+
+    /// `POST /v1/mcp/oauth/claim`: claim an OAuth approval request by assistant id.
+    pub async fn mcp_claim_oauth(&self, bearer: &str, id: &str) -> Result<glyph_protocol::mcp::Approval> {
+        let req = ClaimRequest { id: id.to_string() };
+        Self::json_of(self.authed(reqwest::Method::POST, "/v1/mcp/oauth/claim", bearer).json(&req)).await
     }
 
     /// `GET /v1/mcp/pull`: tool calls waiting for this account (long poll).
@@ -795,7 +851,7 @@ impl ServerClient {
         Self::json_of(self.post("/v1/account/password/register").json(body)).await
     }
 
-    pub async fn password_login(&self, body: &PasswordLoginRequest) -> Result<Session> {
+    pub async fn password_login(&self, body: &PasswordLoginRequest) -> Result<glyph_protocol::Session> {
         Self::json_of(self.post("/v1/account/password/login").json(body)).await
     }
 
@@ -820,7 +876,7 @@ impl ServerClient {
         Self::json_of(self.authed(reqwest::Method::POST, "/v1/account/passkey/link", token)).await
     }
 
-    pub async fn refresh_session(&self, refresh_token: &str) -> Result<Session> {
+    pub async fn refresh_session(&self, refresh_token: &str) -> Result<glyph_protocol::Session> {
         Self::json_of(self.post("/v1/account/token/refresh").timeout(Duration::from_secs(10)).json(&RefreshRequest { refresh_token: refresh_token.into() })).await
     }
 

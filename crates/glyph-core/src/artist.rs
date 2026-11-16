@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistInfo {
     /// Plain-text summary (first paragraph).
     pub about: String,
@@ -18,6 +18,58 @@ pub struct ArtistInfo {
     pub url: String,
     /// Cached photo, if the article has one.
     pub image: Option<PathBuf>,
+    /// High-resolution banner image, if available.
+    #[serde(default)]
+    pub banner: Option<PathBuf>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DiskCacheEntry {
+    cached_at_s: u64,
+    info: ArtistInfo,
+}
+
+fn disk_cache_path(name: &str, lang: &str) -> PathBuf {
+    let dir = paths::cache_dir().join("artists");
+    let norm = crate::dedupe::normalize_artist(name);
+    let key = format!("{}:{}", lang, norm);
+    dir.join(format!("info-v1-{}.json", paths::hash_hex(&key)))
+}
+
+fn load_disk_cache(name: &str, lang: &str) -> Option<ArtistInfo> {
+    let path = disk_cache_path(name, lang);
+    let data = std::fs::read(&path).ok()?;
+    let entry: DiskCacheEntry = serde_json::from_slice(&data).ok()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(entry.cached_at_s) > 7 * 86_400 {
+        return None;
+    }
+    if let Some(ref img) = entry.info.image {
+        if !img.is_file() {
+            return None;
+        }
+    }
+    if let Some(ref banner) = entry.info.banner {
+        if !banner.is_file() {
+            return None;
+        }
+    }
+    Some(entry.info)
+}
+
+fn save_disk_cache(name: &str, lang: &str, info: &ArtistInfo) {
+    let path = disk_cache_path(name, lang);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let entry = DiskCacheEntry {
+        cached_at_s: now,
+        info: info.clone(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&entry) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = paths::write_atomic(&path, &bytes);
+    }
 }
 
 /// Words in Wikidata short descriptions that mark a musical act.
@@ -47,13 +99,55 @@ pub async fn lookup(http: &reqwest::Client, name: &str, lang: &str) -> Result<Op
 
 pub async fn lookup_via(http: &reqwest::Client, name: &str, lang: &str, server: Option<&crate::server_client::ServerClient>) -> Result<Option<ArtistInfo>> {
     let lang = if matches!(lang, "en" | "de" | "ru") { lang } else { "en" };
+    // 1. Check local disk cache (TTL 7 days)
+    if let Some(cached) = load_disk_cache(name, lang) {
+        return Ok(Some(cached));
+    }
+
+    // 2. Prefer server `/v1/artist` first when ServerClient is configured:
+    if let Some(srv) = server {
+        match srv.artist(name, lang).await {
+            Ok(Some(sa)) => {
+                let photo = match sa.photo.as_deref() {
+                    Some(u) => {
+                        let u = srv.upstream_url(u);
+                        fetch_image(http, &u, Some(srv)).await.ok()
+                    }
+                    None => None,
+                };
+                let banner = match sa.banner.as_deref() {
+                    Some(u) => {
+                        let u = srv.upstream_url(u);
+                        fetch_image(http, &u, Some(srv)).await.ok()
+                    }
+                    None => None,
+                };
+                let banner = banner.or_else(|| photo.clone());
+                let info = ArtistInfo {
+                    about: sa.bio.unwrap_or_default(),
+                    url: sa.url.unwrap_or_default(),
+                    image: photo,
+                    banner,
+                };
+                save_disk_cache(name, lang, &info);
+                return Ok(Some(info));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(name = %name, "server artist lookup failed: {e}"),
+        }
+    }
+
+    // 3. Fallback to direct Wikipedia lookup:
     let mut langs = vec![lang.to_string()];
     if lang != "en" {
         langs.push("en".into());
     }
     for l in langs {
         match lookup_in(http, name, &l, server).await {
-            Ok(Some(info)) => return Ok(Some(info)),
+            Ok(Some(info)) => {
+                save_disk_cache(name, lang, &info);
+                return Ok(Some(info));
+            }
             Ok(None) => {}
             Err(e) => tracing::debug!(lang = %l, "wikipedia lookup failed: {e}"),
         }
@@ -102,12 +196,13 @@ async fn lookup_in(http: &reqwest::Client, name: &str, lang: &str, server: Optio
             },
             None => None,
         };
-        return Ok(Some(ArtistInfo { about, url: page, image }));
+        let banner = image.clone();
+        return Ok(Some(ArtistInfo { about, url: page, image, banner }));
     }
     Ok(None)
 }
 
-/// Downloads the photo into the cache (longest edge 1280 px, WebP).
+/// Downloads the photo into the cache (longest edge 1920 px, WebP).
 async fn fetch_image(http: &reqwest::Client, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<PathBuf> {
     let dir = paths::cache_dir().join("artists");
     let path = dir.join(format!("validated-v2-{}.webp", paths::hash_hex(url)));
@@ -117,7 +212,7 @@ async fn fetch_image(http: &reqwest::Client, url: &str, server: Option<&crate::s
     let img = crate::cover::download_image(http, url, server).await?;
     let dest = path.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let img = if img.width().max(img.height()) > 1280 { img.thumbnail(1280, 1280) } else { img };
+        let img = if img.width().max(img.height()) > 1920 { img.thumbnail(1920, 1920) } else { img };
         let out = crate::profile_images::encode_webp(&img,80.0)?;
         std::fs::create_dir_all(&dir)?;
         paths::write_atomic(&dest, &out)
@@ -151,5 +246,18 @@ mod tests {
         assert!(names_match("Muse", "Muse (band)"));
         assert!(names_match("The Chemical Brothers", "The Chemical Brothers"));
         assert!(!names_match("Muse", "Museum of Modern Art"));
+    }
+
+    #[test]
+    fn disk_cache_roundtrip() {
+        let info = ArtistInfo {
+            about: "Daft Punk was a French electronic duo.".into(),
+            url: "https://en.wikipedia.org/wiki/Daft_Punk".into(),
+            image: None,
+            banner: None,
+        };
+        save_disk_cache("Daft Punk", "en", &info);
+        let loaded = load_disk_cache("Daft Punk", "en");
+        assert_eq!(loaded, Some(info));
     }
 }

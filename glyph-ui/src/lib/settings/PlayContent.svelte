@@ -45,9 +45,11 @@
         <Tog on={app.config.playback.patient_search} onchange={(v) => app.setConfig((c) => { c.playback.patient_search = v; })} label={t("sp.patient_search")} />
       </Row>
       {/if}
+      {#if !onWeb() || !!app.account}
       <Row label={t("sp.stats")} info={t("sp.stats.desc")}>
         <Tog on={app.config.stats.enabled} onchange={(v) => app.setConfig((c) => { c.stats.enabled = v; })} label={t("sp.stats")} />
       </Row>
+      {/if}
       <Row label={t("sp.explicit")} info={t("sp.explicit.desc")}>
         <Tog on={app.config.audio.hide_explicit} onchange={(v) => app.setConfig((c) => { c.audio.hide_explicit = v; })} label={t("sp.explicit")} />
       </Row>

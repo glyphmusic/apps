@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.12.1 - 2026-11-16
+
+### Fixed
+
+- **Web player (`/web`)**:
+  - Moved the hidden YouTube embed host off-screen and clipped (`clip-path: inset(50%)`) so Chromium compositing never paints a dark rectangle over cards or the player bar.
+  - Fixed the web mini player closing immediately on open and added Document Picture-in-Picture support (`documentPictureInPicture`) for a chromeless floating mini player (with popup fallback).
+  - Preloaded upcoming queue tracks (stream URL resolution cache, cover pre-warming, and secondary `<audio>` pre-buffering for up to 3 upcoming tracks plus hover prefetch).
+  - Batched E2E encrypted sync pushes (`<= 250` items / `1.4 MB` per request) so large libraries do not trigger `413 Payload Too Large`.
+  - Fixed web login (Argon2 WASM CSP), keybind guard (`keys.ts`), signed-out `/web` hiding Listening Stats and AI Assistants (MCP) settings, artist banner flashing, and mobile search bar focus/tap.
+- **Desktop & Android**:
+  - Fixed Android startup black screen (`glyph-android` / `MainActivity`) and white transparent desktop mini player window (`#mini`).
+  - Added Windows minimize/tray EcoQoS power-saving mode, WebView suspension, and memory trim, plus pausing background ASCII/canvas animation during window resize and UI transitions.
+
+### Changed
+
+- **MCP & Protocol**: added granular MCP settings access modes (`None`, `Read`, `Write`), active MCP session listing/renaming/revocation, `/web#mcp-connect=` pairing prompts, 14-day artist metadata caching, recent searches in empty search view, and borderless segmented pills.
+
 ## 0.12.0 - 2026-11-15
 
 ### Changed

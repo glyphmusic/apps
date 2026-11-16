@@ -10,6 +10,7 @@ import type { BackendEvents, Config, Library, Lyrics, PlayerState, ProfileSectio
 import { PROVIDER_NAME, primaryArtist, trackKey } from "./types";
 import type { WebAccountManager } from "./web-account";
 import { server, serverOrigin, wireTrack, type McpApproval, type PlaybackOutputWire } from "./web-server";
+import type { McpSession } from "../settings/types";
 import type { WebStats } from "./web-stats";
 import { load, save } from "./web-store";
 
@@ -285,6 +286,54 @@ export class WebMcpManager {
       relay_running: this.relayRunning,
       token_loading: this.tokenLoading,
     };
+  }
+
+  async createToken(name?: string) {
+    if (this.tokenLoading) return this.info();
+    this.tokenLoading = true;
+    try {
+      const authToken = await this.host.account.validToken();
+      const res = await server.mcpToken(authToken, name);
+      this.serverToken = res;
+      save("mcp_token", res);
+      this.error = null;
+    } catch (e) {
+      this.error = String((e as Error)?.message ?? e);
+    } finally {
+      this.tokenLoading = false;
+    }
+    this.sync();
+    return this.info();
+  }
+
+  async sessions(): Promise<McpSession[]> {
+    if (!this.host.account.isSignedIn()) return [];
+    const authToken = await this.host.account.validToken();
+    return server.mcpSessions(authToken);
+  }
+
+  async renameSession(id: string, name: string): Promise<McpSession> {
+    const authToken = await this.host.account.validToken();
+    return server.mcpRenameSession(authToken, id, name);
+  }
+
+  async revokeSession(id: string): Promise<void> {
+    const authToken = await this.host.account.validToken();
+    await server.mcpRevokeSession(authToken, id);
+  }
+
+  async claimOAuth(id: string): Promise<McpApproval> {
+    const authToken = await this.host.account.validToken();
+    return server.mcpClaimOAuth(authToken, id);
+  }
+
+  async startConnectFlow(id: string): Promise<McpApproval> {
+    const approval = await this.claimOAuth(id);
+    if (!this.approvals.some((x) => x.id === approval.id)) {
+      this.approvals.push(approval);
+      this.host.emit("mcp_approvals", [...this.approvals]);
+    }
+    return approval;
   }
 
   private startRelay() {
@@ -1252,25 +1301,28 @@ export class WebMcpManager {
 
       mcp_rotate_token: async () => {
         if (!this.host.account.isSignedIn()) return this.info();
-        return this.handlers().mcp_server_token({});
+        return this.createToken();
       },
 
-      mcp_server_token: async () => {
-        if (this.tokenLoading) return this.info();
-        this.tokenLoading = true;
-        try {
-          const authToken = await this.host.account.validToken();
-          const res = await server.mcpToken(authToken);
-          this.serverToken = res;
-          save("mcp_token", res);
-          this.error = null;
-        } catch (e) {
-          this.error = String((e as Error)?.message ?? e);
-        } finally {
-          this.tokenLoading = false;
-        }
-        this.sync();
-        return this.info();
+      mcp_server_token: async (a) => {
+        const name = typeof a?.name === "string" ? a.name : undefined;
+        return this.createToken(name);
+      },
+
+      mcp_sessions: async () => {
+        return this.sessions();
+      },
+
+      mcp_rename_session: async (a) => {
+        return this.renameSession(String(a.id ?? ""), String(a.name ?? ""));
+      },
+
+      mcp_revoke_session: async (a) => {
+        return this.revokeSession(String(a.id ?? ""));
+      },
+
+      mcp_claim_oauth: async (a) => {
+        return this.claimOAuth(String(a.id ?? ""));
       },
 
       mcp_pending: () => [...this.approvals],
@@ -1282,6 +1334,14 @@ export class WebMcpManager {
         this.host.emit("mcp_approvals", [...this.approvals]);
         const authToken = await this.host.account.validToken();
         await server.mcpApprove(authToken, { id, allow });
+        if (allow) {
+          const cfg = this.host.getConfig();
+          if (!cfg.mcp.enabled) {
+            const next = JSON.parse(JSON.stringify(cfg));
+            next.mcp.enabled = true;
+            await this.host.callHandler("set_config", { config: next });
+          }
+        }
         this.host.toast(allow ? "mcp.allowed" : "mcp.denied", allow ? "ok" : "info");
       },
     };

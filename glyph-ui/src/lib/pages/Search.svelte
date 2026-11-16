@@ -22,7 +22,7 @@
   import Skeletons from "./search/Skeletons.svelte";
   import { app, type SearchFilter } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
-  import { PROVIDER_NAME, primaryArtist, type Release, type Track } from "../api/types";
+  import { PROVIDER_NAME, primaryArtist, type Release, type SearchItem, type Track } from "../api/types";
 
   const s = $derived(app.search);
   const filter = $derived(app.searchFilter);
@@ -98,6 +98,29 @@
   function artistMenu(name: string) { return (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: null, artist: primaryArtist(name) }); }; }
   function albumMenu(r: Release) { return (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: null, list: { kind: "album", title: r.title, artist: r.artist, tracks: [asTrack(r)] } }); }; }
 
+  function pickHistory(it: SearchItem) {
+    if (it.kind === "song") {
+      app.playOne(it.track);
+      app.pickSearch(it);
+    } else if (it.kind === "artist") {
+      app.openArtistPage(it.name);
+      app.pickSearch(it);
+    } else {
+      app.searchFor(it.text);
+    }
+  }
+  function historyMenu(e: MouseEvent, it: SearchItem) {
+    if (it.kind === "song") {
+      e.preventDefault();
+      e.stopPropagation();
+      app.openCtx({ x: e.clientX, y: e.clientY, track: it.track });
+    } else if (it.kind === "artist") {
+      e.preventDefault();
+      e.stopPropagation();
+      app.openCtx({ x: e.clientX, y: e.clientY, track: it.track ?? null, artist: it.name });
+    }
+  }
+
   // Near the end of the list: ask for the next page.
   let scroller: HTMLElement | null = null;
   function near() {
@@ -158,7 +181,48 @@
   {:else if !query.trim() && app.compact}
     <!-- phone: compact.rs search_recent is drawn by the phone layout -->
   {:else if !query.trim()}
-    <EmptyState icon="search" title={t("search.empty.title")} sub={t("search.empty.sub")} />
+    {#if app.library.search_history.length > 0}
+      <div class="hist">
+        <div class="lh"><Icon name="clock" size={15} color="var(--dim)" /><span>{t("search.history")}</span></div>
+        <div class="list">
+          {#each app.library.search_history as it, i}
+            <div
+              class="grow"
+              onclick={() => pickHistory(it)}
+              oncontextmenu={(e) => historyMenu(e, it)}
+              onkeydown={(e) => e.key === "Enter" && pickHistory(it)}
+              role="button"
+              tabindex="-1"
+            >
+              {#if it.kind === "song"}
+                <Cover track={it.track} size={44} radius={6} />
+              {:else if it.kind === "artist"}
+                {#if it.track}
+                  <Cover track={it.track} size={44} round />
+                {:else}
+                  <span class="ph r"><Icon name="user-round" size={20} color="rgba(255,255,255,.6)" /></span>
+                {/if}
+              {:else}
+                <span class="ph"><Icon name="search" size={20} color="rgba(255,255,255,.6)" /></span>
+              {/if}
+              <div class="gt">
+                <div class="g1 trunc">{it.kind === "song" ? it.track.title : it.kind === "artist" ? it.name : it.text}</div>
+                <div class="g2 trunc">{it.kind === "song" ? `${t("search.kind.song")} • ${it.track.artist}` : it.kind === "artist" ? t("search.kind.artist") : t("search.kind.query")}</div>
+              </div>
+              <button
+                class="x"
+                aria-label={t("tip.x")}
+                onclick={(e) => { e.stopPropagation(); app.removeSearchHistory(i); }}
+              >
+                <Icon name="x" size={16} color="var(--dim)" />
+              </button>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {:else}
+      <EmptyState icon="search" title={t("search.empty.title")} sub={t("search.empty.sub")} />
+    {/if}
   {:else if !any && s.loading}
     <div class="skel">
       {#if filter === "all"}<Skeletons kind="artists" n={2} prefix="search" />{/if}
@@ -268,6 +332,11 @@
   /* lyric hits */
   .lyr { display: flex; flex-direction: column; gap: 2px; padding-bottom: 10px; }
   .lh { display: flex; align-items: center; gap: 8px; padding: 2px 10px 6px; font-size: var(--md); font-weight: 600; }
+  .hist { display: flex; flex-direction: column; gap: 4px; }
+  .ph { flex: none; width: 44px; height: 44px; border-radius: 6px; background: rgba(255, 255, 255, .08); display: grid; place-items: center; }
+  .ph.r { border-radius: 50%; }
+  .x { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; transition: background-color .12s; }
+  .x:hover { background: rgba(255, 255, 255, .08); }
   .foot { display: flex; flex-direction: column; gap: 4px; }
   .spin { display: flex; align-items: center; gap: 8px; font-size: var(--sm); color: var(--dim); }
   .spin .mono { color: var(--text); }

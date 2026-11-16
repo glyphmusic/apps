@@ -10,7 +10,7 @@
 import type { Backend } from "./backend";
 import type { StatsRange } from "../pages/stats/types";
 import type {
-  ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
+  ArtistInfo, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
   RecentItem, Release, SearchResults, Snapshot, Track,
 } from "./types";
 import { PROVIDER_NAME, primaryArtist, sameList, trackKey } from "./types";
@@ -142,6 +142,12 @@ export class WebBackend implements Backend {
   private playTrackState: { key: string; listenedMs: number; countedPlay: boolean; lastPos: number } | null = null;
   private activeAccountId: string | null = null;
   private lastSavedPos = 0;
+  private resolvedCache = new Map<string, { src: PlaybackSource | null; expiresAt: number }>();
+  private resolving = new Map<string, Promise<PlaybackSource | null>>();
+  private warmedCovers = new Set<string>();
+  private preloadTimer = 0;
+  private preloadCooldownUntil = 0;
+  private preloadSeq = 0;
 
   constructor() {
     this.config = { ...webConfig(), ...(load<Config>("config") ?? {}) };
@@ -393,6 +399,118 @@ export class WebBackend implements Backend {
   private saveQueue() {
     this.saveSessionNow();
     this.emit("queue", this.queue);
+    this.scheduleQueuePreload();
+  }
+
+  private resolveParams() {
+    const enabled = this.config.providers.enabled;
+    const priority = this.config.providers.priority.filter((x) => WEB_SOURCES.includes(x) && enabled.includes(x));
+    const youtubeOnly = Boolean(this.config.providers.youtube_only);
+    return { enabled, priority, youtubeOnly };
+  }
+
+  private resolveCacheKey(t: Track, priority: ProviderId[], youtubeOnly: boolean): string {
+    return `${trackKey(t)}\0${youtubeOnly ? "1" : "0"}\0${priority.join(",")}`;
+  }
+
+  private resolveTrack(t: Track, throwOnRateLimit = false): Promise<PlaybackSource | null> {
+    const { enabled, priority, youtubeOnly } = this.resolveParams();
+    if (!priority.length && !(youtubeOnly && enabled.includes("youtube"))) return Promise.resolve(null);
+    const cacheKey = this.resolveCacheKey(t, priority, youtubeOnly);
+    const now = Date.now();
+    const cached = this.resolvedCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      this.resolvedCache.delete(cacheKey);
+      this.resolvedCache.set(cacheKey, cached);
+      return Promise.resolve(cached.src);
+    }
+    const inflight = this.resolving.get(cacheKey);
+    if (inflight) return inflight;
+
+    const job = (async () => {
+      try {
+        const r = await server.resolve(t, priority, youtubeOnly);
+        let src = direct(r.source);
+        if (src?.kind === "embed" && src.provider !== "youtube") src = null;
+        if (src && !enabled.includes(src.provider)) src = null;
+        const ttlMs = src ? 15 * 60_000 : 60_000;
+        if (this.resolvedCache.size >= 120) {
+          const oldest = this.resolvedCache.keys().next().value;
+          if (oldest !== undefined) this.resolvedCache.delete(oldest);
+        }
+        this.resolvedCache.set(cacheKey, { src, expiresAt: Date.now() + ttlMs });
+        return src;
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "rate_limited") {
+          this.preloadCooldownUntil = Date.now() + (e.retryAfter ?? 30) * 1000;
+          if (throwOnRateLimit) throw e;
+        }
+        return null;
+      } finally {
+        this.resolving.delete(cacheKey);
+      }
+    })();
+
+    this.resolving.set(cacheKey, job);
+    return job;
+  }
+
+  private warmCover(t: Track) {
+    if (!t.cover_url || typeof Image === "undefined" || this.warmedCovers.has(t.cover_url)) return;
+    if (this.warmedCovers.size >= 150) this.warmedCovers.clear();
+    this.warmedCovers.add(t.cover_url);
+    const img = new Image();
+    img.src = t.cover_url;
+  }
+
+  private upcomingQueueTracks(count = 3): Track[] {
+    const q = this.queue;
+    if (q.index == null || q.items.length <= 1) return [];
+    const seen = new Set<string>();
+    const cur = q.items[q.index];
+    if (cur) seen.add(trackKey(cur));
+    const out: Track[] = [];
+    for (let i = q.index + 1; i < q.items.length && out.length < count; i++) {
+      const t = q.items[i];
+      const k = trackKey(t);
+      if (!seen.has(k)) { seen.add(k); out.push(t); }
+    }
+    if (this.player.repeat === "all") {
+      for (let i = 0; i < q.index && out.length < count; i++) {
+        const t = q.items[i];
+        const k = trackKey(t);
+        if (!seen.has(k)) { seen.add(k); out.push(t); }
+      }
+    }
+    return out;
+  }
+
+  private scheduleQueuePreload(delayMs = 450) {
+    clearTimeout(this.preloadTimer);
+    if (!this.queue.items.length || this.queue.index == null) return;
+    const seq = ++this.preloadSeq;
+    this.preloadTimer = window.setTimeout(() => {
+      void this.preloadQueue(seq);
+    }, delayMs);
+  }
+
+  private async preloadQueue(seq: number) {
+    if (seq !== this.preloadSeq || Date.now() < this.preloadCooldownUntil) return;
+    const upcoming = this.upcomingQueueTracks(3);
+    for (let i = 0; i < upcoming.length; i++) {
+      if (seq !== this.preloadSeq || Date.now() < this.preloadCooldownUntil) return;
+      const tr = upcoming[i];
+      this.warmCover(tr);
+      const src = await this.resolveTrack(tr, false);
+      if (seq !== this.preloadSeq) return;
+      if (i === 0 && src) this.engine.preload(src);
+    }
+  }
+
+  private prefetchTrack(t: Track | undefined) {
+    if (!t || Date.now() < this.preloadCooldownUntil) return;
+    this.warmCover(t);
+    void this.resolveTrack(t, false);
   }
 
   // ---- playback ----
@@ -423,15 +541,8 @@ export class WebBackend implements Backend {
     this.account.scheduleRecentUpdate();
     let src: PlaybackSource | null = null;
     try {
-      const enabled = this.config.providers.enabled;
-      const priority = this.config.providers.priority.filter((x) => WEB_SOURCES.includes(x) && enabled.includes(x));
-      if (priority.length || (this.config.providers.youtube_only && enabled.includes("youtube"))) {
-        const r = await server.resolve(t, priority, this.config.providers.youtube_only);
-        if (gen !== this.gen) return;
-        src = direct(r.source);
-        if (src?.kind === "embed" && src.provider !== "youtube") src = null;
-        if (src && !enabled.includes(src.provider)) src = null;
-      }
+      src = await this.resolveTrack(t, true);
+      if (gen !== this.gen) return;
     } catch (e) {
       if (gen !== this.gen) return;
       if (e instanceof ApiError && e.code === "rate_limited") { this.toast("toast.server_out.offline", "info"); this.setStatus("error"); return; }
@@ -443,7 +554,10 @@ export class WebBackend implements Backend {
     this.emit("player", { source: p.source, preview: p.preview });
     try {
       await this.engine.load(src, true, start);
-      if (gen === this.gen) this.loaded = true;
+      if (gen === this.gen) {
+        this.loaded = true;
+        this.scheduleQueuePreload(400);
+      }
     } catch (e) {
       if (gen === this.gen) this.unplayable(String((e as Error)?.message ?? e));
     }
@@ -639,14 +753,32 @@ export class WebBackend implements Backend {
     if (!k) return { name, tracks: [], loading: false, similar: [], releases: [], info: null };
     const hit = this.artists.get(k);
     if (hit) return hit;
-    const all = await this.searchAll(name);
+    const [all, infoRes] = await Promise.all([
+      this.searchAll(name),
+      server.artist(name, this.config.language || "en").catch(() => null),
+    ]);
     const tracks = all.filter((t) => norm(primaryArtist(t.artist)) === k || norm(t.artist).includes(k));
     const similar = tracks[0]
       ? await server.similar(name, tracks[0].title).then((s) => [...new Set(s.map((t) => primaryArtist(t.artist)).filter((a) => norm(a) !== k))].slice(0, 8), () => [] as string[])
       : [];
+    const photo = infoRes?.photo ?? infoRes?.banner ?? tracks.find((t) => t.cover_url)?.cover_url ?? null;
+    const banner = infoRes?.banner ?? infoRes?.photo ?? photo;
+    const info: ArtistInfo = {
+      name: infoRes?.name ?? name,
+      bio: infoRes?.bio ?? null,
+      photo: banner ?? photo,
+      fans: infoRes?.fans ?? null,
+      verified: Boolean(infoRes?.verified),
+      listeners: null,
+      tags: infoRes?.tags ?? [],
+      links: infoRes?.links ?? (infoRes?.url ? [{ label: "Wikipedia", url: infoRes.url }] : []),
+    };
+    if (banner) {
+      (info as any).banner = banner;
+    }
     const page: ArtistPage = {
       name, tracks, loading: false, similar, releases: albumsOf(tracks, name),
-      info: { name, photo: tracks.find((t) => t.cover_url)?.cover_url ?? null, bio: null, fans: null, verified: false, listeners: null, tags: [] },
+      info,
     };
     this.artists.set(k, page);
     return page;
@@ -742,8 +874,8 @@ export class WebBackend implements Backend {
       },
       set_volume: (a) => { p().volume = a.volume; p().muted = false; this.engine.setVolume(a.volume, false); this.config.player.volume = a.volume; save("config", this.config); this.emit("player", { volume: a.volume, muted: false }); },
       toggle_mute: () => { p().muted = !p().muted; this.engine.setVolume(p().volume, p().muted); this.emit("player", { muted: p().muted }); },
-      set_shuffle: (a) => { p().shuffle = !!a.on; this.config.player.shuffle = !!a.on; save("config", this.config); this.emit("player", { shuffle: !!a.on }); },
-      set_repeat: (a) => { p().repeat = a.mode; this.config.player.repeat = a.mode; save("config", this.config); this.emit("player", { repeat: a.mode }); },
+      set_shuffle: (a) => { p().shuffle = !!a.on; this.config.player.shuffle = !!a.on; save("config", this.config); this.emit("player", { shuffle: !!a.on }); this.scheduleQueuePreload(); },
+      set_repeat: (a) => { p().repeat = a.mode; this.config.player.repeat = a.mode; save("config", this.config); this.emit("player", { repeat: a.mode }); this.scheduleQueuePreload(); },
       set_loop: (a) => { p().loop_a = a.a; p().loop_b = a.b; this.emit("player", { loop_a: a.a, loop_b: a.b }); },
       set_radio: (a) => { this.radio = !!a.on; },
       radio_state: () => ({ on: this.radio, ok: null }),
@@ -828,8 +960,8 @@ export class WebBackend implements Backend {
       search_more: (a) => this.runSearch(String(a.query), (this.search && this.search.query === a.query ? this.search.page : 0) + 1, true),
       home: () => this.homeFeeds(),
       artist: (a) => this.artistPage(String(a.name)),
-      artist_photo: () => null,
-      artist_verified: () => false,
+      artist_photo: (a) => this.artists.get(norm(String(a.name)))?.info?.photo ?? null,
+      artist_verified: (a) => Boolean(this.artists.get(norm(String(a.name)))?.info?.verified),
       album: (a) => this.albumTracks(String(a.title), String(a.artist)),
       album_meta: () => null,
       lyrics: (a) => this.lyrics(a.track),
@@ -929,6 +1061,7 @@ export class WebBackend implements Backend {
       open_url: (a) => { window.open(String(a.url), "_blank", "noopener,noreferrer"); },
       import_text: () => this.toast("web.app_only", "info"),
       cover_path: (a) => a.track?.cover_url ?? null,
+      prefetch_hover: (a) => this.prefetchTrack(a.track as Track | undefined),
       onboarding_seen: () => save("onboarding_seen", true),
       diagnostics: () => `Glyph ${VERSION} (web) · ${navigator.userAgent}`,
       // ---- stats, account, profile & MCP ----

@@ -17,7 +17,6 @@
   onMount(() => {
     if (fx.reduce) { app.splash = false; return; }
     const ctx = cv.getContext("2d")!;
-    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#ff5fd2";
     let start: number | null = null;
     let raf = 0, done = false;
 
@@ -29,6 +28,7 @@
     let cacheSh = 0;
     const sprites = new Map<string, HTMLCanvasElement>();
     const buildSprites = (rowH: number, cellW: number, dpr: number) => {
+      const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#ff5fd2";
       const fontSpec = `700 ${rowH * 0.95}px "JetBrains Mono", Consolas, monospace`;
       const fontReady = document.fonts ? document.fonts.check(fontSpec) : true;
       const key = `${rowH.toFixed(2)}:${dpr}:${accent}:${fontReady}`;

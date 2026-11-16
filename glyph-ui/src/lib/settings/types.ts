@@ -145,7 +145,16 @@ export interface ConnTestResult { ok: boolean; text: string; auth_required?: boo
 
 export interface DeviceDiscovery { found: number; searching: boolean; playing: string | null; error: string | null }
 export interface MpdStatus { connected: string | null; error: string | null }
-export interface McpInfo { url: string | null; token: string | null; config: string | null; error: string | null; relay_running: boolean; token_loading: boolean }
+export interface McpSession {
+  id: string;
+  name: string;
+  client_name: string;
+  site?: string | null;
+  kind: string;
+  created_at: number;
+  last_used_at?: number | null;
+}
+export interface McpInfo { url: string | null; token: string | null; config: string | null; error: string | null; relay_running: boolean; token_loading: boolean; sessions?: McpSession[] }
 
 // ---- migrate (glyph_core::import::accounts) --------------------------
 export type MigrateService = "spotify" | "youtube" | "soundcloud" | "deezer" | "lastfm";

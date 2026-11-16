@@ -225,7 +225,8 @@
   .plain { display: flex; flex-direction: column; gap: 8px; font-size: 18px; color: var(--dim); }
   .plain.centered { align-items: center; text-align: center; }
   .sk { padding-top: 24px; display: flex; flex-direction: column; gap: 26px; }
-  .none { display: flex; flex-direction: column; gap: 12px; padding-top: 24px; }
-  .find { padding-left: 4px; }
+  .none { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding-top: 0; }
+  .none :global(.es) { align-self: center; }
+  .find { padding-left: 0; display: flex; justify-content: center; }
   .note { font-size: var(--sm); color: var(--dim); }
 </style>

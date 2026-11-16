@@ -39,6 +39,7 @@ export function keyOf(id: string): string {
 
 /** The key of an event, in the config's notation. */
 export function eventKey(e: KeyboardEvent): string {
+  if (!e || !e.key) return "";
   const parts: string[] = [];
   const secondary = isMac() ? e.metaKey : e.ctrlKey;
   if (secondary) parts.push("secondary");

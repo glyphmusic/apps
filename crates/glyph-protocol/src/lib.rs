@@ -902,12 +902,49 @@ pub mod mcp {
         pub result: serde_json::Value,
     }
 
+    /// Optional options when creating a manual MCP token (`POST /v1/mcp/token`).
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    pub struct TokenRequest {
+        #[serde(default)]
+        pub name: Option<String>,
+    }
+
     /// A fresh MCP token for the signed-in user (shown once; the server only
     /// keeps its hash) and the endpoint to give the assistant.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct TokenResponse {
         pub token: String,
         pub url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub session_id: Option<String>,
+    }
+
+    /// Connected AI assistant session recorded by the server.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Session {
+        pub id: String,
+        pub name: String,
+        #[serde(default)]
+        pub client_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub site: Option<String>,
+        #[serde(default)]
+        pub kind: String,
+        pub created_at: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub last_used_at: Option<u64>,
+    }
+
+    /// `PATCH /v1/mcp/sessions/{id}`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct SessionPatch {
+        pub name: String,
+    }
+
+    /// `POST /v1/mcp/oauth/claim`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ClaimRequest {
+        pub id: String,
     }
 
     fn obj(props: serde_json::Value, required: &[&str]) -> serde_json::Value {

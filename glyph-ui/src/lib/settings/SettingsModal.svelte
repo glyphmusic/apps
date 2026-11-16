@@ -15,10 +15,15 @@
   import { t } from "../i18n.svelte";
   import { fx, tip, fadeEdges } from "../ui.svelte";
   import Nav from "./Nav.svelte";
-  import { pageComponent, pageInfo, subtabs } from "./pages";
+  import { pageComponent, pageInfo, pageShown, subtabs } from "./pages";
   import { setTab, sui } from "./settings.svelte";
   import { closeDetail, findListing, loadPlugins, pl } from "./plugins-state.svelte";
   import { mg, serviceOf, toPick } from "./migrate-state.svelte";
+
+  // Redirect away if the active settings page is not available (e.g. Integrations while signed out on /web).
+  $effect(() => {
+    if (!pageShown(app.settingsPage)) app.openSettings("overview");
+  });
 
   // A page opened from elsewhere (app.openSettings(page)) starts at its first tab.
   $effect(() => {

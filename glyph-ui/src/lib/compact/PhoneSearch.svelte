@@ -26,17 +26,18 @@
 </script>
 
 {#if part === "bar"}
-  {#if active}
-    <div class="bar" style:background="rgba(10, 10, 10, {bg})">
-      <IconAction name="arrow-left" onclick={() => { app.setQuery(""); (document.activeElement as HTMLElement)?.blur(); }} />
-      <div class="flex1"><SearchField width={null} /></div>
-    </div>
-  {:else}
-    <div style:background="rgba(10, 10, 10, {bg})">
+  <div style:background="rgba(10, 10, 10, {bg})">
+    {#if !active}
       <Header title={t("nav.search")} />
-      <div class="field"><SearchField width={null} /></div>
+    {/if}
+    <!-- Keep one SearchField mounted across active transitions so focusing it on tap never unmounts the input. -->
+    <div class:bar={active} class:field={!active}>
+      {#if active}
+        <IconAction name="arrow-left" onclick={() => { app.setQuery(""); app.searchFocused = false; (document.activeElement as HTMLElement)?.blur(); }} />
+      {/if}
+      <div class:flex1={active}><SearchField width={null} /></div>
     </div>
-  {/if}
+  </div>
 {:else if !items.length}
   <p class="hint">{t("search.empty.sub")}</p>
 {:else}

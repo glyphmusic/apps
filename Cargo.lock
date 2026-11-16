@@ -2148,7 +2148,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "glyph-android"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2160,6 +2160,7 @@ dependencies = [
  "glyph-protocol",
  "jni 0.22.4",
  "log",
+ "ndk-context",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2169,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-app"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "flume",
@@ -2192,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-audio"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2216,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2264,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-protocol"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "minisign-verify",
  "serde",
@@ -2273,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-tauri"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "flume",

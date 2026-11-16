@@ -31,8 +31,10 @@
   import { press, tip } from "../ui.svelte";
   import { tipFor } from "../i18n.svelte";
   import { inMiniWindow, setWindowSize, startDrag, startResize } from "../window";
+  import { isTauri } from "../api/backend";
 
-  const windowed = inMiniWindow();
+  let { pipWindow }: { pipWindow?: Window } = $props();
+  const windowed = $derived(inMiniWindow() || !!pipWindow);
   // The saved card size (config.player.mini_card_w / _h) is the first size.
   if (!cardLoaded) {
     cardLoaded = true;
@@ -61,10 +63,23 @@
   const W = $derived(big ? card.w : MINI_W);
   const H = $derived(big ? card.h : MINI_H);
   const liked = $derived(cur ? app.isLiked(cur) : false);
-  let vw = $state(1200), vh = $state(800);
+  let vw = $state(1200);
+  let vh = $state(800);
   let volPinned = $state(false), volHover = $state(false);
   let resizing = $state(false);
   const volOpen = $derived(volPinned || volHover);
+
+  $effect(() => {
+    const win = pipWindow ?? (typeof window !== "undefined" ? window : null);
+    if (!win) return;
+    const syncSize = () => {
+      vw = win.innerWidth || vw;
+      vh = win.innerHeight || vh;
+    };
+    syncSize();
+    win.addEventListener("resize", syncSize);
+    return () => win.removeEventListener("resize", syncSize);
+  });
 
   // First place: bottom right, 24 px from the edges.
   $effect.pre(() => { if (pos.x < 0) { pos.x = Math.max(8, vw - MINI_W - 24); pos.y = Math.max(8, vh - (big ? card.h : MINI_H) - 24); } });
@@ -77,17 +92,28 @@
     if (!resizing) { pos.x = Math.max(0, pos.x + prev.w - w); pos.y = Math.max(0, pos.y + prev.h - h); }
     prev = { w, h };
   });
-  // Tauri: the mini player is a window of its own and fills it.
+  // Tauri / Document PiP: the mini player is a window of its own and fills it.
   const left = $derived(windowed ? 0 : Math.min(Math.max(0, pos.x), Math.max(0, vw - W)));
   const top = $derived(windowed ? 0 : Math.min(Math.max(0, pos.y), Math.max(0, vh - H)));
   // The window follows the look (bar / card); the card follows the window.
-  $effect(() => { if (windowed) setWindowSize(big ? card.w : MINI_W, big ? card.h : MINI_H); });
+  $effect(() => {
+    if (!windowed) return;
+    const w = big ? card.w : MINI_W, h = big ? card.h : MINI_H;
+    if (pipWindow) {
+      try { pipWindow.resizeTo(Math.round(w), Math.round(h)); } catch {}
+    } else {
+      void setWindowSize(w, h);
+    }
+  });
   $effect(() => { if (windowed && big && vw > 0 && vh > 0) { card.w = vw; card.h = vh; } });
 
   /** Drag the window by this element (not by its buttons). */
   function grab(e: PointerEvent) {
     if (e.button !== 0) return;
-    if (windowed) { startDrag(); return; }
+    if (windowed) {
+      if (isTauri()) void startDrag();
+      return;
+    }
     const dx = e.clientX - left, dy = e.clientY - top;
     const move = (ev: PointerEvent) => { pos.x = ev.clientX - dx; pos.y = ev.clientY - dy; };
     const up = () => { removeEventListener("pointermove", move); removeEventListener("pointerup", up); };
@@ -96,26 +122,42 @@
   }
   function resize(e: PointerEvent) {
     e.stopPropagation(); e.preventDefault();
-    if (windowed) { startResize(); return; }
+    if (pipWindow) return;
+    if (isTauri() && windowed) { startResize(); return; }
     const x0 = e.clientX, y0 = e.clientY, w0 = card.w, h0 = card.h;
     resizing = true;
-    const move = (ev: PointerEvent) => { card.w = Math.min(1200, Math.max(240, w0 + ev.clientX - x0)); card.h = Math.min(1200, Math.max(220, h0 + ev.clientY - y0)); };
+    const move = (ev: PointerEvent) => {
+      card.w = Math.min(1200, Math.max(240, w0 + ev.clientX - x0));
+      card.h = Math.min(1200, Math.max(220, h0 + ev.clientY - y0));
+      if (windowed) void setWindowSize(card.w, card.h);
+    };
     const up = () => { resizing = false; saveCard(); removeEventListener("pointermove", move); removeEventListener("pointerup", up); };
     addEventListener("pointermove", move);
     addEventListener("pointerup", up);
   }
-  const setBig = (b: boolean) => app.setConfig((c) => { c.player.mini_large = b; });
+  const setBig = (b: boolean) => {
+    app.setConfig((c) => { c.player.mini_large = b; });
+    if (pipWindow) {
+      try {
+        pipWindow.resizeTo(Math.round(b ? card.w : MINI_W), Math.round(b ? card.h : MINI_H));
+      } catch {}
+    }
+  };
+  const closeMini = () => {
+    app.miniShown = false;
+    if (pipWindow && !pipWindow.closed) {
+      try { pipWindow.close(); } catch {}
+    }
+  };
   const side = $derived(Math.max(60, Math.min(card.w - CARD_PAD * 2, card.h - CARD_TOP - CARD_PAD - INFO_GAP - INFO_H)));
   const wheelVol = $derived(app.config.ui.wheel_volume_pct / 100);
   const wheelSeek = $derived(dur ? app.config.ui.wheel_seek_s / dur : 0);
   const title = $derived(cur?.title ?? t("mini.idle"));
 </script>
 
-<svelte:window bind:innerWidth={vw} bind:innerHeight={vh} />
-
 {#if !big}
   <!-- the slim bar -->
-  <div class="mini bar" style:left="{left}px" style:top="{top}px" style:width="{MINI_W}px" style:height="{MINI_H}px">
+  <div class="mini bar" class:pip={!!pipWindow} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
     <div class="grp">
       <div class="art" onpointerdown={grab} role="presentation">
         {#if cur}<Cover track={cur} size={34} radius={6} />{:else}<span class="ph"><Icon name="music-2" size={16} color="var(--faint)" /></span>{/if}
@@ -132,15 +174,15 @@
       <PlayGlyph loading={app.loading} playing={app.playing} size={11} button={28} />
     </button>
     <span use:press><IconButton name="skip-forward" size={15} box={29} color="var(--text)" onclick={() => app.next()} /></span>
-    <div class="prog" style:width="{MINI_W * Math.min(1, Math.max(0, frac))}px"></div>
+    <div class="prog" style:width="{100 * Math.min(1, Math.max(0, frac))}%"></div>
   </div>
 {:else}
   <!-- the card -->
-  <div class="mini cardw" class:resizing style:left="{left}px" style:top="{top}px" style:width="{card.w}px" style:height="{card.h}px" style:padding="{CARD_TOP}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
+  <div class="mini cardw" class:pip={!!pipWindow} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{CARD_TOP}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
     <div class="topbar" style:height="{CARD_TOP}px" style:padding="{TOP_INSET}px">
       <button class="tbtn" aria-label={tipFor("minimize-2")} use:tip={tipFor("minimize-2")} onclick={() => setBig(false)}><Icon name="minimize-2" size={14} /></button>
       <div class="gripbar" onpointerdown={grab} role="presentation"><Icon name="grip-horizontal" size={16} color="var(--dim)" /></div>
-      <button class="tbtn" aria-label={tipFor("x")} use:tip={tipFor("x")} onclick={() => (app.miniShown = false)}><Icon name="x" size={14} /></button>
+      <button class="tbtn" aria-label={tipFor("x")} use:tip={tipFor("x")} onclick={closeMini}><Icon name="x" size={14} /></button>
     </div>
 
     <div class="cover" class:pinned={volPinned} style:width="{side}px" style:height="{side}px" onpointerleave={() => (volPinned = false)} role="presentation">
@@ -178,12 +220,13 @@
       </div>
       {#if cur}<ToggleButton name="heart" size={18} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(cur)} />{/if}
     </div>
-    <div class="rz" onpointerdown={resize} role="presentation"></div>
+    {#if !pipWindow}<div class="rz" onpointerdown={resize} role="presentation"></div>{/if}
   </div>
 {/if}
 
 <style>
   .mini { position: fixed; z-index: 80; border-radius: 12px; overflow: hidden; font-family: var(--font); color: var(--text); animation: rise-in .25s var(--ease); --ink: 242, 242, 242; }
+  .mini.pip { border-radius: 0; animation: none; }
   /* ---- bar ---- */
   .bar { display: flex; align-items: center; gap: 2px; padding: 0 8px 0 9px; background: hsl(0 0% 6% / .98); }
   .grp { flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 10px; }

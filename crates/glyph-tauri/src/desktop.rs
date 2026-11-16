@@ -83,13 +83,22 @@ fn is_app_origin(uri: &str) -> bool {
 pub fn harden_webview(win: &tauri::WebviewWindow) {
     #[cfg(windows)]
     {
-        let _ = win.with_webview(|wv| unsafe {
+        let is_mini = win.label() == "mini";
+        let _ = win.with_webview(move |wv| unsafe {
             use webview2_com::Microsoft::Web::WebView2::Win32::{
-                COREWEBVIEW2_PERMISSION_STATE_ALLOW, ICoreWebView2PermissionRequestedEventArgs2,
+                COREWEBVIEW2_COLOR, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                ICoreWebView2Controller2, ICoreWebView2PermissionRequestedEventArgs2,
                 ICoreWebView2Settings3,
             };
             use webview2_com::{take_pwstr, PermissionRequestedEventHandler};
             use windows_core::{Interface, PWSTR};
+
+            if is_mini {
+                if let Ok(c2) = wv.controller().cast::<ICoreWebView2Controller2>() {
+                    let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR { A: 0, R: 0, G: 0, B: 0 });
+                }
+            }
+
             let Ok(core) = wv.controller().CoreWebView2() else { return };
             if let Ok(settings) = core.Settings() {
                 let _ = settings.SetAreDevToolsEnabled(false);
@@ -155,10 +164,103 @@ pub fn set_webview_low_memory(app: &tauri::AppHandle, low: bool) {
     let _ = (app, low);
 }
 
+/// Suspends the main WebView2 instance when the window is hidden or minimized.
+pub fn suspend_main_webview(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2_3, ICoreWebView2_19,
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            };
+            use webview2_com::TrySuspendCompletedHandler;
+            use windows_core::Interface;
+
+            let Some(win) = h.get_webview_window("main") else { return };
+            let is_minimized = win.is_minimized().unwrap_or(false);
+            let is_visible = win.is_visible().unwrap_or(true);
+            if !is_minimized && is_visible {
+                return;
+            }
+
+            let _ = win.with_webview(move |wv| unsafe {
+                if let Ok(core) = wv.controller().CoreWebView2() {
+                    if let Ok(c19) = core.cast::<ICoreWebView2_19>() {
+                        let _ = c19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+                    }
+                    if let Ok(c3) = core.cast::<ICoreWebView2_3>() {
+                        let handler = TrySuspendCompletedHandler::create(Box::new(|res, is_suspended| {
+                            tracing::debug!(?res, is_suspended, "ICoreWebView2_3::TrySuspend completed");
+                            Ok(())
+                        }));
+                        let res = c3.TrySuspend(&handler);
+                        tracing::debug!(?res, "ICoreWebView2_3::TrySuspend initiated");
+                    }
+                }
+            });
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+/// Immediately resumes the main WebView2 instance if suspended and restores normal memory level.
+pub fn resume_main_webview(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2_3, ICoreWebView2_19,
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+            };
+            use windows_core::Interface;
+
+            let Some(win) = h.get_webview_window("main") else { return };
+            let _ = win.with_webview(move |wv| unsafe {
+                if let Ok(core) = wv.controller().CoreWebView2() {
+                    if let Ok(c3) = core.cast::<ICoreWebView2_3>() {
+                        let res = c3.Resume();
+                        tracing::debug!(?res, "ICoreWebView2_3::Resume completed");
+                    }
+                    if let Ok(c19) = core.cast::<ICoreWebView2_19>() {
+                        let _ = c19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
+                    }
+                }
+            });
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+/// Starts window event listening for minimize / focus / visibility dormancy tracking.
+pub fn start(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let handle = app.clone();
+        win.on_window_event(move |event| {
+            match event {
+                tauri::WindowEvent::Focused(focused) => {
+                    if *focused {
+                        resume_main_webview(&handle);
+                    }
+                    crate::memory_guard::notify_window_state(&handle);
+                }
+                tauri::WindowEvent::Resized(_) => {
+                    crate::memory_guard::notify_window_state(&handle);
+                }
+                _ => {}
+            }
+        });
+    }
+}
+
 /// Window at start-up: shown, or hidden with a tray icon.
 pub fn setup(app: &tauri::App, core: &Arc<Core>) {
     let handle = app.handle().clone();
     let _ = APP.set(handle.clone());
+    start(&handle);
     // glyph:// links the system hands to the running app (macOS) or at cold start.
     {
         use tauri_plugin_deep_link::DeepLinkExt;
@@ -217,6 +319,8 @@ pub fn setup(app: &tauri::App, core: &Arc<Core>) {
 /// Shows the window (tray click, second start).
 pub fn show_window(app: &tauri::AppHandle) {
     PENDING_SHOW.store(false, Ordering::Release);
+    resume_main_webview(app);
+    crate::memory_guard::notify_window_state(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -644,8 +748,10 @@ pub fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>, shown
         .always_on_top(on_top)
         .skip_taskbar(true)
         .resizable(true)
-        .shadow(true)
-        .transparent(true);
+        .shadow(false)
+        .transparent(true)
+        .background_color(tauri::window::Color(0, 0, 0, 0))
+        .no_redirection_bitmap(true);
     let win = b.build().map_err(|e| e.to_string())?;
     harden_webview(&win);
     if let Some(icon) = DESK.with(|d| d.borrow().theme_accent).and_then(themed_icon) {

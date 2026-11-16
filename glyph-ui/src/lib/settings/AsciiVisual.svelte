@@ -113,12 +113,12 @@
           </span>
         </div>
         <div class="preview sk-row" aria-hidden="true">
-          <Skeleton w={44} h={44} radius={6} id="ascii-prev-c" />
+          <Skeleton w={44} h={44} radius={6} id="ascii-prev-c" ascii={v.ascii_effects} />
           <div class="sk-bars">
-            <div style:width="68%"><Skeleton w="100%" h={12} radius={4} id="ascii-prev-t" /></div>
-            <div style:width="44%"><Skeleton w="100%" h={10} radius={4} id="ascii-prev-a" /></div>
+            <div style:width="68%"><Skeleton w="100%" h={12} radius={4} id="ascii-prev-t" ascii={v.ascii_effects} /></div>
+            <div style:width="44%"><Skeleton w="100%" h={10} radius={4} id="ascii-prev-a" ascii={v.ascii_effects} /></div>
           </div>
-          <Skeleton w={28} h={10} radius={4} id="ascii-prev-d" />
+          <Skeleton w={28} h={10} radius={4} id="ascii-prev-d" ascii={v.ascii_effects} />
         </div>
       </div>
     {/if}

@@ -136,6 +136,7 @@
 
 <style>
   .empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .empty :global(.es) { align-self: center; }
   .page { width: 100%; height: 100%; display: flex; flex-direction: column; min-height: 0; }
   .top { position: relative; z-index: 20; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px var(--page-x) 4px; }
   .root { flex: 1; min-height: 0; width: 100%; display: flex; justify-content: center; padding: 0 40px; }
