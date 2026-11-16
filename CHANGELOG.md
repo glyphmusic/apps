@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Listening statistics**: a track credited to several artists (`A feat. B`, `A & B`, `A, B`) stored the track's main artist as the display name of every credited artist, so "Top artists" could list the same name twice and the page failed with Svelte's `each_key_duplicate`. Each credited artist now keeps its own spelling, and top artists never repeat a name (existing statistics included).
+
 ## 0.12.4 - 2026-11-16
 
 ### Added

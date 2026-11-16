@@ -217,9 +217,8 @@ impl Stats {
         m.hours[when.hour as usize % 24] += ms;
         m.weekdays[when.weekday as usize % 7] += ms;
         m.days[(when.day.max(1) as usize - 1) % 31] += ms;
-        for a in crate::taste::credited(&track.artist).into_iter().take(3) {
-            let display = dedupe::primary_artist(&track.artist);
-            let e = m.artists.entry(a).or_insert_with(|| (display, ArtistStat::default()));
+        for (key, name) in crate::taste::credited_named(&track.artist).into_iter().take(3) {
+            let e = m.artists.entry(key).or_insert_with(|| (name, ArtistStat::default()));
             e.1.ms += ms;
         }
         let key = dedupe::track_key(track);
@@ -237,9 +236,8 @@ impl Stats {
     pub fn add_play(&mut self, track: &Track, when: When) {
         let m = self.month_mut(&when);
         m.plays += 1;
-        for a in crate::taste::credited(&track.artist).into_iter().take(3) {
-            let display = dedupe::primary_artist(&track.artist);
-            m.artists.entry(a).or_insert_with(|| (display, ArtistStat::default())).1.plays += 1;
+        for (key, name) in crate::taste::credited_named(&track.artist).into_iter().take(3) {
+            m.artists.entry(key).or_insert_with(|| (name, ArtistStat::default())).1.plays += 1;
         }
         let key = dedupe::track_key(track);
         m.tracks.entry(key).or_insert_with(|| TrackStat { track: track.clone(), ms: 0, plays: 0 }).plays += 1;
@@ -354,6 +352,11 @@ fn previous_month(m: &str) -> String {
 pub fn top_artists(s: &MonthStats, n: usize) -> Vec<(String, ArtistStat)> {
     let mut v: Vec<(String, ArtistStat)> = s.artists.values().cloned().collect();
     v.sort_by(|a, b| b.1.ms.cmp(&a.1.ms).then(b.1.plays.cmp(&a.1.plays)));
+    // Statistics written by earlier versions stored the track's primary artist
+    // as the display name of every credited artist, so one name could appear
+    // more than once. Keep the first (biggest) entry per name.
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|(name, _)| seen.insert(name.trim().to_lowercase()));
     v.truncate(n);
     v
 }
@@ -425,5 +428,29 @@ mod tests {
     fn months_roll_over() {
         assert_eq!(previous_month("2026-01"), "2025-12");
         assert_eq!(previous_month("2026-10"), "2026-09");
+    }
+
+    #[test]
+    fn features_get_their_own_top_artist_row() {
+        let t = test_track(ProviderId::Deezer, "1", "Song", "Petit Biscuit feat. XYLO", None);
+        let mut s = Stats::default();
+        s.add_time(&t, 60_000, when("2026-11", 12));
+        s.add_play(&t, when("2026-11", 12));
+        let top = top_artists(&s.summary(Range::ThisMonth, when("2026-11", 0)), 10);
+        let names: Vec<&str> = top.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["Petit Biscuit", "XYLO"]);
+    }
+
+    #[test]
+    fn top_artists_hide_duplicate_names_from_old_data() {
+        // Before the credited names were stored, every credit of "A feat. B"
+        // was shown as "A"; strip the duplicates instead of breaking the page.
+        let mut s = MonthStats::default();
+        s.artists.insert("a".into(), ("A".into(), ArtistStat { ms: 90_000, plays: 3 }));
+        s.artists.insert("b".into(), ("A".into(), ArtistStat { ms: 30_000, plays: 1 }));
+        s.artists.insert("c".into(), ("C".into(), ArtistStat { ms: 10_000, plays: 1 }));
+        let top = top_artists(&s, 10);
+        assert_eq!(top.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["A", "C"]);
+        assert_eq!(top[0].1.ms, 90_000);
     }
 }

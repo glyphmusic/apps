@@ -51,10 +51,62 @@ fn isrc_country(isrc: &str) -> Option<String> {
 /// Every credited artist of "A, B feat. C" (normalised).
 pub fn credited(credit: &str) -> Vec<String> {
     let mut s = credit.to_lowercase();
-    for sep in [" feat. ", " feat ", " ft. ", " ft ", " featuring ", " & ", " x ", " × ", " with ", " vs. ", " vs ", " и ", ";", "/"] {
+    for sep in CREDIT_SEPS {
         s = s.replace(sep, ",");
     }
     s.split(',').map(normalize_artist).filter(|a| !a.is_empty()).collect()
+}
+
+/// Separators between the artists of one credit, with the spaces they are
+/// written with ("A feat. B", "A & B", "A, B", "A x B", ...).
+const CREDIT_SEPS: [&str; 15] = [
+    " feat. ", " feat ", " ft. ", " ft ", " featuring ", " & ", " x ", " × ", " with ", " vs. ", " vs ", " и ", ";", "/", ",",
+];
+
+/// A credit split into the artists as written: "A feat. B" -> ["A", "B"].
+fn credit_parts(credit: &str) -> Vec<&str> {
+    let lower = credit.to_lowercase();
+    // Byte offsets of the lowercased text only line up with the credit itself
+    // when lowercasing kept its length (some scripts change it); else fall back
+    // to splitting on commas, the normalised name is used for display then.
+    if lower.len() != credit.len() {
+        return credit.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < lower.len() {
+        let hit = CREDIT_SEPS.iter().filter(|sep| lower[i..].starts_with(**sep)).map(|sep| sep.len()).max();
+        if let Some(len) = hit {
+            let part = credit[start..i].trim();
+            if !part.is_empty() {
+                out.push(part);
+            }
+            i += len;
+            start = i;
+        } else {
+            i += lower[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    let tail = credit[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+/// Every credited artist of "A, B feat. C" as (normalised key, name as
+/// written), so statistics can show each artist under their own spelling.
+pub fn credited_named(credit: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for part in credit_parts(credit) {
+        let key = normalize_artist(part);
+        if key.is_empty() || out.iter().any(|(k, _)| *k == key) {
+            continue;
+        }
+        out.push((key, part.to_string()));
+    }
+    out
 }
 
 fn song_key(t: &Track) -> String {
@@ -309,6 +361,20 @@ mod tests {
             external_ids: Default::default(),
             explicit: false,
         }
+    }
+
+    #[test]
+    fn credited_names_keep_their_spelling() {
+        assert_eq!(
+            credited_named("Petit Biscuit feat. XYLO"),
+            vec![("petit biscuit".to_string(), "Petit Biscuit".to_string()), ("xylo".to_string(), "XYLO".to_string())]
+        );
+        assert_eq!(
+            credited("Petit Biscuit feat. XYLO"),
+            credited_named("Petit Biscuit feat. XYLO").into_iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
+        assert_eq!(credited_named("A, B & C"), vec![("a".into(), "A".into()), ("b".into(), "B".into()), ("c".into(), "C".into())]);
+        assert_eq!(credited_named("  "), Vec::<(String, String)>::new());
     }
 
     #[test]
