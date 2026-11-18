@@ -602,6 +602,7 @@ async fn run_search(core: &Arc<Core>, query: &str, page: usize) -> Res<Value> {
     const EMIT_COALESCE: Duration = Duration::from_millis(120);
     let mut last_emit = Instant::now() - EMIT_COALESCE;
     let mut dirty = false;
+    let mut warmed_early = false;
     loop {
         let now = Instant::now();
         if now >= deadline {
@@ -676,6 +677,18 @@ async fn run_search(core: &Arc<Core>, query: &str, page: usize) -> Res<Value> {
                 emit_results(core, true);
             } else {
                 dirty = true;
+            }
+            // The first hit is the likely click: find its source now, not
+            // only once every source has answered (that can take seconds).
+            if !warmed_early {
+                let first = {
+                    let st = core.st();
+                    (st.search.seq == seq).then(|| st.search.tracks.first().cloned()).flatten()
+                };
+                if let Some(t) = first {
+                    warmed_early = true;
+                    b.warm(vec![t]);
+                }
             }
         }
     }

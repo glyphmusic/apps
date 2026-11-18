@@ -58,10 +58,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -137,6 +141,18 @@ public class MainActivity extends AppCompatActivity {
     private String lastInsetsJs;
     private final List<String> pendingInvokes = new ArrayList<>();
     private final List<String> pendingEvents = new ArrayList<>();
+    /**
+     * Events that only describe the current state: while the page cannot take
+     * them (app in the background, page loading) only the newest of each is
+     * kept. Before, every library/queue/player update piled up in the frozen
+     * page and ran all at once on return, which froze the app.
+     */
+    private final LinkedHashMap<String, String> pendingLatest = new LinkedHashMap<>();
+    private static final Set<String> LATEST_ONLY = new HashSet<>(Arrays.asList(
+            "glyph://player", "glyph://queue", "glyph://library", "glyph://devices",
+            "glyph://config", "glyph://account", "glyph://home", "glyph://jam",
+            "glyph://sleep", "glyph://import_progress", "glyph://backend", "glyph://update",
+            "glyph://mcp_approvals", "glyph://search"));
     private final Handler themeHandler = new Handler(Looper.getMainLooper());
     private int lastAccentRgb = -1;
     private String pendingAlias;
@@ -424,6 +440,7 @@ public class MainActivity extends AppCompatActivity {
         pageReady = false;
         pendingInvokes.clear();
         pendingEvents.clear();
+        pendingLatest.clear();
         if (old != null) {
             try {
                 ViewParent parent = old.getParent();
@@ -542,6 +559,10 @@ public class MainActivity extends AppCompatActivity {
         if (lastInsetsJs != null) {
             webView.evaluateJavascript(lastInsetsJs, null);
         }
+        // In the background the page is frozen: keep everything until onResume.
+        if (activityPaused) {
+            return;
+        }
         if (!pendingInvokes.isEmpty()) {
             List<String> copy = new ArrayList<>(pendingInvokes);
             pendingInvokes.clear();
@@ -556,11 +577,18 @@ public class MainActivity extends AppCompatActivity {
                 webView.evaluateJavascript(js, null);
             }
         }
+        if (!pendingLatest.isEmpty()) {
+            List<String> copy = new ArrayList<>(pendingLatest.values());
+            pendingLatest.clear();
+            for (String js : copy) {
+                webView.evaluateJavascript(js, null);
+            }
+        }
     }
 
     private void evalInvokeJs(String js) {
         runOnUiThread(() -> {
-            if (webView != null && pageReady) {
+            if (webView != null && pageReady && !activityPaused) {
                 webView.evaluateJavascript(js, null);
             } else if (!isFinishing() && !isDestroyed()) {
                 pendingInvokes.add(js);
@@ -568,11 +596,16 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void evalEventJs(String js) {
+    private void evalEventJs(String name, String js) {
         runOnUiThread(() -> {
-            if (webView != null && pageReady) {
+            if (webView != null && pageReady && !activityPaused) {
                 webView.evaluateJavascript(js, null);
-            } else if (!isFinishing() && !isDestroyed()) {
+            } else if (isFinishing() || isDestroyed()) {
+                return;
+            } else if (LATEST_ONLY.contains(name)) {
+                pendingLatest.remove(name);
+                pendingLatest.put(name, js);
+            } else {
                 if (pendingEvents.size() >= MAX_PENDING_EVENTS) {
                     pendingEvents.remove(0);
                 }
@@ -783,6 +816,10 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         if (webView != null) {
             webView.onResume();
+            // Hand over what waited while the app was in the background.
+            if (pageReady) {
+                flushPending();
+            }
         }
         nativeResumed();
         if (checkOnResume) {
@@ -939,10 +976,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void gpuiEmitEvent(String name, String payloadJson) {
-        if (activityPaused && ("glyph://spectrum".equals(name) || "glyph://player".equals(name))) {
+        String ev = name == null ? "" : name;
+        if (activityPaused && "glyph://spectrum".equals(ev)) {
             return;
         }
-        evalEventJs("window.__glyphEmit(" + JSONObject.quote(name == null ? "" : name)
+        evalEventJs(ev, "window.__glyphEmit(" + JSONObject.quote(ev)
                 + "," + toSafeJsLiteral(payloadJson) + ");");
     }
 

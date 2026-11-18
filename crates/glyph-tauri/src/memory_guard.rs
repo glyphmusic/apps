@@ -436,6 +436,9 @@ mod win {
         let mut hard_pinned = false;
         let mut last_soft_trim = Instant::now() - Duration::from_secs(60);
         let mut last_hard_trim = Instant::now() - Duration::from_secs(60);
+        // Power throttling last set while dormant (audio playing, process
+        // tree): set again only when that changes, not on every round.
+        let mut dormant_qos: Option<(bool, Vec<u32>)> = None;
 
         loop {
             let pids = collect_tree_pids(root_pid);
@@ -464,6 +467,7 @@ mod win {
                     let throttle = DormantController::should_throttle_process(true, pid == root_pid, audio_playing);
                     crate::playback_qos::set_process_efficiency_mode(pid, throttle);
                 }
+                dormant_qos = Some((audio_playing, pids.clone()));
                 core.trim_memory(true);
                 for (h, can_quota, _) in &entries {
                     if *can_quota {
@@ -476,12 +480,15 @@ mod win {
                     handle_window_state_change(&app);
                     continue;
                 }
-                let root_throttle = DormantController::should_throttle_process(true, true, audio_playing);
-                crate::playback_qos::set_process_efficiency_mode(root_pid, root_throttle);
-                for &pid in &pids {
-                    if pid != root_pid {
-                        crate::playback_qos::set_process_efficiency_mode(pid, true);
+                if dormant_qos.as_ref() != Some(&(audio_playing, pids.clone())) {
+                    let root_throttle = DormantController::should_throttle_process(true, true, audio_playing);
+                    crate::playback_qos::set_process_efficiency_mode(root_pid, root_throttle);
+                    for &pid in &pids {
+                        if pid != root_pid {
+                            crate::playback_qos::set_process_efficiency_mode(pid, true);
+                        }
                     }
+                    dormant_qos = Some((audio_playing, pids.clone()));
                 }
 
                 if do_dormant_trim {
@@ -522,11 +529,14 @@ mod win {
                             low_target = true;
                             crate::desktop::set_webview_low_memory(&app, true);
                         }
-                        if last_hard_trim.elapsed() >= Duration::from_secs(if enforce { 2 } else { 5 }) {
+                        // Emptied pages that are still in use come straight
+                        // back (page faults cost CPU): not too often, and
+                        // never the process that plays the audio.
+                        if last_hard_trim.elapsed() >= Duration::from_secs(if enforce { 4 } else { 10 }) {
                             last_hard_trim = Instant::now();
                             core.trim_memory(true);
                             for (h, can_quota, m) in &entries {
-                                if *can_quota && m.private_ws > 24 * 1024 * 1024 {
+                                if *can_quota && m.private_ws > 24 * 1024 * 1024 && !(audio_playing && m.pid == root_pid) {
                                     // SAFETY: moves excess clean/reclaimable pages from process working set.
                                     unsafe { let _ = EmptyWorkingSet(h.0); }
                                 }
@@ -569,8 +579,10 @@ mod win {
             }
 
             let pressure = classify_pressure(total_priv, total_commit, low_target);
+            // Minimized or hidden: a window change wakes this loop at once
+            // (`DORMANT_NOTIFY`), so it can sleep long.
             let sleep_ms = if is_dormant {
-                500
+                3000
             } else if matches!(pressure, Pressure::HardTrim | Pressure::EnforceCap) {
                 1500
             } else {

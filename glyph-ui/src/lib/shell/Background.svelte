@@ -2,7 +2,8 @@
   // The glow field behind everything (visuals/glow.rs): theme glow colours,
   // the playing song's palette (from its cover), a new shape per song unless
   // one is fixed in Settings > Appearance.
-  import { Glow, paletteFromImage, paletteFromSeed, presetFromSeed, hex, solidIsDarkInk, type GlowShape, type Palette } from "../glow";
+  import { untrack } from "svelte";
+  import { Glow, paletteFromImage, paletteFromSeed, presetFromSeed, hex, solidIsDarkInk, type GlowShape, type Palette, type RenderMode } from "../glow";
   import { app } from "../state.svelte";
   import { THEMES, themeColors } from "../theme";
   import { backend } from "../api/backend";
@@ -16,6 +17,9 @@
   let glow = $state<Glow | null>(null);
 
   const solid = $derived(!app.config || app.config.visuals.glow_shape === "solid");
+  // Settings > Appearance > Animations. A canvas keeps the kind of drawing it
+  // started with, so a switch brings new canvases (the {#key} below).
+  const renderMode = $derived<RenderMode>(app.config?.visuals.render_mode === "cpu" ? "cpu" : "gpu");
   const baseColor = $derived(themeColors(app.config?.visuals.theme ?? "glyph").base);
   const baseCss = $derived(`#${baseColor.toString(16).padStart(6, "0")}`);
 
@@ -24,7 +28,7 @@
       glow = null;
       return;
     }
-    const g = new Glow(glowEl, asciiEl);
+    const g = new Glow(glowEl, asciiEl, untrack(() => renderMode));
     glow = g;
     setGlow(g);
     return () => {
@@ -82,8 +86,10 @@
 {#if solid}
   <div class="bg solid" style:background={baseCss}></div>
 {:else}
-  <canvas class="bg glow" class:blurred bind:this={glowEl}></canvas>
-  <canvas class="bg ascii" class:blurred bind:this={asciiEl}></canvas>
+  {#key renderMode}
+    <canvas class="bg glow" class:blurred bind:this={glowEl}></canvas>
+    <canvas class="bg ascii" class:blurred bind:this={asciiEl}></canvas>
+  {/key}
 {/if}
 
 <style>

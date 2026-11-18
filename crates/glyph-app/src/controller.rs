@@ -633,7 +633,7 @@ impl Core {
             st.pending_recent_artist = from.artist.map(|a| (a, Some(track.clone())));
         }
         if library_touched {
-            self.library_changed();
+            self.library_changed_soon();
         }
         self.playback_changed();
         self.start_track(track);
@@ -737,10 +737,12 @@ impl Core {
                 st.library.push_recent_artist(&name, art);
             }
         }
+        // Only "recently played" and play counts changed: the whole library
+        // goes to the UI a moment later (one event), not before the song starts.
         if adopted.is_some() {
             *self.playback_pos_saved.lock().unwrap_or_else(|e| e.into_inner()) = None;
             self.playback_changed();
-            self.library_changed();
+            self.library_changed_soon();
             self.emit_queue();
             self.emit_player();
             if let Some(b) = self.backend() {
@@ -757,10 +759,11 @@ impl Core {
         }
         *self.playback_pos_saved.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.playback_changed();
-        self.library_changed();
-        self.emit_queue();
         self.emit_player();
+        // Look up the source first; the rest of the UI updates meanwhile.
         self.load_current(track);
+        self.emit_queue();
+        self.library_changed_soon();
     }
 
     /// Finds the source of the current song, then plays it. Before the
@@ -1181,7 +1184,7 @@ impl Core {
         }
         if skipped {
             crate::discover::on_skip(self);
-            self.library_changed();
+            self.library_changed_soon();
         }
         match next {
             Some(t) => {
@@ -1678,6 +1681,10 @@ impl Core {
             .spawn(move || {
                 let events = core.player.as_ref().map(|p| p.events());
                 let mut last: Option<PlayerState> = None;
+                // What the UI was last told, and when: it counts the time on
+                // its own, so a moving position alone is not sent ten times a
+                // second (each report redrew the player everywhere).
+                let mut sent: Option<(PlayerState, Instant)> = None;
                 let mut ticks: u32 = 0;
                 let mut outage_seen: u64 = 0;
                 let mut was_playing = false;
@@ -1702,8 +1709,11 @@ impl Core {
                     }
                     if let Some(p) = &core.player {
                         if let Some(s) = p.state_if_changed(last.as_ref()) {
+                            if player_report_due(sent.as_ref(), &s) {
+                                sent = Some((s.clone(), Instant::now()));
+                                core.emit_player();
+                            }
                             last = Some(s);
-                            core.emit_player();
                         }
                         // Open the next audio stream near the end (~30 s left) so mobile links/TCP do not stall while locked.
                         if last.as_ref().is_some_and(|s| {
@@ -2074,5 +2084,57 @@ impl Core {
             st.search.seq = seq;
         }
         crate::mcp_tools::remember_search(&[]);
+    }
+}
+
+/// The player changed in a way the UI cannot work out itself: another song,
+/// status, volume..., or the position is off from where the UI's own clock
+/// has it (a seek, buffering) by more than 0.75 s. Every 5 s it is sent
+/// anyway, to keep the UI's clock in step.
+fn player_report_due(sent: Option<&(PlayerState, Instant)>, now: &PlayerState) -> bool {
+    let Some((old, at)) = sent else { return true };
+    if !now.same_but_position(old) {
+        return true;
+    }
+    let elapsed = at.elapsed();
+    if elapsed >= Duration::from_secs(5) {
+        return true;
+    }
+    let expected = if old.status == glyph_audio::Status::Playing { old.position + elapsed } else { old.position };
+    let off = if now.position > expected { now.position - expected } else { expected - now.position };
+    off > Duration::from_millis(750)
+}
+
+#[cfg(test)]
+mod player_report_tests {
+    use super::*;
+
+    fn state(status: glyph_audio::Status, pos_ms: u64) -> PlayerState {
+        PlayerState {
+            status,
+            track: None,
+            provider: None,
+            backend: None,
+            is_preview: false,
+            position: Duration::from_millis(pos_ms),
+            duration: Some(Duration::from_secs(200)),
+            volume: 1.0,
+        }
+    }
+
+    #[test]
+    fn position_alone_is_not_reported_every_tick() {
+        let sent = (state(glyph_audio::Status::Playing, 10_000), Instant::now());
+        // 100 ms later the song is 100 ms further: the UI knows that already.
+        assert!(!player_report_due(Some(&sent), &state(glyph_audio::Status::Playing, 10_100)));
+    }
+
+    #[test]
+    fn first_report_status_change_and_seek_are_sent() {
+        assert!(player_report_due(None, &state(glyph_audio::Status::Playing, 0)));
+        let sent = (state(glyph_audio::Status::Playing, 10_000), Instant::now());
+        assert!(player_report_due(Some(&sent), &state(glyph_audio::Status::Paused, 10_000)));
+        // Jumped 30 s ahead (a seek).
+        assert!(player_report_due(Some(&sent), &state(glyph_audio::Status::Playing, 40_000)));
     }
 }

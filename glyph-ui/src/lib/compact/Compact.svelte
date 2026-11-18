@@ -175,7 +175,7 @@
     </div>
   {/if}
 
-  <main class="main scroll" class:with-mini={!!app.player.current} id="main-scroll" bind:this={mainEl} use:fadeEdges={{ top: app.view === "artist" || ownList ? 0 : 14, bottom: 28 }} onscroll={(e) => { scrollTop = e.currentTarget.scrollTop; syncBar(); }}>
+  <main class="main scroll" id="main-scroll" bind:this={mainEl} use:fadeEdges={{ top: app.view === "artist" || ownList ? 0 : 14, bottom: 0 }} onscroll={(e) => { scrollTop = e.currentTarget.scrollTop; syncBar(); }}>
     {#key viewKey}
       <div in:fade={{ duration: 180 }}>
         {#if app.view === "library"}<PhoneLibrary />
@@ -215,15 +215,15 @@
   .bar-play { flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; transition: transform .12s; }
   .bar-play.nudge :global(.ic) { margin-left: 1.5px; }
   .bar-play:global(.pressing) { animation: press .25s var(--ease); }
-  /* The page ends above the tab bar and mini player (no fill behind them:
-     the app background shows there) and fades out at its bottom edge. */
-  .main { flex: 1; min-height: 0; margin-bottom: calc(62px + var(--safe-bottom, env(safe-area-inset-bottom))); }
-  .main.with-mini { margin-bottom: calc(134px + var(--safe-bottom, env(safe-area-inset-bottom))); }
+  /* The page runs on under the tab bar and mini player, so it stays visible
+     there; the tail lets the last row scroll up above them. */
+  .main { flex: 1; min-height: 0; }
   .pad { padding: 0 16px; }
   /* Desktop pages inside the phone frame: the frame scrolls, not the page. */
   .desk :global(.frame), .desk :global(.page-scroll) { position: static; height: auto; overflow: visible; }
   .desk :global(.page-scroll) { -webkit-mask-image: none !important; mask-image: none !important; }
-  .tail { height: 16px; }
-  .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 6px 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: transparent; }
+  .tail { height: calc(78px + var(--safe-bottom, env(safe-area-inset-bottom))); }
+  .tail.with-mini { height: calc(150px + var(--safe-bottom, env(safe-area-inset-bottom))); }
+  .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 6px 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: linear-gradient(to bottom, rgba(10, 10, 10, 0), rgba(10, 10, 10, .55) 60%, rgba(10, 10, 10, .75)); }
   .bottom > :global(*) { pointer-events: auto; }
 </style>

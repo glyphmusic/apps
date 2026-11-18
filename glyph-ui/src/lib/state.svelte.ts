@@ -87,6 +87,9 @@ class App {
   version = $state("0.0.0");
   config = $state<Config>(null as unknown as Config);
   library = $state<Library>(emptyLibrary());
+  /** Keys of liked / downloaded songs: every song row asks, so a set instead of a walk through the whole list. */
+  private likedKeys = $derived(new Set(this.library.liked.map(trackKey)));
+  private downloadedKeys = $derived(new Set(this.library.downloads.map(trackKey)));
   queue = $state<QueueState>({ items: [], index: null, user: 0 });
   player = $state<PlayerState>(emptyPlayer());
   backendState = $state<BackendState>({ kind: "connecting" });
@@ -258,9 +261,13 @@ class App {
   private clockIntervalMs(): number {
     if (typeof document !== "undefined" && document.hidden) return 0;
     const now = performance.now();
-    if (this.playing || this.loading || this.search.loading || this.jamOpen || now < this.clockUntil) {
+    // Short animations (spinners, the follow button) want smooth frames.
+    if (this.loading || this.search.loading || this.jamOpen || now < this.clockUntil) {
       return 33;
     }
+    // A playing song only moves the time and the progress bar: ten steps a
+    // second look the same and cost a third of the work.
+    if (this.playing) return 100;
     if (this.sleep?.until != null) return 1000;
     return 0;
   }
@@ -412,7 +419,7 @@ class App {
   }
 
   // ---- library ----
-  isLiked(t: Track) { const k = trackKey(t); return this.library.liked.some((x) => trackKey(x) === k); }
+  isLiked(t: Track) { return this.likedKeys.has(trackKey(t)); }
   toggleLike(t: Track) {
     const on = !this.isLiked(t);
     this.library.liked = on ? [t, ...this.library.liked] : this.library.liked.filter((x) => trackKey(x) !== trackKey(t));
@@ -473,7 +480,7 @@ class App {
     this.library.followed = on ? [...this.library.followed, a] : this.library.followed.filter((x) => x.toLowerCase() !== a.toLowerCase());
     return backend().call("follow", { artist: a, on });
   }
-  isDownloaded(tr: Track) { const k = trackKey(tr); return this.library.downloads.some((x) => trackKey(x) === k); }
+  isDownloaded(tr: Track) { return this.downloadedKeys.has(trackKey(tr)); }
   download(tracks: Track[]) { for (const tr of tracks) this.downloading[trackKey(tr)] = null; return backend().call("download", { tracks }); }
   share(what: { track?: Track; list?: ListKey }) { return backend().call<string>("share", what); }
 
@@ -729,7 +736,8 @@ class App {
     clearTimeout(this.searchTimer);
     if (!q.trim()) { this.search = { ...this.search, query: "", tracks: [], artists: [], albums: [], lyric_hits: [], loading: false }; return; }
     if (/^(https?:\/\/|glyph:)/i.test(q.trim())) return;
-    this.searchTimer = window.setTimeout(() => this.runSearch(q), 500);
+    // Short pause after typing: searches start soon, without one per key.
+    this.searchTimer = window.setTimeout(() => this.runSearch(q), 300);
   }
   runSearch(q = this.searchQuery) {
     clearTimeout(this.searchTimer);

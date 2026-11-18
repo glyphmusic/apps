@@ -230,10 +230,12 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
             }
             (kind::SETTING, "visuals") => {
                 let Some(x) = parse::<VisualsConfig>(v) else { continue };
-                // Performance mode belongs to this device.
+                // Performance mode and who draws the background belong to this device.
                 let perf = cfg.visuals.performance_mode;
+                let render = std::mem::take(&mut cfg.visuals.render_mode);
                 cfg.visuals = x;
                 cfg.visuals.performance_mode = perf;
+                cfg.visuals.render_mode = render;
             }
             (kind::SETTING, "updates") => {
                 let Some(x) = parse::<UpdatesConfig>(v) else { continue };

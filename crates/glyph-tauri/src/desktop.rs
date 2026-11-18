@@ -528,7 +528,9 @@ pub fn tick(core: &Arc<Core>) {
         }
     }
 
-    let (current, liked, playing, position, config) = {
+    // Runs ten times a second: only the few settings it needs, not a copy
+    // of the whole config.
+    let (current, liked, playing, position, discord_want, on_top) = {
         let st = core.st();
         let liked = st.current.as_ref().is_some_and(|c| st.library.is_liked(c));
         let ps = core.player_state();
@@ -537,7 +539,8 @@ pub fn tick(core: &Arc<Core>) {
         let playing = (ps.as_ref().is_some_and(|s| s.status == Status::Playing) && !st.resolving)
             || (st.resolving && !glyph_app::jam::hold_play());
         let pos = ps.map_or(Duration::ZERO, |s| s.position);
-        (st.current.clone(), liked, playing, pos, st.config.clone())
+        let discord_want = st.config.integrations.discord_presence.then(|| crate::discord::client_id(&st.config)).flatten();
+        (st.current.clone(), liked, playing, pos, discord_want, st.config.player.mini_on_top)
     };
     #[cfg(windows)]
     crate::thumbbar::set_state(playing, liked);
@@ -556,7 +559,7 @@ pub fn tick(core: &Arc<Core>) {
             d.media_sent = Some(k);
         }
         // Discord status, as Settings > Integrations says.
-        let want = config.integrations.discord_presence.then(|| crate::discord::client_id(&config)).flatten();
+        let want = discord_want;
         if want != d.discord_id {
             d.discord = want.clone().map(crate::discord::DiscordPresence::new);
             d.discord_id = want;
@@ -573,7 +576,6 @@ pub fn tick(core: &Arc<Core>) {
             d.discord_sent = Some(k);
         }
         // "Mini player on top": the YouTube embed's mini window and ours.
-        let on_top = config.player.mini_on_top;
         if d.mini_on_top != Some(on_top) {
             if let Some(p) = &core.player {
                 p.set_mini_player_options(glyph_audio::MiniPlayerOptions { always_on_top: on_top, position: None });

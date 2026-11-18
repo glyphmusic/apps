@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.12.8 - 2026-11-18
+
+### Added
+
+- **Animations: graphics card or processor** (Settings > Appearance > Animations): who draws the background. "Graphics card (GPU)", the default, now computes the whole glow field on the graphics card too (WebGL 2), not only the characters, so the processor stays almost free; a device without WebGL 2 falls back to the processor and the setting says so. "Processor (CPU)" draws everything without the graphics card, for graphics cards that flicker or show a black background. It stays on the device it was set on (`visuals.render_mode`, not synced). Switching takes effect at once.
+
+### Fixed
+
+- **Android app froze after coming back**: while the app was in the background, every library, queue and player update piled up in the paused page and all ran at once on return. Now they wait in the app and only the newest of each is handed over when you come back.
+- **Background characters gone after coming back (phones)**: the phone drops the GPU drawing while the app is away; it is now built again when the app returns.
+
+### Changed
+
+- **Songs start faster**: starting a song no longer sends the whole library to the screen before the song is looked up; "recently played" follows a moment later in one update. A song whose source is already being looked up starts as soon as that is done (checked every 25 ms instead of every 100 ms).
+- **Search feels quicker**: it starts 300 ms after you stop typing (was 500 ms), and the first hit's source is looked up as soon as it shows, so tapping it plays at once even while other sources still answer.
+- **Smoother song lists**: liked and downloaded marks are checked with a quick lookup instead of going through all liked or downloaded songs for every row.
+- **Less work while a song plays**: the player state went to the screen ten times a second only because the time moved, and every time the whole player redrew. The screen counts the time on its own, so the state now goes only when something else changes, when the time is off by more than 0.75 s (a seek, buffering) or every 5 s. The time and progress bar now update ten times a second instead of thirty.
+- **Lighter background**: the glow field's noise runs without helper functions per cell, and the brightness under text is worked out only when it is checked (about twice a second) instead of for every cell of every frame. It looks the same.
+- **Desktop housekeeping**: the 10-per-second task no longer copies the whole settings; while the window is minimized the memory guard checks every 3 s instead of every 0.5 s and sets power saving only when something changed; when memory is high, it empties the working sets every 4 to 10 s instead of every 2 to 5 s and leaves the process that plays the audio alone.
+- **Phone layout**: the page runs on under the tab bar and mini player again, so you see it there through a soft fade instead of an empty dark strip.
+
 ## 0.12.7 - 2026-11-18
 
 ### Fixed

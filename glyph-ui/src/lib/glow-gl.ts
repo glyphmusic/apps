@@ -6,12 +6,12 @@
 // Same cells (10 x 16), font (5 x 7), ramp, thresholds and colours as the
 // CPU path in glow.ts, which stays as the fallback without WebGL.
 
-const VERT = `
+export const VERT = `
 attribute vec2 aPos;
 void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
 `;
 
-const FRAG = `
+export const FRAG = `
 precision highp float;
 uniform sampler2D uField;
 uniform sampler2D uFont;
@@ -63,6 +63,15 @@ void main() {
 }
 `;
 
+/** The 12 ramp glyphs side by side, 5 x 7 bits each, as a 60 x 7 luminance picture. */
+export function fontBytes(font: number[][]): Uint8Array {
+  const out = new Uint8Array(60 * 7);
+  font.forEach((g, gi) => g.forEach((bits, ry) => {
+    for (let rx = 0; rx < 5; rx++) if (bits & (16 >> rx)) out[ry * 60 + gi * 5 + rx] = 255;
+  }));
+  return out;
+}
+
 export interface AsciiFrame {
   W: number; H: number; iw: number; ih: number; pitch: number;
   /** RGB per field cell, 0..1. */
@@ -74,7 +83,7 @@ export interface AsciiFrame {
 
 export class AsciiGl {
   private gl: WebGLRenderingContext;
-  private fieldTex: WebGLTexture;
+  private fieldTex!: WebGLTexture;
   private fieldBytes = new Uint8Array(0);
   private fw = 0; private fh = 0;
   private u: Record<string, WebGLUniformLocation | null> = {};
@@ -94,9 +103,25 @@ export class AsciiGl {
     }
   }
 
-  private constructor(canvas: HTMLCanvasElement, gl: WebGLRenderingContext, font: number[][]) {
+  private constructor(canvas: HTMLCanvasElement, gl: WebGLRenderingContext, private font: number[][]) {
     this.gl = gl;
     canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    // Phones drop the context while the app is in the background: build the
+    // shader again when it comes back, so the ASCII layer returns too.
+    canvas.addEventListener("webglcontextrestored", () => {
+      try {
+        this.setup();
+        this.fw = 0; this.fh = 0;
+        this.lost = false;
+      } catch (e) {
+        console.warn("[glow] WebGL ASCII layer could not be restored:", e);
+      }
+    });
+    this.setup();
+  }
+
+  private setup() {
+    const gl = this.gl, font = this.font;
     const sh = (type: number, src: string) => {
       const s = gl.createShader(type)!;
       gl.shaderSource(s, src);
@@ -120,11 +145,7 @@ export class AsciiGl {
     for (const n of ["uField", "uFont", "uRes", "uFieldSize", "uPitch", "uDensity", "uThreshold", "uLevel", "uDotLevel", "uBlend", "uDots"]) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
-    // Font: the 12 ramp glyphs side by side, 5 x 7 bits each.
-    const fontBytes = new Uint8Array(60 * 7);
-    font.forEach((g, gi) => g.forEach((bits, ry) => {
-      for (let rx = 0; rx < 5; rx++) if (bits & (16 >> rx)) fontBytes[ry * 60 + gi * 5 + rx] = 255;
-    }));
+    const glyphs = fontBytes(font);
     const tex = (unit: number) => {
       const t = gl.createTexture()!;
       gl.activeTexture(gl.TEXTURE0 + unit);
@@ -137,7 +158,7 @@ export class AsciiGl {
     };
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     tex(1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 60, 7, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, fontBytes);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 60, 7, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, glyphs);
     this.fieldTex = tex(0);
     gl.uniform1i(this.u.uField, 0);
     gl.uniform1i(this.u.uFont, 1);

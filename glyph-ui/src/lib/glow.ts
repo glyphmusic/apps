@@ -3,15 +3,21 @@
 // the browser stretches into soft light, the ASCII layer (10 x 16 cells,
 // ramp " .-=+xX0S8#@", 5 x 7 font) and the titlebar dot grid on top.
 // Same presets, ramps, thresholds and alphas as the app.
-// The ASCII layer and dots are drawn by the GPU when WebGL is there
-// (glow-gl.ts); performance mode samples coarser and draws less often.
+// Settings > Appearance > Animations picks who draws it: "gpu" (default)
+// computes the field and everything on top on the graphics card
+// (glow-gpu.ts, WebGL 2; with only WebGL 1 just the characters, glow-gl.ts),
+// "cpu" draws everything here without WebGL. Performance mode samples
+// coarser and draws less often.
 import { AsciiGl } from "./glow-gl";
+import { FieldGpu } from "./glow-gpu";
 
 export type Rgb = [number, number, number];
 export type Palette = [Rgb, Rgb, Rgb];
 export type Preset = "strahl" | "band" | "sonnenaufgang" | "horizont";
 export type GlowShape = Preset | "" | "solid";
 export const PRESETS: Preset[] = ["strahl", "band", "sonnenaufgang", "horizont"];
+/** Who draws the background (`visuals.render_mode`). */
+export type RenderMode = "gpu" | "cpu";
 
 const FONT = [
   [0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 4, 0], [0, 0, 0, 14, 0, 0, 0], [0, 0, 31, 0, 31, 0, 0],
@@ -60,12 +66,16 @@ function ramps(p: Preset, theme: Palette | null, pal: Palette | null, blend: num
 // Smooth 3D value noise in -1..1 (stands in for OpenSimplex).
 const hash = (x: number, y: number, z: number) => { let h = (x * 374761393 + y * 668265263 + z * 1274126177) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295 * 2 - 1; };
 const fade = (t: number) => t * t * (3 - 2 * t);
+// Runs for every cell of every frame: plain arithmetic, no helper closures.
 function noise(x: number, y: number, z: number) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
   const xf = fade(x - xi), yf = fade(y - yi), zf = fade(z - zi);
-  const l = (a: number, b: number, t: number) => a + (b - a) * t;
-  const c = (dx: number, dy: number, dz: number) => hash(xi + dx, yi + dy, zi + dz);
-  return l(l(l(c(0, 0, 0), c(1, 0, 0), xf), l(c(0, 1, 0), c(1, 1, 0), xf), yf), l(l(c(0, 0, 1), c(1, 0, 1), xf), l(c(0, 1, 1), c(1, 1, 1), xf), yf), zf);
+  const x1 = xi + 1, y1 = yi + 1, z1 = zi + 1;
+  const a = hash(xi, yi, zi), b = hash(x1, yi, zi), c = hash(xi, y1, zi), d = hash(x1, y1, zi);
+  const e = hash(xi, yi, z1), f = hash(x1, yi, z1), g = hash(xi, y1, z1), h = hash(x1, y1, z1);
+  const ab = a + (b - a) * xf, cd = c + (d - c) * xf, ef = e + (f - e) * xf, gh = g + (h - g) * xf;
+  const lo = ab + (cd - ab) * yf, hi = ef + (gh - ef) * yf;
+  return lo + (hi - lo) * zf;
 }
 
 interface Motion { t: number; dx: number; dy: number; size: number; gain: number; energy: number }
@@ -129,6 +139,50 @@ function sampleMixRgb(cool: Ramp, warm: Ramp, b: number, s: number) {
   _cr = cr + (wr - cr) * s;
   _cg = cg + (wg - cg) * s;
   _cb = cb + (wb - cb) * s;
+}
+
+/** One frame's field settings, kept in GPU mode so `lumAt` can work out a few cells here. */
+interface CellFrame {
+  preset: Preset; prevPreset: Preset; presetT: number;
+  cool: Ramp; warm: Ramp; prev: [Ramp, Ramp] | null;
+  m: Motion; t: number; sh: number; level: number; density: number; threshold: number;
+  aspect: number; iw: number; ih: number;
+}
+
+let _fb = 0;
+/** Cell (px, py) exactly as the draw loop computes it: writes `_fb` and `_cr`, `_cg`, `_cb`. */
+function cellInto(f: CellFrame, px: number, py: number) {
+  const x = (px + 0.5) / f.iw * f.aspect, y = (py + 0.5) / f.ih;
+  sampleInto(f.preset, x, y, f.aspect, f.m);
+  let b = _smpB;
+  sampleMixRgb(f.cool, f.warm, b, _smpS);
+  let c0 = _cr, c1 = _cg, c2 = _cb;
+  if (f.prev) {
+    sampleInto(f.prevPreset, x, y, f.aspect, f.m);
+    const pb = _smpB;
+    sampleMixRgb(f.prev[0], f.prev[1], pb, _smpS);
+    b = pb + (b - pb) * f.presetT;
+    c0 = _cr + (c0 - _cr) * f.presetT;
+    c1 = _cg + (c1 - _cg) * f.presetT;
+    c2 = _cb + (c2 - _cb) * f.presetT;
+  }
+  const n = noise(x * 1.7, y * 1.7, f.t * 0.045) * f.sh;
+  _fb = Math.max(0, (b + n * Math.min(b, 1) * 1.4) * f.m.gain);
+  _cr = c0; _cg = c1; _cb = c2;
+}
+
+/** Displayed brightness of one cell: the light plus the character drawn on it. */
+function cellLum(b: number, c0: number, c1: number, c2: number, level: number, density: number, threshold: number) {
+  const k = smooth(0.02, 1.1, b) * level * 0.5;
+  const ascii = b * density >= threshold
+    ? 0.33 * (0.16 + 0.16 * Math.min(b * density, 1)) * level * (0.2126 * (c0 + (1 - c0) * 0.3) + 0.7152 * (c1 + (1 - c1) * 0.3) + 0.0722 * (c2 + (1 - c2) * 0.3))
+    : 0;
+  return (0.2126 * c0 + 0.7152 * c1 + 0.0722 * c2) * k + ascii;
+}
+
+/** Whether this device can draw the background on the graphics card (WebGL 2). */
+export function gpuBackgroundSupported(): boolean {
+  return FieldGpu.supported(FONT);
 }
 
 /** field.rs sample: brightness and warm/cool mix at (x, y). */
@@ -299,13 +353,19 @@ export class Glow {
   private gctx: CanvasRenderingContext2D | null;
   private actx: CanvasRenderingContext2D | null = null;
   private agl: AsciiGl | null = null;
+  /** GPU mode: the whole background on the graphics card. */
+  private fgpu: FieldGpu | null = null;
+  private cellFrame: CellFrame | null = null;
   private asciiFresh = false;
   private pitch = PITCH;
   private W = 0; private H = 0; private iw = 0; private ih = 0;
   private img: ImageData | null = null; private aimg: ImageData | null = null;
   private bright = new Float32Array(0);
   private cols: Float32Array = new Float32Array(0);
-  private lum = new Float32Array(0);
+  /** Brightness under text is worked out from the field only when asked
+   *  (`lumAt`, about twice a second), not for every cell of every frame. */
+  private lumSolid = -1;
+  private fLevel = 0; private fDensity = 0; private fThreshold = 0;
   private t = 0; private motionK = 1; private playingK = 0; private last = performance.now(); private frame = 0;
   private bands: [number, number, number] = [0, 0, 0];
   private pulse = 0;
@@ -360,10 +420,18 @@ export class Glow {
   /** Called after every frame (adaptive ink reads `lumAt`). */
   onFrame: (() => void) | null = null;
 
-  constructor(private glowEl: HTMLCanvasElement, private asciiEl: HTMLCanvasElement) {
+  /**
+   * `mode` "gpu": the graphics card draws everything (WebGL 2), or at least
+   * the characters (WebGL 1); "cpu": no WebGL at all. A canvas keeps the kind
+   * of drawing it started with, so a new mode needs new canvases.
+   */
+  constructor(private glowEl: HTMLCanvasElement, private asciiEl: HTMLCanvasElement, mode: RenderMode = "gpu") {
     this.gctx = glowEl.getContext("2d");
-    this.agl = AsciiGl.create(asciiEl, FONT);
-    if (!this.agl) this.actx = asciiEl.getContext("2d");
+    if (mode === "gpu") {
+      this.fgpu = FieldGpu.create(asciiEl, FONT, this.onGpuChange);
+      if (!this.fgpu) this.agl = AsciiGl.create(asciiEl, FONT);
+    }
+    if (!this.fgpu && !this.agl) this.actx = asciiEl.getContext("2d");
     if (!this.gctx) return;
     this.resize();
     addEventListener("resize", this.onResize);
@@ -398,6 +466,16 @@ export class Glow {
     return [null, 0];
   }
 
+  /** The GPU draws right now (not lost). */
+  private get gpuOn() { return !!this.fgpu && !this.fgpu.lost; }
+
+  /** The GPU context was lost (the CPU field takes over) or came back. */
+  private onGpuChange = () => {
+    if (!this.gctx) return;
+    this.resize();
+    if (!document.hidden && !this.resizing && !this.opts.solid) this.draw();
+  };
+
   private releaseAsciiBuffer() {
     this.aimg = null;
     this.asciiFresh = false;
@@ -412,6 +490,18 @@ export class Glow {
     this.W = Math.max(1, innerWidth); this.H = Math.max(1, innerHeight);
     this.pitch = this.opts.perf ? 12 : PITCH;
     this.iw = Math.max(2, Math.ceil(this.W / this.pitch)); this.ih = Math.max(2, Math.ceil(this.H / this.pitch));
+    if (this.gpuOn) {
+      // The GPU draws light and characters into the top canvas; the small
+      // CPU canvas and its buffers stay empty.
+      this.glowEl.width = 1; this.glowEl.height = 1;
+      this.img = null;
+      this.bright = new Float32Array(0);
+      this.cols = new Float32Array(0);
+      if (this.opts.solid) this.releaseAsciiBuffer();
+      else { this.asciiEl.width = this.W; this.asciiEl.height = this.H; }
+      this.solidKey = "";
+      return;
+    }
     this.glowEl.width = this.iw; this.glowEl.height = this.ih;
     this.img = this.gctx.createImageData(this.iw, this.ih);
     if (this.opts.solid || this.opts.reduce || (!this.actx && !this.agl)) {
@@ -425,7 +515,6 @@ export class Glow {
     }
     this.bright = new Float32Array(this.iw * this.ih);
     this.cols = new Float32Array(this.iw * this.ih * 3);
-    this.lum = new Float32Array(this.iw * this.ih);
     this.solidKey = "";
   }
 
@@ -496,6 +585,8 @@ export class Glow {
     clearTimeout(this.resizeTimer);
     this.resizeTimer = 0;
     this.releaseAsciiBuffer();
+    this.fgpu?.destroy();
+    this.fgpu = null;
     removeEventListener("resize", this.onResize);
     document.removeEventListener("visibilitychange", this.onVis);
   }
@@ -507,14 +598,28 @@ export class Glow {
     const x1 = Math.min(this.iw, Math.ceil(r.right / P)), y1 = Math.min(this.ih, Math.ceil(r.bottom / P));
     const v = this.lumScratch;
     v.length = 0;
-    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) v.push(this.lum[y * this.iw + x]);
+    const solidL = this.lumSolid, level = this.fLevel, density = this.fDensity, threshold = this.fThreshold;
+    const bright = this.bright, cols = this.cols;
+    // GPU mode: the field lives on the graphics card; these few cells are worked out here.
+    const fr = this.gpuOn ? this.cellFrame : null;
+    if (this.gpuOn && !fr && solidL < 0) return null;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+      if (solidL >= 0) { v.push(solidL); continue; }
+      if (fr) {
+        cellInto(fr, x, y);
+        v.push(cellLum(_fb, _cr, _cg, _cb, fr.level, fr.density, fr.threshold));
+        continue;
+      }
+      const i = y * this.iw + x, ci = i * 3;
+      v.push(cellLum(bright[i], cols[ci], cols[ci + 1], cols[ci + 2], level, density, threshold));
+    }
     if (!v.length) return null;
     v.sort((a, b) => a - b);
     return v[Math.min(v.length - 1, Math.floor(v.length * 0.9))];
   }
 
   draw() {
-    if (!this.gctx || !this.img) return;
+    if (!this.gctx || (!this.img && !this.gpuOn)) return;
     const now = performance.now();
     const dt = Math.min(0.25, (now - this.last) / 1000);
     this.last = now;
@@ -529,7 +634,7 @@ export class Glow {
         this.gctx.fillStyle = `rgb(${Math.round(rgb[0] * 255)}, ${Math.round(rgb[1] * 255)}, ${Math.round(rgb[2] * 255)})`;
         this.gctx.fillRect(0, 0, this.iw, this.ih);
         this.releaseAsciiBuffer();
-        this.lum.fill(luma(rgb));
+        this.lumSolid = luma(rgb);
         this.solidKey = key;
         this.onFrame?.();
       }
@@ -573,8 +678,29 @@ export class Glow {
     const dotLevel = 0.18 + 0.14 * o.intensity + 0.28 * bass + 0.1 * pulse;
     const sh = 0.1 + 0.08 * m.energy;
 
+    // GPU: hand the numbers over; the graphics card does every cell.
+    if (this.gpuOn) {
+      const { iw, ih, W, H } = this, aspect = W / H;
+      if (this.asciiEl.width !== W || this.asciiEl.height !== H) { this.asciiEl.width = W; this.asciiEl.height = H; }
+      const pr: [Ramp, Ramp] = prev ?? [cool, warm];
+      this.lumSolid = -1;
+      this.cellFrame = { preset: this.preset, prevPreset: this.prevPreset, presetT: prev ? presetT : 1, cool, warm, prev, m, t, sh, level, density, threshold, aspect, iw, ih };
+      this.fgpu!.draw({
+        W, H, iw, ih, pitch: this.pitch, aspect,
+        preset: PRESETS.indexOf(this.preset), prevPreset: PRESETS.indexOf(this.prevPreset), presetT: prev ? presetT : 1,
+        cool, warm, prevCool: pr[0], prevWarm: pr[1],
+        dx: m.dx, dy: m.dy, size: m.size, gain: m.gain, t, sh, level,
+        density, threshold, dotLevel, blend,
+        ascii: !o.reduce, dots: !o.reduce && o.titlebarDots !== false,
+      });
+      this.onFrame?.();
+      return;
+    }
+
+    if (!this.img) return;
     const { iw, ih, W, H } = this, aspect = W / H, data = this.img.data;
-    const cols = this.cols, bright = this.bright, lum = this.lum;
+    const cols = this.cols, bright = this.bright;
+    this.lumSolid = -1; this.fLevel = level; this.fDensity = density; this.fThreshold = threshold;
     for (let py = 0; py < ih; py++) {
       const y = (py + 0.5) / ih;
       for (let px = 0; px < iw; px++) {
@@ -597,10 +723,6 @@ export class Glow {
         const k = smooth(0.02, 1.1, b) * level * 0.5, i = py * iw + px, oo = i * 4, ci = i * 3;
         data[oo] = c0 * k * 255; data[oo + 1] = c1 * k * 255; data[oo + 2] = c2 * k * 255; data[oo + 3] = 255;
         bright[i] = b; cols[ci] = c0; cols[ci + 1] = c1; cols[ci + 2] = c2;
-        const ascii = b * density >= threshold
-          ? 0.33 * (0.16 + 0.16 * Math.min(b * density, 1)) * level * (0.2126 * (c0 + (1 - c0) * 0.3) + 0.7152 * (c1 + (1 - c1) * 0.3) + 0.0722 * (c2 + (1 - c2) * 0.3))
-          : 0;
-        lum[i] = (0.2126 * c0 + 0.7152 * c1 + 0.0722 * c2) * k + ascii;
       }
     }
     this.gctx.putImageData(this.img, 0, 0);

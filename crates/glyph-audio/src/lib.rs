@@ -99,10 +99,15 @@ pub struct PlayerState {
 
 impl PlayerState {
     fn ui_changed(&self, old: &Self) -> bool {
-        self.status != old.status || self.track != old.track || self.provider != old.provider
-            || self.backend != old.backend || self.is_preview != old.is_preview
-            || self.duration != old.duration || self.volume != old.volume
-            || self.position.as_millis() / 100 != old.position.as_millis() / 100
+        !self.same_but_position(old) || self.position.as_millis() / 100 != old.position.as_millis() / 100
+    }
+
+    /// Everything but the position is the same (the UI counts the time on
+    /// its own between two reports).
+    pub fn same_but_position(&self, old: &Self) -> bool {
+        self.status == old.status && self.track == old.track && self.provider == old.provider
+            && self.backend == old.backend && self.is_preview == old.is_preview
+            && self.duration == old.duration && self.volume == old.volume
     }
 }
 

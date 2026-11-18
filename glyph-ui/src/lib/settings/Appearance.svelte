@@ -16,6 +16,7 @@
   import MiniPlayerVisual from "./MiniPlayerVisual.svelte";
   import AsciiVisual from "./AsciiVisual.svelte";
   import PerformanceVisual from "./PerformanceVisual.svelte";
+  import RenderVisual from "./RenderVisual.svelte";
   import { loadPlugins, pl } from "./plugins-state.svelte";
   import { onWeb } from "../web";
   import { isMobile } from "./util";
@@ -48,6 +49,8 @@
     <AsciiVisual />
 
     <PerformanceVisual />
+
+    <RenderVisual />
 
     <Rows>
       {#if !mobile}

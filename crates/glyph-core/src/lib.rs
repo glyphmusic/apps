@@ -281,7 +281,9 @@ const WARM_TTL: std::time::Duration = std::time::Duration::from_secs(8 * 60);
 /// A source found ahead of time for `key` (taken out: used once). While its
 /// lookup still runs, waits for it up to 4 s instead of asking again.
 async fn take_warm(warm: &WarmCache, key: &str) -> Option<Resolved> {
-    for _ in 0..40 {
+    // Up to 4 s for a lookup that is already running; checked often, so the
+    // song starts as soon as it is done.
+    for _ in 0..160 {
         let pending = {
             let mut w = warm.lock().unwrap_or_else(|e| e.into_inner());
             match w.get(key) {
@@ -295,7 +297,7 @@ async fn take_warm(warm: &WarmCache, key: &str) -> Option<Resolved> {
             }
         };
         if pending {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
     None

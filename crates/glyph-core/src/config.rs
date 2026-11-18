@@ -350,6 +350,12 @@ pub struct VisualsConfig {
     /// on this device (not synced: a phone and a desktop differ).
     #[serde(default)]
     pub performance_mode: bool,
+    /// Who draws the background animation: "" (or "gpu") the graphics card,
+    /// with the processor as the fallback where WebGL 2 is missing; "cpu"
+    /// the processor only. Stays on this device (not synced), like
+    /// performance mode.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub render_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -611,7 +617,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), performance_mode: false }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), performance_mode: false, render_mode: String::new() }
     }
 }
 
