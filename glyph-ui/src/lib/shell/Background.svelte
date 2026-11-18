@@ -46,7 +46,8 @@
     const compact = app.compact;
     const v = app.config!.visuals;
     const c = themeColors(v.theme);
-    glow.opts = { intensity: v.intensity, reactivity: v.music_reactivity, throttleUnfocused: v.throttle_unfocused, reduce: fx.reduce, titlebarDots: !compact, solid: false, base: c.base };
+    glow.opts = { intensity: v.intensity, reactivity: v.music_reactivity, throttleUnfocused: v.throttle_unfocused, reduce: fx.reduce, titlebarDots: !compact, solid: false, base: c.base, perf: !!v.performance_mode };
+    glow.refreshLayout();
     glow.setTheme(c.glow ? (c.glow.map(hex) as Palette) : null);
   });
 

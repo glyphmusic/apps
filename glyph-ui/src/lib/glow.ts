@@ -3,6 +3,9 @@
 // the browser stretches into soft light, the ASCII layer (10 x 16 cells,
 // ramp " .-=+xX0S8#@", 5 x 7 font) and the titlebar dot grid on top.
 // Same presets, ramps, thresholds and alphas as the app.
+// The ASCII layer and dots are drawn by the GPU when WebGL is there
+// (glow-gl.ts); performance mode samples coarser and draws less often.
+import { AsciiGl } from "./glow-gl";
 
 export type Rgb = [number, number, number];
 export type Palette = [Rgb, Rgb, Rgb];
@@ -222,6 +225,8 @@ export interface GlowOptions {
   solid?: boolean;
   /** Theme base colour (`0xRRGGBB`) used when `solid` is true. */
   base?: number;
+  /** Performance mode: coarser field, lower frame rate, characters redrawn less often. */
+  perf?: boolean;
 }
 
 /**
@@ -292,7 +297,10 @@ export function renderGlowPreview(
 /** The background field. `spectrum()` gives bass / mids / highs 0..1. */
 export class Glow {
   private gctx: CanvasRenderingContext2D | null;
-  private actx: CanvasRenderingContext2D | null;
+  private actx: CanvasRenderingContext2D | null = null;
+  private agl: AsciiGl | null = null;
+  private asciiFresh = false;
+  private pitch = PITCH;
   private W = 0; private H = 0; private iw = 0; private ih = 0;
   private img: ImageData | null = null; private aimg: ImageData | null = null;
   private bright = new Float32Array(0);
@@ -354,7 +362,8 @@ export class Glow {
 
   constructor(private glowEl: HTMLCanvasElement, private asciiEl: HTMLCanvasElement) {
     this.gctx = glowEl.getContext("2d");
-    this.actx = asciiEl.getContext("2d");
+    this.agl = AsciiGl.create(asciiEl, FONT);
+    if (!this.agl) this.actx = asciiEl.getContext("2d");
     if (!this.gctx) return;
     this.resize();
     addEventListener("resize", this.onResize);
@@ -391,6 +400,7 @@ export class Glow {
 
   private releaseAsciiBuffer() {
     this.aimg = null;
+    this.asciiFresh = false;
     if (this.asciiEl.width !== 0 || this.asciiEl.height !== 0) {
       this.asciiEl.width = 0;
       this.asciiEl.height = 0;
@@ -400,14 +410,18 @@ export class Glow {
   private resize() {
     if (!this.gctx) return;
     this.W = Math.max(1, innerWidth); this.H = Math.max(1, innerHeight);
-    this.iw = Math.max(2, Math.ceil(this.W / PITCH)); this.ih = Math.max(2, Math.ceil(this.H / PITCH));
+    this.pitch = this.opts.perf ? 12 : PITCH;
+    this.iw = Math.max(2, Math.ceil(this.W / this.pitch)); this.ih = Math.max(2, Math.ceil(this.H / this.pitch));
     this.glowEl.width = this.iw; this.glowEl.height = this.ih;
     this.img = this.gctx.createImageData(this.iw, this.ih);
-    if (this.opts.solid || this.opts.reduce || !this.actx) {
+    if (this.opts.solid || this.opts.reduce || (!this.actx && !this.agl)) {
       this.releaseAsciiBuffer();
+    } else if (this.agl) {
+      this.asciiEl.width = this.W; this.asciiEl.height = this.H;
+      this.asciiFresh = false;
     } else {
       this.asciiEl.width = this.W; this.asciiEl.height = this.H;
-      this.aimg = this.actx.createImageData(this.W, this.H);
+      this.aimg = this.actx!.createImageData(this.W, this.H);
     }
     this.bright = new Float32Array(this.iw * this.ih);
     this.cols = new Float32Array(this.iw * this.ih * 3);
@@ -427,7 +441,7 @@ export class Glow {
         return;
       }
       const slow = this.opts.throttleUnfocused && !document.hasFocus();
-      const fps = slow ? 6 : this.playing ? 24 : 12;
+      const fps = this.opts.perf ? (slow ? 3 : this.playing ? 12 : 6) : slow ? 6 : this.playing ? 24 : 12;
       this.draw();
       if (!this.paused && !this.resizing && !this.uiPaused && !this.opts.solid && !document.hidden) {
         this.timer = window.setTimeout(tick, 1000 / fps);
@@ -468,6 +482,14 @@ export class Glow {
 
   isPaused() { return this.paused || this.resizing || this.uiPaused; }
 
+  /** Call after changing `opts`: performance mode changes the field's grid. */
+  refreshLayout() {
+    const want = this.opts.perf ? 12 : PITCH;
+    if (want === this.pitch || !this.gctx) return;
+    this.resize();
+    if (!document.hidden && !this.resizing) this.draw();
+  }
+
   destroy() {
     clearTimeout(this.timer);
     this.timer = 0;
@@ -480,8 +502,9 @@ export class Glow {
 
   /** Displayed luminance (90th percentile) under a rect in window px. */
   lumAt(r: DOMRect): number | null {
-    const x0 = Math.max(0, Math.floor(r.left / PITCH)), y0 = Math.max(0, Math.floor(r.top / PITCH));
-    const x1 = Math.min(this.iw, Math.ceil(r.right / PITCH)), y1 = Math.min(this.ih, Math.ceil(r.bottom / PITCH));
+    const P = this.pitch;
+    const x0 = Math.max(0, Math.floor(r.left / P)), y0 = Math.max(0, Math.floor(r.top / P));
+    const x1 = Math.min(this.iw, Math.ceil(r.right / P)), y1 = Math.min(this.ih, Math.ceil(r.bottom / P));
     const v = this.lumScratch;
     v.length = 0;
     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) v.push(this.lum[y * this.iw + x]);
@@ -582,6 +605,21 @@ export class Glow {
     }
     this.gctx.putImageData(this.img, 0, 0);
 
+    // GPU path: the shader draws characters and dots from the field.
+    if (this.agl && !this.agl.lost) {
+      const every = o.perf ? 3 : 2;
+      if (o.reduce) {
+        if (this.asciiFresh) { this.agl.clear(); this.asciiFresh = false; }
+      } else if (!this.asciiFresh || this.frame++ % every === 0) {
+        if (this.asciiEl.width !== W || this.asciiEl.height !== H) { this.asciiEl.width = W; this.asciiEl.height = H; }
+        this.agl.draw({ W, H, iw, ih, pitch: this.pitch, cols, bright, density, threshold, level, dotLevel, blend, dots: o.titlebarDots !== false });
+        this.asciiFresh = true;
+      }
+      this.onFrame?.();
+      return;
+    }
+    if (this.agl) { this.onFrame?.(); return; }
+
     // ASCII layer and titlebar dots at half cadence (6-12 fps) without per-pixel tuple allocations.
     if ((!this.aimg || this.frame++ % 2 === 0) && !o.reduce && this.actx) {
       if (!this.aimg || this.aimg.width !== W || this.aimg.height !== H) {
@@ -590,7 +628,8 @@ export class Glow {
       }
       const a = this.aimg.data;
       a.fill(0);
-      const at = (lx: number, ly: number) => Math.min(ih - 1, (ly / PITCH) | 0) * iw + Math.min(iw - 1, (lx / PITCH) | 0);
+      const P = this.pitch;
+      const at = (lx: number, ly: number) => Math.min(ih - 1, (ly / P) | 0) * iw + Math.min(iw - 1, (lx / P) | 0);
       const put = (x: number, y: number, r: number, g: number, b: number, al: number) => {
         if (x < 0 || y < 0 || x >= W || y >= H) return;
         const q = (y * W + x) * 4;

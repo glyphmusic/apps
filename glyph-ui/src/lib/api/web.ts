@@ -20,7 +20,7 @@ import { WebMcpManager } from "./web-mcp";
 import { ApiError, server, type PlaybackCommandWire, type PlaybackSource, type SearchEvent } from "./web-server";
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
-import { cancelSoon, load, save, saveSoon } from "./web-store";
+import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
 import { filterTrackByEnabled } from "../settings/sources";
 
 interface WebPlaybackSession {
@@ -47,7 +47,7 @@ export function webConfig(): Config {
   return {
     server_url: "", language: "", keys: {},
     providers: { local_search: false, youtube_mode: "server", youtube_only: false, enabled: ["audius", "jamendo", "archive", "soundcloud", "youtube", "deezer"], priority: ["audius", "jamendo", "archive", "youtube"], extractor: "none" },
-    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "" },
+    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false },
     updates: { repo: "glyphmusic/apps", check_on_start: false, auto_install: false, channel: "stable" },
     audio: { crossfade_s: 0, quality: "auto", download_quality: "high", download_parallelism: 3, download_adaptive: true, level: "normal", normalize: false, hide_explicit: false, channels: "stereo", eq_enabled: false, eq_preset: "flat", eq_gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], eq_user_presets: [], eq_bass_db: 0, eq_headroom_db: 0, output_device: null },
     storage: { cache_limit_mb: 0, data_saver: false, download_dir: null },
@@ -65,6 +65,24 @@ export function webConfig(): Config {
     ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, keys: {}, reveal_downloads: false, text_scale: 1 },
     local: { folders: [] },
   };
+}
+
+// Found cover addresses, kept across reloads (Home and lists show them at
+// once instead of loading each cover again through the server).
+const COVER_KEEP_MS = 7 * 24 * 3600_000;
+function loadCoverUrls(): [string, { url: string | null; expiresAt: number }][] {
+  const saved = load<[string, string, number][]>("cover_urls") ?? [];
+  const now = Date.now();
+  return Array.isArray(saved) ? saved.filter((e) => Array.isArray(e) && e[2] > now).map(([k, url, at]) => [k, { url, expiresAt: at }]) : [];
+}
+let coverSaveTimer = 0;
+function saveCoverUrlsSoon(m: Map<string, { url: string | null; expiresAt: number }>) {
+  clearTimeout(coverSaveTimer);
+  coverSaveTimer = window.setTimeout(() => {
+    const out: [string, string, number][] = [];
+    for (const [k, v] of m) if (v.url) out.push([k, v.url, v.expiresAt]);
+    save("cover_urls", out.slice(-400));
+  }, 1500);
 }
 
 const emptyLibrary = (): Library => ({ liked: [], recent: [], playlists: [], saved_albums: [], pinned: [], recent_lists: [], followed: [], downloads: [], search_history: [], hidden_sidebar: [] });
@@ -152,7 +170,7 @@ export class WebBackend implements Backend {
   private resolvedCache = new Map<string, { src: PlaybackSource | null; expiresAt: number }>();
   private resolving = new Map<string, Promise<PlaybackSource | null>>();
   private warmedCovers = new Set<string>();
-  private coverCache = new Map<string, { url: string | null; expiresAt: number }>();
+  private coverCache = new Map<string, { url: string | null; expiresAt: number }>(loadCoverUrls());
   private coverInflight = new Map<string, { promise: Promise<string | null>; signals: (AbortSignal | undefined)[] }>();
   private coverQueue: { t: Track; key: string; signals: (AbortSignal | undefined)[]; resolve: (u: string | null) => void }[] = [];
   private coverActive = 0;
@@ -164,6 +182,9 @@ export class WebBackend implements Backend {
   private playingFrom: ListKey | null = null;
   private lastMediaPosAt = 0;
   private lastMediaDur: number | null = null;
+
+  /** localStorage had no library (too big for it): read it from IndexedDB first. */
+  private libraryFromIdb = false;
 
   constructor() {
     this.config = { ...webConfig(), ...(load<Config>("config") ?? {}) };
@@ -179,7 +200,9 @@ export class WebBackend implements Backend {
         settings: this.config.mcp?.access?.settings ?? "write",
       },
     };
-    this.library = { ...emptyLibrary(), ...(load<Library>("library") ?? {}) };
+    const cachedLib = load<Library>("library");
+    this.libraryFromIdb = !cachedLib;
+    this.library = { ...emptyLibrary(), ...(cachedLib ?? {}) };
     this.lyricsOffsets = load<Record<string, number>>("lyrics_offsets") ?? {};
     this.activeAccountId = load<{ account?: { id?: string } }>("account")?.account?.id ?? null;
     this.queue = { items: [], index: null, user: 0 };
@@ -328,6 +351,11 @@ export class WebBackend implements Backend {
 
   // ---- Backend ----
   async snapshot(): Promise<Snapshot> {
+    if (this.libraryFromIdb) {
+      this.libraryFromIdb = false;
+      const lib = await loadBig<Library>("library");
+      if (lib) this.library = { ...emptyLibrary(), ...lib };
+    }
     try {
       const h = await server.health();
       this.state = h.protocol_version === 1 ? { kind: "ready", mode: "server" } : { kind: "incompatible", version: h.protocol_version };
@@ -388,7 +416,9 @@ export class WebBackend implements Backend {
 
   trimCovers(keep = 48) {
     const cap = Math.max(0, keep);
-    while (this.coverCache.size > cap) {
+    // Addresses are a few bytes each: keep enough of them that a reload or a
+    // long scroll back does not ask the server again.
+    while (this.coverCache.size > Math.max(400, cap)) {
       const oldest = this.coverCache.keys().next().value;
       if (oldest === undefined) break;
       this.coverCache.delete(oldest);
@@ -408,7 +438,8 @@ export class WebBackend implements Backend {
 
   private drainCoverQueue() {
     while (this.coverActive < 2 && this.coverQueue.length > 0) {
-      const item = this.coverQueue.shift()!;
+      // Newest first: what is on screen now beats rows scrolled past long ago.
+      const item = this.coverQueue.pop()!;
       if (item.signals.length > 0 && item.signals.every((s) => s?.aborted)) {
         item.resolve(null);
         continue;
@@ -434,14 +465,15 @@ export class WebBackend implements Backend {
             if (album || (res?.url && !isYoutubeCover(res.url))) {
               this.backfillTrackMeta(item.t, album, res?.url ?? null);
             }
-            if (this.coverCache.size >= 250) {
+            if (this.coverCache.size >= 500) {
               const oldest = this.coverCache.keys().next().value;
               if (oldest !== undefined) this.coverCache.delete(oldest);
             }
             this.coverCache.set(item.key, {
               url,
-              expiresAt: Date.now() + (url ? 30 * 60_000 : 2 * 60_000),
+              expiresAt: Date.now() + (url ? COVER_KEEP_MS : 2 * 60_000),
             });
+            if (url) saveCoverUrlsSoon(this.coverCache);
             item.resolve(url);
           })
           .catch((e) => {

@@ -115,6 +115,11 @@ public class MainActivity extends AppCompatActivity {
     private native void nativeResumed();
 
     private volatile boolean activityPaused;
+    /** The page has been in the background (onStop): check it is still alive on return. */
+    private boolean checkOnResume;
+    /** Bumped for every health check, so an old check's timeout does nothing. */
+    private int healthSeq;
+    private static final long HEALTH_TIMEOUT_MS = 4000L;
     private static final int MAX_PENDING_EVENTS = 128;
     private static final int MAX_MAIN_FRAME_RETRIES = 3;
     private static final ExecutorService THEME_EXECUTOR = Executors.newSingleThreadExecutor();
@@ -361,6 +366,53 @@ public class MainActivity extends AppCompatActivity {
         mainFrameErrorThisLoad = false;
         pageReady = false;
         webView.loadUrl(APP_ORIGIN + "/index.html");
+    }
+
+    /**
+     * A WebView can come back from the background black: the renderer was
+     * frozen or its GPU surface lost, or the page's script died, while the
+     * activity itself is fine. Ask the page for a sign of life; no answer in
+     * time recreates the WebView, an empty app root reloads the page. Before,
+     * only clearing the cache or force-closing the app helped.
+     */
+    private void checkPageAlive() {
+        if (webView == null || showingFallbackError || isFinishing() || isDestroyed() || activityPaused) {
+            return;
+        }
+        final WebView wv = webView;
+        final int seq = ++healthSeq;
+        final boolean[] answered = {false};
+        try {
+            wv.evaluateJavascript(
+                    "(function(){var a=document.getElementById('app');"
+                            + "return (a&&a.childElementCount>0?'ok':'empty')+'|'+document.readyState;})()",
+                    value -> {
+                        answered[0] = true;
+                        if (wv != webView || seq != healthSeq) {
+                            return;
+                        }
+                        String v = value == null ? "" : value;
+                        if (v.contains("empty") && v.contains("complete")) {
+                            Log.w("glyph-web", "App root empty after resume; reloading page");
+                            mainFrameRetries = 0;
+                            loadAppPage();
+                        } else {
+                            // Alive: repaint once, in case the surface came back blank.
+                            wv.invalidate();
+                        }
+                    });
+        } catch (Throwable t) {
+            Log.w("glyph-web", "Health check failed", t);
+            recreateWebView();
+            return;
+        }
+        themeHandler.postDelayed(() -> {
+            if (!answered[0] && wv == webView && seq == healthSeq && !isFinishing() && !isDestroyed() && !activityPaused) {
+                Log.w("glyph-web", "WebView did not answer after resume; recreating");
+                mainFrameRetries = 0;
+                recreateWebView();
+            }
+        }, HEALTH_TIMEOUT_MS);
     }
 
     private void recreateWebView() {
@@ -733,6 +785,11 @@ public class MainActivity extends AppCompatActivity {
             webView.onResume();
         }
         nativeResumed();
+        if (checkOnResume) {
+            checkOnResume = false;
+            // Give the WebView a moment to wake its renderer before asking.
+            themeHandler.postDelayed(this::checkPageAlive, 600L);
+        }
         if (connectivity != null) {
             reportConnectivity();
         }
@@ -751,6 +808,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         activityPaused = true;
+        checkOnResume = true;
         if (webView != null) {
             webView.onPause();
         }

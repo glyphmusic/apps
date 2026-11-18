@@ -345,6 +345,11 @@ pub struct VisualsConfig {
     /// one shape always ("strahl", "band", "sonnenaufgang", "horizont", "solid").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub glow_shape: String,
+    /// Performance mode: the background samples coarser and draws at half
+    /// the frame rate, ASCII effects and blur behind panels are off. Stays
+    /// on this device (not synced: a phone and a desktop differ).
+    #[serde(default)]
+    pub performance_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -606,7 +611,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new() }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), performance_mode: false }
     }
 }
 

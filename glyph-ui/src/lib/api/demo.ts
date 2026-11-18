@@ -22,7 +22,7 @@ export function demoConfig(): Config {
   return {
     server_url: "", language: "", keys: {},
     providers: { local_search: true, youtube_mode: "local", youtube_only: false, enabled: ["audius", "jamendo", "archive", "soundcloud", "youtube", "deezer"], priority: ["jamendo", "audius", "archive", "soundcloud", "youtube"], extractor: "r_dlp" },
-    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "" },
+    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false },
     updates: { repo: "glyphmusic/apps", check_on_start: true, auto_install: false, channel: "stable" },
     audio: { crossfade_s: 0, quality: "auto", download_quality: "high", download_parallelism: 3, download_adaptive: true, level: "normal", normalize: true, hide_explicit: false, channels: "stereo", eq_enabled: false, eq_preset: "flat", eq_gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], eq_user_presets: [], eq_bass_db: 0, eq_headroom_db: 0, output_device: null },
     storage: { cache_limit_mb: 2048, data_saver: false, download_dir: null },

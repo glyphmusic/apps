@@ -15,6 +15,7 @@
   import GlowVisual from "./GlowVisual.svelte";
   import MiniPlayerVisual from "./MiniPlayerVisual.svelte";
   import AsciiVisual from "./AsciiVisual.svelte";
+  import PerformanceVisual from "./PerformanceVisual.svelte";
   import { loadPlugins, pl } from "./plugins-state.svelte";
   import { onWeb } from "../web";
   import { isMobile } from "./util";
@@ -45,6 +46,8 @@
     {/if}
 
     <AsciiVisual />
+
+    <PerformanceVisual />
 
     <Rows>
       {#if !mobile}

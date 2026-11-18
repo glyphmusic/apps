@@ -89,12 +89,23 @@
     let alive = true;
     const ac = new AbortController();
     const late = setTimeout(() => { if (alive && phase === "loading") timedOut = true; }, 7000);
-    backend().cover(t, ac.signal).then((u) => {
+    let again: ReturnType<typeof setTimeout> | undefined;
+    const ask = (retry: boolean) => backend().cover(t, ac.signal).then((u) => {
       if (!alive) return;
-      if (!u) { clearTimeout(late); phase = "none"; return; }
+      if (!u) {
+        clearTimeout(late);
+        phase = "none";
+        // One more try a bit later (after the "no cover" answer expires):
+        // a slow network or a busy server should not leave a note for good.
+        if (!retry) again = setTimeout(() => { if (alive) ask(true); }, 16_000);
+        return;
+      }
+      // Found on the second try: keep the note until the picture is decoded.
+      if (phase === "none") { phase = "loading"; timedOut = true; }
       url = u;
     });
-    return () => { alive = false; ac.abort(); clearTimeout(late); clearTimeout(veilTimer); };
+    ask(false);
+    return () => { alive = false; ac.abort(); clearTimeout(late); clearTimeout(again); clearTimeout(veilTimer); };
   });
 
   let veilTimer: ReturnType<typeof setTimeout> | undefined;

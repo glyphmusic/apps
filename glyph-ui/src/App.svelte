@@ -205,7 +205,10 @@
   $effect(() => {
     if (!app.config) return;
     applyTheme(app.config.visuals.theme, app.config.ui.text_scale);
-    fx.ascii = app.config.visuals.ascii_effects;
+    // Performance mode: no decode / shimmer effects and no blur behind panels.
+    const perf = !!app.config.visuals.performance_mode;
+    fx.ascii = app.config.visuals.ascii_effects && !perf;
+    document.documentElement.classList.toggle("perf", perf);
   });
 
   // Song + lyrics in Now Playing carries its own transport: no bar there.

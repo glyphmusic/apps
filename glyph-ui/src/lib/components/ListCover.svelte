@@ -56,20 +56,26 @@
     if (!mosaic || own?.cover || !near) return;
     const ts = tracks;
     let alive = true;
+    const ac = new AbortController();
     (async () => {
+      // The first four asked side by side (one round trip, not four), the
+      // rest only when some of them have no cover or repeat one.
+      // Kept in song order, so the mosaic looks the same every time.
       const out: string[] = [];
-      for (const t of ts) {
-        if (!alive) return;
-        const u = await backend().cover(t);
-        if (!alive) return;
-        if (u && !out.includes(u)) {
-          out.push(u);
-          urls = [...out];
-          if (out.length === 4) break;
-        }
+      const add = (u: string | null) => {
+        if (!alive || !u || out.includes(u) || out.length >= 4) return;
+        out.push(u);
+        if (out.length >= 2) urls = [...out];
+      };
+      const first = await Promise.all(ts.slice(0, 4).map((t) => backend().cover(t, ac.signal)));
+      if (!alive) return;
+      for (const u of first) add(u);
+      for (const t of ts.slice(4)) {
+        if (!alive || out.length >= 4) break;
+        add(await backend().cover(t, ac.signal));
       }
     })();
-    return () => { alive = false; };
+    return () => { alive = false; ac.abort(); };
   });
   const tile = $derived(
     list.kind === "liked" || list.kind === "artist_liked" ? { bg: accentTile(0.22, 0.45, accent), icon: "heart-fill", fg: "var(--accent)" }

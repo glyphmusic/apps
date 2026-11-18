@@ -1320,7 +1320,7 @@ pub async fn cover_path(core: C<'_>, track: Track) -> Res<Option<String>> {
             st.library.backfill_track_meta(&track, res.album.as_deref(), res.cover_url.as_deref())
         };
         if changed {
-            core.library_changed();
+            core.library_changed_soon();
         }
     }
     Ok(Some(res.path.to_string_lossy().into_owned()))
@@ -1336,7 +1336,7 @@ pub async fn track_album(core: C<'_>, track: Track) -> Res<Option<String>> {
         st.library.backfill_track_meta(&track, album.as_deref(), cover_url.as_deref())
     };
     if changed {
-        core.library_changed();
+        core.library_changed_soon();
     }
     Ok(album)
 }

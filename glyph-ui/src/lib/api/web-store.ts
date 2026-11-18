@@ -14,12 +14,74 @@ export function load<T>(name: string): T | null {
   }
 }
 
+/** Big entries (the library) are mirrored into IndexedDB: localStorage only
+ *  holds about 5 MB, and a large library that no longer fit there used to be
+ *  lost on reload (empty playlists until the next sync). */
+const big = (name: string) => name === "library" || name.startsWith("account_lib.");
+
 export function save(name: string, value: unknown) {
+  let json: string;
   try {
-    localStorage.setItem(PREFIX + name, JSON.stringify(value));
+    json = JSON.stringify(value);
   } catch {
-    /* storage full or blocked: keep it in memory only */
+    return;
   }
+  try {
+    localStorage.setItem(PREFIX + name, json);
+  } catch {
+    /* storage full or blocked: IndexedDB below keeps big entries */
+    if (big(name)) {
+      try { localStorage.removeItem(PREFIX + name); } catch { /* ignore */ }
+    }
+  }
+  if (big(name)) void idbPut(name, json);
+}
+
+// ---- IndexedDB mirror ----
+let dbp: Promise<IDBDatabase | null> | null = null;
+function db(): Promise<IDBDatabase | null> {
+  if (dbp) return dbp;
+  dbp = new Promise((resolve) => {
+    try {
+      if (typeof indexedDB === "undefined") return resolve(null);
+      const req = indexedDB.open("glyph-web", 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore("kv"); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+      req.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return dbp;
+}
+async function idbPut(name: string, json: string) {
+  const d = await db();
+  if (!d) return;
+  try {
+    d.transaction("kv", "readwrite").objectStore("kv").put(json, name);
+  } catch { /* ignore */ }
+}
+/** A big entry from IndexedDB (used when localStorage had none). */
+export async function loadBig<T>(name: string): Promise<T | null> {
+  // Never hold up startup: a slow or stuck IndexedDB counts as "nothing saved".
+  const timeout = new Promise<null>((r) => setTimeout(() => r(null), 1500));
+  return Promise.race([readBig<T>(name), timeout]);
+}
+async function readBig<T>(name: string): Promise<T | null> {
+  const d = await db();
+  if (!d) return null;
+  return new Promise((resolve) => {
+    try {
+      const req = d.transaction("kv", "readonly").objectStore("kv").get(name);
+      req.onsuccess = () => {
+        try { resolve(typeof req.result === "string" ? (JSON.parse(req.result) as T) : null); } catch { resolve(null); }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 export function remove(name: string) {
@@ -27,6 +89,9 @@ export function remove(name: string) {
     localStorage.removeItem(PREFIX + name);
   } catch {
     /* ignore */
+  }
+  if (big(name)) {
+    void db().then((d) => { try { d?.transaction("kv", "readwrite").objectStore("kv").delete(name); } catch { /* ignore */ } });
   }
 }
 

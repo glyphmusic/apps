@@ -15,7 +15,7 @@ import {
   type AccountSession, type DeviceInfo, type ProfileSettingsWire, type PublicProfile,
 } from "./web-server";
 import type { MonthStats, WebStats } from "./web-stats";
-import { installId, load, remove, save } from "./web-store";
+import { installId, load, loadBig, remove, save } from "./web-store";
 
 const MAX_PUSH_ITEMS = 500;
 const MAX_PUSH_BYTES = 1_500_000;
@@ -403,6 +403,11 @@ export class WebAccountManager {
     if (cachedLib) {
       this.host.setLibrary(cachedLib);
     } else {
+      // Too big for localStorage: the IndexedDB copy fills in as soon as it is read.
+      void loadBig<Library>(`account_lib.${accountId}`).then((lib) => {
+        const cur = this.host.getLibrary();
+        if (lib && !cur.liked.length && !cur.playlists.length) this.host.setLibrary(lib);
+      });
       this.host.setLibrary({
         liked: [],
         recent: [],
@@ -835,16 +840,21 @@ export class WebAccountManager {
 
       switch (it.kind) {
         case SYNC_KIND.LIKED: {
+          // A known song keeps its place (like the apps); a new one goes on top.
+          const pos = lib.liked.findIndex((t) => trackSyncId(t) === it.key || trackKey(t) === it.key);
           lib.liked = lib.liked.filter((t) => trackSyncId(t) !== it.key && trackKey(t) !== it.key);
           if (!it.deleted && it.value?.id && it.value?.title) {
             const tr = canonicalTrack(it.value as Track);
-            lib.liked.unshift(tr);
+            if (pos >= 0) lib.liked.splice(pos, 0, tr);
+            else lib.liked.unshift(tr);
             hashSource = tr;
           }
           libChanged = true;
           break;
         }
         case SYNC_KIND.PLAYLIST: {
+          // Update in place so a changed playlist keeps its spot in the library.
+          const at = lib.playlists.findIndex((p) => p.id === it.key);
           lib.playlists = lib.playlists.filter((p) => p.id !== it.key);
           if (!it.deleted && it.value?.name) {
             const pl: Playlist = {
@@ -855,7 +865,8 @@ export class WebAccountManager {
               created_at: Number(it.value.created_at) || 0,
               local_only: false,
             };
-            lib.playlists.push(pl);
+            if (at >= 0) lib.playlists.splice(at, 0, pl);
+            else lib.playlists.push(pl);
             hashSource = playlistSyncValue(pl);
           }
           libChanged = true;
@@ -980,7 +991,9 @@ export class WebAccountManager {
       current.set(`${kind}\0${key}`, { kind, key, value });
     };
 
-    for (const t of lib.liked) {
+    // Oldest first, like the apps: other devices put each new liked song on
+    // top in arrival order, so newest-first would flip the list there.
+    for (const t of [...lib.liked].reverse()) {
       const k = pickJournalKey(journal, SYNC_KIND.LIKED, trackSyncId(t), trackKey(t));
       put(SYNC_KIND.LIKED, k, canonicalTrack(t));
     }

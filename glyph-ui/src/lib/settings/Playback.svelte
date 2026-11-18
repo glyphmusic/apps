@@ -20,6 +20,7 @@
   import PlayContent from "./PlayContent.svelte";
   import Sources from "./Sources.svelte";
   import PlayerOpts from "./PlayerOpts.svelte";
+  import QualityVisual from "./QualityVisual.svelte";
   import { isMobile } from "./util";
   import type { DeviceDiscovery, MpdStatus } from "./types";
   let { sub = 0 }: { sub?: number } = $props();
@@ -72,10 +73,9 @@
   <PlayerOpts />
 {:else}
   <PluginHost page="playback">
+    <QualityVisual />
+    <div class="gap"></div>
     <Rows>
-      <Row label={t("sp.audio.quality")} info={t("sp.audio.quality.desc")}>
-        <Select value={au.quality} options={qOptions} onpick={(v) => app.setConfig((c) => { c.audio.quality = v; })} />
-      </Row>
       <Row label={t("sp.audio.dl_quality")} info={t("sp.audio.dl_quality.desc")}>
         <Select value={au.download_quality} options={qOptions} onpick={(v) => app.setConfig((c) => { c.audio.download_quality = v; })} />
       </Row>
@@ -121,4 +121,5 @@
 
 <style>
   .val { width: 36px; text-align: right; font-size: 13px; color: rgba(255, 255, 255, .75); }
+  .gap { height: 14px; }
 </style>

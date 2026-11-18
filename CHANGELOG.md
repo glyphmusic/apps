@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.12.6 - 2026-11-18
+
+### Added
+
+- **Performance mode** (Settings > Appearance > Performance): halves the background's frame rate, samples the glow field on a coarser grid, redraws the ASCII characters less often, and turns off ASCII decode effects and the blur behind panels. It stays on the device it was set on (`visuals.performance_mode`, not synced).
+- **Settings pictures**: streaming quality is now four picture cards (sound bars and about how much data an hour uses) instead of a dropdown; performance mode has its own picture card.
+
+### Changed
+
+- **Background on the GPU**: the ASCII characters and titlebar dots of the background are drawn by a WebGL shader (`glow-gl.ts`) from the small glow field instead of the CPU filling and uploading a full-window bitmap 6-12 times a second. Without WebGL the CPU path stays.
+- **Caching**: album pages, the Home feeds and artist photos are kept across restarts, so they show at once and refresh quietly behind; a failed refresh never empties a page that already shows songs. The web player mirrors a library too big for localStorage into IndexedDB (playlists were empty after a reload until the next sync) and keeps found cover addresses for 7 days.
+
+### Fixed
+
+- **Import order**: sync pushed changed items in key order instead of library order, so liked songs imported on one device appeared shuffled on the others. Pushes and re-encryption pushes now keep the library's order; the web player also pushes liked songs oldest first and keeps a changed playlist (or liked song) in its place instead of moving it.
+- **Covers and sidebar icons**: covers asked for while the app was still starting got "no cover" for good, so sidebar entries kept placeholder icons; they are now asked again once the core is up. Newly visible covers load first (newest request first, 5 at a time), playlist mosaics load their first four covers together and cancel when scrolled away, a missing cover is tried once more after 16 s, and sidebar artists show their photo.
+- **Smoother lists**: album names and covers found while covers load update the library in one batched event per second instead of one full library event per cover.
+- **Android black screen**: after coming back from the background, the app checks that the page still answers; a frozen WebView is recreated and an empty page is reloaded, instead of needing a cache wipe or force close.
+- **Playback stopping**: a short network gap while finding the next song no longer skips song after song and stops; the same song is asked for again after 2, 4 and 6 s. Mid-song stream refills wait up to about 11 s (Wi-Fi to mobile data) before giving up, and refused links (4xx) go to re-resolving at once.
+
 ## 0.12.5 - 2026-11-16
 
 ### Fixed

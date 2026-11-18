@@ -15,7 +15,7 @@
 </script>
 
 {#if photo}
-  <img class="av" src={photo} alt="" style:width="{size}px" style:height="{size}px" />
+  <img class="av" src={photo} alt="" style:width="{size}px" style:height="{size}px" onerror={() => app.dropArtistPhoto(name)} />
 {:else if tr}
   <Cover track={tr} {size} round />
 {:else}

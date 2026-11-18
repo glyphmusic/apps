@@ -6,6 +6,7 @@
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import ListCover from "../components/ListCover.svelte";
+  import ArtistAvatar from "../components/ArtistAvatar.svelte";
   import { app, type SideItem, type View } from "../state.svelte";
   import { t } from "../i18n.svelte";
   import { tip } from "../ui.svelte";
@@ -48,8 +49,8 @@
       <button class="it" class:on={activeItem(it)} onclick={() => openItem(it)} oncontextmenu={(e) => menu(e, it)}
         use:tip={{ label: expanded ? "" : title, side: "right" }}>
         {#if it.kind === "list"}<ListCover list={it.list} size={expanded ? 32 : 36} />
-        {:else if it.track}<Cover track={it.track} size={expanded ? 32 : 36} round />
-        {:else}<span class="art" class:sm={expanded}><Icon name="user-round" size={16} color="var(--dim)" /></span>{/if}
+        {:else if app.artistPhoto(it.name) || !it.track}<ArtistAvatar name={it.name} size={expanded ? 32 : 36} iconSize={16} />
+        {:else}<Cover track={it.track} size={expanded ? 32 : 36} round />{/if}
         {#if expanded}<span class="lab trunc">{title}</span>{/if}
       </button>
     {/each}

@@ -5,12 +5,14 @@ import type { BackendEvents, Snapshot, Track } from "./types";
 import { trackKey } from "./types";
 
 const MAX_COVER_CACHE = 300;
-const MAX_COVER_ACTIVE = 3;
+const MAX_COVER_ACTIVE = 5;
+/** Asked before the backend is up: tried again for this long instead of answering "no cover". */
+const OFFLINE_RETRY_MS = 30_000;
 
 export class TauriBackend implements Backend {
   readonly kind = "tauri" as const;
   private covers = new Map<string, Promise<string | null>>();
-  private coverQueue: { t: Track; k: string; signal?: AbortSignal; resolve: (v: string | null) => void }[] = [];
+  private coverQueue: { t: Track; k: string; signal?: AbortSignal; resolve: (v: string | null) => void; since: number }[] = [];
   private coverActive = 0;
 
   snapshot(): Promise<Snapshot> {
@@ -48,14 +50,16 @@ export class TauriBackend implements Backend {
       return cached;
     }
     return new Promise<string | null>((resolve) => {
-      this.coverQueue.push({ t, k, signal, resolve });
+      this.coverQueue.push({ t, k, signal, resolve, since: performance.now() });
       this.drainCovers();
     });
   }
 
   private drainCovers() {
     while (this.coverActive < MAX_COVER_ACTIVE && this.coverQueue.length > 0) {
-      const item = this.coverQueue.shift()!;
+      // Newest first: what was just scrolled into view (or the sidebar) is
+      // asked before a long backlog of rows that may already be gone.
+      const item = this.coverQueue.pop()!;
       if (item.signal?.aborted) {
         item.resolve(null);
         continue;
@@ -73,16 +77,25 @@ export class TauriBackend implements Backend {
       }
       this.coverActive++;
       // Before the backend is up a miss is no real miss: asked again next time.
+      let offline = false;
       const p = invoke<string | null>("cover_path", { track: item.t })
         .then((path) => (path ? convertFileSrc(path) : null))
-        .catch((e) => { if (/backend_offline/.test(String(e))) this.covers.delete(item.k); return null; })
+        .catch((e) => { if (/backend_offline/.test(String(e))) offline = true; return null; })
         .finally(() => {
           this.coverActive--;
           this.drainCovers();
         });
       this.covers.set(item.k, p);
       p.then((v) => {
-        if (!v && this.covers.get(item.k) === p) {
+        if (offline) {
+          // The core was still starting: this is no real miss. Ask again
+          // shortly (the sidebar used to keep placeholder icons for good).
+          if (this.covers.get(item.k) === p) this.covers.delete(item.k);
+          if (performance.now() - item.since < OFFLINE_RETRY_MS && !item.signal?.aborted) {
+            setTimeout(() => { this.coverQueue.unshift(item); this.drainCovers(); }, 800);
+            return;
+          }
+        } else if (!v && this.covers.get(item.k) === p) {
           setTimeout(() => { if (this.covers.get(item.k) === p) this.covers.delete(item.k); }, 15_000);
         }
         item.resolve(v);

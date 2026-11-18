@@ -351,12 +351,17 @@ impl SyncState {
         let changes = self.changes(snap, now);
         let wanted: BTreeSet<String> = changes.iter().map(|i| joined(&(i.kind.clone(), i.key.clone()))).collect();
         self.outbox.retain(|key, _| wanted.contains(key));
+        // Push in library order, not key order: other devices insert liked
+        // songs (and new playlists) in the order they arrive, so a key-sorted
+        // push showed imported lists shuffled there.
+        let mut order = Vec::with_capacity(changes.len());
         for item in changes {
             let key = joined(&(item.kind.clone(), item.key.clone()));
             let unchanged = self.outbox.get(&key).is_some_and(|old| old.value == item.value && old.deleted == item.deleted && old.rev == item.rev);
+            order.push(key.clone());
             if !unchanged { self.outbox.insert(key, item); }
         }
-        self.outbox.values().cloned().collect()
+        order.iter().filter_map(|k| self.outbox.get(k).cloned()).collect()
     }
 
     /// The server accepted these pushed items.
@@ -770,6 +775,22 @@ mod tests {
         restarted.mark_pushed(&retry);
         assert!(restarted.outbox.is_empty());
         assert!(restarted.enqueue(&snap, 1000).is_empty());
+    }
+
+    #[test]
+    fn imported_liked_songs_arrive_in_library_order_on_another_device() {
+        // Ids that sort differently from the list order.
+        let mut lib = Library::default();
+        let names = ["zulu", "alpha", "mike", "bravo", "yankee"];
+        let tracks: Vec<Track> = names.iter().map(|n| test_track(n, "Artist")).collect();
+        lib.like_all(tracks.clone());
+        let mut state = SyncState::default();
+        let pushed = state.enqueue(&snapshot(&lib, &[]), 10);
+        let liked: Vec<SyncItem> = pushed.into_iter().filter(|i| i.kind == kind::LIKED).collect();
+        let mut other = Library::default();
+        apply(&mut other, &mut SyncState::default(), &liked, &[]);
+        let got: Vec<&str> = other.liked.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(got, names);
     }
 
     #[test]

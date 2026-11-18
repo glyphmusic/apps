@@ -197,7 +197,10 @@ class App {
         this.scheduleClock();
       }
     });
-    api.on("home", (h) => (this.home = h));
+    api.on("home", (h) => {
+      this.home = h;
+      if (!h.loading && (h.recs.length || h.trending.length)) homeCacheSave(h);
+    });
     api.on("artist", (a) => this.cacheArtist(a));
     api.on("lyrics", (l) => { if (l.key === this.lyrics.key || l.key === this.currentKey) this.lyrics = l; });
     api.on("toast", (m) => {
@@ -579,9 +582,20 @@ class App {
     return prev;
   }
   private fetchAlbumTracks(l: Extract<ListKey, { kind: "album" }>) {
+    // Seen before: show the cached songs at once, refresh quietly behind them.
+    const cached = albumCacheGet(l.title, l.artist);
+    if (cached?.length && this.view === "list" && this.openList?.kind === "album" && sameList(this.openList, l) && !this.openList.tracks.length) {
+      this.openList = { ...this.openList, tracks: cached, cover: this.openList.cover ?? cached[0] ?? null, loading: false };
+    }
     backend().call<Track[]>("album", { title: l.title, artist: l.artist }).then((full) => {
+      if (full?.length) albumCachePut(l.title, l.artist, full);
       if (this.view === "list" && this.openList?.kind === "album" && sameList(this.openList, l)) {
+        // A failed refresh never empties a list that already shows songs.
         const tracks = full?.length ? full : this.openList.tracks;
+        if (cached?.length && full?.length && sameTrackKeys(full, this.openList.tracks)) {
+          if (this.openList.loading) this.openList = { ...this.openList, loading: false };
+          return;
+        }
         this.openList = {
           ...this.openList,
           tracks,
@@ -774,16 +788,38 @@ class App {
   }
 
   // ---- home, lyrics ----
-  loadHome() { backend().call<HomeFeeds>("home").then((h) => h && (this.home = h)); }
+  loadHome() {
+    // Last Home first (no empty skeleton page on every start), fresh feeds replace it.
+    if (!this.home.recs.length && !this.home.trending.length) {
+      const c = homeCacheLoad();
+      if (c) this.home = { ...c, loading: true };
+    }
+    backend().call<HomeFeeds>("home").then((h) => {
+      if (!h) return;
+      const empty = !h.recs.length && !h.trending.length && !h.new_releases.length;
+      // A failed refresh (offline, server busy) keeps the cached feeds.
+      if (empty && (this.home.recs.length || this.home.trending.length)) { this.home = { ...this.home, loading: false }; return; }
+      this.home = h;
+      if (!empty) homeCacheSave(h);
+    }).catch(() => { this.home = { ...this.home, loading: false }; });
+  }
   /** Code pasted into the search field, waiting for its settings page. */
   pendingSettingsCode = $state<string | null>(null);
   pendingEqCode = $state<string | null>(null);
   /** Pictures of artists whose page was not opened (tiles), and verified badges. */
-  artistPhotos = $state<Record<string, string | null>>({});
+  artistPhotos = $state<Record<string, string | null>>(loadArtistPhotos());
   private photoAsked = new Map<string, number>();
   verified = $state<Record<string, boolean>>({});
   private verifiedAsked = new Set<string>();
   /** The artist's picture; looked up in the background the first time. */
+  /** A cached artist photo failed to load (file gone): forget it and ask again. */
+  dropArtistPhoto(name: string) {
+    const k = primaryArtist(name).toLowerCase();
+    if (!this.artistPhotos[k]) return;
+    delete this.artistPhotos[k];
+    this.photoAsked.delete(k);
+    saveArtistPhotos(this.artistPhotos);
+  }
   artistPhoto(name: string): string | null {
     const k = primaryArtist(name).toLowerCase();
     const page = this.artists[k]?.info?.photo;
@@ -793,7 +829,7 @@ class App {
     if (this.backendState.kind === "ready" && (at === undefined || performance.now() - at > 30_000)) {
       pruneTrackedKeys(this.photoAsked, this.artistPhotos, 299);
       this.photoAsked.set(k, performance.now());
-      backend().call<string | null>("artist_photo", { name: k }).then((p) => { if (p) this.artistPhotos[k] = p; }).catch(() => {});
+      backend().call<string | null>("artist_photo", { name: k }).then((p) => { if (p) { this.artistPhotos[k] = p; saveArtistPhotos(this.artistPhotos); } }).catch(() => {});
     }
     return null;
   }
@@ -993,6 +1029,90 @@ async function fetchInitialSnapshot(api: Backend): Promise<Snapshot> {
     }
     launch();
   });
+}
+
+// ---- artist photos (sidebar, tiles), kept across restarts ----
+const PHOTO_CACHE_KEY = "glyph.artist-photos.v1";
+function loadArtistPhotos(): Record<string, string | null> {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(PHOTO_CACHE_KEY) : null;
+    const v = raw ? JSON.parse(raw) : null;
+    return v && typeof v === "object" ? (v as Record<string, string | null>) : {};
+  } catch {
+    return {};
+  }
+}
+let photoTimer: ReturnType<typeof setTimeout> | undefined;
+function saveArtistPhotos(m: Record<string, string | null>) {
+  clearTimeout(photoTimer);
+  photoTimer = setTimeout(() => {
+    try {
+      const entries = Object.entries($state.snapshot(m) as Record<string, string | null>).filter(([, u]) => !!u).slice(-300);
+      localStorage.setItem(PHOTO_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+    } catch { /* ignore */ }
+  }, 1500);
+}
+
+// ---- Home feeds cache ----
+const HOME_CACHE_KEY = "glyph.home-cache.v1";
+function homeCacheLoad(): HomeFeeds | null {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(HOME_CACHE_KEY) : null;
+    const h = raw ? (JSON.parse(raw) as HomeFeeds) : null;
+    return h && Array.isArray(h.recs) && Array.isArray(h.trending) ? { ...h, new_releases: h.new_releases ?? [] } : null;
+  } catch {
+    return null;
+  }
+}
+let homeCacheTimer: ReturnType<typeof setTimeout> | undefined;
+function homeCacheSave(h: HomeFeeds) {
+  clearTimeout(homeCacheTimer);
+  const snap = $state.snapshot(h) as HomeFeeds;
+  homeCacheTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(HOME_CACHE_KEY, JSON.stringify({ recs: snap.recs.slice(0, 60), trending: snap.trending.slice(0, 60), new_releases: snap.new_releases.slice(0, 40), loading: false }));
+    } catch { /* ignore */ }
+  }, 1000);
+}
+
+// ---- album page cache (songs of albums opened before, kept across restarts) ----
+const ALBUM_CACHE_KEY = "glyph.album-cache.v1";
+const ALBUM_CACHE_MAX = 80;
+let albumCache: Map<string, Track[]> | null = null;
+const albumCacheKey = (title: string, artist: string) => `${title.trim().toLowerCase()}|${artist.trim().toLowerCase()}`;
+function albumCacheMap(): Map<string, Track[]> {
+  if (albumCache) return albumCache;
+  albumCache = new Map();
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(ALBUM_CACHE_KEY) : null;
+    const arr = raw ? (JSON.parse(raw) as [string, Track[]][]) : [];
+    for (const [k, v] of arr) if (Array.isArray(v)) albumCache.set(k, v);
+  } catch { /* ignore */ }
+  return albumCache;
+}
+function albumCacheGet(title: string, artist: string): Track[] | null {
+  const m = albumCacheMap();
+  const k = albumCacheKey(title, artist);
+  const v = m.get(k);
+  if (!v) return null;
+  m.delete(k);
+  m.set(k, v);
+  return v;
+}
+let albumCacheTimer: ReturnType<typeof setTimeout> | undefined;
+function albumCachePut(title: string, artist: string, tracks: Track[]) {
+  const m = albumCacheMap();
+  const k = albumCacheKey(title, artist);
+  m.delete(k);
+  m.set(k, $state.snapshot(tracks) as Track[]);
+  while (m.size > ALBUM_CACHE_MAX) m.delete(m.keys().next().value as string);
+  clearTimeout(albumCacheTimer);
+  albumCacheTimer = setTimeout(() => {
+    try { localStorage.setItem(ALBUM_CACHE_KEY, JSON.stringify([...m.entries()])); } catch { /* full: memory only */ }
+  }, 800);
+}
+function sameTrackKeys(a: Track[], b: Track[]) {
+  return a.length === b.length && a.every((x, i) => trackKey(x) === trackKey(b[i]));
 }
 
 export const app = new App();

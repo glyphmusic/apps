@@ -114,3 +114,11 @@ html.compact *::-webkit-scrollbar { display: none; width: 0; height: 0; }
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
 .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+
+/* Performance mode (Settings > Appearance): blur behind panels costs the GPU
+   a full extra pass per frame; solid fills look nearly the same. */
+html.perf *, html.perf *::before, html.perf *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.perf .bg.blurred, html.perf .root.dim { filter: brightness(.55) !important; }

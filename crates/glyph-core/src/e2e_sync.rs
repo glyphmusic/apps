@@ -155,7 +155,6 @@ pub struct Wire {
 /// with an older key. Their current value comes from `snap`.
 pub fn repush(st: &SyncState, snap: &Snapshot, now: u64) -> Vec<SyncItem> {
     let e = &st.e2e;
-    let map: BTreeMap<String, &Value> = snap.items.iter().map(|(k, v)| (joined(k), v)).collect();
     let mut wanted: BTreeSet<String> = e.reseal.clone();
     for j in &e.plain {
         let Some((k, key)) = split(j) else { continue };
@@ -173,13 +172,13 @@ pub fn repush(st: &SyncState, snap: &Snapshot, now: u64) -> Vec<SyncItem> {
     // Only what this device has: another device's statistics or keys it
     // cannot open stay for the device they belong to (a deletion made here
     // retires both copies through the outbox).
-    wanted
-        .into_iter()
-        .filter_map(|j| {
-            let v = map.get(&j)?;
-            let key = split(&j)?;
-            Some(SyncItem { kind: key.0, key: key.1, value: Some((*v).clone()), updated_at: now, deleted: false, rev: 0 })
-        })
+    // Keep the library's own order (liked songs oldest first, playlists as
+    // listed): other devices insert items in the order they arrive, so a
+    // key-sorted push would shuffle Liked Songs there.
+    snap.items
+        .iter()
+        .filter(|(k, _)| wanted.contains(&joined(k)))
+        .map(|(key, v)| SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(v.clone()), updated_at: now, deleted: false, rev: 0 })
         .collect()
 }
 

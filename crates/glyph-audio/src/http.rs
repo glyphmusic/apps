@@ -100,6 +100,11 @@ const CHUNK: u64 = 384 * 1024;
 // About 12 seconds at 160 kbps: covers companion latency during the first refill.
 const FIRST_CHUNK: u64 = 256 * 1024;
 const RETRIES: usize = 3;
+/// Pauses before each new try of a refill in the middle of a song. A phone
+/// switching between Wi-Fi and mobile data (or waking from doze) needs a few
+/// seconds; under one second of retries stopped playback there. The player
+/// just waits (buffering) meanwhile. About 11 s in total.
+const REFILL_BACKOFF_MS: [u64; 7] = [0, 300, 700, 1200, 2000, 3000, 4000];
 
 pub fn client() -> reqwest::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
@@ -341,9 +346,9 @@ impl HttpSource {
             }
         }
         let mut last = None;
-        for attempt in 0..RETRIES {
+        for (attempt, pause) in REFILL_BACKOFF_MS.iter().enumerate() {
             if attempt > 0 {
-                std::thread::sleep(Duration::from_millis(300 * attempt as u64));
+                std::thread::sleep(Duration::from_millis(*pause));
             }
             let transfer = glyph_protocol::network::Transfer::start();
             let request = self.client.get(&self.url).headers(local_headers(&self.url));
@@ -404,7 +409,15 @@ impl HttpSource {
                         Err(e) => last = Some(io_err(e)),
                     }
                 }
-                Err(e) => last = Some(io_err(e)),
+                Err(e) => {
+                    // An expired or refused link (4xx) does not heal by
+                    // waiting: hand it to the player's re-resolve at once.
+                    let refused = e.status().is_some_and(|s| s.is_client_error());
+                    last = Some(io_err(e));
+                    if refused {
+                        break;
+                    }
+                }
             }
         }
         Err(last.unwrap())

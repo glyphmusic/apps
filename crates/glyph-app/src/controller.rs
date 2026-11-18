@@ -134,6 +134,8 @@ pub struct Core {
     transfer: OnceLock<Arc<crate::transfer::Transfer>>,
     plugins: OnceLock<Arc<crate::plugins::PluginState>>,
     library_dirty: AtomicBool,
+    /// A batched library event is due at this time (`library_changed_soon`).
+    library_emit_at: Mutex<Option<Instant>>,
     config_dirty: AtomicBool,
     playback_dirty: AtomicBool,
     playback_pos_dirty: AtomicBool,
@@ -214,6 +216,7 @@ impl Core {
             transfer: OnceLock::new(),
             plugins: OnceLock::new(),
             library_dirty: AtomicBool::new(false),
+            library_emit_at: Mutex::new(None),
             config_dirty: AtomicBool::new(false),
             playback_dirty: AtomicBool::new(false),
             playback_pos_dirty: AtomicBool::new(false),
@@ -457,6 +460,32 @@ impl Core {
         crate::account::library_changed(self);
         self.library_dirty.store(true, Ordering::Relaxed);
         self.emit_library();
+    }
+
+    /// Like `library_changed`, for small background fixes (album names and
+    /// covers found while covers load): many of them in a row send the UI
+    /// one library event a second later instead of one per cover.
+    pub fn library_changed_soon(&self) {
+        crate::account::library_changed(self);
+        self.library_dirty.store(true, Ordering::Relaxed);
+        let mut at = self.library_emit_at.lock().unwrap_or_else(|e| e.into_inner());
+        if at.is_none() {
+            *at = Some(Instant::now() + Duration::from_millis(1000));
+        }
+    }
+
+    /// Sends a batched library event once it is due (called by the pump).
+    fn flush_library_soon(&self) {
+        let due = {
+            let mut at = self.library_emit_at.lock().unwrap_or_else(|e| e.into_inner());
+            match *at {
+                Some(t) if Instant::now() >= t => { *at = None; true }
+                _ => false,
+            }
+        };
+        if due {
+            self.emit_library();
+        }
     }
 
     pub fn config_changed(&self) {
@@ -763,7 +792,23 @@ impl Core {
         crate::rt::spawn(async move {
             let key = glyph_core::dedupe::track_key(&track);
             let started = Instant::now();
-            let r = backend.resolve(&track).await;
+            let mut r = backend.resolve(&track).await;
+            // A short network gap (Wi-Fi to mobile data, a phone waking up)
+            // used to skip song after song within a second and then stop.
+            // Wait a little and ask again for the same song first.
+            for wait in [2u64, 4, 6] {
+                let transient = matches!(&r, Err(e) if transient_net_error(&e.to_string()));
+                if !transient {
+                    break;
+                }
+                tracing::info!(wait_s = wait, "playback: network gap while resolving, retrying");
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+                let still = core.st().current.as_ref().map(glyph_core::dedupe::track_key).as_deref() == Some(key.as_str());
+                if !still {
+                    return; // another song was started meanwhile
+                }
+                r = backend.resolve(&track).await;
+            }
             tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, success = r.is_ok(), "playback: source resolved");
             {
                 let mut st = core.st();
@@ -1639,6 +1684,7 @@ impl Core {
                 loop {
                     std::thread::sleep(Duration::from_millis(100));
                     ticks = ticks.wrapping_add(1);
+                    core.flush_library_soon();
                     if let Some(rx) = &events {
                         while let Ok(ev) = rx.try_recv() {
                             match ev {
@@ -1992,6 +2038,15 @@ pub fn shuffle_mode(cfg: &Config) -> glyph_core::queue::ShuffleMode {
 
 /// A problem of the audio output itself: every song would fail the same
 /// way, so skipping to the next one does not help.
+/// A resolve error from the network itself (no connection, DNS, timeout),
+/// which usually heals within seconds, not from the song or the source.
+fn transient_net_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    ["error sending request", "connection", "timed out", "timeout", "dns", "network is unreachable", "no route to host", "temporary failure", "backend_offline"]
+        .iter()
+        .any(|p| e.contains(p))
+}
+
 fn output_error(e: &str) -> bool {
     ["no audio output device", "audio output not available", "The selected audio output"].iter().any(|p| e.starts_with(p))
 }
