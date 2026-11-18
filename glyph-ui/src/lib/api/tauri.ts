@@ -8,6 +8,10 @@ const MAX_COVER_CACHE = 300;
 const MAX_COVER_ACTIVE = 5;
 /** Asked before the backend is up: tried again for this long instead of answering "no cover". */
 const OFFLINE_RETRY_MS = 30_000;
+/** After this long a slow cover request no longer blocks the others. */
+const COVER_SLOT_MS = 6_000;
+/** After this long a cover request counts as "no cover" (asked again later). */
+const COVER_GIVE_UP_MS = 20_000;
 
 export class TauriBackend implements Backend {
   readonly kind = "tauri" as const;
@@ -78,13 +82,26 @@ export class TauriBackend implements Backend {
       this.coverActive++;
       // Before the backend is up a miss is no real miss: asked again next time.
       let offline = false;
-      const p = invoke<string | null>("cover_path", { track: item.t })
-        .then((path) => (path ? convertFileSrc(path) : null))
-        .catch((e) => { if (/backend_offline/.test(String(e))) offline = true; return null; })
-        .finally(() => {
-          this.coverActive--;
-          this.drainCovers();
-        });
+      let released = false;
+      // A slot is given back after COVER_SLOT_MS even when the answer never
+      // comes (a lost bridge reply on Android, a stuck download): before, a
+      // few lost answers held every slot and no cover loaded anymore.
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.coverActive--;
+        this.drainCovers();
+      };
+      const slot = setTimeout(release, COVER_SLOT_MS);
+      const p = Promise.race([
+        invoke<string | null>("cover_path", { track: item.t })
+          .then((path) => (path ? convertFileSrc(path) : null))
+          .catch((e) => { if (/backend_offline/.test(String(e))) offline = true; return null; }),
+        new Promise<null>((r) => setTimeout(() => r(null), COVER_GIVE_UP_MS)),
+      ]).finally(() => {
+        clearTimeout(slot);
+        release();
+      });
       this.covers.set(item.k, p);
       p.then((v) => {
         if (offline) {

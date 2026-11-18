@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.12.7 - 2026-11-18
+
+### Fixed
+
+- **Covers stopped loading (phone Home)**: a cover request whose answer never arrived (a lost bridge reply on Android, a stuck download) held one of the five loading slots for good; once all were held, no cover loaded anymore, typically after scrolling down Home. A slot is now freed after 6 s and a request counts as "no cover" after 20 s (asked again later).
+
+### Changed
+
+- **Phone layout**: no dark fill behind the tab bar and mini player any more; the page ends above them with a short fade, so the app background shows there.
+
 ## 0.12.6 - 2026-11-18
 
 ### Added
