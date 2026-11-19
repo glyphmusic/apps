@@ -246,6 +246,9 @@ pub fn start(app: &tauri::AppHandle) {
                 tauri::WindowEvent::Focused(focused) => {
                     if *focused {
                         resume_main_webview(&handle);
+                        if let Some(core) = handle.try_state::<Arc<Core>>() {
+                            crate::clip::on_focus(&handle, &core);
+                        }
                     }
                     crate::memory_guard::notify_window_state(&handle);
                 }
@@ -524,6 +527,11 @@ pub fn tick(core: &Arc<Core>) {
             show_window(&app);
         } else if let Some(text) = req.strip_prefix("open ").or_else(|| req.strip_prefix("shared ")) {
             core.emit("shared", text.to_string());
+            show_window(&app);
+        } else if let Some(list) = req.strip_prefix("files ") {
+            // "Open with" / "Send to": the files play at once.
+            let paths = crate::instance::split_files(list).into_iter().map(std::path::PathBuf::from).collect();
+            glyph_app::opened::open_files(core, paths, glyph_app::opened::Then::Play);
             show_window(&app);
         }
     }

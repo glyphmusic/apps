@@ -1155,6 +1155,20 @@ impl Backend {
         self.cur().lyrics_cache.put(&lyrics::cache_key(track), Some(lyrics));
     }
 
+    /// The server's cached artist page data (profile, popular songs,
+    /// discography, related artists); `None` without a server or when it
+    /// does not know the artist. One lookup serves every app for 14 days.
+    pub async fn artist_server(&self, name: &str, lang: &str) -> Option<server_client::ServerArtist> {
+        let (inner, name, lang) = (self.cur(), name.to_string(), lang.to_string());
+        self.spawn(async move {
+            let srv = inner.server.as_ref()?;
+            srv.artist(&name, &lang).await.ok().flatten()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Bio + photo for the artist page (Wikipedia in `lang`, then English).
     pub async fn artist_info(&self, name: &str, lang: &str) -> anyhow::Result<Option<artist::ArtistInfo>> {
         let (inner, name, lang) = (self.cur(), name.to_string(), lang.to_string());

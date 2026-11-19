@@ -43,6 +43,12 @@ pub trait Host: Send + Sync + 'static {
     /// Writes `text` to the system clipboard.
     fn write_clipboard(&self, text: &str) -> Result<(), String>;
 
+    /// Opens the system share sheet with `text` (Android); not on desktop.
+    fn share_text(&self, text: &str, title: Option<&str>) -> Result<(), String> {
+        let _ = (text, title);
+        Err("not supported on this platform".into())
+    }
+
     /// Opens a native file chooser. Returns `Ok(None)` when cancelled or unsupported.
     fn pick_file(
         &self,

@@ -240,6 +240,7 @@ export const handlers: Record<string, DemoHandler> = {
   stats_recap: (_, a) => recap(String(a.year)),
   share_songs: async (ctx, a) => {
     const link = `https://glyph.my/p/${hash(String(a.title)).toString(36)}`;
+    if (a.copy === false) return link;
     try { await navigator.clipboard.writeText(link); } catch { /* preview */ }
     ctx.emit("toast", { text: "Playlist code copied" });
     return link;
@@ -257,6 +258,13 @@ export const handlers: Record<string, DemoHandler> = {
   device_connect: (ctx, a) => activate(ctx, a.id),
   device_use_local: (ctx) => activate(ctx, "this"),
   open_url: (_, a) => { window.open(String(a.url), "_blank", "noopener"); },
+  share_system: async (ctx, a) => {
+    const nav = navigator as Navigator & { share?: (d: ShareData) => Promise<void> };
+    if (nav.share) { try { await nav.share({ url: String(a.text) }); return; } catch { /* cancelled */ } }
+    try { await navigator.clipboard.writeText(String(a.text)); } catch { /* preview */ }
+    ctx.emit("toast", { text: "Link copied" });
+  },
+  copy_text: async (_, a) => { try { await navigator.clipboard.writeText(String(a.text)); } catch { /* preview */ } },
   onboarding_seen: () => {},
   ...jamHandlers,
 };

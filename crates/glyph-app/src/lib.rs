@@ -13,6 +13,8 @@ pub mod links;
 pub mod mcp;
 pub mod mcp_tools;
 pub mod mpd;
+pub mod opened;
+pub mod page_cache;
 pub mod plugins;
 pub mod settings;
 pub mod storage;

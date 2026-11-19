@@ -76,6 +76,7 @@ impl Host for TauriHost {
     }
 
     fn write_clipboard(&self, text: &str) -> Result<(), String> {
+        crate::clip::seen(text);
         self.app.clipboard().write_text(text.to_string()).map_err(|e| e.to_string())
     }
 

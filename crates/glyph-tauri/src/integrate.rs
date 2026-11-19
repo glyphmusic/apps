@@ -40,7 +40,7 @@ fn marker() -> PathBuf {
 
 #[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 fn stamp(exe: &Path) -> String {
-    format!("{}\n{}\nlinks-v1", exe.display(), env!("CARGO_PKG_VERSION"))
+    format!("{}\n{}\nlinks-v2-open-with", exe.display(), env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "freebsd", target_os = "macos"))]
@@ -77,19 +77,46 @@ mod platform {
         // Register for this user only. Pass values as arguments, never shell code.
         use std::os::windows::process::CommandExt;
         let key = r"HKCU\Software\Classes\glyph";
-        for (subkey, value, data) in [
-            (key.to_string(), None, "URL:Glyph Protocol".to_string()),
-            (key.to_string(), Some("URL Protocol"), String::new()),
-            (format!(r"{key}\shell\open\command"), None, format!(r#""{}" "%1""#, exe.display())),
-        ] {
+        let open = format!(r#""{}" "%1""#, exe.display());
+        let reg = |subkey: &str, value: Option<&str>, data: &str| -> anyhow::Result<()> {
             let mut command = std::process::Command::new("reg.exe");
-            command.args(["add", &subkey, "/f"]);
+            command.args(["add", subkey, "/f"]);
             if let Some(value) = value { command.args(["/v", value]); } else { command.arg("/ve"); }
-            let output = command.args(["/d", &data]).creation_flags(0x08000000).output()?;
-            anyhow::ensure!(output.status.success(), "could not register Glyph URL protocol");
+            let output = command.args(["/d", data]).creation_flags(0x08000000).output()?;
+            anyhow::ensure!(output.status.success(), "could not register {subkey}");
+            Ok(())
+        };
+        reg(key, None, "URL:Glyph Protocol")?;
+        reg(key, Some("URL Protocol"), "")?;
+        reg(&format!(r"{key}\shell\open\command"), None, &open)?;
+        // "Open with -> Glyph" for audio files. Glyph is only offered, it
+        // never takes over as the default player by itself.
+        let app_key = r"HKCU\Software\Classes\Applications\glyph.exe";
+        let prog = r"HKCU\Software\Classes\Glyph.AudioFile";
+        reg(app_key, Some("FriendlyAppName"), "Glyph")?;
+        reg(&format!(r"{app_key}\shell\open\command"), None, &open)?;
+        reg(prog, None, "Audio file")?;
+        reg(&format!(r"{prog}\DefaultIcon"), None, &format!(r#""{}",0"#, exe.display()))?;
+        reg(&format!(r"{prog}\shell\open\command"), None, &open)?;
+        for ext in glyph_core::import::local::AUDIO_EXTS {
+            reg(&format!(r"{app_key}\SupportedTypes"), Some(format!(".{ext}").as_str()), "")?;
+            reg(&format!(r"HKCU\Software\Classes\.{ext}\OpenWithProgids"), Some("Glyph.AudioFile"), "")?;
         }
         // The shortcut's file name is the name Windows search and the Start
         // menu show.
+        shortcut(exe, &lnk)?;
+        // "Send to -> Glyph": songs play, browser link shortcuts (.url) are
+        // added like a shared link.
+        let send_to = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join(r"Microsoft\Windows\SendTo");
+        if send_to.is_dir() {
+            shortcut(exe, &send_to.join("Glyph.lnk"))?;
+        }
+        remember(exe);
+        Ok(())
+    }
+
+    /// A `.lnk` to `exe` with Glyph's icon.
+    fn shortcut(exe: &Path, lnk: &Path) -> anyhow::Result<()> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
@@ -102,7 +129,6 @@ mod platform {
             let file: IPersistFile = link.cast()?;
             file.Save(&HSTRING::from(lnk.as_os_str()), true)?;
         }
-        remember(exe);
         Ok(())
     }
 }
@@ -181,8 +207,8 @@ mod platform {
              Name=Glyph\n\
              GenericName=Music Player\n\
              Comment=Search everywhere, play from free sources\n\
-             Exec={} %u\n\
-             MimeType=x-scheme-handler/glyph;\n\
+             Exec={} %U\n\
+             MimeType=x-scheme-handler/glyph;audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/wav;audio/x-wav;audio/x-matroska;\n\
              Icon=glyph\n\
              Terminal=false\n\
              Categories=AudioVideo;Audio;Player;\n\
@@ -256,6 +282,23 @@ mod platform {
   <key>CFBundleVersion</key><string>{version}</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Audio file</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.mp3</string>
+        <string>public.mpeg-4-audio</string>
+        <string>public.aac-audio</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>org.xiph.flac</string>
+        <string>public.audio</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

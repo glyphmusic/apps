@@ -246,7 +246,7 @@
   {/if}
   <MenuItem icon={pinned ? "pin-fill" : "pin"} label={t(pinned ? "ctx.unpin" : "ctx.pin")} onenter={() => (moreSub = null)} onclick={run(() => app.togglePin(k))} />
   <MenuItem icon="list-music" label={t("ctx.open")} onenter={() => (moreSub = null)} onclick={() => openList(k)} />
-  {#if has}<MenuItem icon="link-2" label={t("ctx.share_list")} onenter={() => (moreSub = null)} onclick={run(() => shareList(k))} />{/if}
+  {#if has}<MenuItem icon={app.compact ? "share-2" : "link-2"} label={t("ctx.share_list")} onenter={() => (moreSub = null)} onclick={run(() => shareList(k))} />{/if}
   {#if k.kind === "album" || k.kind === "artist_liked"}
     {@const a = k.artist}
     {@const listArtists = splitArtists(a)}
@@ -398,7 +398,7 @@
       onenter={() => { if (!compact) sub = "recommend"; }} onclick={compact ? () => setSub("recommend") : undefined}>
       {#if !compact && subOpen("recommend")}<Flyout {flip}>{@render recommendBody(song)}</Flyout>{/if}
     </MenuItem>
-    <MenuItem icon="link-2" label={t("ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
+    <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
     <MenuItem icon="ellipsis" label={t("ctx.more")} sub open={!compact && subOpen("more")}
       onenter={() => { if (!compact) { sub = "more"; moreSub = null; } }} onclick={compact ? () => setSub("more") : undefined}>
       {#if !compact && subOpen("more")}

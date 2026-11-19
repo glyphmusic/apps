@@ -44,6 +44,8 @@ export interface CtxMenu {
 export interface Toast { id: number; title: string; sub?: string; kind: "ok" | "info"; at: number; life: number; undo?: { label?: string; run: () => void }; gone?: number }
 
 export interface NameDialog { tracks: Track[]; rename?: string | null; eqPreset?: boolean; initial?: string }
+/** What the phone share menu shares: one song, a list, or loose songs (recap). */
+export interface ShareTarget { track?: Track; list?: ListKey; songs?: { title: string; tracks: Track[]; kind?: "song" | "playlist" | "album" } }
 
 export type SideItem = { kind: "list"; list: ListKey } | { kind: "artist"; name: string; track: Track | null };
 
@@ -130,6 +132,10 @@ class App {
   confirm = $state<{ title: string; body: string; ok: string; danger?: boolean; run: () => void } | null>(null);
   /** A shared playlist link, shown as a preview until "Add to library" (GPUI shared_preview). */
   sharedPreview = $state<{ code: string; link: string; author: string | null } | null>(null);
+  /** Phone share menu (compact/ShareSheet.svelte): what is being shared. */
+  shareSheet = $state<ShareTarget | null>(null);
+  /** Songs shared or opened with Glyph: where they go (overlays/AddShared.svelte). */
+  pickSongs = $state<{ tracks: Track[]; file?: boolean } | null>(null);
   onboarding = $state(false);
   splash = $state(false);
   jamOpen = $state(false);
@@ -187,7 +193,13 @@ class App {
 
     api.on("player", (p) => this.setPlayer({ ...this.player, ...p }));
     api.on("queue", (q) => (this.queue = q));
-    api.on("library", (l) => { this.library = l; this.pruneAddSongs(); });
+    // The core sends only the parts that changed (`{ __patch: {..} }`); the
+    // rest stays the same object, so lists that did not change do not redraw.
+    api.on("library", (l) => {
+      const patch = (l as { __patch?: Partial<Library> }).__patch;
+      this.library = patch ? { ...this.library, ...patch } : l;
+      this.pruneAddSongs();
+    });
     api.on("config", (c) => (this.config = normalizeConfig(c)));
     api.on("backend", (b) => {
       const was = this.backendState.kind;
@@ -232,13 +244,22 @@ class App {
     // Plugins, MCP access questions, finished imports (settings/plugin-events.svelte.ts).
     if (!inMiniWindow()) import("./settings/plugin-events.svelte").then((m) => m.initPluginEvents());
     // The mini player window only mirrors the player.
-    if (!inMiniWindow()) api.on("shared", (text) => this.importText(text));
+    // Shared to Glyph (share sheet, "Send to", `glyph <link>`): one song asks where it goes.
+    if (!inMiniWindow()) api.on("shared", (text) => this.importText(text, true));
+    if (!inMiniWindow()) api.on("pick_songs", (p) => { if (p.tracks?.length) { this.ctx = null; this.pickSongs = p; } });
+    // A music link copied in another app: a toast offers to add it.
+    if (!inMiniWindow()) api.on("clipboard_link", (link) => {
+      this.toast(`${t("share_in.copied")} · ${link}`, "info", { label: t("share_in.add"), run: () => { void this.importText(link, true); } });
+    });
 
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", () => {
         this.scheduleClock();
+        // Back from the background: only the player and the queue can be
+        // behind (the whole snapshot also rebuilt the library and listed
+        // the audio outputs, which froze phones for a moment on return).
         if (!document.hidden && this.ready && backend().kind === "tauri") {
-          void backend().call<Snapshot>("snapshot").then((s) => {
+          void backend().call<Pick<Snapshot, "player" | "queue">>("resume_state").then((s) => {
             if (!s) return;
             if (s.player) this.setPlayer(s.player);
             if (s.queue) this.queue = s.queue;
@@ -292,7 +313,7 @@ class App {
     const idx = this.artistLru.indexOf(k);
     if (idx !== -1) this.artistLru.splice(idx, 1);
     this.artistLru.push(k);
-    this.trimArtistCache(8, k);
+    this.trimArtistCache(12, k);
   }
 
   private trimArtistCache(limit: number, extraKeep?: string) {
@@ -482,7 +503,17 @@ class App {
   }
   isDownloaded(tr: Track) { return this.downloadedKeys.has(trackKey(tr)); }
   download(tracks: Track[]) { for (const tr of tracks) this.downloading[trackKey(tr)] = null; return backend().call("download", { tracks }); }
-  share(what: { track?: Track; list?: ListKey }) { return backend().call<string>("share", what); }
+  /** Shares a song or list: on phones the share menu opens, on the desktop the link is copied. */
+  share(what: { track?: Track; list?: ListKey }) {
+    if (this.compact) { this.shareSheet = what; return Promise.resolve(null); }
+    return backend().call<string>("share", what);
+  }
+  /** Shares loose songs (recap): share menu on phones, else copied. */
+  shareSongs(what: { title: string; tracks: Track[]; kind?: "song" | "playlist" | "album" }) {
+    if (!what.tracks.length) return Promise.resolve(null);
+    if (this.compact) { this.shareSheet = { songs: what }; return Promise.resolve(null); }
+    return backend().call<string>("share_songs", { ...what, kind: what.kind ?? "playlist" });
+  }
 
   /** Songs of a list. */
   listTracks(l: ListKey): Track[] {
@@ -568,10 +599,12 @@ class App {
     if (!isArtistView(this.view)) this.openArtist = null;
     if (this.view !== "profile") this.openProfile = null;
     if (this.view !== "section") this.section = null;
-    this.trimArtistCache(isArtistView(this.view) ? 1 : 0);
+    // Artist pages opened lately stay, so going back to one is instant
+    // (memory pressure still empties them: trimMemory).
+    this.trimArtistCache(12);
     if (prevView === "search" && this.view !== "search") this.clearSearchState();
     if (prevView !== this.view || sameTargetChanged) {
-      backend().trimCovers?.(32);
+      backend().trimCovers?.(200);
       pruneTrackedKeys(this.photoAsked, this.artistPhotos, 48);
       pruneTrackedKeys(this.verifiedAsked, this.verified, 48);
       trimReveals(128);
@@ -780,9 +813,10 @@ class App {
   }
   /** Links or codes pasted / shared to Glyph. Several service links open
    *  the "move from another app" screen (Rust answers `{ kind: "migrate" }`). */
-  async importText(text: string) {
-    const r = await backend().call<{ kind?: string; text?: string; id?: string; name?: string; code?: string; link?: string; author?: string | null; tracks?: Track[] } | undefined | void>("import_text", { text });
+  async importText(text: string, ask = false) {
+    const r = await backend().call<{ kind?: string; text?: string; id?: string; name?: string; code?: string; link?: string; author?: string | null; tracks?: Track[] } | undefined | void>("import_text", { text, ask });
     if (!r || typeof r !== "object") return;
+    if (r.kind === "pick" && r.tracks?.length) { this.ctx = null; this.pickSongs = { tracks: r.tracks }; return; }
     if (r.kind === "migrate") {
       const { openPasted } = await import("./settings/migrate-state.svelte");
       await openPasted(r.text ?? text);

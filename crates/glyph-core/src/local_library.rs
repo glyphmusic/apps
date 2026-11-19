@@ -76,10 +76,41 @@ pub struct LocalLibrary {
     scanning: AtomicBool,
     /// Files read so far / found in the running scan.
     progress: (AtomicUsize, AtomicUsize),
+    /// Single files opened with Glyph ("Open with", Android share), outside
+    /// the music folders. They play like music-folder songs but are not
+    /// listed on the Local files page; a scan leaves them alone.
+    opened: RwLock<Vec<LocalFile>>,
 }
+
+/// At most this many opened files are remembered (the oldest go first).
+pub const MAX_OPENED: usize = 500;
 
 fn index_path() -> PathBuf {
     paths::data_dir().join("local_library.json")
+}
+
+fn opened_path() -> PathBuf {
+    paths::data_dir().join("opened_files.json")
+}
+
+/// Reads one audio file: tags, the `file:` id from its path and the
+/// embedded cover (saved to [`cover_path`]).
+fn read_file(path: PathBuf, mtime: u64, size: u64) -> anyhow::Result<LocalFile> {
+    let (mut track, cover) = read_track(&path)?;
+    track.id = format!("{ID_PREFIX}{}", paths::hash_hex(&path.to_string_lossy()));
+    let mut has_cover = false;
+    if let Some(bytes) = cover {
+        let dest = cover_path(&track);
+        has_cover = dest.is_file()
+            || crate::cover::normalize_image(&bytes)
+                .ok()
+                .and_then(|jpeg| {
+                    let _ = std::fs::create_dir_all(dest.parent()?);
+                    paths::write_atomic(&dest, &jpeg).ok()
+                })
+                .is_some();
+    }
+    Ok(LocalFile { path, track, mtime, size, cover: has_cover })
 }
 
 /// Embedded cover of a song from the music folders.
@@ -133,7 +164,46 @@ impl LocalLibrary {
         let lib = Self::default();
         let files: Vec<LocalFile> = paths::read_json(&index_path()).unwrap_or_default();
         lib.install(files);
+        let opened: Vec<LocalFile> = paths::read_json(&opened_path()).unwrap_or_default();
+        *lib.opened.write().unwrap() = opened;
         lib
+    }
+
+    /// A single audio file opened with Glyph: its song, playable from the
+    /// file. A file of the music folders keeps its song; others are
+    /// remembered (`opened_files.json`) so liked or added songs keep playing
+    /// from it. Blocking (reads the tags): run off the UI thread.
+    pub fn open_file(&self, path: &Path) -> anyhow::Result<Track> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !path.is_file() || !is_audio(&path) {
+            anyhow::bail!("not an audio file: {}", path.display());
+        }
+        if let Some(f) = self.files.read().unwrap().iter().find(|f| f.path == path) {
+            return Ok(f.track.clone());
+        }
+        let meta = std::fs::metadata(&path)?;
+        let (mtime, size) = (mtime_of(&meta), meta.len());
+        if let Some(f) = self.opened.read().unwrap().iter().find(|f| f.path == path && f.mtime == mtime && f.size == size) {
+            return Ok(f.track.clone());
+        }
+        let file = read_file(path, mtime, size)?;
+        let track = file.track.clone();
+        let snapshot = {
+            let mut opened = self.opened.write().unwrap();
+            opened.retain(|f| f.path != file.path);
+            opened.push(file);
+            let extra = opened.len().saturating_sub(MAX_OPENED);
+            opened.drain(..extra);
+            opened.clone()
+        };
+        if let Err(e) = paths::write_json(&opened_path(), &snapshot) {
+            tracing::warn!("could not save the opened files: {e}");
+        }
+        Ok(track)
+    }
+
+    fn opened_file(&self, id: &str) -> Option<PathBuf> {
+        self.opened.read().unwrap().iter().find(|f| f.track.id == id).map(|f| f.path.clone())
     }
 
     fn install(&self, files: Vec<LocalFile>) {
@@ -169,7 +239,7 @@ impl LocalLibrary {
 
     /// Index lookup only (cheap enough for every rendered row).
     pub fn contains(&self, t: &Track) -> bool {
-        t.id.starts_with(ID_PREFIX) && self.by_id.read().unwrap().contains_key(&t.id)
+        t.id.starts_with(ID_PREFIX) && (self.by_id.read().unwrap().contains_key(&t.id) || self.opened.read().unwrap().iter().any(|f| f.track.id == t.id))
     }
 
     /// The file a song from the music folders plays from. Only `file:`
@@ -181,10 +251,14 @@ impl LocalLibrary {
         // A scan can replace the files between reading an index and looking
         // up its row. Resolve against one snapshot so playback cannot pick
         // another song at the old row number.
-        let files = self.files.read().unwrap();
-        let file = files.iter().find(|f| f.track.id == t.id)
-            .or_else(|| files.iter().find(|f| track_key(&f.track) == track_key(t)))?;
-        let p = file.path.clone();
+        let p = {
+            let files = self.files.read().unwrap();
+            let by_id = files.iter().find(|f| f.track.id == t.id).map(|f| f.path.clone());
+            // An opened file before the fuzzy match (another file with the
+            // same title and artist).
+            by_id.or_else(|| self.opened_file(&t.id))
+                .or_else(|| files.iter().find(|f| track_key(&f.track) == track_key(t)).map(|f| f.path.clone()))?
+        };
         p.is_file().then_some(p)
     }
 
@@ -227,26 +301,14 @@ impl LocalLibrary {
                 continue;
             }
             changed = true;
-            match read_track(&path) {
-                Ok((mut track, cover)) => {
-                    track.id = format!("{ID_PREFIX}{}", paths::hash_hex(&path.to_string_lossy()));
-                    let mut has_cover = false;
-                    if let Some(bytes) = cover {
-                        let dest = cover_path(&track);
-                        has_cover = dest.is_file()
-                            || crate::cover::normalize_image(&bytes)
-                                .ok()
-                                .and_then(|jpeg| {
-                                    let _ = std::fs::create_dir_all(dest.parent()?);
-                                    paths::write_atomic(&dest, &jpeg).ok()
-                                })
-                                .is_some();
-                    }
+            let shown = path.display().to_string();
+            match read_file(path, mtime, size) {
+                Ok(file) => {
                     report.read += 1;
-                    out.push(LocalFile { path, track, mtime, size, cover: has_cover });
+                    out.push(file);
                 }
                 Err(e) => {
-                    tracing::debug!("local file {} unreadable: {e:#}", path.display());
+                    tracing::debug!("local file {shown} unreadable: {e:#}");
                     report.failed += 1;
                 }
             }
@@ -395,5 +457,21 @@ mod tests {
         let mut streamed = t.clone();
         streamed.id = "yt:abc".into();
         assert_eq!(lib.local(&streamed), None);
+    }
+
+    #[test]
+    fn opened_files_play_but_stay_off_the_page() {
+        let lib = LocalLibrary::default();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("opened.mp3");
+        std::fs::write(&p, b"x").unwrap();
+        let mut f = file(&p.to_string_lossy(), "Band", None);
+        f.path = p.clone();
+        let t = f.track.clone();
+        lib.opened.write().unwrap().push(f);
+        assert!(lib.contains(&t));
+        assert_eq!(lib.local(&t), Some(p));
+        assert!(lib.tracks().is_empty());
+        assert!(lib.open_file(&dir.path().join("notes.txt")).is_err());
     }
 }

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.12.9 - 2026-11-19
+
+### Added
+
+- **Share menu on phones** (app and web): sharing a song, playlist, album or your recap now opens a menu from the bottom instead of only copying. It shows a card with the cover and title, the link, and buttons for Copy link, WhatsApp, Telegram, SMS, e-mail and More (the phone's own share menu). The desktop still copies the link right away.
+- **Share songs to Glyph**: sharing a song link to Glyph (Android share menu, or on the computer "Send to" / `glyph <link>`) now opens a small window where you pick where it goes: Liked Songs (ticked at the start), one or more playlists, or a new playlist. A Play button plays it first. Before, the song always went into Liked Songs.
+- **Open music files with Glyph**: "Open with -> Glyph" for MP3, FLAC, OGG, M4A, AAC, WAV and MKA files on Windows, macOS, Linux and Android. On the computer the files play at once (several selected files play as one list); "Send to -> Glyph" works too, also for a link dragged out of the browser (a .url file). On the phone the same pick window opens. Songs from such files keep playing from the file after you liked or added them.
+- **Copied music links** (computer): copy a Spotify, YouTube or other song or playlist link in another app, switch to Glyph, and a message offers "Add". Can be turned off in Settings > System > "Offer copied music links".
+
+### Fixed
+
+- **Android app stuck: artists, playlists and the start never loaded**: two parts of the app (the media controls, ten times a second, and the jam / output check) could wait for each other forever. Then nothing in the app moved any more: artist pages kept their placeholders, lists did not open, the app sometimes showed "Glyph could not start", and it seemed frozen after coming back from another app. They now always take their turns in the same order.
+
+### Changed
+
+- **Artist pages and lists open faster**: opening an artist or a list sent the whole library (all liked songs and playlists) to the screen again, only to move the sidebar order. Now only the parts that changed are sent (10 KB instead of about 240 KB with 1000 liked songs), and lists that did not change are not redrawn. On the emulator Liked Songs and playlists open after 0.1-0.2 s.
+- **Artist pages from the server**: the Glyph server now keeps a whole artist page (popular songs, discography, related artists, fans, photo and banner) for 14 days for everyone, so the app asks once instead of searching and asking four services itself. A new artist shows after about 0.3-0.5 s, one someone else opened before after about 20 ms. Older servers still work: the app looks up what they do not send.
+- **More caching**: artist pages and album song lists are kept on the device (artist pages 30 minutes fresh, shown first and refreshed behind for 14 days; albums a week) and also after a restart; offline, the last copy shows instead of an empty page. The app keeps more artist pages (12) and cover lookups (800) in memory before letting go of them.
+- **Coming back from another app (Android)**: library changes made while the app was away (songs played, skipped with the media buttons) are sent once on return instead of piling up, and the app only asks for the player and the queue on return instead of the whole app state.
+
 ## 0.12.8 - 2026-11-18
 
 ### Added

@@ -104,6 +104,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
 
         // ---- core playback / library / search / browse ----
         "snapshot" => Ok(commands::snapshot(core)),
+        "resume_state" => Ok(core.resume_state()),
         "play" => {
             commands::play(
                 core,
@@ -311,8 +312,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             discover::set_playing_from(core, opt::<ListKey>(&args, "list")?);
             Ok(Value::Null)
         }
-        "share_songs" => res(discover::share_songs(core, req(&args, "title")?, req(&args, "tracks")?, opt(&args, "kind")?).await),
-        "share" => res(discover::share(core, opt(&args, "track")?, opt::<ListKey>(&args, "list")?).await),
+        "share_songs" => res(discover::share_songs(core, req(&args, "title")?, req(&args, "tracks")?, opt(&args, "kind")?, opt(&args, "copy")?).await),
+        "share" => res(discover::share(core, opt(&args, "track")?, opt::<ListKey>(&args, "list")?, opt(&args, "copy")?).await),
+        "share_system" => res(commands::share_system(req(&args, "text")?, opt(&args, "title")?)),
+        "copy_text" => res(commands::copy_text(req(&args, "text")?)),
         "copy_artist_link" => res(discover::copy_artist_link(core, req(&args, "artist")?).await),
         "hidden_artists" => ok(discover::hidden_artists(core)),
         "toggle_hidden_artist" => {
@@ -487,7 +490,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "import_parse_url" => ok(transfer::import_parse_url(req(&args, "url")?)),
         "import_link" => res(transfer::import_link(core, req(&args, "url")?, opt(&args, "name")?, opt(&args, "playlist_id")?).await),
         "import_playlist_file" => res(transfer::import_playlist_file(core, opt(&args, "playlist_id")?).await),
-        "import_text" => res(transfer::import_text(core, req(&args, "text")?).await),
+        "import_text" => res(transfer::import_text(core, req(&args, "text")?, opt(&args, "ask")?).await),
         "share_save" => ok(transfer::share_save(core, req(&args, "code")?, opt(&args, "link")?, opt(&args, "author")?)),
         "migrate_resume_state" => Ok(ok(transfer::migrate_resume_state())?),
         "migrate_discard" => {

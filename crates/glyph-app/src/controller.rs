@@ -13,7 +13,7 @@ use glyph_core::{Backend, Config, Library, ListKey, Queue};
 use glyph_protocol::Track;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
@@ -136,6 +136,14 @@ pub struct Core {
     library_dirty: AtomicBool,
     /// A batched library event is due at this time (`library_changed_soon`).
     library_emit_at: Mutex<Option<Instant>>,
+    /// Hash of each part of the library the UI was last sent (`None`: it
+    /// has nothing yet, the next event is whole). Held while sending, so
+    /// events never overtake each other.
+    library_sent: Mutex<Option<HashMap<String, u64>>>,
+    /// The UI is in the background (Android): library events wait.
+    ui_hidden: AtomicBool,
+    /// A library event waited while the UI was in the background.
+    library_unsent: AtomicBool,
     config_dirty: AtomicBool,
     playback_dirty: AtomicBool,
     playback_pos_dirty: AtomicBool,
@@ -217,6 +225,9 @@ impl Core {
             plugins: OnceLock::new(),
             library_dirty: AtomicBool::new(false),
             library_emit_at: Mutex::new(None),
+            library_sent: Mutex::new(None),
+            ui_hidden: AtomicBool::new(false),
+            library_unsent: AtomicBool::new(false),
             config_dirty: AtomicBool::new(false),
             playback_dirty: AtomicBool::new(false),
             playback_pos_dirty: AtomicBool::new(false),
@@ -451,8 +462,64 @@ impl Core {
     pub fn emit_queue(&self) {
         self.emit("queue", self.queue_dto());
     }
+    /// Sends the library to the UI: only the parts that changed since the
+    /// last event (`{"__patch": {..}}`), the whole library when the UI has none
+    /// yet. Opening a list or an artist only moves the sidebar order; before,
+    /// every such step sent the whole library (all liked songs and
+    /// playlists), which made phones wait on every page.
     pub fn emit_library(&self) {
-        self.emit("library", self.library_dto());
+        if self.ui_hidden.load(Ordering::Acquire) {
+            // The page is frozen in the background: one whole event on return.
+            self.library_unsent.store(true, Ordering::Release);
+            *self.library_sent.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return;
+        }
+        let mut sent = self.library_sent.lock().unwrap_or_else(|e| e.into_inner());
+        let dto = self.library_dto();
+        let Value::Object(parts) = dto else {
+            self.emit("library", dto);
+            return;
+        };
+        let hashes: HashMap<String, u64> = parts.iter().map(|(k, v)| (k.clone(), value_hash(v))).collect();
+        let payload = match sent.as_ref() {
+            Some(old) => {
+                let mut patch = serde_json::Map::new();
+                for (k, v) in &parts {
+                    if old.get(k) != hashes.get(k) {
+                        patch.insert(k.clone(), v.clone());
+                    }
+                }
+                if patch.is_empty() {
+                    return;
+                }
+                json!({ "__patch": Value::Object(patch) })
+            }
+            None => Value::Object(parts),
+        };
+        *sent = Some(hashes);
+        self.emit("library", payload);
+    }
+
+    /// The UI went to the background (`true`) or came back. While away,
+    /// library events wait and one whole library is sent on return.
+    pub fn set_ui_hidden(&self, hidden: bool) {
+        self.ui_hidden.store(hidden, Ordering::Release);
+        if !hidden && self.library_unsent.swap(false, Ordering::AcqRel) {
+            self.emit_library();
+        }
+    }
+
+    /// The UI lost library events (Android, too many waited while away):
+    /// send it the whole library.
+    pub fn resend_library(&self) {
+        self.library_resent();
+        self.emit_library();
+    }
+
+    /// The UI reloads its whole state (`snapshot`): the next library event
+    /// is whole again (a second window or a reloaded page has no parts yet).
+    fn library_resent(&self) {
+        *self.library_sent.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Library changed: tell the UI now, write the file soon (`pump`).
@@ -495,6 +562,7 @@ impl Core {
     }
 
     pub fn snapshot(&self) -> Value {
+        self.library_resent();
         let (config, first_run) = {
             let st = self.st();
             (serde_json::to_value(&st.config).unwrap_or(Value::Null), st.first_run)
@@ -512,6 +580,12 @@ impl Core {
             "output_devices": PlayerController::output_devices(),
             "update": Value::Null,
         })
+    }
+
+    /// What can be behind after the UI was in the background: the player
+    /// and the queue (light, unlike `snapshot`).
+    pub fn resume_state(&self) -> Value {
+        json!({ "player": self.player_dto(), "queue": self.queue_dto() })
     }
 
     // ---- rules shared by everything that starts or queues songs ----
@@ -2022,6 +2096,9 @@ impl Core {
         }
         crate::commands::trim_verified_cache(aggressive);
         if aggressive {
+            crate::commands::trim_artist_cache();
+        }
+        if aggressive {
             let mut st = self.st();
             st.preload_attempt = None;
             st.search.seen.shrink_to_fit();
@@ -2137,4 +2214,12 @@ mod player_report_tests {
         // Jumped 30 s ahead (a seek).
         assert!(player_report_due(Some(&sent), &state(glyph_audio::Status::Playing, 40_000)));
     }
+}
+
+/// Stable hash of a JSON value (library parts: did this part change?).
+fn value_hash(v: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(v).unwrap_or_default().hash(&mut h);
+    h.finish()
 }

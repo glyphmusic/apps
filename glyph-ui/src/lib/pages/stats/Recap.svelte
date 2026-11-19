@@ -44,7 +44,7 @@
     app.createPlaylist(tf("recap.playlist", { year }), songs).then(() => app.toast(tf("recap.playlist", { year })));
   }
   function share() {
-    backend().call<string>("share_songs", { title: tf("recap.title", { year }), tracks: songs, kind: "playlist" });
+    app.shareSongs({ title: tf("recap.title", { year }), tracks: songs, kind: "playlist" });
   }
 </script>
 

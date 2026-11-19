@@ -2,7 +2,9 @@
 //! launch (e.g. a click in the Windows taskbar jump list, which starts
 //! `glyph --dock-action N`) hands its request to the running app and exits.
 //!
-//! Messages are single lines: `activate` or `dock <index>`.
+//! Messages are single lines: `activate`, `dock <index>`, `jam <code>`,
+//! `open <link>`, `plugin <id>`, `shared <text>` (a music link sent to
+//! Glyph) or `files <path>␟<path>` (audio files opened with Glyph).
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -62,16 +64,120 @@ pub fn post(request: &str) {
     }
 }
 
-/// What this launch asks for, from the command line.
-pub fn request_from_args() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(req) = args.iter().skip(1).find_map(|a| request_for_url(a)) {
+/// Separates the paths of one `files` request (never part of a path).
+const FILE_SEP: char = '\u{1f}';
+
+/// The `files` request for audio files opened with Glyph (`None`: none of
+/// them is an audio file).
+pub fn files_request(paths: &[String]) -> Option<String> {
+    let files: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| valid_file(p))
+        .take(glyph_app::opened::MAX_FILES)
+        .collect();
+    (!files.is_empty()).then(|| format!("files {}", files.join(&FILE_SEP.to_string())))
+}
+
+/// The paths of a `files` request.
+pub fn split_files(list: &str) -> Vec<String> {
+    list.split(FILE_SEP).filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+fn valid_file(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    !path.contains(['\n', '\r', FILE_SEP]) && glyph_core::import::local::is_audio(p) && p.is_file()
+}
+
+/// A `files` request names only audio files that exist.
+fn valid_files(list: &str) -> bool {
+    let files = split_files(list);
+    !files.is_empty() && files.len() <= glyph_app::opened::MAX_FILES && files.iter().all(|p| valid_file(p))
+}
+
+/// A `shared` request holds exactly what [`open_shared`] makes of a text.
+fn valid_shared(text: &str) -> bool {
+    glyph_app::links::shared_query(text).as_deref() == Some(text)
+}
+
+/// The link inside an internet shortcut: Windows `.url`, Linux `.desktop`
+/// links (`URL=...`) or macOS `.webloc` (`<string>...</string>`), as made
+/// by dragging a link out of the browser.
+fn shortcut_link(path: &str) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "url" | "desktop" | "webloc") {
+        return None;
+    }
+    if std::fs::metadata(p).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    let text = std::fs::read_to_string(p).ok()?;
+    let link = if ext == "webloc" {
+        text.split("<string>").nth(1)?.split("</string>").next()?.trim().to_string()
+    } else {
+        text.lines().find_map(|l| l.trim().strip_prefix("URL="))?.trim().to_string()
+    };
+    (link.starts_with("https://") || link.starts_with("http://") || link.starts_with("glyph://")).then_some(link)
+}
+
+/// A `file://` URI (what Linux launchers hand over) as a path.
+fn file_uri_path(arg: &str) -> Option<String> {
+    let rest = arg.strip_prefix("file://")?;
+    // `file:///home/a/b%20c.mp3` (no host) -> `/home/a/b c.mp3`.
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            if let Some(b) = hex {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let path = String::from_utf8(out).ok()?;
+    // Windows: `file:///C:/x.mp3`.
+    Some(if cfg!(windows) { path.trim_start_matches('/').to_string() } else { path })
+}
+
+/// What one command line asks for (without the program name).
+fn request_for_args(args: &[String]) -> String {
+    let args: Vec<String> = args.iter().map(|a| file_uri_path(a).unwrap_or_else(|| a.clone())).collect();
+    let links: Vec<String> = args.iter().filter_map(|a| shortcut_link(a)).collect();
+    if let Some(req) = args.iter().chain(&links).find_map(|a| request_for_url(a)) {
         return req;
     }
-    match args.iter().position(|a| a == "--dock-action").and_then(|i| args.get(i + 1)) {
-        Some(n) if n.parse::<usize>().is_ok() => format!("dock {n}"),
-        _ => "activate".into(),
+    if let Some(n) = args.iter().position(|a| a == "--dock-action").and_then(|i| args.get(i + 1)) {
+        if n.parse::<usize>().is_ok() {
+            return format!("dock {n}");
+        }
     }
+    // A music link: `glyph <link>`, "Send to" on a browser shortcut.
+    if let Some(q) = args
+        .iter()
+        .chain(&links)
+        .filter(|a| a.starts_with("https://") || a.starts_with("http://") || a.starts_with("spotify:"))
+        .find_map(|a| glyph_app::links::shared_query(a))
+    {
+        return format!("shared {q}");
+    }
+    let plain: Vec<String> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+    files_request(&plain).unwrap_or_else(|| "activate".into())
+}
+
+/// What this launch asks for, from the command line.
+pub fn request_from_args() -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    request_for_args(&args)
 }
 
 /// Becomes the primary instance (true), or forwards `request` to the running
@@ -93,7 +199,7 @@ pub fn claim_or_forward(request: &str) -> bool {
                         let mut line = String::new();
                         if BufReader::new(stream).read_line(&mut line).is_ok() {
                             let line = line.trim();
-                            if line == "activate" || line.starts_with("dock ") || line.strip_prefix("jam ").is_some_and(|c| glyph_protocol::jam::normalize_code(c).as_deref() == Some(c)) || line.strip_prefix("open ").is_some_and(|s| glyph_core::share::link_id(s).is_some()) || line.strip_prefix("plugin ").is_some_and(glyph_core::plugins::valid_id) {
+                            if line == "activate" || line.starts_with("dock ") || line.strip_prefix("jam ").is_some_and(|c| glyph_protocol::jam::normalize_code(c).as_deref() == Some(c)) || line.strip_prefix("open ").is_some_and(|s| glyph_core::share::link_id(s).is_some()) || line.strip_prefix("plugin ").is_some_and(glyph_core::plugins::valid_id) || line.strip_prefix("shared ").is_some_and(valid_shared) || line.strip_prefix("files ").is_some_and(valid_files) {
                                 let _ = tx.send(line.to_string());
                             }
                         }
@@ -143,6 +249,31 @@ mod tests {
 
     #[test]
     fn request_defaults_to_activate() {
-        assert_eq!(request_from_args(), "activate");
+        assert_eq!(request_for_args(&[]), "activate");
+    }
+
+    #[test]
+    fn music_links_and_files_from_the_command_line() {
+        let a = |v: &[&str]| request_for_args(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(a(&["https://open.spotify.com/track/123"]), "shared https://open.spotify.com/track/123");
+        assert_eq!(a(&["--dock-action", "2"]), "dock 2");
+        let dir = std::env::temp_dir().join(format!("glyph-instance-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let song = dir.join("song.mp3");
+        std::fs::write(&song, b"x").unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, b"x").unwrap();
+        let song_s = song.to_string_lossy().into_owned();
+        assert_eq!(a(&[&song_s, &notes.to_string_lossy()]), format!("files {song_s}"));
+        assert!(valid_files(&format!("{song_s}{FILE_SEP}{song_s}")));
+        assert!(!valid_files(&notes.to_string_lossy()));
+        let lnk = dir.join("Song.url");
+        std::fs::write(&lnk, "[InternetShortcut]\r\nURL=https://open.spotify.com/track/9\r\n").unwrap();
+        assert_eq!(a(&[&lnk.to_string_lossy()]), "shared https://open.spotify.com/track/9");
+        assert!(valid_shared("https://open.spotify.com/track/9"));
+        assert!(!valid_shared("  two  words "));
+        let uri = file_uri_path("file:///home/a/b%20c.mp3");
+        assert_eq!(uri.as_deref(), Some(if cfg!(windows) { "home/a/b c.mp3" } else { "/home/a/b c.mp3" }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

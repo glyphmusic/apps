@@ -3,6 +3,7 @@
 
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
+mod clip;
 mod desktop;
 mod host;
 mod tauri_commands;
@@ -103,6 +104,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             tauri_commands::snapshot,
+            tauri_commands::resume_state,
             tauri_commands::play,
             tauri_commands::play_shuffled,
             tauri_commands::play_recent,
@@ -170,6 +172,8 @@ fn main() {
             tauri_commands::stats_recap,
             tauri_commands::share_songs,
             tauri_commands::share,
+            tauri_commands::share_system,
+            tauri_commands::copy_text,
             tauri_commands::copy_artist_link,
             tauri_commands::hidden_artists,
             tauri_commands::toggle_hidden_artist,
@@ -306,6 +310,20 @@ fn main() {
             // macOS: a click on the Dock icon opens the window Glyph started without.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => desktop::show_window(app),
+            // macOS: audio files opened with Glyph (Finder "Open With", a
+            // double click once Glyph is the default player).
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                let files: Vec<String> = urls
+                    .iter()
+                    .filter(|u| u.scheme() == "file")
+                    .filter_map(|u| u.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                if let Some(req) = instance::files_request(&files) {
+                    instance::post(&req);
+                }
+            }
             tauri::RunEvent::Exit => {
                 if let Some(core) = app.try_state::<Arc<Core>>() {
                     core.save_if_dirty();

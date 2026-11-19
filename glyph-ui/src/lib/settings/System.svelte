@@ -28,6 +28,9 @@
       <Row label={t("sp.system.autostart")} info={t("sp.system.autostart.desc")}>
         <Tog on={d.autostart} onchange={autostart} label={t("sp.system.autostart")} />
       </Row>
+      <Row label={t("sp.system.clipboard_links")} info={t("sp.system.clipboard_links.desc")}>
+        <Tog on={d.clipboard_links !== false} onchange={(on) => app.setConfig((c) => { c.desktop.clipboard_links = on; })} label={t("sp.system.clipboard_links")} />
+      </Row>
     </Rows>
     <StartModeVisual />
   </div>

@@ -275,7 +275,10 @@ pub async fn import_playlist_file(core: C<'_>, playlist_id: Option<String>) -> R
 /// Text pasted into the search bar or shared to Glyph. Says what it was:
 /// `{ kind: "migrate", text }` (many links: the UI opens Transfer music with
 /// it), `"song"`, `"playlist"`, `"share"` or `"none"` (just a search).
-pub async fn import_text(core: C<'_>, text: String) -> Res<Value> {
+/// `ask`: the text was shared to Glyph (share sheet, "Send to", a copied
+/// link): one song link is not liked at once but answered as
+/// `{ kind: "pick", tracks }`, and the UI asks where it goes.
+pub async fn import_text(core: C<'_>, text: String, ask: Option<bool>) -> Res<Value> {
     let tr = need_transfer(core)?;
     let core = core.clone();
     let q = text.trim().to_string();
@@ -295,8 +298,14 @@ pub async fn import_text(core: C<'_>, text: String) -> Res<Value> {
             return Ok(json!({ "kind": "migrate", "text": q }));
         }
     }
-    // One song link: that song into Liked Songs.
+    // One song link: that song into Liked Songs (or asked where it goes).
     if Backend::is_song_link(&q) {
+        if ask.unwrap_or(false) {
+            return Ok(match read_song_link(&core, &q).await {
+                Some(song) => json!({ "kind": "pick", "tracks": [song] }),
+                None => json!({ "kind": "none" }),
+            });
+        }
         import_song_link(&core, &q).await;
         return Ok(json!({ "kind": "song" }));
     }
@@ -317,6 +326,26 @@ pub async fn import_text(core: C<'_>, text: String) -> Res<Value> {
         core.toast_key("import.unknown_link", "info");
     }
     Ok(json!({ "kind": "none" }))
+}
+
+/// The song behind one song link, for the "add shared song" sheet.
+async fn read_song_link(core: &Arc<Core>, link: &str) -> Option<glyph_protocol::Track> {
+    let Ok(b) = core.backend_or_err() else {
+        core.toast_key("status.backend_offline", "info");
+        return None;
+    };
+    core.toast_key("import.song.reading", "info");
+    match guard_async(b.songs_from_links(link)).await.map(|s| s.into_iter().next()) {
+        Ok(Some(song)) => Some(song),
+        Ok(None) => {
+            core.toast_key("import.song.unreadable", "info");
+            None
+        }
+        Err(e) => {
+            toast(core, "import.failed", json!({ "e": e }), None, "info");
+            None
+        }
+    }
 }
 
 /// One song link: the song goes into Liked Songs.

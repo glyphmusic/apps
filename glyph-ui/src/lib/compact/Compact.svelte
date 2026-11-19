@@ -25,6 +25,7 @@
   import LyricsView from "./LyricsView.svelte";
   import BottomSheet from "./BottomSheet.svelte";
   import SettingsScreen from "./SettingsScreen.svelte";
+  import ShareSheet from "./ShareSheet.svelte";
   import Page from "../shell/Page.svelte";
   import { installCompactLongPress, phone } from "./cstate.svelte";
 
@@ -39,6 +40,8 @@
   });
   $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; } });
   $effect(() => { if (!app.settingsOpen) phone.settingsInPage = false; });
+  // Leaving the phone layout (window made wide) closes the share menu.
+  $effect(() => () => { app.shareSheet = null; });
   // Navigating away from the sheet ("Go to album" in its menu) closes it.
   let lastView = app.view;
   $effect(() => { const v = app.view; if (v !== lastView && v !== "now_playing") phone.npOpen = false; lastView = v; });
@@ -198,6 +201,7 @@
 {#if app.showQueue || app.showDevices}<BottomSheet />{/if}
 {#if phone.drawerOpen}<Drawer />{/if}
 {#if app.settingsOpen}<SettingsScreen />{/if}
+{#if app.shareSheet}<ShareSheet />{/if}
 
 <style>
   .phone { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; padding-top: var(--safe-top, env(safe-area-inset-top)); }

@@ -22,7 +22,7 @@
     const nextTo = Math.min(count, Math.ceil((sc.clientHeight - top) / pitch) + overscan);
     if (Math.abs(nextFrom - lastTrimAt) >= 24) {
       lastTrimAt = nextFrom;
-      queueMicrotask(() => backend().trimCovers?.(64));
+      queueMicrotask(() => backend().trimCovers?.(240));
     }
     from = nextFrom;
     to = nextTo;

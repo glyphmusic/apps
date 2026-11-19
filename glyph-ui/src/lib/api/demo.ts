@@ -288,6 +288,7 @@ export class DemoBackend implements Backend, DemoCtx {
       download_remove: (_, a) => { lib().downloads = lib().downloads.filter((t) => trackKey(t) !== trackKey(a.track)); this.saveLibrary(); },
       share: async (_, a) => {
         const link = a.track ? `https://glyph.my/t/${a.track.id}` : "https://glyph.my/p/demo";
+        if (a.copy === false) return link;
         try { await navigator.clipboard.writeText(link); } catch { /* preview without clipboard access */ }
         this.emit("toast", { text: a.track ? "Glyph link copied" : "Playlist code copied" });
         return link;

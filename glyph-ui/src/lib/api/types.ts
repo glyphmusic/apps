@@ -363,7 +363,7 @@ export interface Config {
   mpd: { enabled: boolean; address: string };
   devices: { discovery: boolean };
   plugins: { auto_update: boolean; skip_install_warning: boolean; sort: string; disabled: string[] };
-  desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean };
+  desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
   ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; zen?: boolean; reduce_motion?: boolean };
   local: { folders: string[] };
   [k: string]: unknown;
@@ -415,6 +415,10 @@ export interface BackendEvents {
   spectrum: [number, number, number];
   /** Text or link shared to Glyph (deep link, share sheet). */
   shared: string;
+  /** Songs shared or opened with Glyph (an audio file on the phone): ask where they go. */
+  pick_songs: { tracks: Track[]; file?: boolean };
+  /** A music link was copied in another app (desktop, window focused): offer to add it. */
+  clipboard_link: string;
   /** The mini player window was opened or closed (Tauri). */
   mini: boolean;
   /** A plugin (or a glyph://plugin link) asks the window to open something. */

@@ -189,7 +189,7 @@ impl Default for DevicesConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopConfig {
     /// Glyph starts when the user signs in to the computer.
@@ -197,6 +197,15 @@ pub struct DesktopConfig {
     /// Such a start stays in the background (system tray icon) instead of
     /// opening the window.
     pub start_in_tray: bool,
+    /// A music link copied in another app (Spotify, YouTube, ...) is
+    /// offered when the Glyph window gets the focus ("Add to Glyph?").
+    pub clipboard_links: bool,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self { autostart: false, start_in_tray: false, clipboard_links: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

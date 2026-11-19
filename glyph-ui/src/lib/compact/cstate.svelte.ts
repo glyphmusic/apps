@@ -248,6 +248,8 @@ export function installCompactLongPress(holdMs = 360): () => void {
 export function installAndroidBack() {
   (window as unknown as { __glyphBack?: () => boolean }).__glyphBack = () => {
     if (app.confirm) { app.confirm = null; return true; }
+    if (app.shareSheet) { app.shareSheet = null; return true; }
+    if (app.pickSongs) { app.pickSongs = null; return true; }
     if (app.nameDialog) { app.nameDialog = null; return true; }
     if (app.addSongs) { app.addSongs = null; return true; }
     if (app.sharedPreview) { app.sharedPreview = null; return true; }

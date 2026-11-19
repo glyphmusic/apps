@@ -7,6 +7,7 @@
   import ContextMenu from "../overlays/ContextMenu.svelte";
   import ControlMenu from "../overlays/ControlMenu.svelte";
   import NameDialog from "../overlays/NameDialog.svelte";
+  import AddShared from "../overlays/AddShared.svelte";
   import ConfirmDialog from "../overlays/ConfirmDialog.svelte";
   import McpApprove from "../overlays/McpApprove.svelte";
   import MiniPlayer from "../overlays/MiniPlayer.svelte";
@@ -20,6 +21,7 @@
 {#if app.miniShown && !isTauri() && isWebMiniFallback()}<MiniPlayer />{/if}
 {#if app.ctx}<ContextMenu />{/if}
 {#if app.controlMenu}<ControlMenu />{/if}
+{#if app.pickSongs}<AddShared />{/if}
 {#if app.nameDialog}<NameDialog />{/if}
 {#if app.confirm}<ConfirmDialog />{/if}
 {#if app.jamOpen}<Jam />{/if}

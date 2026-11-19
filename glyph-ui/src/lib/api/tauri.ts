@@ -4,7 +4,7 @@ import type { Backend } from "./backend";
 import type { BackendEvents, Snapshot, Track } from "./types";
 import { trackKey } from "./types";
 
-const MAX_COVER_CACHE = 300;
+const MAX_COVER_CACHE = 800;
 const MAX_COVER_ACTIVE = 5;
 /** Asked before the backend is up: tried again for this long instead of answering "no cover". */
 const OFFLINE_RETRY_MS = 30_000;

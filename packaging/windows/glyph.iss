@@ -52,6 +52,22 @@ Filename: "{app}\glyph.exe"; Description: "{cm:LaunchProgram,Glyph}"; Flags: now
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Glyph"; Flags: uninsdeletevalue dontcreatekey
 ; The glyph:// link handler the app registers (src/integrate.rs).
 Root: HKCU; Subkey: "Software\Classes\glyph"; ValueType: none; Flags: uninsdeletekey dontcreatekey
+; "Open with -> Glyph" for audio files, registered by the app too.
+Root: HKCU; Subkey: "Software\Classes\Applications\glyph.exe"; ValueType: none; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\Glyph.AudioFile"; ValueType: none; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.oga\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.mp4\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.aac\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.mka\OpenWithProgids"; ValueType: none; ValueName: "Glyph.AudioFile"; Flags: uninsdeletevalue dontcreatekey
+
+[UninstallDelete]
+; "Send to -> Glyph", made by the app (src/integrate.rs).
+Type: files; Name: "{userappdata}\Microsoft\Windows\SendTo\Glyph.lnk"
 
 [CustomMessages]
 en.DataTitle=Delete Glyph's data on this computer?

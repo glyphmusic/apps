@@ -630,12 +630,14 @@ fn glyph_links(core: &Core) -> bool {
 }
 
 /// Copies a Glyph link of `tracks` and says so; false when it failed.
-async fn copy_glyph_link(core: &Core, title: &str, tracks: &[Track], kind: &str) -> String {
+async fn copy_glyph_link(core: &Core, title: &str, tracks: &[Track], kind: &str, quiet: bool) -> String {
     let Some(b) = core.backend() else { return String::new() };
     let text = b.share_text(title, tracks, kind, None).await;
     if glyph_core::share::link_id(&text).is_some() {
-        copy(core, &text);
-        toast(core, "toast.share_link_copied", None, Some(title), "ok");
+        if !quiet {
+            copy(core, &text);
+            toast(core, "toast.share_link_copied", None, Some(title), "ok");
+        }
         text
     } else {
         toast(core, "toast.share_link_failed", None, None, "info");
@@ -644,13 +646,16 @@ async fn copy_glyph_link(core: &Core, title: &str, tracks: &[Track], kind: &str)
 }
 
 /// Copies a short link (public server) or a share code for `tracks`.
-async fn share_songs_inner(core: &Core, title: String, tracks: Vec<Track>, kind: &str, origin: Option<String>) -> String {
+/// `quiet` only returns it (the phone share menu copies or sends it itself).
+async fn share_songs_inner(core: &Core, title: String, tracks: Vec<Track>, kind: &str, origin: Option<String>, quiet: bool) -> String {
     // Glyph links turned off in Settings > Account: always the code.
     let b = core.backend().filter(|_| core.st().config.sharing.glyph_links);
     let Some(b) = b else {
         let code = glyph_core::share::encode(&title, &tracks);
-        copy(core, &code);
-        toast(core, "toast.share_copied", None, Some(&title), "ok");
+        if !quiet {
+            copy(core, &code);
+            toast(core, "toast.share_copied", None, Some(&title), "ok");
+        }
         return code;
     };
     let signed_in = b.account().is_some();
@@ -660,24 +665,31 @@ async fn share_songs_inner(core: &Core, title: String, tracks: Vec<Track>, kind:
         toast(core, "toast.share_link_failed", None, None, "info");
         return String::new();
     }
-    copy(core, &text);
-    toast(core, if is_link { "toast.share_link_copied" } else { "toast.share_copied" }, None, Some(&title), "ok");
+    if !quiet {
+        copy(core, &text);
+        toast(core, if is_link { "toast.share_link_copied" } else { "toast.share_copied" }, None, Some(&title), "ok");
+    }
     text
 }
 
-pub async fn share_songs(core: C<'_>, title: String, tracks: Vec<Track>, kind: Option<String>) -> Res<String> {
-    Ok(share_songs_inner(&core, title, tracks, kind.as_deref().unwrap_or("playlist"), None).await)
+/// `copy: Some(false)` returns the link without copying it or saying so.
+pub async fn share_songs(core: C<'_>, title: String, tracks: Vec<Track>, kind: Option<String>, copy: Option<bool>) -> Res<String> {
+    Ok(share_songs_inner(&core, title, tracks, kind.as_deref().unwrap_or("playlist"), None, copy == Some(false)).await)
 }
 
-pub async fn share(core: C<'_>, track: Option<Track>, list: Option<ListKey>) -> Res<String> {
+/// `copy: Some(false)` returns the link without copying it or saying so.
+pub async fn share(core: C<'_>, track: Option<Track>, list: Option<ListKey>, copy: Option<bool>) -> Res<String> {
+    let quiet = copy == Some(false);
     if let Some(t) = track {
         if glyph_links(&core) {
-            return Ok(copy_glyph_link(&core, &t.title, std::slice::from_ref(&t), "track").await);
+            return Ok(copy_glyph_link(&core, &t.title, std::slice::from_ref(&t), "track", quiet).await);
         }
         return Ok(match &t.permalink {
             Some(url) => {
-                copy(&core, url);
-                toast(&core, "toast.link_copied_plain", None, Some(&t.title), "ok");
+                if !quiet {
+                    self::copy(&core, url);
+                    toast(&core, "toast.link_copied_plain", None, Some(&t.title), "ok");
+                }
                 url.clone()
             }
             None => {
@@ -697,7 +709,7 @@ pub async fn share(core: C<'_>, track: Option<Track>, list: Option<ListKey>) -> 
         ListKey::Playlist { id } => core.st().library.playlist(id).and_then(|p| p.origin.clone()),
         _ => None,
     };
-    Ok(share_songs_inner(&core, title, tracks, kind, origin).await)
+    Ok(share_songs_inner(&core, title, tracks, kind, origin, quiet).await)
 }
 
 /// A few songs of `name`: known ones first, else a short search.
@@ -734,7 +746,7 @@ async fn artist_tracks(core: &Core, name: &str) -> Vec<Track> {
 pub async fn copy_artist_link(core: C<'_>, artist: String) -> Res<String> {
     let tracks = artist_tracks(&core, &artist).await;
     if glyph_links(&core) {
-        return Ok(copy_glyph_link(&core, &artist, &tracks, "artist").await);
+        return Ok(copy_glyph_link(&core, &artist, &tracks, "artist", false).await);
     }
     let lg = core.st().config.language.clone();
     let wiki = match core.backend() {

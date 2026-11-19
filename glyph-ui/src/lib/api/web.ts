@@ -1526,7 +1526,9 @@ export class WebBackend implements Backend {
         this.mcp.sync();
       },
       // ---- links ----
+      // `copy: false` (phone share menu) only returns the link.
       share: async (a) => {
+        const out = (link: string) => (a.copy === false ? link : this.copyLink(link));
         if (a.track) {
           if (this.config.sharing.glyph_links) {
             try {
@@ -1535,13 +1537,13 @@ export class WebBackend implements Backend {
                 { kind: "song", title: a.track.title, subtitle: a.track.artist, cover_url: a.track.cover_url ?? null, tracks: [a.track] },
                 token,
               );
-              return this.copyLink(res.url);
+              return out(res.url);
             } catch { /* fall back to search link */ }
           }
-          return this.copyLink(this.pageUrl(`search?q=${enc(`${primaryArtist(a.track.artist)} ${a.track.title}`)}`));
+          return out(this.pageUrl(`search?q=${enc(`${primaryArtist(a.track.artist)} ${a.track.title}`)}`));
         }
         const l = a.list as ListKey | undefined;
-        if (l?.kind === "album") return this.copyLink(this.pageUrl(`album/${enc(l.artist)}/${enc(l.title)}`));
+        if (l?.kind === "album") return out(this.pageUrl(`album/${enc(l.artist)}/${enc(l.title)}`));
         if (l?.kind === "playlist") {
           const pl = playlist(l.id);
           if (pl?.tracks.length) {
@@ -1551,7 +1553,7 @@ export class WebBackend implements Backend {
                 { kind: "playlist", title: pl.name, cover_url: pl.cover ?? pl.tracks[0]?.cover_url ?? null, tracks: pl.tracks },
                 token,
               );
-              return this.copyLink(res.url);
+              return out(res.url);
             } catch { /* fall through */ }
           }
         }
@@ -1561,19 +1563,41 @@ export class WebBackend implements Backend {
       share_songs: async (a) => {
         const tracks = (a.tracks ?? []) as Track[];
         if (!tracks.length) return null;
+        const out = (link: string) => (a.copy === false ? link : this.copyLink(link));
         try {
           const token = this.account.isSignedIn() ? await this.account.validToken().catch(() => undefined) : undefined;
           const res = await server.shareCreate(
             { kind: a.kind === "album" || a.kind === "song" ? a.kind : "playlist", title: String(a.title ?? "Glyph"), cover_url: tracks[0]?.cover_url ?? null, tracks },
             token,
           );
-          return this.copyLink(res.url);
+          return out(res.url);
         } catch {
-          return this.copyLink(this.pageUrl(`search?q=${enc(`${primaryArtist(tracks[0].artist)} ${tracks[0].title}`)}`));
+          return out(this.pageUrl(`search?q=${enc(`${primaryArtist(tracks[0].artist)} ${tracks[0].title}`)}`));
         }
       },
+      // Phone share menu: the browser's own share sheet, else copy.
+      share_system: async (a) => {
+        const text = String(a.text ?? "");
+        const nav = navigator as Navigator & { share?: (d: ShareData) => Promise<void> };
+        if (nav.share) {
+          try {
+            // Only the link, so the chat shows it as a link with its preview.
+            await nav.share(/^https?:\/\//.test(text) ? { url: text } : { text });
+            return;
+          } catch (e) {
+            if ((e as DOMException)?.name === "AbortError") return;
+          }
+        }
+        await this.copyLink(text);
+      },
+      copy_text: async (a) => { await navigator.clipboard.writeText(String(a.text ?? "")); },
       copy_artist_link: (a) => this.copyLink(this.pageUrl(`artist/${enc(a.artist)}`)),
-      open_url: (a) => { window.open(String(a.url), "_blank", "noopener,noreferrer"); },
+      open_url: (a) => {
+        const url = String(a.url);
+        // mailto: / sms: hand off to the phone's app; a new tab would stay blank.
+        if (/^(mailto|sms):/.test(url)) location.href = url;
+        else window.open(url, "_blank", "noopener,noreferrer");
+      },
       import_text: () => this.toast("web.app_only", "info"),
       cover_path: (a) => a.track?.cover_url ?? null,
       track_album: async (a) => {

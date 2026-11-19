@@ -22,6 +22,11 @@ pub fn snapshot(core: C) -> Value {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn resume_state(core: C) -> Value {
+    core.resume_state()
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn play(core: C, tracks: Vec<Track>, index: usize, context: Option<String>, from: Option<PlayFrom>) {
     commands::play(&core, tracks, index, context, from)
 }
@@ -364,13 +369,23 @@ pub fn set_playing_from(core: C, list: Option<ListKey>) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn share_songs(core: C<'_>, title: String, tracks: Vec<Track>, kind: Option<String>) -> Res<String> {
-    discover::share_songs(&core, title, tracks, kind).await
+pub async fn share_songs(core: C<'_>, title: String, tracks: Vec<Track>, kind: Option<String>, copy: Option<bool>) -> Res<String> {
+    discover::share_songs(&core, title, tracks, kind, copy).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn share(core: C<'_>, track: Option<Track>, list: Option<ListKey>) -> Res<String> {
-    discover::share(&core, track, list).await
+pub async fn share(core: C<'_>, track: Option<Track>, list: Option<ListKey>, copy: Option<bool>) -> Res<String> {
+    discover::share(&core, track, list, copy).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn share_system(text: String, title: Option<String>) -> Res {
+    commands::share_system(text, title)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn copy_text(text: String) -> Res {
+    commands::copy_text(text)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -937,8 +952,8 @@ pub async fn import_playlist_file(core: C<'_>, playlist_id: Option<String>) -> R
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn import_text(core: C<'_>, text: String) -> Res<Value> {
-    transfer::import_text(&core, text).await
+pub async fn import_text(core: C<'_>, text: String, ask: Option<bool>) -> Res<Value> {
+    transfer::import_text(&core, text, ask).await
 }
 
 #[tauri::command(rename_all = "snake_case")]

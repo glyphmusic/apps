@@ -229,9 +229,14 @@ impl Host for AndroidHost {
             }
         }
 
+        // Asked before `core.st()` is taken: the jam locks come first
+        // (jam -> out -> st). Asking it with `st` held deadlocked against
+        // the jam tick, and the whole core stood still (artist pages and
+        // lists never loaded, the app froze).
+        let remote_on = glyph_app::jam::remote_on();
+        let ps = core.player_state();
         let (current, liked, playing, buffering, position, remote_volume) = {
             let st = core.st();
-            let ps = core.player_state();
             let active_ps = (!st.player_stale).then_some(ps.as_ref()).flatten();
             let current = st.current.clone().or_else(|| active_ps.and_then(|s| s.track.clone()));
             let liked = current.as_ref().is_some_and(|c| st.library.is_liked(c));
@@ -249,7 +254,7 @@ impl Host for AndroidHost {
             } else {
                 active_ps.map_or(Duration::ZERO, |s| s.position)
             };
-            let remote_vol = if glyph_app::jam::remote_on() {
+            let remote_vol = if remote_on {
                 ps.as_ref().map(|s| (s.volume.clamp(0.0, 1.0) * 100.0).round() as u8)
             } else {
                 None
@@ -291,6 +296,20 @@ impl Host for AndroidHost {
         let called = with_activity("gpuiSetClipboard", |env, activity| {
             let s = env.new_string(text)?;
             env.call_method(activity, jni_str!("gpuiSetClipboard"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&s)])?;
+            Ok(())
+        });
+        if called.is_some() {
+            Ok(())
+        } else {
+            Err("activity unavailable".into())
+        }
+    }
+
+    fn share_text(&self, text: &str, title: Option<&str>) -> Result<(), String> {
+        let called = with_activity("gpuiShareText", |env, activity| {
+            let s = env.new_string(text)?;
+            let t = env.new_string(title.unwrap_or(""))?;
+            env.call_method(activity, jni_str!("gpuiShareText"), jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"), &[JValue::Object(&s), JValue::Object(&t)])?;
             Ok(())
         });
         if called.is_some() {
@@ -570,8 +589,37 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeResumed(
     _this: JObject,
 ) {
     if let Some(st) = STATE.get() {
-        st.core.emit_player();
-        st.core.emit_queue();
+        // Off the UI thread: a waiting library is serialized here.
+        let core = st.core.clone();
+        st.rt.spawn_blocking(move || {
+            core.set_ui_hidden(false);
+            core.emit_player();
+            core.emit_queue();
+        });
+    }
+}
+
+/// The app went to the background: the page is frozen, so library events
+/// wait in Rust (one whole library on return) instead of piling up.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativePaused(
+    _env: EnvUnowned,
+    _this: JObject,
+) {
+    if let Some(st) = STATE.get() {
+        st.core.set_ui_hidden(true);
+    }
+}
+
+/// Library patches waiting in Java were dropped: send the whole library.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeLibraryResend(
+    _env: EnvUnowned,
+    _this: JObject,
+) {
+    if let Some(st) = STATE.get() {
+        let core = st.core.clone();
+        st.rt.spawn_blocking(move || core.resend_library());
     }
 }
 

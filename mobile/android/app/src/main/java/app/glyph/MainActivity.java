@@ -117,6 +117,10 @@ public class MainActivity extends AppCompatActivity {
     private native void nativeUrlWaiting();
     private native void nativeConnectivity(boolean online);
     private native void nativeResumed();
+    /** The page goes to the background: Rust holds library events until nativeResumed. */
+    private native void nativePaused();
+    /** Library patches were dropped: Rust sends the whole library again. */
+    private native void nativeLibraryResend();
 
     private volatile boolean activityPaused;
     /** The page has been in the background (onStop): check it is still alive on return. */
@@ -149,10 +153,16 @@ public class MainActivity extends AppCompatActivity {
      */
     private final LinkedHashMap<String, String> pendingLatest = new LinkedHashMap<>();
     private static final Set<String> LATEST_ONLY = new HashSet<>(Arrays.asList(
-            "glyph://player", "glyph://queue", "glyph://library", "glyph://devices",
+            "glyph://player", "glyph://queue", "glyph://devices",
             "glyph://config", "glyph://account", "glyph://home", "glyph://jam",
             "glyph://sleep", "glyph://import_progress", "glyph://backend", "glyph://update",
             "glyph://mcp_approvals", "glyph://search"));
+    /**
+     * Library events that waited: a whole library replaces everything before
+     * it, a patch (only the changed parts) must follow the ones before it.
+     */
+    private final List<String> pendingLibrary = new ArrayList<>();
+    private static final int MAX_PENDING_LIBRARY = 64;
     private final Handler themeHandler = new Handler(Looper.getMainLooper());
     private int lastAccentRgb = -1;
     private String pendingAlias;
@@ -441,6 +451,7 @@ public class MainActivity extends AppCompatActivity {
         pendingInvokes.clear();
         pendingEvents.clear();
         pendingLatest.clear();
+        pendingLibrary.clear();
         if (old != null) {
             try {
                 ViewParent parent = old.getParent();
@@ -584,6 +595,13 @@ public class MainActivity extends AppCompatActivity {
                 webView.evaluateJavascript(js, null);
             }
         }
+        if (!pendingLibrary.isEmpty()) {
+            List<String> copy = new ArrayList<>(pendingLibrary);
+            pendingLibrary.clear();
+            for (String js : copy) {
+                webView.evaluateJavascript(js, null);
+            }
+        }
     }
 
     private void evalInvokeJs(String js) {
@@ -596,12 +614,24 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void evalEventJs(String name, String js) {
+    private void evalEventJs(String name, String js, boolean patch) {
         runOnUiThread(() -> {
             if (webView != null && pageReady && !activityPaused) {
                 webView.evaluateJavascript(js, null);
             } else if (isFinishing() || isDestroyed()) {
                 return;
+            } else if ("glyph://library".equals(name)) {
+                // A whole library makes the waiting ones useless; patches
+                // keep their order. Too many: the next whole one is asked for.
+                if (!patch) {
+                    pendingLibrary.clear();
+                }
+                if (pendingLibrary.size() < MAX_PENDING_LIBRARY) {
+                    pendingLibrary.add(js);
+                } else {
+                    pendingLibrary.clear();
+                    libraryResendNeeded = true;
+                }
             } else if (LATEST_ONLY.contains(name)) {
                 pendingLatest.remove(name);
                 pendingLatest.put(name, js);
@@ -613,6 +643,14 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
+
+    /** A library event with only the changed parts (`{"__patch":{..}}`). */
+    private static boolean isLibraryPatch(String payloadJson) {
+        return payloadJson != null && payloadJson.startsWith("{\"__patch\":");
+    }
+
+    /** Library patches were dropped while away: Rust sends one whole library on return. */
+    private boolean libraryResendNeeded;
 
     private static String toSafeJsLiteral(String json) {
         if (json == null || json.isEmpty()) {
@@ -822,6 +860,10 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         nativeResumed();
+        if (libraryResendNeeded) {
+            libraryResendNeeded = false;
+            nativeLibraryResend();
+        }
         if (checkOnResume) {
             checkOnResume = false;
             // Give the WebView a moment to wake its renderer before asking.
@@ -845,6 +887,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         activityPaused = true;
+        nativePaused();
         checkOnResume = true;
         if (webView != null) {
             webView.onPause();
@@ -932,6 +975,11 @@ public class MainActivity extends AppCompatActivity {
         if (intent == null) {
             return;
         }
+        List<Uri> audio = audioUris(intent);
+        if (!audio.isEmpty()) {
+            takeAudioFiles(audio);
+            return;
+        }
         String url;
         if (Intent.ACTION_SEND.equals(intent.getAction())) {
             // Shared from another app (a Spotify / YouTube link, a song name):
@@ -950,6 +998,194 @@ public class MainActivity extends AppCompatActivity {
             openUrl = url;
         }
         nativeUrlWaiting();
+    }
+
+    /** At most this many files from one "Open with" / share. */
+    private static final int MAX_OPENED_FILES = 200;
+    /** Files larger than this are not copied (a whole video, by mistake). */
+    private static final long MAX_OPENED_BYTES = 1L << 30;
+
+    /**
+     * Music files this intent hands over: "Open with" (VIEW of an audio
+     * file) or "Share" of one or more audio files (SEND / SEND_MULTIPLE).
+     */
+    @SuppressWarnings("deprecation")
+    private List<Uri> audioUris(Intent intent) {
+        List<Uri> out = new ArrayList<>();
+        String action = intent.getAction();
+        String type = intent.getType();
+        boolean audioType = type != null && type.startsWith("audio/");
+        if (Intent.ACTION_VIEW.equals(action)) {
+            Uri data = intent.getData();
+            if (data != null && audioType && ("content".equals(data.getScheme()) || "file".equals(data.getScheme()))) {
+                out.add(data);
+            }
+        } else if (Intent.ACTION_SEND.equals(action) && audioType) {
+            Uri u = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (u != null) {
+                out.add(u);
+            }
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(action) && audioType) {
+            ArrayList<Uri> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (list != null) {
+                for (Uri u : list) {
+                    if (u != null && out.size() < MAX_OPENED_FILES) {
+                        out.add(u);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Copies opened music files into the app's storage (`files/opened`), off
+     * the main thread, and hands their paths to Rust ("glyph-file:", one per
+     * line). The copy stays, so a song liked or added from the sheet keeps
+     * playing from it; the same file shared again is not copied twice.
+     */
+    private void takeAudioFiles(List<Uri> uris) {
+        new Thread(() -> {
+            File dir = new File(getFilesDir(), "opened");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                return;
+            }
+            StringBuilder paths = new StringBuilder();
+            for (Uri uri : uris) {
+                File f = copyOpened(uri, dir);
+                if (f != null) {
+                    paths.append(f.getAbsolutePath()).append('\n');
+                }
+            }
+            if (paths.length() == 0) {
+                return;
+            }
+            synchronized (MainActivity.this) {
+                openUrl = "glyph-file:" + paths;
+            }
+            runOnUiThread(this::nativeUrlWaiting);
+        }, "glyph-open-files").start();
+    }
+
+    private File copyOpened(Uri uri, File dir) {
+        String name = null;
+        long size = -1;
+        try (android.database.Cursor c = getContentResolver().query(uri,
+                new String[] {android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE},
+                null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                if (!c.isNull(0)) {
+                    name = c.getString(0);
+                }
+                if (!c.isNull(1)) {
+                    size = c.getLong(1);
+                }
+            }
+        } catch (Exception e) {
+            Log.i("glyph", "opened file: no name", e);
+        }
+        if (name == null) {
+            name = uri.getLastPathSegment();
+        }
+        name = openedName(name, getContentResolver().getType(uri));
+        if (name == null || size > MAX_OPENED_BYTES) {
+            return null;
+        }
+        File dest = new File(dir, name);
+        if (dest.isFile() && size >= 0 && dest.length() == size) {
+            return dest;
+        }
+        File tmp = new File(dir, name + ".part");
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream out = new java.io.FileOutputStream(tmp)) {
+            if (in == null) {
+                return null;
+            }
+            byte[] buf = new byte[1 << 16];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > MAX_OPENED_BYTES) {
+                    throw new IOException("file too large");
+                }
+                out.write(buf, 0, n);
+            }
+        } catch (Exception e) {
+            Log.w("glyph", "opened file not copied", e);
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            return null;
+        }
+        if (dest.exists() && !dest.delete()) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            return null;
+        }
+        return tmp.renameTo(dest) ? dest : null;
+    }
+
+    /** Audio file endings Glyph plays (glyph_core::import::local::AUDIO_EXTS). */
+    private static final Set<String> AUDIO_EXTS = new HashSet<>(Arrays.asList(
+            "mp3", "flac", "ogg", "oga", "m4a", "mp4", "aac", "wav", "mka"));
+
+    /**
+     * A safe file name for an opened file: no folders, and an ending Glyph
+     * plays (taken from the type when the name has none). Null: not audio.
+     */
+    private static String openedName(String raw, String mime) {
+        String name = raw == null ? "" : raw;
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        name = name.substring(slash + 1).replaceAll("[^\\p{L}\\p{N} ._()\\-]", "_").trim();
+        if (name.startsWith(".")) {
+            name = "_" + name;
+        }
+        if (name.length() > 120) {
+            name = name.substring(name.length() - 120);
+        }
+        int dot = name.lastIndexOf('.');
+        String ext = dot >= 0 ? name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "";
+        if (AUDIO_EXTS.contains(ext)) {
+            return name;
+        }
+        String byType = extForType(mime);
+        if (byType == null) {
+            return null;
+        }
+        return (name.isEmpty() ? "song" : name) + "." + byType;
+    }
+
+    private static String extForType(String mime) {
+        if (mime == null) {
+            return null;
+        }
+        switch (mime.toLowerCase(java.util.Locale.ROOT)) {
+            case "audio/mpeg":
+            case "audio/mp3":
+                return "mp3";
+            case "audio/flac":
+            case "audio/x-flac":
+                return "flac";
+            case "audio/ogg":
+            case "audio/vorbis":
+            case "application/ogg":
+                return "ogg";
+            case "audio/mp4":
+            case "audio/x-m4a":
+            case "audio/m4a":
+                return "m4a";
+            case "audio/aac":
+            case "audio/aacp":
+                return "aac";
+            case "audio/wav":
+            case "audio/x-wav":
+            case "audio/wave":
+                return "wav";
+            case "audio/x-matroska":
+                return "mka";
+            default:
+                return null;
+        }
     }
 
     /**
@@ -981,7 +1217,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         evalEventJs(ev, "window.__glyphEmit(" + JSONObject.quote(ev)
-                + "," + toSafeJsLiteral(payloadJson) + ");");
+                + "," + toSafeJsLiteral(payloadJson) + ");", isLibraryPatch(payloadJson));
     }
 
     public void gpuiOpenUrl(String url) {
@@ -1009,6 +1245,22 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             installApk(path);
+        });
+    }
+
+    /** Opens the Android share sheet with a link or text (phone share menu, "More"). */
+    public void gpuiShareText(String text, String title) {
+        runOnUiThread(() -> {
+            try {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_TEXT, text);
+                if (title != null && !title.isEmpty()) {
+                    send.putExtra(Intent.EXTRA_SUBJECT, title);
+                }
+                startActivity(Intent.createChooser(send, title == null || title.isEmpty() ? null : title));
+            } catch (Exception ignored) {
+            }
         });
     }
 

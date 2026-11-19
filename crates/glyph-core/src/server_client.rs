@@ -48,6 +48,25 @@ pub struct ServerArtist {
     pub tags: Vec<String>,
     #[serde(default)]
     pub similar: Vec<String>,
+    /// Popular songs (newer servers).
+    #[serde(default)]
+    pub top: Vec<Track>,
+    /// The discography, newest first (newer servers).
+    #[serde(default)]
+    pub releases: Vec<ServerRelease>,
+}
+
+/// One release in `ServerArtist::releases` (Deezer album id).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ServerRelease {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub released: Option<String>,
+    #[serde(default)]
+    pub record_type: Option<String>,
 }
 
 /// What a jam's push socket delivers.

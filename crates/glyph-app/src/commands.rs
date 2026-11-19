@@ -1106,7 +1106,54 @@ impl ArtistBuild {
     }
 }
 
-fn artist_event(core: &Core, page: &std::sync::Mutex<ArtistBuild>) {
+/// Artist pages loaded lately, in memory and on disk (`page_cache`).
+/// Opening one again shows it at once instead of asking six services again.
+fn artist_pages() -> &'static crate::page_cache::PageCache {
+    static PAGES: std::sync::LazyLock<crate::page_cache::PageCache> =
+        std::sync::LazyLock::new(|| crate::page_cache::PageCache::new("artists", 32));
+    &PAGES
+}
+
+/// Album track lists loaded lately (title + artist).
+fn album_pages() -> &'static crate::page_cache::PageCache {
+    static PAGES: std::sync::LazyLock<crate::page_cache::PageCache> =
+        std::sync::LazyLock::new(|| crate::page_cache::PageCache::new("albums", 64));
+    &PAGES
+}
+
+/// An artist page this young is shown without asking again.
+const ARTIST_FRESH_S: u64 = 30 * 60;
+/// Older ones still show first while the page loads again behind them.
+const ARTIST_KEEP_S: u64 = 14 * 24 * 3600;
+/// Album track lists rarely change.
+const ALBUM_FRESH_S: u64 = 7 * 24 * 3600;
+
+/// Drops the remembered pages from memory under memory pressure.
+pub(crate) fn trim_artist_cache() {
+    artist_pages().trim();
+    album_pages().trim();
+}
+
+/// A release from the server's artist page in the app's own shape.
+fn server_release(r: glyph_core::server_client::ServerRelease, artist: &str) -> Release {
+    let year = r.released.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()).filter(|y| *y > 1900);
+    Release {
+        id: r.id,
+        title: r.title,
+        artist: artist.to_string(),
+        cover_url: r.cover_url,
+        year,
+        released: r.released,
+        kind: r.record_type.as_deref().and_then(glyph_core::catalog::AlbumKind::parse).unwrap_or(glyph_core::catalog::AlbumKind::Album),
+    }
+}
+
+/// `quiet`: an older copy of the page shows already; only the finished page
+/// replaces it (half-loaded steps would make it jump).
+fn artist_event(core: &Core, page: &std::sync::Mutex<ArtistBuild>, quiet: bool) {
+    if quiet {
+        return;
+    }
     let v = page.lock().unwrap_or_else(|e| e.into_inner()).json();
     core.emit("artist", v);
 }
@@ -1116,7 +1163,7 @@ fn artist_event(core: &Core, page: &std::sync::Mutex<ArtistBuild>) {
 /// `quiet`: not remembered in the sidebar (restoring a page).
 pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value> {
     let core = core.clone();
-    let b = core.backend_or_err()?;
+    let backend = core.backend_or_err();
     let name = glyph_core::dedupe::primary_artist(&name);
     if name.is_empty() {
         return Err("no artist".into());
@@ -1131,10 +1178,60 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         core.library_changed();
     }
     let lang = core.st().config.resolved_language().to_string();
+    let cache_key = format!("{}|{lang}", name.to_lowercase());
+    let cached = artist_pages().get(&cache_key).filter(|(age, _)| *age < ARTIST_KEEP_S);
+    if let Some((age, v)) = &cached {
+        core.emit("artist", v.clone());
+        if *age < ARTIST_FRESH_S {
+            return Ok(v.clone());
+        }
+    }
+    let refresh = cached.is_some();
+    // Offline or still starting: the older copy is better than nothing.
+    let b = match (backend, &cached) {
+        (Ok(b), _) => b,
+        (Err(_), Some((_, v))) => return Ok(v.clone()),
+        (Err(e), None) => return Err(e),
+    };
     let page = std::sync::Mutex::new(ArtistBuild { name: name.clone(), tracks: vec![], loading: true, info_loading: true, info: None, stats: None, similar: vec![], releases: vec![] });
     let lock = || page.lock().unwrap_or_else(|e| e.into_inner());
+    // The server keeps a whole artist page (popular songs, discography,
+    // related artists, fans) for 14 days for every app: one quick request
+    // instead of a search and four lookups on the phone. What it lacks is
+    // still looked up here.
+    let from_server = tokio::time::timeout(Duration::from_secs(4), b.artist_server(&name, &lang)).await.ok().flatten();
+    let (mut have_songs, mut have_stats, mut have_similar, mut have_releases) = (false, false, false, false);
+    if let Some(s) = from_server {
+        let mut p = lock();
+        let top: Vec<Track> = s.top.into_iter().filter(|t| glyph_core::dedupe::by_artist(&t.artist, &name)).collect();
+        if top.len() >= 5 {
+            p.tracks = top;
+            p.loading = p.info_loading;
+            have_songs = true;
+        }
+        if let Some(fans) = s.fans {
+            p.stats = Some(glyph_core::catalog::ArtistStats { fans, verified: s.verified });
+            have_stats = true;
+        }
+        let similar: Vec<String> = s.similar.into_iter().filter(|n| !n.eq_ignore_ascii_case(&name)).collect();
+        if !similar.is_empty() {
+            p.similar = similar;
+            have_similar = true;
+        }
+        if !s.releases.is_empty() {
+            p.releases = s.releases.into_iter().map(|r| server_release(r, &name)).collect();
+            have_releases = true;
+        }
+        drop(p);
+        if have_songs || have_stats || have_similar || have_releases {
+            artist_event(&core, &page, refresh);
+        }
+    }
     // Songs: a normal search for the name, keeping the artist's own songs.
     let songs = async {
+        if have_songs {
+            return;
+        }
         let mut found: Vec<Track> = Vec::new();
         let mut stream = b.search(&name);
         let deadline = Instant::now() + Duration::from_secs(12);
@@ -1153,7 +1250,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
                     }
                     if changed {
                         lock().tracks = found.clone();
-                        artist_event(&core, &page);
+                        artist_event(&core, &page, refresh);
                     }
                 }
                 SearchEvent::Done => break,
@@ -1186,25 +1283,34 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
             }
             p.loading = p.info_loading;
         }
-        artist_event(&core, &page);
+        artist_event(&core, &page, refresh);
     };
     let stats = async {
+        if have_stats {
+            return;
+        }
         if let Ok(Some(s)) = b.artist_stats(&name).await {
             lock().stats = Some(s);
-            artist_event(&core, &page);
+            artist_event(&core, &page, refresh);
         }
     };
     let similar = async {
+        if have_similar {
+            return;
+        }
         if let Ok(v) = b.similar_artists(&name).await {
             // The artist itself is never its own suggestion.
             lock().similar = v.into_iter().filter(|n| !n.eq_ignore_ascii_case(&name)).collect();
-            artist_event(&core, &page);
+            artist_event(&core, &page, refresh);
         }
     };
     let releases = async {
+        if have_releases {
+            return;
+        }
         if let Ok(v) = b.artist_releases(&name).await {
             lock().releases = v;
-            artist_event(&core, &page);
+            artist_event(&core, &page, refresh);
         }
     };
     let info = async {
@@ -1220,7 +1326,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
                 p.info = Some(json!({ "name": name, "bio": i.about, "photo": photo, "banner": banner, "links": links }));
             }
         }
-        artist_event(&core, &page);
+        artist_event(&core, &page, refresh);
     };
     futures::join!(songs, stats, similar, releases, info);
     {
@@ -1229,6 +1335,16 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         p.info_loading = false;
     }
     let v = lock().json();
+    // A page without songs (all lookups failed, offline) is not kept, and
+    // never replaces an older one that had songs.
+    if v["tracks"].as_array().is_some_and(|t| !t.is_empty()) {
+        artist_pages().put(&cache_key, &v);
+    } else if let Some((_, old)) = cached {
+        return Ok(old);
+    }
+    if refresh {
+        core.emit("artist", v.clone());
+    }
     Ok(v)
 }
 
@@ -1281,10 +1397,48 @@ pub async fn artist_verified(core: C<'_>, name: String) -> Res<bool> {
 }
 
 /// The songs of an album: from the catalog, else a search for "artist album".
+/// The songs of an album; kept a week (`album_pages`), and an older copy is
+/// used when the lookup finds nothing (offline, a service down).
 pub async fn album(core: C<'_>, title: String, artist: String) -> Res<Vec<Track>> {
-    let b = core.backend_or_err()?;
     let artist = glyph_core::dedupe::primary_artist(&artist);
-    let releases = b.artist_releases(&artist).await.unwrap_or_default();
+    let key = format!("{}|{}", title.trim().to_lowercase(), artist.trim().to_lowercase());
+    let cached: Option<(u64, Vec<Track>)> = album_pages()
+        .get(&key)
+        .and_then(|(age, v)| Some((age, serde_json::from_value::<Vec<Track>>(v).ok()?)))
+        .filter(|(_, t)| !t.is_empty());
+    if let Some((age, tracks)) = &cached {
+        if *age < ALBUM_FRESH_S {
+            return Ok(tracks.clone());
+        }
+    }
+    match album_lookup(core, &title, &artist).await {
+        Ok(found) if !found.is_empty() => {
+            album_pages().put(&key, &json!(found));
+            Ok(found)
+        }
+        other => match cached {
+            Some((_, tracks)) => Ok(tracks),
+            None => other,
+        },
+    }
+}
+
+async fn album_lookup(core: C<'_>, title: &str, artist: &str) -> Res<Vec<Track>> {
+    let b = core.backend_or_err()?;
+    let (title, artist) = (title.to_string(), artist.to_string());
+    // The server's cached discography first; the catalog itself when it has none.
+    let lang = core.st().config.resolved_language().to_string();
+    let from_server: Vec<Release> = tokio::time::timeout(Duration::from_secs(4), b.artist_server(&artist, &lang))
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.releases.into_iter().map(|r| server_release(r, &artist)).collect())
+        .unwrap_or_default();
+    let releases = if from_server.iter().any(|r| r.title.eq_ignore_ascii_case(&title)) {
+        from_server
+    } else {
+        b.artist_releases(&artist).await.unwrap_or_default()
+    };
     if let Some(r) = releases.iter().find(|r| r.title.eq_ignore_ascii_case(&title)) {
         if let Ok(tracks) = b.release_tracks(r).await {
             if !tracks.is_empty() {
@@ -1395,10 +1549,20 @@ pub fn output_devices() -> Vec<String> {
 }
 
 pub fn open_url(url: String) -> Res {
-    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:")) {
+    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:") || url.starts_with("sms:")) {
         return Err("unsupported link".into());
     }
     crate::host::get().open_url(&url)
+}
+
+/// Hands `text` to the system share sheet (phone share menu, "More").
+pub fn share_system(text: String, title: Option<String>) -> Res {
+    crate::host::get().share_text(&text, title.as_deref())
+}
+
+/// Puts `text` on the clipboard (phone share menu, "Copy link").
+pub fn copy_text(text: String) -> Res {
+    crate::host::get().write_clipboard(&text)
 }
 
 pub fn reveal_data_dir() -> Res {
