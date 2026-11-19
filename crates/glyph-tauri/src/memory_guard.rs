@@ -15,14 +15,20 @@ use glyph_app::controller::Core;
 use std::sync::Arc;
 
 /// Fixed 500 MB RAM budget (binary MiB displayed by Windows Task Manager).
+#[cfg(any(windows, test))]
 pub const RAM_CAP_BYTES: usize = 500 * 1024 * 1024;
 /// Active physical ceiling (~487.6 MB decimal, 465 MiB Task Manager) so both
 /// MiB and decimal MB stay safely under 500 MB.
+#[cfg(any(windows, test))]
 const ENFORCE_CAP_BYTES: usize = 465 * 1024 * 1024;
+#[cfg(any(windows, test))]
 const HARD_TRIM_BYTES: usize = 400 * 1024 * 1024;
+#[cfg(any(windows, test))]
 const SOFT_TRIM_BYTES: usize = 330 * 1024 * 1024;
+#[cfg(any(windows, test))]
 const RELEASE_HYSTERESIS_BYTES: usize = 290 * 1024 * 1024;
 
+#[cfg(any(windows, test))]
 const DEFAULT_BROWSER_ARGS: &[(&str, &str)] = &[
     ("--js-flags=", "--js-flags=--max-old-space-size=128"),
     ("--renderer-process-limit=", "--renderer-process-limit=2"),
@@ -32,6 +38,7 @@ const DEFAULT_BROWSER_ARGS: &[(&str, &str)] = &[
 
 /// Merges WebView2 memory/cache flags into an existing `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
 /// value without duplicating any flag the caller already configured.
+#[cfg(any(windows, test))]
 fn merge_browser_args(existing: &str) -> String {
     let mut parts: Vec<String> = existing.split_whitespace().map(str::to_string).collect();
     for (prefix, flag) in DEFAULT_BROWSER_ARGS {
@@ -57,6 +64,7 @@ pub fn configure_browser_env() {
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcMem {
     pid: u32,
@@ -65,12 +73,14 @@ struct ProcMem {
     commit: usize,
 }
 
+#[cfg(any(windows, test))]
 impl ProcMem {
     fn shared_ws(self) -> usize {
         self.working_set.saturating_sub(self.private_ws)
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pressure {
     Low,
@@ -79,6 +89,7 @@ enum Pressure {
     EnforceCap,
 }
 
+#[cfg(any(windows, test))]
 fn classify_pressure(total_priv: usize, total_commit: usize, was_low_target: bool) -> Pressure {
     if total_priv >= ENFORCE_CAP_BYTES {
         Pressure::EnforceCap
@@ -96,6 +107,7 @@ fn classify_pressure(total_priv: usize, total_commit: usize, was_low_target: boo
 /// Computes per-process hard `WorkingSetSize` limits (`(pid, max_ws_bytes)`) so
 /// the sum of private working sets across `procs` fits within `cap_private`
 /// while preserving each process's shared-DLL working-set delta.
+#[cfg(any(windows, test))]
 fn compute_working_set_caps(procs: &[ProcMem], cap_private: usize) -> Vec<(u32, usize)> {
     const MIN_FLOOR: usize = 16 * 1024 * 1024;
     let total_priv: usize = procs.iter().map(|p| p.private_ws).sum();
@@ -133,8 +145,10 @@ fn compute_working_set_caps(procs: &[ProcMem], cap_private: usize) -> Vec<(u32, 
     out
 }
 
+#[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DormantController {
     pub is_dormant: bool,
@@ -142,6 +156,7 @@ pub struct DormantController {
     pub last_dormant_trim: Option<Instant>,
 }
 
+#[cfg(any(windows, test))]
 impl DormantController {
     #[allow(dead_code)]
     pub fn new() -> Self {

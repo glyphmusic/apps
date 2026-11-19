@@ -54,10 +54,22 @@ def require_unpublished(release):
         raise ValueError('Draft already contains assets; review the interrupted release before retrying')
 
 
+def is_stable(kind, tag, channel_file=Path('RELEASE_CHANNEL')):
+    """Apps releases go out as pre-releases (the "Latest" update channel)
+    unless RELEASE_CHANNEL says "stable"; a tag with a suffix (v1.2.3-beta)
+    is always a pre-release. Server and r-dlp releases stay stable."""
+    if '-' in tag:
+        return False
+    if kind != 'apps':
+        return True
+    return channel_file.exists() and channel_file.read_text(encoding='utf-8').strip().lower() == 'stable'
+
+
 def publish(kind, tag, repo, directory):
     if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', tag):
         raise ValueError('Invalid release tag')
     expected = expected_assets(kind, tag[1:])
+    stable = is_stable(kind, tag)
     content = manifest(directory, expected)
     sums = directory / 'SHA256SUMS.txt'
     sums.write_text(content, encoding='utf-8', newline='\n')
@@ -71,7 +83,7 @@ def publish(kind, tag, repo, directory):
         raise RuntimeError(lookup.stderr)
     else:
         gh('release', 'create', tag, '--repo', repo, '--verify-tag', '--draft',
-           '--notes-file', 'RELEASE_NOTES.md', *(['--prerelease'] if '-' in tag else []))
+           '--notes-file', 'RELEASE_NOTES.md', *([] if stable else ['--prerelease']))
     # No clobber: concurrent or resumed publishers fail closed.
     uploads = sorted(expected | {'SHA256SUMS.txt', 'SHA256SUMS.txt.minisig'})
     gh('release', 'upload', tag, '--repo', repo, *(str(directory / n) for n in uploads))
@@ -84,7 +96,7 @@ def publish(kind, tag, repo, directory):
             if digest(downloaded / name) != digest(directory / name):
                 raise ValueError(f'Remote release checksum mismatch: {name}')
     gh('release', 'edit', tag, '--repo', repo, '--draft=false',
-       '--latest=false' if '-' in tag else '--latest')
+       '--latest' if stable else '--latest=false')
 
 
 if __name__ == '__main__':

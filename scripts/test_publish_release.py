@@ -10,6 +10,17 @@ spec.loader.exec_module(publisher)
 
 
 class PublicationTests(unittest.TestCase):
+    def test_app_releases_are_latest_unless_marked_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            channel = Path(tmp) / 'RELEASE_CHANNEL'
+            self.assertFalse(publisher.is_stable('apps', 'v1.2.3', channel))
+            channel.write_text('latest', encoding='utf-8')
+            self.assertFalse(publisher.is_stable('apps', 'v1.2.3', channel))
+            channel.write_text('stable', encoding='utf-8')
+            self.assertTrue(publisher.is_stable('apps', 'v1.2.3', channel))
+            self.assertFalse(publisher.is_stable('apps', 'v1.2.3-beta', channel))
+            self.assertTrue(publisher.is_stable('server', 'v1.2.3', Path(tmp) / 'missing'))
+
     def test_complete_build_and_windows_binary_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

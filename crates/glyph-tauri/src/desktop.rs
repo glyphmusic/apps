@@ -158,9 +158,10 @@ pub fn harden_webview(win: &tauri::WebviewWindow) {
 }
 
 /// Switches all open Tauri WebView2 instances between `LOW` (flush V8 / image
-/// caches under RAM pressure) and `NORMAL` memory target level.
+/// caches under RAM pressure) and `NORMAL` memory target level. Windows only
+/// (memory_guard's Windows part is the only caller).
+#[cfg(windows)]
 pub fn set_webview_low_memory(app: &tauri::AppHandle, low: bool) {
-    #[cfg(windows)]
     {
         let h = app.clone();
         let _ = app.run_on_main_thread(move || {
@@ -186,13 +187,12 @@ pub fn set_webview_low_memory(app: &tauri::AppHandle, low: bool) {
             }
         });
     }
-    #[cfg(not(windows))]
-    let _ = (app, low);
 }
 
 /// Suspends the main WebView2 instance when the window is hidden or minimized.
+/// Windows only, like `set_webview_low_memory`.
+#[cfg(windows)]
 pub fn suspend_main_webview(app: &tauri::AppHandle) {
-    #[cfg(windows)]
     {
         let h = app.clone();
         let _ = app.run_on_main_thread(move || {
@@ -227,8 +227,6 @@ pub fn suspend_main_webview(app: &tauri::AppHandle) {
             });
         });
     }
-    #[cfg(not(windows))]
-    let _ = app;
 }
 
 /// Immediately resumes the main WebView2 instance if suspended and restores normal memory level.
