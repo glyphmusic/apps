@@ -55,6 +55,7 @@
   $effect(() => {
     if (!mosaic || own?.cover || !near) return;
     const ts = tracks;
+    if (ts.length < 2) { urls = []; return; }
     let alive = true;
     const ac = new AbortController();
     (async () => {
@@ -74,6 +75,9 @@
         if (!alive || out.length >= 4) break;
         add(await backend().cover(t, ac.signal));
       }
+      // Fewer than two covers left (songs removed): drop the old mosaic, so
+      // the single song's cover shows again.
+      if (alive && out.length < 2) urls = [];
     })();
     return () => { alive = false; ac.abort(); };
   });
@@ -89,10 +93,10 @@
 {#if tile}
   <div class="tile" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" style:background={tile.bg}><Icon name={tile.icon} size={isz} color={tile.fg} /></div>
 {:else if own?.cover}
-  <img class="one" src={own.cover} alt="" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" />
+  <img class="one" src={own.cover} alt="" decoding="async" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" />
 {:else if mosaic && urls.length >= 2}
   <div bind:this={box} class="mo m{Math.min(4, urls.length)}" style:width="{size}px" style:height="{size}px" style:--r="{r}px">
-    {#each urls.slice(0, urls.length === 3 ? 3 : urls.length >= 4 ? 4 : 2) as u, i}<img class="q{i}" src={u} alt="" />{/each}
+    {#each urls.slice(0, urls.length === 3 ? 3 : urls.length >= 4 ? 4 : 2) as u, i}<img class="q{i}" src={u} alt="" decoding="async" />{/each}
   </div>
 {:else if coverTrack}
   <div bind:this={box} class="cv-wrap" style:width="{size}px" style:height="{size}px"><Cover track={coverTrack} {size} radius={r} /></div>

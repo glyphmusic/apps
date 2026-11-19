@@ -4,13 +4,15 @@
   // stretched up to 420; rows are made even (6 cards = 3 + 3). Picks Liked
   // Songs plus the playlists, albums, artists, and songs with the most
   // listening time & activity (falling back to recent items when stats empty).
+  // The listening time itself is not shown. Artist cards are round on the
+  // left, like their picture.
   import Icon from "../../components/Icon.svelte";
   import ListCover from "../../components/ListCover.svelte";
   import Cover from "../../components/Cover.svelte";
   import SongTitle from "../../components/SongTitle.svelte";
   import { app } from "../../state.svelte";
   import { t, tf } from "../../i18n.svelte";
-  import { fmtListen } from "../stats/types";
+  import ArtistAvatar from "../../components/ArtistAvatar.svelte";
   import { listId, primaryArtist, rating, trackKey, type ListKey, type Playlist, type Track } from "../../api/types";
 
   const MAX = 420;
@@ -167,7 +169,7 @@
           <ListCover list={c.list} size={56} />
           <div class="tx">
             <div class="tl trunc">{c.playlist.name}</div>
-            <div class="sub trunc">{c.ms > 0 ? `${tf("common.n_songs", { n: c.playlist.tracks.length })} · ${fmtListen(c.ms)}` : tf("common.n_songs", { n: c.playlist.tracks.length })}</div>
+            <div class="sub trunc">{tf("common.n_songs", { n: c.playlist.tracks.length })}</div>
           </div>
         </div>
       {:else if c.kind === "album"}
@@ -175,19 +177,16 @@
           <ListCover list={c.list} size={56} />
           <div class="tx">
             <div class="tl trunc">{c.list.title}</div>
-            <div class="sub trunc">{c.ms > 0 ? `${c.list.artist} · ${fmtListen(c.ms)}` : c.list.artist}</div>
+            <div class="sub trunc">{c.list.artist}</div>
           </div>
         </div>
       {:else if c.kind === "artist"}
-        <div class="c" onclick={() => app.openArtistPage(c.name)} oncontextmenu={artistMenu(c.name)} onkeydown={(e) => e.key === "Enter" && app.openArtistPage(c.name)} role="button" tabindex="-1">
-          {#if c.track}
-            <Cover track={c.track} size={56} radius={28} />
-          {:else}
-            <div class="artist-ph"><Icon name="user-round" size={22} color="rgba(255,255,255,.55)" /></div>
-          {/if}
+        <!-- Round on the left like the picture, so no card corners show around it. -->
+        <div class="c artist" onclick={() => app.openArtistPage(c.name)} oncontextmenu={artistMenu(c.name)} onkeydown={(e) => e.key === "Enter" && app.openArtistPage(c.name)} role="button" tabindex="-1">
+          <ArtistAvatar name={c.name} track={c.track} size={56} iconSize={22} />
           <div class="tx">
             <div class="tl trunc">{c.name}</div>
-            <div class="sub trunc">{c.ms > 0 ? `${t("search.kind.artist")} · ${fmtListen(c.ms)}` : t("search.kind.artist")}</div>
+            <div class="sub trunc">{t("search.kind.artist")}</div>
           </div>
         </div>
       {:else if c.kind === "song"}
@@ -214,7 +213,7 @@
   .c:hover::before { opacity: 1; transition-duration: .12s; }
   .c.off { opacity: .4; }
   .liked { flex: none; width: 56px; height: 56px; display: grid; place-items: center; background: var(--active); }
-  .artist-ph { flex: none; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 50%; background: rgba(255, 255, 255, .06); }
+  .c.artist { border-radius: 28px 8px 8px 28px; }
   .tx { position: relative; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 10px; }
   .tl { font-size: var(--md); font-weight: 500; min-width: 0; }
   .sub { display: flex; min-width: 0; font-size: var(--sm); color: var(--dim); }

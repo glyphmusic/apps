@@ -9,7 +9,7 @@
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
   import { jam } from "../jam.svelte";
-  import { fadeEdges, press } from "../ui.svelte";
+  import { press } from "../ui.svelte";
   import { t } from "../i18n.svelte";
   import { playingFrom } from "../pages/lists/actions";
   import PlayGlyph from "../components/PlayGlyph.svelte";
@@ -65,7 +65,9 @@
     const cutoff = barEl.getBoundingClientRect().bottom;
     const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .sv .head h1, .desk h1.hd");
     const playEl = mainEl.querySelector<HTMLElement>(".lv .head .play, .ap .mob-acts .rp, .sv .head .play");
-    barBgK = app.view === "artist"
+    // Artist pages and lists with a big picture: the bar turns dark only when
+    // the title comes up to it, so the photo / shrinking cover stays visible.
+    barBgK = app.view === "artist" || ownList
       ? (titleEl ? clamp01((cutoff + 36 - titleEl.getBoundingClientRect().top) / 48) : clamp01((top - 180) / 48))
       : clamp01(top / 24);
     titleK = titleEl ? clamp01((cutoff - titleEl.getBoundingClientRect().bottom) / 24) : clamp01((top - 20) / 36);
@@ -77,6 +79,7 @@
     void viewKey;
     untrack(() => {
       scrollTop = 0;
+      phone.scroll = 0;
       mainEl?.scrollTo(0, 0);
       syncBar(0);
     });
@@ -86,10 +89,26 @@
     void app.view;
     untrack(() => syncBar());
   });
+  // One update per frame, read in one go: scroll events can come faster
+  // than frames on Android, and each one used to restyle the page.
+  let scrollRaf = 0;
+  function onScroll() {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      const top = mainEl?.scrollTop ?? 0;
+      scrollTop = top;
+      phone.scroll = top;
+      syncBar(top);
+    });
+  }
+  // The bar of the tab pages and plain pages turns dark as the page scrolls
+  // under it; its status-bar part with it, so no lighter strip stays above.
+  const topK = $derived(app.view === "home" || app.view === "search" || app.view === "library" ? clamp01(scrollTop / 24) : barBgK);
   onMount(() => {
     const onResize = () => syncBar();
     addEventListener("resize", onResize);
-    return () => removeEventListener("resize", onResize);
+    return () => { removeEventListener("resize", onResize); cancelAnimationFrame(scrollRaf); };
   });
   function back() { if (!app.history.length) app.navigate("home"); else app.back(); }
   const barTitle = $derived(
@@ -142,13 +161,15 @@
 {/snippet}
 
 <div class="phone" class:under={phone.npOpen} class:fading={!phone.npOpen || phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
+  {#if app.view !== "artist" && !ownList}
+  <div class="top" style:background="rgba(10, 10, 10, {topK})">
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
       {#snippet actions()}
         <IconAction name="monitor-speaker" label={t("connect.title")} color={connectActive ? "var(--accent)" : undefined} onclick={() => { app.showQueue = false; app.showDevices = true; }} />
       {/snippet}
     </Header>
-  {:else if app.view === "search"}<PhoneSearch part="bar" bg={clamp01(scrollTop / 24)} />
+  {:else if app.view === "search"}<PhoneSearch part="bar" />
   {:else if app.view === "library"}
     <Header title={t("nav.library")}>
       {#snippet actions()}
@@ -156,6 +177,14 @@
         <IconAction name="plus" onclick={() => (app.nameDialog = { tracks: [] })} />
       {/snippet}
     </Header>
+  {:else}
+    <div class="backbar" bind:this={barEl}>
+      <IconAction name="arrow-left" onclick={back} />
+      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
+      {@render barPlayBtn()}
+    </div>
+  {/if}
+  </div>
   {:else if app.view === "artist"}
     <div class="backbar over artist" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <span class="pill-ic" style:--bar-k={barBgK}>
@@ -168,17 +197,17 @@
       </span>
     </div>
   {:else}
-    <div class="backbar" class:over={ownList} bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
+    <div class="backbar over" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <IconAction name="arrow-left" onclick={back} />
       <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
       {@render barPlayBtn()}
-      {#if ownList && app.openList}
+      {#if app.openList}
         <IconAction name="ellipsis-vertical" label={t("ctx.more")} onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: barTracks[0] ?? null, list: app.openList! })} />
       {/if}
     </div>
   {/if}
 
-  <main class="main scroll" id="main-scroll" bind:this={mainEl} use:fadeEdges={{ top: app.view === "artist" || ownList ? 0 : 14, bottom: 0 }} onscroll={(e) => { scrollTop = e.currentTarget.scrollTop; syncBar(); }}>
+  <main class="main scroll" id="main-scroll" bind:this={mainEl} onscroll={onScroll}>
     {#key viewKey}
       <div in:fade={{ duration: 180 }}>
         {#if app.view === "library"}<PhoneLibrary />
@@ -204,15 +233,19 @@
 {#if app.shareSheet}<ShareSheet />{/if}
 
 <style>
-  .phone { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; padding-top: var(--safe-top, env(safe-area-inset-top)); }
+  /* Pages run up under the status bar: the top bar holds the status-bar space
+     and takes its colour, artist photos and list covers start at the very top. */
+  .phone { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
+  .top { flex: none; position: relative; z-index: 6; padding-top: var(--safe-top, env(safe-area-inset-top)); }
   .phone.fading { transition: opacity .22s var(--ease); }
   .phone.under { pointer-events: none; }
   .phone::before { content: ""; position: fixed; inset: 0; z-index: -1; background: rgba(0, 0, 0, .5); pointer-events: none; }
   .backbar { flex: none; height: 52px; padding: 0 16px 0 4px; display: flex; align-items: center; gap: 4px; }
-  .backbar.over { position: absolute; top: var(--safe-top, env(safe-area-inset-top)); left: 0; right: 0; z-index: 6; pointer-events: none; }
+  .backbar.over { position: absolute; top: 0; left: 0; right: 0; z-index: 6; height: calc(52px + var(--safe-top, env(safe-area-inset-top))); padding-top: var(--safe-top, env(safe-area-inset-top)); pointer-events: none; }
   .backbar.over > :global(*) { pointer-events: auto; }
-  .backbar.over:not(.artist) { padding: 0 4px; }
-  .backbar.over.artist { height: 54px; padding: 0 12px; gap: 8px; }
+  .backbar.over:not(.artist) { padding-left: 4px; padding-right: 4px; }
+  /* Starts at the very top, so once it turns dark on scroll it covers the status bar too. */
+  .backbar.over.artist { top: 0; height: calc(54px + var(--safe-top, env(safe-area-inset-top))); padding: var(--safe-top, env(safe-area-inset-top)) 12px 0; gap: 8px; }
   .pill-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: color-mix(in srgb, #141414, transparent calc(var(--bar-k, 0) * 100%)); }
   .pill-ic > :global(*) { width: 38px; height: 38px; }
   .bt { flex: 1; font-size: 16px; font-weight: 700; color: var(--text); }
@@ -221,7 +254,8 @@
   .bar-play:global(.pressing) { animation: press .25s var(--ease); }
   /* The page runs on under the tab bar and mini player, so it stays visible
      there; the tail lets the last row scroll up above them. */
-  .main { flex: 1; min-height: 0; }
+  /* --page: the scroll timeline the cover shrink and photo zoom follow. */
+  .main { flex: 1; min-height: 0; scroll-timeline: --page block; }
   .pad { padding: 0 16px; }
   /* Desktop pages inside the phone frame: the frame scrolls, not the page. */
   .desk :global(.frame), .desk :global(.page-scroll) { position: static; height: auto; overflow: visible; }

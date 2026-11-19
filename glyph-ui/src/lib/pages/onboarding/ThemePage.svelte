@@ -3,7 +3,7 @@
   // h 64, radius 12, white 5 %: 44 cover tile, three skeleton bars, a moving
   // progress line and a 36 accent disc); swatches (38 round, 26 colour dot,
   // white 90 % ring on the current one) recolour the whole app right away;
-  // the theme's name `[ OCEAN ]` decodes in below.
+  // the theme's name decodes in below.
   import Icon from "../../components/Icon.svelte";
   import { app } from "../../state.svelte";
   import { t } from "../../i18n.svelte";
@@ -16,7 +16,7 @@
   const accent = $derived(themeColors(current).accent);
   const pw = $derived(Math.min(w - 48, 380));
   const prog = $derived(still ? 0.4 : (0.18 + s * 0.035) % 1);
-  const name = $derived((THEMES.find((x) => x.id === current) ? t(THEMES.find((x) => x.id === current)!.name) : "").toUpperCase());
+  const name = $derived(THEMES.find((x) => x.id === current) ? t(THEMES.find((x) => x.id === current)!.name) : "");
   const shown = $derived(name ? decode(name, revealK("onb-theme-name", 0.4)) : "");
 
   function pick(id: string) { app.setConfig((c) => { c.visuals.theme = id; }); revealRestart("onb-theme-name"); }
@@ -39,7 +39,7 @@
       </button>
     {/each}
   </div>
-  <div class="nm mono">{#if shown}[ {shown} ]{/if}</div>
+  <div class="nm">{shown}</div>
 </div>
 
 <style>
@@ -57,5 +57,5 @@
   .s { width: 38px; height: 38px; border-radius: 50%; border: 2px solid transparent; display: grid; place-items: center; transition: border-color .2s ease-out; }
   .s.on { border-color: rgba(255, 255, 255, .9); }
   .s span { display: block; border-radius: 50%; }
-  .nm { height: 14px; font-size: 11px; color: rgba(255, 255, 255, .55); }
+  .nm { height: 16px; font-size: 12.5px; font-weight: 500; color: rgba(255, 255, 255, .6); }
 </style>

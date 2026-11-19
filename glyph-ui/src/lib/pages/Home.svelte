@@ -16,6 +16,7 @@
   import CardSkeleton from "./home/CardSkeleton.svelte";
   import { app } from "../state.svelte";
   import { t } from "../i18n.svelte";
+  import { uniqBy } from "../fmt";
   import { listId, trackKey, type ListKey, type Track } from "../api/types";
 
   type HomeRecentEntry =
@@ -67,9 +68,11 @@
   });
   /** Recently played songs only (what a click on a song plays from). */
   const recentSongs = $derived(app.library.recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])));
-  const recs = $derived(app.home.recs.filter((x) => app.allowed(x)));
-  const trending = $derived(app.home.trending.filter((x) => app.allowed(x)));
-  const releases = $derived(app.home.new_releases);
+  // Settings > Playback > Content "Song suggestions" off: no Recommended row.
+  const showRecs = $derived(app.config.ui.recommendations !== false);
+  const recs = $derived(showRecs ? uniqBy(app.home.recs.filter((x) => app.allowed(x)), trackKey) : []);
+  const trending = $derived(uniqBy(app.home.trending.filter((x) => app.allowed(x)), trackKey));
+  const releases = $derived(uniqBy(app.home.new_releases, (r) => r.id));
   const loading = $derived(app.home.loading && !recs.length && !trending.length);
 
   function playRecent(tr: Track) {
@@ -109,9 +112,11 @@
   {/if}
 
   {#if loading}
-    <HomeSection icon="heart" title={t("home.recs")}>
-      <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
-    </HomeSection>
+    {#if showRecs}
+      <HomeSection icon="heart" title={t("home.recs")}>
+        <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
+      </HomeSection>
+    {/if}
     <HomeSection icon="headphones" title={t("home.trending")}>
       <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-trend" {i} />{/each}</HScroll>
     </HomeSection>

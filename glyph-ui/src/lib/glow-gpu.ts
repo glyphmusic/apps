@@ -4,7 +4,9 @@
 // loop in glow.ts), a second stretches it into soft light over the window,
 // and the ASCII characters and titlebar dots (glow-gl.ts) go on top. The CPU
 // only hands over a few numbers per frame. Needs WebGL 2 (integer maths for
-// the noise); without it glow.ts uses the CPU field.
+// the noise); without it glow.ts uses the CPU field. Before it is trusted,
+// `probe` draws a test frame that glow.ts checks against the CPU maths; a
+// graphics card that fails it (or later draws black) is switched off.
 import { VERT, FRAG, fontBytes } from "./glow-gl";
 
 type Rgb = [number, number, number];
@@ -155,7 +157,30 @@ void main() {
 const ASCII_UNIFORMS = ["uField", "uFont", "uRes", "uFieldSize", "uPitch", "uDensity", "uThreshold", "uLevel", "uDotLevel", "uBlend", "uDots"];
 const FIELD_UNIFORMS = ["uFieldSize", "uAspect", "uPreset", "uPrevPreset", "uPresetT", "uMotion", "uT", "uSh", "uLevel", "uCool", "uWarm", "uPCool", "uPWarm"];
 
-let probed: boolean | null = null;
+/** What the one-time check of the graphics card found (`FieldGpu.probe`). */
+export interface GpuProbe {
+  /** WebGL 2 is there and drew the test picture right. */
+  ok: boolean;
+  /** WebGL 2 is there but failed or drew the test picture wrong: the
+   *  graphics card cannot be trusted with the background on this device. */
+  broken: boolean;
+  /** Only a software renderer, no real graphics card behind it. */
+  software: boolean;
+  renderer: string;
+  reason: string;
+}
+
+const CONTEXT: WebGLContextAttributes = { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: "low-power" };
+const SOFTWARE = /swiftshader|llvmpipe|softpipe|lavapipe|software|basic render|microsoft basic|\bwarp\b|mesa offscreen/i;
+
+function rendererOf(gl: WebGL2RenderingContext): string {
+  try {
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) ?? "");
+  } catch {
+    return "";
+  }
+}
 
 export class FieldGpu {
   private gl: WebGL2RenderingContext;
@@ -176,33 +201,45 @@ export class FieldGpu {
   lost = false;
 
   /**
-   * Whether this device can draw the background on the GPU. Tried once on a
-   * spare canvas: a canvas that got a WebGL 2 context cannot fall back to a
-   * 2D one any more.
+   * Whether this device can draw the background on the GPU. Tried on a
+   * spare `w` x `h` canvas (a canvas that got a WebGL 2 context cannot fall
+   * back to a 2D one any more): set up everything, then `test` draws a known
+   * frame and checks the result (glow.ts compares it with the CPU maths). It
+   * returns why it failed, or null. Some drivers hand out a context, compile
+   * everything and then draw nothing or garbage: that is `broken`.
    */
-  static supported(font: number[][]): boolean {
-    if (probed != null) return probed;
-    probed = false;
+  static probe(font: number[][], w: number, h: number, test: (f: FieldGpu) => string | null): GpuProbe {
+    const out: GpuProbe = { ok: false, broken: false, software: false, renderer: "", reason: "" };
+    let f: FieldGpu | null = null;
     try {
       const c = document.createElement("canvas");
-      c.width = c.height = 4;
-      const gl = c.getContext("webgl2", { antialias: false, depth: false, stencil: false });
-      if (gl) {
-        const f = new FieldGpu(c, gl, font, () => {});
-        f.destroy();
-        probed = true;
-      }
+      c.width = w; c.height = h;
+      const gl = c.getContext("webgl2", CONTEXT);
+      if (!gl) { out.reason = "no WebGL 2"; return out; }
+      out.renderer = rendererOf(gl);
+      // A context only with "major performance caveats" means software.
+      const strict = document.createElement("canvas");
+      strict.width = strict.height = 1;
+      const sgl = strict.getContext("webgl2", { ...CONTEXT, failIfMajorPerformanceCaveat: true });
+      out.software = !sgl || SOFTWARE.test(out.renderer);
+      sgl?.getExtension("WEBGL_lose_context")?.loseContext();
+      f = new FieldGpu(c, gl, font, () => {});
+      const why = test(f) ?? f.check();
+      if (why) { out.broken = true; out.reason = why; } else out.ok = true;
     } catch (e) {
-      console.warn("[glow] GPU background unavailable, using the CPU:", e);
+      out.broken = true;
+      out.reason = e instanceof Error ? e.message : String(e);
+    } finally {
+      f?.destroy();
     }
-    return probed === true;
+    if (!out.ok) console.warn(`[glow] GPU background unavailable (${out.renderer || "unknown renderer"}): ${out.reason}`);
+    return out;
   }
 
-  /** null without WebGL 2. `onChange` runs when the context is lost or back. */
+  /** null without WebGL 2 or when setting up fails. `onChange` runs when the context is lost or back. */
   static create(canvas: HTMLCanvasElement, font: number[][], onChange: () => void): FieldGpu | null {
-    if (!FieldGpu.supported(font)) return null;
     try {
-      const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: "low-power" });
+      const gl = canvas.getContext("webgl2", CONTEXT);
       if (!gl) return null;
       return new FieldGpu(canvas, gl, font, onChange);
     } catch (e) {
@@ -377,6 +414,40 @@ export class FieldGpu {
     gl.uniform1f(a.uBlend, f.blend);
     gl.uniform1f(a.uDots, f.dots ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /** Why the context is not usable right now (an error or lost), or null. */
+  check(): string | null {
+    const gl = this.gl;
+    if (gl.isContextLost()) return "context lost";
+    const e = gl.getError();
+    return e === gl.NO_ERROR ? null : `WebGL error 0x${e.toString(16)}`;
+  }
+
+  /**
+   * The last frame's field, one RGBA pixel per cell, top row first:
+   * `which` 0 colour + brightness / 2 (what the characters read), 1 the light.
+   */
+  readField(which: 0 | 1): Uint8Array | null {
+    if (this.lost || !this.fw || !this.fh) return null;
+    const gl = this.gl;
+    const px = new Uint8Array(this.fw * this.fh * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbo);
+    gl.readBuffer(which === 0 ? gl.COLOR_ATTACHMENT0 : gl.COLOR_ATTACHMENT1);
+    gl.readPixels(0, 0, this.fw, this.fh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    return px;
+  }
+
+  /** Row `y` (from the top) of the window picture just drawn, before the browser shows it. */
+  readScreenRow(y: number): Uint8Array | null {
+    if (this.lost) return null;
+    const gl = this.gl, w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+    if (!w || !h) return null;
+    const px = new Uint8Array(w * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.readPixels(0, Math.max(0, Math.min(h - 1, h - 1 - Math.floor(y))), w, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px;
   }
 
   /** Frees the GPU memory right away (the canvas goes too). */

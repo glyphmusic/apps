@@ -13,12 +13,13 @@
   import { groupAlbums, releaseKind } from "./lists/actions";
   import { albumLabel } from "./lists/albumMeta.svelte";
   import type { Release, Track } from "../api/types";
+  import { uniqBy } from "../fmt";
 
   const name = $derived(app.openArtist ?? "");
   const page = $derived(app.artists[name.toLowerCase()]);
   const tracks = $derived(page?.tracks ?? []);
   const loading = $derived((!page || page.loading) && !tracks.length);
-  const releases = $derived(page?.releases ?? []);
+  const releases = $derived(uniqBy(page?.releases ?? [], (r) => r.id));
   const grouped = $derived(releases.length ? [] : groupAlbums(tracks));
   const seed = (r: Release): Track => ({ id: r.id, source: "deezer", title: r.title, artist: r.artist, album: r.title, cover_url: r.cover_url ?? undefined });
 </script>

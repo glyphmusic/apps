@@ -4,6 +4,7 @@
   // down recent searches (or recently played).
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
+  import ArtistAvatar from "../components/ArtistAvatar.svelte";
   import { app } from "../state.svelte";
   import { t } from "../i18n.svelte";
   import { shortcut } from "../window";
@@ -62,7 +63,7 @@
                 <Cover track={item.track} size={44} radius={4} />
                 <span class="po"><Icon name="play" size={16} color="#fff" /></span>
               {:else if item.kind === "artist"}
-                {#if item.track}<Cover track={item.track} size={44} round />{:else}<span class="ph round"><Icon name="user-round" size={18} color="rgba(255,255,255,.6)" /></span>{/if}
+                <ArtistAvatar name={item.name} track={item.track} size={44} iconSize={18} />
               {:else}
                 <span class="ph"><Icon name="search" size={18} color="rgba(255,255,255,.6)" /></span>
               {/if}
@@ -101,7 +102,6 @@
   .po { position: absolute; inset: 0; border-radius: 4px; display: grid; place-items: center; background: rgba(0, 0, 0, .45); opacity: 0; transition: opacity .12s; }
   .it:hover .po { opacity: 1; }
   .ph { width: 44px; height: 44px; border-radius: 4px; background: rgba(255, 255, 255, .08); display: grid; place-items: center; }
-  .ph.round { border-radius: 50%; }
   .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .t { font-size: var(--md); font-weight: 500; color: #fff; }
   .s { font-size: var(--sm); color: rgba(255, 255, 255, .6); }

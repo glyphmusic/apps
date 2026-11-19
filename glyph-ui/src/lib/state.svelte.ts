@@ -12,6 +12,7 @@ import { setLang, t, tf } from "./i18n.svelte";
 import { trimReveals } from "./ui.svelte";
 import { inMiniWindow } from "./window";
 import { applyTheme } from "./theme";
+import { gpuProbe, recommendVisuals } from "./glow";
 
 export type View =
   | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local";
@@ -83,6 +84,9 @@ function sameTrackData(a: Track | null | undefined, b: Track | null | undefined)
   return ak.length === bk.length && ak.every((k) => (ae as Record<string, string | undefined>)[k] === (be as Record<string, string | undefined>)[k]);
 }
 
+/** How long hearts wait to be sent together (see App.flushLikes). */
+const LIKE_BATCH_MS = 700;
+
 class App {
   ready = $state(false);
   platform = $state<Snapshot["platform"]>("web");
@@ -105,6 +109,8 @@ class App {
   view = $state<View>("home");
   openList = $state<ListKey | null>(null);
   openArtist = $state<string | null>(null);
+  /** The list or artist page the queue was last started from (`play`), for the "Playing from" link. */
+  playOrigin = $state<{ context: string | null; list: ListKey | null; artist: string | null } | null>(null);
   openProfile = $state<string | null>(null);
   section = $state<Section | null>(null);
   history = $state<Route[]>([]);
@@ -190,6 +196,7 @@ class App {
     setLang(snap.config.language || navigator.language);
     this.splash = snap.config.visuals.startup_animation;
     this.onboarding = snap.first_run;
+    if (snap.first_run && !inMiniWindow()) this.tuneVisuals();
 
     api.on("player", (p) => this.setPlayer({ ...this.player, ...p }));
     api.on("queue", (q) => (this.queue = q));
@@ -198,6 +205,8 @@ class App {
     api.on("library", (l) => {
       const patch = (l as { __patch?: Partial<Library> }).__patch;
       this.library = patch ? { ...this.library, ...patch } : l;
+      // Hearts still waiting to be sent stay as tapped (no flicker back).
+      if (this.likeBatch.size && (!patch || patch.liked)) this.library.liked = this.withPendingLikes(this.library.liked);
       this.pruneAddSongs();
     });
     api.on("config", (c) => (this.config = normalizeConfig(c)));
@@ -253,7 +262,10 @@ class App {
     });
 
     if (typeof document !== "undefined") {
+      // Leaving the app (phone home button, window hidden): send waiting hearts now.
+      addEventListener("pagehide", () => this.flushLikes());
       document.addEventListener("visibilitychange", () => {
+        if (document.hidden) this.flushLikes();
         this.scheduleClock();
         // Back from the background: only the player and the queue can be
         // behind (the whole snapshot also rebuilt the library and listed
@@ -392,7 +404,43 @@ class App {
       artist: this.view === "artist" ? this.openArtist : null,
       search: this.view === "search",
     };
+    this.playOrigin = { context: context ?? null, list: fromList, artist: from.artist };
     return backend().call("play", { tracks, index, context: context ?? null, from });
+  }
+
+  /**
+   * Where "Playing from <context>" leads: the list or artist page the queue
+   * was started from when its name matches, else a list or artist with that
+   * name (Liked Songs, a playlist, the playing song's artist), else the page
+   * it was started from. null when nothing fits (radio, search results).
+   */
+  playingFromTarget(): { list: ListKey } | { artist: string } | null {
+    const ctx = this.queue.context?.trim();
+    if (!ctx) return null;
+    const same = (a: string | null | undefined) => !!a && a.trim().toLowerCase() === ctx.toLowerCase();
+    const o = this.playOrigin;
+    if (o?.list && same(this.listTitle(o.list))) return { list: o.list };
+    if (o?.artist && same(o.artist)) return { artist: o.artist };
+    if (same(t("library.liked"))) return { list: { kind: "liked" } };
+    const pl = this.library.playlists.find((p) => same(p.name));
+    if (pl) return { list: { kind: "playlist", id: pl.id } };
+    const cur = this.player.current;
+    if (cur && (same(cur.artist) || same(primaryArtist(cur.artist)))) return { artist: primaryArtist(cur.artist) };
+    if (cur?.album && same(cur.album)) return { list: { kind: "album", title: cur.album, artist: primaryArtist(cur.artist), tracks: [] } };
+    if (o && (!o.context || same(o.context))) {
+      if (o.list) return { list: o.list };
+      if (o.artist) return { artist: o.artist };
+    }
+    return null;
+  }
+
+  /** Opens what "Playing from" names; false when there is nothing to open. */
+  openPlayingFrom(): boolean {
+    const to = this.playingFromTarget();
+    if (!to) return false;
+    if ("artist" in to) this.openArtistPage(to.artist);
+    else this.openListView(to.list);
+    return true;
   }
   playOne(t: Track) { return this.play([t], 0); }
   togglePlay() {
@@ -444,7 +492,110 @@ class App {
   toggleLike(t: Track) {
     const on = !this.isLiked(t);
     this.library.liked = on ? [t, ...this.library.liked] : this.library.liked.filter((x) => trackKey(x) !== trackKey(t));
-    return backend().call("like", { track: t, on });
+    this.likeBatch.set(trackKey(t), { track: t, on });
+    clearTimeout(this.likeTimer);
+    this.likeTimer = window.setTimeout(() => this.flushLikes(), LIKE_BATCH_MS);
+    return Promise.resolve();
+  }
+  /** Likes or unlikes many songs at once (a selection, "Clear Liked Songs"):
+   *  the list changes at once, the backend gets one call. */
+  setLiked(tracks: Track[], on: boolean) {
+    if (!tracks.length) return Promise.resolve();
+    const ks = new Set(tracks.map(trackKey));
+    for (const k of ks) this.likeBatch.delete(k);
+    const rest = this.library.liked.filter((x) => !ks.has(trackKey(x)));
+    this.library.liked = on ? [...tracks.filter((x) => !this.likedKeys.has(trackKey(x))), ...this.library.liked] : rest;
+    return backend().call("like_many", { tracks, on });
+  }
+  // ---- select mode (Liked Songs, own playlists) ----
+  /** The list in select mode and the keys of the picked songs. */
+  picking = $state<{ list: string; keys: string[] } | null>(null);
+  private pickedSet = $derived(new Set(this.picking?.keys ?? []));
+  /** Only Liked Songs (also per artist) and own playlists can drop songs in bulk. */
+  canPick(l: ListKey | null | undefined) { return !!l && (l.kind === "liked" || l.kind === "artist_liked" || (l.kind === "playlist" && !!this.playlist(l.id))); }
+  isPicking(l: ListKey | null | undefined) { return !!l && this.picking?.list === listId(l); }
+  isPicked(t: Track) { return this.pickedSet.has(trackKey(t)); }
+  startPicking(l: ListKey, first?: Track) { this.picking = { list: listId(l), keys: first ? [trackKey(first)] : [] }; }
+  stopPicking() { this.picking = null; }
+  togglePicked(t: Track) {
+    const p = this.picking;
+    if (!p) return;
+    const k = trackKey(t);
+    this.picking = { ...p, keys: this.pickedSet.has(k) ? p.keys.filter((x) => x !== k) : [...p.keys, k] };
+  }
+  /** Picks all `tracks`, or none when all are picked already. */
+  pickAll(tracks: Track[]) {
+    const p = this.picking;
+    if (!p) return;
+    const all = tracks.length > 0 && tracks.every((x) => this.pickedSet.has(trackKey(x)));
+    this.picking = { ...p, keys: all ? [] : [...new Set(tracks.map(trackKey))] };
+  }
+  /** Removes the picked songs of `l` in one go and leaves select mode. */
+  removePicked(l: ListKey) {
+    if (!this.isPicking(l)) return;
+    const ks = this.pickedSet;
+    const tracks = this.listTracks(l).filter((x) => ks.has(trackKey(x)));
+    this.picking = null;
+    this.removeTracks(l, tracks);
+  }
+  /** Removes `tracks` from Liked Songs or an own playlist (one backend call). */
+  removeTracks(l: ListKey, tracks: Track[]) {
+    if (!tracks.length) return;
+    const n = tracks.length;
+    if (l.kind === "liked" || l.kind === "artist_liked") {
+      void this.setLiked(tracks, false);
+      this.toast(tf("toast.removed_n_liked", { n }), "ok", { label: t("toast.undo"), run: () => { void this.setLiked(tracks, true); } });
+    } else if (l.kind === "playlist") {
+      const ks = new Set(tracks.map(trackKey));
+      const p = this.playlist(l.id);
+      if (!p) return;
+      const indices = p.tracks.flatMap((x, i) => (ks.has(trackKey(x)) ? [i] : []));
+      const before = [...p.tracks];
+      p.tracks = p.tracks.filter((x) => !ks.has(trackKey(x)));
+      void backend().call("playlist_remove_many", { id: l.id, indices });
+      this.toast(tf("toast.removed_n_from", { n, name: p.name }), "ok", {
+        label: t("toast.undo"),
+        // Back in their old places.
+        run: () => { for (const i of [...indices].sort((a, b) => a - b)) void backend().call("list_insert", { list: l, index: i, track: before[i] }); },
+      });
+    }
+  }
+  /** "Clear Liked Songs": asks first, then removes all of them at once. */
+  clearLiked() {
+    const all = [...this.library.liked];
+    if (!all.length) return;
+    this.ask({
+      title: t("liked.clear.title"),
+      body: tf("liked.clear.body", { n: all.length }),
+      ok: t("liked.clear.ok"),
+      danger: true,
+      run: () => { this.picking = null; this.removeTracks({ kind: "liked" }, all); },
+    });
+  }
+
+  // Hearts tapped close together (unliking a lot of songs one by one) are
+  // sent as one call after a short pause: each call saved and redrew the
+  // whole library, and many in a row could leave a black screen.
+  private likeBatch = new Map<string, { track: Track; on: boolean }>();
+  private likeTimer = 0;
+  flushLikes() {
+    clearTimeout(this.likeTimer);
+    this.likeTimer = 0;
+    if (!this.likeBatch.size) return;
+    const all = [...this.likeBatch.values()];
+    this.likeBatch.clear();
+    for (const on of [true, false]) {
+      const tracks = all.filter((x) => x.on === on).map((x) => x.track);
+      if (tracks.length === 1) void backend().call("like", { track: tracks[0], on });
+      else if (tracks.length) void backend().call("like_many", { tracks, on });
+    }
+  }
+  private withPendingLikes(liked: Track[]): Track[] {
+    const add: Track[] = [];
+    const drop = new Set<string>();
+    for (const [k, x] of this.likeBatch) (x.on ? add.push(x.track) : drop.add(k));
+    const have = new Set(liked.map(trackKey));
+    return [...add.filter((x) => !have.has(trackKey(x))), ...liked.filter((x) => !drop.has(trackKey(x)))];
   }
   allowed(t: Track) { return !(this.config?.audio.hide_explicit && (t.explicit || (t.source === "youtube" && !t.external_ids?.deezer && !t.external_ids?.spotify))); }
   playlist(id: string): Playlist | undefined { return this.library.playlists.find((p) => p.id === id); }
@@ -917,6 +1068,30 @@ class App {
   }
 
   // ---- settings ----
+  /**
+   * First start: checks the device before the background starts and picks
+   * who draws it (graphics card or processor) and whether performance mode
+   * helps (glow.ts recommendVisuals). A graphics card that fails the check
+   * is locked right away. The onboarding's speed page shows the pick and
+   * lets the user change it.
+   */
+  private tuneVisuals() {
+    try {
+      const pick = recommendVisuals();
+      const broken = gpuProbe().broken;
+      const render = pick.render === "cpu" ? "cpu" : "";
+      const v = this.config.visuals;
+      if ((v.render_mode ?? "") === render && !!v.performance_mode === pick.perf && !!v.gpu_blocked === broken) return;
+      void this.setConfig((c) => {
+        c.visuals.render_mode = render;
+        c.visuals.performance_mode = pick.perf;
+        c.visuals.gpu_blocked = broken;
+      });
+    } catch (e) {
+      console.warn("[visuals] device check failed, keeping the defaults:", e);
+    }
+  }
+
   setConfig(patch: (c: Config) => void) {
     patch(this.config);
     if (this.config.language) setLang(this.config.language);

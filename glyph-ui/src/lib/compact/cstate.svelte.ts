@@ -14,7 +14,14 @@ export const phone = $state({
   settingsInPage: false,
   settingsSub: 0,
   libFilter: 0,
+  /** How far the page is scrolled (px): the list cover shrinks, the artist photo zooms. */
+  scroll: 0,
 });
+
+/** The browser moves scroll-linked effects itself (on its own thread, in
+ *  step with the finger), so they never stutter when the page is busy.
+ *  Older WebViews fall back to updating them from the scroll position. */
+export const scrollFx = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("animation-timeline: scroll()");
 
 /** Constants of compact.rs. */
 export const MINI_H = 64, TABS_H = 42, HEADER_H = 60, EDGE = 16, SIDE = 24, SWIPE_ACT = 72;
@@ -97,8 +104,18 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   el.addEventListener("pointermove", move);
   el.addEventListener("pointerup", up);
   el.addEventListener("pointercancel", up);
+  // Smooth scrolling: a blocking touchmove listener makes the browser wait
+  // for this page's code before every scroll step (stutter on Android, most
+  // of all on song rows, which are everywhere). So the browser is told up
+  // front which way it may scroll here (touch-action), and only drags that
+  // must decide per move (pull down a sheet only when its list is at the
+  // top) keep a blocking listener.
+  const ta = o.axis === "x" ? "pan-y" : o.axis === "y" && !o.onlyAtTop ? "pan-x" : o.axis === "any" || !o.axis ? "none" : "";
+  const cur = typeof getComputedStyle === "function" ? getComputedStyle(el).touchAction : "";
+  if (ta && (cur === "auto" || cur === "")) el.style.touchAction = ta;
+  const blocking = !ta || !(el.style.touchAction === ta || cur === ta || cur === "none");
   el.addEventListener("touchstart", tstart, { passive: true });
-  el.addEventListener("touchmove", tmove, { passive: false });
+  if (blocking) el.addEventListener("touchmove", tmove, { passive: false });
   el.addEventListener("touchend", tend, { passive: true });
   el.addEventListener("touchcancel", tend, { passive: true });
   el.addEventListener("click", click, true);

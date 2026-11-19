@@ -145,11 +145,10 @@
     padding: 6px;
     border-radius: 6px;
     background: #0a0a0a;
-    border: 1.5px solid rgba(255, 255, 255, .2);
-    transition: border-color .15s ease-out, transform .15s var(--ease);
+    transition: background-color .15s ease-out, transform .15s var(--ease);
   }
-  .thumb:hover .box { border-color: rgba(255, 255, 255, .48); }
-  .thumb.on .box { border-color: #fff; }
+  .thumb:hover .box { background: #18181b; }
+  .thumb.on .box { background: #2a2a30; }
   .thumb:active .box { transform: scale(.97); }
 
   .wf { width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: space-between; gap: 4px; }
@@ -246,13 +245,13 @@
     height: 32px;
     padding: 0 18px;
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, .28);
+    background: rgba(255, 255, 255, .1);
     font-size: 13px;
     font-weight: 600;
     color: #fff;
     transition: background-color .15s, border-color .15s, opacity .15s;
   }
-  .reset:hover:not(:disabled) { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .5); }
+  .reset:hover:not(:disabled) { background: rgba(255, 255, 255, .16); }
   .reset:disabled { opacity: .35; cursor: default; }
 
   @media (max-width: 480px) {

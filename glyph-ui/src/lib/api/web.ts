@@ -47,7 +47,7 @@ export function webConfig(): Config {
   return {
     server_url: "", language: "", keys: {},
     providers: { local_search: false, youtube_mode: "server", youtube_only: false, enabled: ["audius", "jamendo", "archive", "soundcloud", "youtube", "deezer"], priority: ["audius", "jamendo", "archive", "youtube"], extractor: "none" },
-    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false, render_mode: "" },
+    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false, render_mode: "", gpu_blocked: false },
     updates: { repo: "glyphmusic/apps", check_on_start: false, auto_install: false, channel: "stable" },
     audio: { crossfade_s: 0, quality: "auto", download_quality: "high", download_parallelism: 3, download_adaptive: true, level: "normal", normalize: false, hide_explicit: false, channels: "stereo", eq_enabled: false, eq_preset: "flat", eq_gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], eq_user_presets: [], eq_bass_db: 0, eq_headroom_db: 0, output_device: null },
     storage: { cache_limit_mb: 0, data_saver: false, download_dir: null },
@@ -62,7 +62,7 @@ export function webConfig(): Config {
     devices: { discovery: false },
     plugins: { auto_update: false, skip_install_warning: false, sort: "stars", disabled: [] },
     desktop: { autostart: false, start_in_tray: false },
-    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, keys: {}, reveal_downloads: false, text_scale: 1 },
+    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, keys: {}, reveal_downloads: false, text_scale: 1, recommendations: true },
     local: { folders: [] },
   };
 }
@@ -1419,6 +1419,12 @@ export class WebBackend implements Backend {
         lib().liked = a.on ? [a.track, ...lib().liked.filter((t) => trackKey(t) !== k)] : lib().liked.filter((t) => trackKey(t) !== k);
         this.saveLibrary();
       },
+      like_many: (a) => {
+        const ks = new Set((a.tracks as Track[]).map(trackKey));
+        const rest = lib().liked.filter((t) => !ks.has(trackKey(t)));
+        lib().liked = a.on ? [...(a.tracks as Track[]), ...rest] : rest;
+        this.saveLibrary();
+      },
       playlist_create: (a) => {
         const id = `pl-${Date.now().toString(36)}`;
         lib().playlists.unshift({ id, name: a.name, tracks: a.tracks ?? [], created_at: Date.now(), local_only: !this.account.isSignedIn() });
@@ -1443,6 +1449,13 @@ export class WebBackend implements Backend {
       playlist_purge: (a) => { lib().playlist_trash = (lib().playlist_trash ?? []).filter((x) => x.id !== a.id); this.saveLibrary(); },
       playlist_add: (a) => { playlist(a.id)?.tracks.push(...a.tracks); this.saveLibrary(); },
       playlist_remove: (a) => { playlist(a.id)?.tracks.splice(a.index, 1); this.saveLibrary(); },
+      playlist_remove_many: (a) => {
+        const x = playlist(a.id);
+        if (!x) return;
+        const drop = new Set<number>(a.indices);
+        x.tracks = x.tracks.filter((_, i) => !drop.has(i));
+        this.saveLibrary();
+      },
       playlist_move: (a) => { const x = playlist(a.id); if (x) { const [it] = x.tracks.splice(a.from, 1); x.tracks.splice(a.to, 0, it); } this.saveLibrary(); },
       playlist_remove_cover: (a) => { const x = playlist(a.id); if (x) { x.cover = null; this.saveLibrary(); } },
       list_insert: (a) => {

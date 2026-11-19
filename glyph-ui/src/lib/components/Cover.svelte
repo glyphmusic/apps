@@ -113,7 +113,7 @@
     phase = "ready";
     timedOut = false;
     clearTimeout(veilTimer);
-    if (fx.ascii && !fx.reduce) {
+    if (fx.ascii && !fx.still && !fx.reduce) {
       unveiling = true;
       veilTimer = setTimeout(() => { unveiling = false; }, 950);
     } else {
@@ -134,7 +134,7 @@
     <div class="ph"><Icon name="music-2" size={Math.min(64, Math.max(14, size * 0.36))} color="var(--faint)" /></div>
   {/if}
   {#if url && phase !== "none"}
-    <img src={url} alt="" draggable="false" decoding="async" class:hidden={phase !== "ready"} class:reveal={phase === "ready" && fx.ascii && !fx.reduce && unveiling} onload={onImgLoad} onerror={onImgError} />
+    <img src={url} alt="" draggable="false" decoding="async" class:hidden={phase !== "ready"} class:reveal={phase === "ready" && fx.ascii && !fx.still && !fx.reduce && unveiling} onload={onImgLoad} onerror={onImgError} />
   {/if}
 </div>
 

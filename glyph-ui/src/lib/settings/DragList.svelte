@@ -50,5 +50,5 @@
   .dl { display: flex; flex-direction: column; }
   .r { position: relative; flex: none; border-radius: 8px; cursor: grab; touch-action: none; transition: transform .15s var(--ease), background-color .12s; }
   .r:hover { background: rgba(255, 255, 255, .03); }
-  .r.lift { z-index: 3; transition: none; cursor: grabbing; background: rgba(43, 43, 43, .98); outline: 1px solid rgba(255, 255, 255, .12); }
+  .r.lift { z-index: 3; transition: none; cursor: grabbing; background: rgba(48, 48, 52, .98); }
 </style>

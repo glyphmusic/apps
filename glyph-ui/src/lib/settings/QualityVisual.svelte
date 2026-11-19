@@ -42,12 +42,13 @@
   .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
   .opt {
     display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px;
-    border-radius: 10px; background: #0b0b0b; border: 1.5px solid rgba(255, 255, 255, .14);
+    border-radius: 10px; background: #0b0b0b; border: 0;
     text-align: left; min-width: 0;
     transition: border-color .15s ease-out, background-color .15s ease-out, transform .15s var(--ease);
   }
-  .opt:hover { border-color: rgba(255, 255, 255, .42); }
-  .opt.on { border-color: #fff; background: #101012; }
+  .opt:hover { background: #18181b; }
+  /* No outlines: the picked card is the lighter one. */
+  .opt.on { background: #26262b; }
   .opt:active { transform: scale(.985); }
   .stage { height: 34px; width: 100%; display: flex; align-items: center; justify-content: flex-start; margin-bottom: 4px; }
   .bars { display: flex; align-items: flex-end; gap: 3px; height: 24px; }

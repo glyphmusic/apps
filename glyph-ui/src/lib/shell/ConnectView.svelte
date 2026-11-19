@@ -379,7 +379,7 @@
   .jamon:hover { background: rgba(255, 255, 255, .04); }
   .jamhost { flex: 1; min-width: 0; font-size: var(--sm); font-weight: 600; color: var(--text); }
   .jamdesc { flex: 1; min-width: 0; font-size: var(--xs); line-height: 1.35; color: var(--dim); }
-  .jampill { flex: none; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .32); display: inline-flex; align-items: center; gap: 6px; font-size: var(--xs); font-weight: 600; color: #fff; white-space: nowrap; transition: background-color .12s, border-color .12s, color .12s; }
+  .jampill { flex: none; height: 32px; padding: 0 12px; border-radius: 999px; background: rgba(255, 255, 255, .1); display: inline-flex; align-items: center; gap: 6px; font-size: var(--xs); font-weight: 600; color: #fff; white-space: nowrap; transition: background-color .12s, border-color .12s, color .12s; }
   .jampill:hover { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .55); }
 
   .sec { padding: 12px 4px 6px; font-size: 11.5px; font-weight: 600; color: rgba(255, 255, 255, .45); text-transform: uppercase; letter-spacing: .02em; }

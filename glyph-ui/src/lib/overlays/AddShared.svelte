@@ -173,8 +173,8 @@
   .lk, .nw { flex: none; width: 32px; height: 32px; border-radius: 4px; display: grid; place-items: center; }
   .lk { background: var(--accent); }
   .nw { background: rgba(255, 255, 255, .08); }
-  .chk { flex: none; width: 20px; height: 20px; border-radius: 5px; border: 1.5px solid rgba(255, 255, 255, .4); display: grid; place-items: center; transition: background-color .12s ease-out, border-color .12s ease-out; }
-  .chk.on { background: var(--accent); border-color: var(--accent); }
+  .chk { flex: none; width: 20px; height: 20px; border-radius: 5px; background: rgba(255, 255, 255, .16); display: grid; place-items: center; transition: background-color .12s ease-out; }
+  .chk.on { background: var(--accent); }
   .row:disabled .chk.on { opacity: .5; }
   .sep { height: 1px; margin: 4px 8px; background: rgba(255, 255, 255, .07); }
 

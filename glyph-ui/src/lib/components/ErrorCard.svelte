@@ -55,4 +55,14 @@
   pre { width: 100%; max-height: 160px; margin: 0; padding: 10px 12px; overflow: auto; border-radius: 8px; background: rgba(255, 255, 255, .05); font-size: 11.5px; line-height: 1.5; color: var(--dim); text-align: left; white-space: pre-wrap; word-break: break-word; user-select: text; }
   .cp { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; font-size: var(--sm); color: var(--dim); transition: background-color .12s, color .12s; }
   .cp:hover { background: rgba(255, 255, 255, .06); color: var(--text); }
+  /* Phones: no box, just a calm screen, with big buttons a thumb can hit and
+     the details tucked away below them. */
+  :global(html.compact) .card { width: 100%; max-width: 420px; padding: 24px 8px; gap: 12px; background: none; border-radius: 0; }
+  :global(html.compact) .ic { width: 64px; height: 64px; margin-bottom: 8px; }
+  :global(html.compact) h2 { font-size: 20px; font-weight: 700; }
+  :global(html.compact) p { font-size: 15px; }
+  :global(html.compact) .btns { align-self: stretch; flex-direction: column; gap: 10px; margin-top: 18px; }
+  :global(html.compact) .btns :global(.btn) { width: 100%; height: 50px; justify-content: center; border-radius: 25px; font-size: 15px; }
+  :global(html.compact) .tog { margin-top: 10px; min-height: 40px; }
+  :global(html.compact) pre { max-height: 40vh; }
 </style>

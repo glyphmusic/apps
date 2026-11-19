@@ -22,7 +22,7 @@ export function demoConfig(): Config {
   return {
     server_url: "", language: "", keys: {},
     providers: { local_search: true, youtube_mode: "local", youtube_only: false, enabled: ["audius", "jamendo", "archive", "soundcloud", "youtube", "deezer"], priority: ["jamendo", "audius", "archive", "soundcloud", "youtube"], extractor: "r_dlp" },
-    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false, render_mode: "" },
+    visuals: { intensity: 0.8, music_reactivity: 1, ascii_covers: false, startup_animation: false, ascii_effects: true, theme: "glyph", throttle_unfocused: true, glow_shape: "", performance_mode: false, render_mode: "", gpu_blocked: false },
     updates: { repo: "glyphmusic/apps", check_on_start: true, auto_install: false, channel: "stable" },
     audio: { crossfade_s: 0, quality: "auto", download_quality: "high", download_parallelism: 3, download_adaptive: true, level: "normal", normalize: true, hide_explicit: false, channels: "stereo", eq_enabled: false, eq_preset: "flat", eq_gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], eq_user_presets: [], eq_bass_db: 0, eq_headroom_db: 0, output_device: null },
     storage: { cache_limit_mb: 2048, data_saver: false, download_dir: null },
@@ -37,7 +37,7 @@ export function demoConfig(): Config {
     devices: { discovery: true },
     plugins: { auto_update: true, skip_install_warning: false, sort: "stars", disabled: [] },
     desktop: { autostart: false, start_in_tray: false },
-    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: true, np_lyrics: true, keys: {}, reveal_downloads: true, text_scale: 1 },
+    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: true, np_lyrics: true, keys: {}, reveal_downloads: true, text_scale: 1, recommendations: true },
     local: { folders: [] },
   };
 }
@@ -218,11 +218,24 @@ export class DemoBackend implements Backend, DemoCtx {
         lib().liked = a.on ? [a.track, ...lib().liked.filter((t) => trackKey(t) !== k)] : lib().liked.filter((t) => trackKey(t) !== k);
         this.saveLibrary();
       },
+      like_many: (_, a) => {
+        const ks = new Set((a.tracks as Track[]).map(trackKey));
+        const rest = lib().liked.filter((t) => !ks.has(trackKey(t)));
+        lib().liked = a.on ? [...(a.tracks as Track[]), ...rest] : rest;
+        this.saveLibrary();
+      },
       playlist_create: (_, a) => { const id = `pl-${Date.now()}`; lib().playlists.unshift({ id, name: a.name, tracks: a.tracks ?? [], created_at: Date.now() }); this.saveLibrary(); return id; },
       playlist_rename: (_, a) => { const pl = lib().playlists.find((x) => x.id === a.id); if (pl) pl.name = a.name; this.saveLibrary(); },
       playlist_delete: (_, a) => { lib().playlists = lib().playlists.filter((x) => x.id !== a.id); this.saveLibrary(); },
       playlist_add: (_, a) => { const pl = lib().playlists.find((x) => x.id === a.id); pl?.tracks.push(...a.tracks); this.saveLibrary(); },
       playlist_remove: (_, a) => { const pl = lib().playlists.find((x) => x.id === a.id); pl?.tracks.splice(a.index, 1); this.saveLibrary(); },
+      playlist_remove_many: (_, a) => {
+        const pl = lib().playlists.find((x) => x.id === a.id);
+        if (!pl) return;
+        const drop = new Set<number>(a.indices);
+        pl.tracks = pl.tracks.filter((_, i) => !drop.has(i));
+        this.saveLibrary();
+      },
       playlist_move: (_, a) => { const pl = lib().playlists.find((x) => x.id === a.id); if (pl) { const [it] = pl.tracks.splice(a.from, 1); pl.tracks.splice(a.to, 0, it); } this.saveLibrary(); },
       pin: (_, a) => { lib().pinned = a.on ? [...lib().pinned, a.list] : lib().pinned.filter((l) => !sameList(l, a.list)); this.saveLibrary(); },
       save_album: (_, a) => { const l = { ...a.list, tracks: [] } as ListKey; lib().saved_albums = a.on ? [...lib().saved_albums, l] : lib().saved_albums.filter((x) => !sameList(x, l)); this.saveLibrary(); },

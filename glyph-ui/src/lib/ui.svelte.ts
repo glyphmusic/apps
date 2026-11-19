@@ -54,7 +54,9 @@ export function tip(el: HTMLElement, arg: string | undefined | { label?: string;
 export const iconTip = (name: string) => tipFor(name);
 
 // ---- ASCII reveal (widgets/indicators.rs) -------------------------------
-export const fx = $state({ ascii: true, reduce: false, t: 0 });
+/** `ascii`: ASCII effects on; `still`: performance mode (placeholder
+ *  characters stand still, no decode effects); `reduce`: reduced motion. */
+export const fx = $state({ ascii: true, still: false, reduce: false, t: 0 });
 export const pageChrome = $state({ stickyTop: false });
 function initialSortDirs(): Record<string, "asc" | "desc"> {
   try {
@@ -101,7 +103,7 @@ export function trimReveals(limit = 128): void {
 
 /** Progress 0..1 of the reveal under `key` (starts the first time asked). */
 export function revealK(key: string, dur = 0.9): number {
-  if (!fx.ascii || fx.reduce) return 1;
+  if (!fx.ascii || fx.still || fx.reduce) return 1;
   void fx.t;
   let at = reveals.get(key);
   const now = performance.now();

@@ -174,7 +174,7 @@
             {@const ggap = gaps[en.gapKey] ?? 0}
             {#if drag && ggap > 0.5}<div class="gap" data-slot={en.gapKey} style:height="{ggap}px"></div>{/if}
             <div class="qitem" class:sep={ri > 0} data-qslot={en.gapKey}>
-              <QueueRow track={en.tr} n={(en.i < manual ? en.i : en.i - manual) + 1} off={!app.allowed(en.tr)}
+              <QueueRow track={en.tr} n={(en.i < manual ? en.i : en.i - manual) + 1} off={!app.allowed(en.tr)} queued={en.i < manual}
                 onclick={() => jump(base + en.i)} onremove={() => app.queueRemove(base + en.i)} ondown={(e) => down(e, en.i)} />
             </div>
           {/each}

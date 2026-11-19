@@ -229,6 +229,9 @@ pub struct UiConfig {
     pub reveal_downloads: bool,
     /// Text size factor (0.9 ..= 1.3).
     pub text_scale: f32,
+    /// Song suggestions: "Recommended" under your own playlists and the
+    /// Recommended row on the home page. Off: both are hidden.
+    pub recommendations: bool,
 }
 
 impl Default for UiConfig {
@@ -241,6 +244,7 @@ impl Default for UiConfig {
             keys: BTreeMap::new(),
             reveal_downloads: true,
             text_scale: 1.0,
+            recommendations: true,
         }
     }
 }
@@ -354,6 +358,10 @@ pub struct VisualsConfig {
     /// one shape always ("strahl", "band", "sonnenaufgang", "horizont", "solid").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub glow_shape: String,
+    /// Colour of the "solid" background as "#rrggbb"; "" = the theme's
+    /// base colour.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub solid_color: String,
     /// Performance mode: the background samples coarser and draws at half
     /// the frame rate, ASCII effects and blur behind panels are off. Stays
     /// on this device (not synced: a phone and a desktop differ).
@@ -365,6 +373,12 @@ pub struct VisualsConfig {
     /// performance mode.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub render_mode: String,
+    /// The graphics card failed to draw the background on this device (a
+    /// failed check, errors or a black picture), so the processor draws it
+    /// and the GPU choice is locked until "Try again" in Settings >
+    /// Appearance > Animations. Stays on this device (not synced).
+    #[serde(default)]
+    pub gpu_blocked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -522,7 +536,8 @@ pub struct PlayerPrefs {
     pub repeat: String,
     /// Queue panel open.
     pub show_queue: bool,
-    /// Mini player stays on top.
+    /// Mini player stays on top. No longer read: the mini players are
+    /// always on top (kept so older config files still load).
     pub mini_on_top: bool,
     /// Mini player as the big card (else the slim bar).
     pub mini_large: bool,
@@ -626,7 +641,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), performance_mode: false, render_mode: String::new() }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), solid_color: String::new(), performance_mode: false, render_mode: String::new(), gpu_blocked: false }
     }
 }
 

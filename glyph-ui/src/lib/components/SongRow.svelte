@@ -59,10 +59,12 @@
   import { t, tf } from "../i18n.svelte";
   import { backend } from "../api/backend";
   let {
-    tracks, index, from = null, album = true, context, selected = false, draggable = false, ondragstart, number,
+    tracks, index, from = null, album = true, context, selected = false, draggable = false, ondragstart, number, picking = false, picked = false,
   }: {
     tracks: Track[]; index: number; from?: ListKey | null; album?: boolean; context?: string; selected?: boolean;
     draggable?: boolean; ondragstart?: (e: PointerEvent) => void; number?: number;
+    /** Select mode: a click picks the row instead of playing it. */
+    picking?: boolean; picked?: boolean;
   } = $props();
   const tr = $derived(tracks[index]);
   const playing = $derived(app.isCurrent(tr));
@@ -90,19 +92,27 @@
     const timer = setTimeout(() => scheduleAlbumBackfill(tr, ac.signal), 250);
     return () => { clearTimeout(timer); ac.abort(); };
   });
-  function play() { app.selectedRow = index; if (!blocked) app.play(tracks, index, context); }
+  function play() {
+    if (picking) { app.togglePicked(tr); return; }
+    app.selectedRow = index;
+    if (!blocked) app.play(tracks, index, context);
+  }
   function menu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
     app.openCtx({ x: e.clientX, y: e.clientY, track: tr, from: from ? { list: from, index } : null });
   }
 </script>
 
-<div class="row" class:off={blocked} class:sel={selected} class:menu={app.ctx?.track === tr} onclick={play} oncontextmenu={menu}
+<div class="row" class:off={blocked && !picking} class:sel={selected && !picking} class:picking class:picked class:menu={app.ctx?.track === tr} onclick={play} oncontextmenu={menu}
   onpointerenter={hoverIn} onpointerleave={hoverOut}
-  onpointerdown={(e) => draggable && e.button === 0 && ondragstart?.(e)} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1">
+  onpointerdown={(e) => draggable && !picking && e.button === 0 && ondragstart?.(e)} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1" aria-selected={picking ? picked : undefined}>
   <span class="num">
-    <span class="n">{#if playing}<PlayingBars size={14} />{:else}<span class="mono">{number ?? index + 1}</span>{/if}</span>
-    <span class="p"><Icon name="play" size={13} color="var(--text)" /></span>
+    {#if picking}
+      <span class="ck"><Icon name={picked ? "circle-check" : "circle"} size={18} color={picked ? "var(--accent)" : "var(--faint)"} /></span>
+    {:else}
+      <span class="n">{#if playing}<PlayingBars size={14} />{:else}<span class="mono">{number ?? index + 1}</span>{/if}</span>
+      <span class="p"><Icon name="play" size={13} color="var(--text)" /></span>
+    {/if}
   </span>
   <Cover track={tr} size={40} radius={6} />
   <span class="tx">
@@ -124,8 +134,10 @@
   .row { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; }
   .row:hover, .row.menu { background: rgba(255, 255, 255, .05); transition-duration: .12s; }
   .row:not(:hover) { transition-duration: .24s; }
-  .row.sel { background: rgba(255, 255, 255, .08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
+  .row.sel { background: rgba(255, 255, 255, .1); }
   .row.off { opacity: .4; }
+  .row.picked { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .ck { position: absolute; inset: 0; display: grid; place-items: center; }
   .num { position: relative; flex: none; width: 26px; height: 20px; }
   .n, .p { position: absolute; inset: 0; display: grid; place-items: center; transition: opacity .12s; }
   .n .mono { font-size: var(--sm); color: var(--faint); }

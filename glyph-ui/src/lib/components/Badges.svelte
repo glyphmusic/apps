@@ -1,5 +1,5 @@
 <script lang="ts">
-  // widgets/buttons.rs badge / badges: `[YT]` source badges, mono xs faint;
+  // widgets/buttons.rs badge / badges: the source as a small chip (`YT`);
   // hovering names the source.
   import { PROVIDER_BADGE, PROVIDER_NAME, sources, type ProviderId, type Track } from "../api/types";
   import { tip } from "../ui.svelte";
@@ -10,11 +10,11 @@
 
 <span class="bs">
   {#each list as p (p)}
-    <span class="b mono" use:tip={tf("tip.source", { name: PROVIDER_NAME[p] })}>[{PROVIDER_BADGE[p]}]</span>
+    <span class="b" use:tip={tf("tip.source", { name: PROVIDER_NAME[p] })}>{PROVIDER_BADGE[p]}</span>
   {/each}
 </span>
 
 <style>
   .bs { display: flex; flex: none; gap: 2px; }
-  .b { font-size: var(--xs); color: var(--faint); }
+  .b { padding: 0 4px; border-radius: 3px; font-size: 10px; font-weight: 600; line-height: 15px; color: var(--dim); background: rgba(255, 255, 255, .07); }
 </style>

@@ -1,6 +1,51 @@
 # Changelog
 
-## Unreleased
+## 0.12.10 - 2026-11-19
+
+### Added
+
+- **Device check on first start**: Glyph now checks the computer or phone once before the background starts and picks what suits it: graphics card or processor for the animations (Settings > Appearance > Animations), and performance mode on slow processors, few cores, little memory or software-only graphics.
+- **Performance in the welcome tour**: a new page lets you pick full effects or performance mode; the one that suits the device is marked "Recommended", and it says who draws the background.
+- **Swipe in the queue (phones)**: swipe a song in the queue to the right to add it to the queue again, to the left to take it out.
+- **Queue mark**: songs you added to the queue yourself show a small queue mark in the accent colour before the artist (phone queue and the queue panel on the computer).
+- **"Playing from" opens the list (phones)**: in the full-screen player, tap "Playing from …" at the top to go to that playlist, album, Liked Songs or artist.
+- **Scroll effects (phones)**: on playlists and albums the cover shrinks step by step as you scroll down (to half its size, fading in the second half) and grows back when you scroll up; on artist pages the photo zooms in the same way and keeps its soft fade at the bottom. The bar at the top only turns dark once the title reaches it.
+- **Scrolling keeps its direction**: after scrolling up or down, a scroll that starts again within a moment keeps going up or down, even when it starts on a sideways row (home, artist pages); the row no longer catches it. After swiping a row sideways, it keeps going sideways the same way. Works with the mouse wheel and on touch screens; after a longer pause the rows react as before.
+- **Select songs to remove**: in Liked Songs and your own playlists, the new select button (circle with a check) lets you tap several songs and remove them together. "Select all" picks them all, and Liked Songs gets a "Clear Liked Songs" button (it asks first). An undo button shows right after.
+- **Turn off recommendations**: Settings > Playback has a switch to hide the "Recommended" rows on Home and under playlists.
+- **Mini player menu**: right-click a mini player to switch between the bar and the card, or close it.
+- **Pick the solid colour**: with the "Solid" background, a new row lets you pick its colour: the theme's own, a few calm dark ones, or any colour you like.
+
+### Fixed
+
+- **ASCII placeholders move again**: with ASCII effects on, the characters in loading placeholders change again as a band sweeps over them (like in the old app), instead of a gradient sliding over still characters. In performance mode they stand still; before, performance mode turned them into plain boxes.
+- **"Show more" under an artist's bio**: it only shows when the bio is longer than the card; before, it was always there, even for a short bio.
+- **Black background on some graphics cards**: some graphics cards started the GPU animations but drew nothing. Glyph now draws a test picture first and checks the first frames of the real background against the processor's maths; when the graphics card fails (wrong or black picture, errors, keeps dropping out), the processor takes over at once, a message says so, and the GPU choice is locked on that device until "Try again" in Settings > Appearance > Animations.
+- **Black screen when unliking many songs**: each unlike saved and redrew the whole library, so unliking a lot of songs quickly could leave a black screen. Hearts tapped close together are now sent as one change after a short pause, and removing a selection is a single change.
+- **Playlist cover after removing songs**: when a playlist went back to one song, its cover kept showing the old mosaic of several covers. It now shows that one song's cover again.
+- **Mini players stay on top**: the mini player could slip behind other windows. It is now put back on top every few seconds, without taking the focus.
+- **Crash in search on phones**: searching could crash the page when the results held the same artist or song twice. Repeated entries are now left out (search, Home, artist releases).
+- **Smoother scrolling on phones**: song rows no longer make the page wait for the app before each scroll step, the cover shrink and photo zoom are now run by the browser itself in step with your finger, the background glow holds still while you scroll, the full-page edge fade is gone, and more rows are ready around the visible ones.
+- **Speed cards in the welcome tour**: the pictures on the "Full effects" and "Performance mode" cards stayed empty on some computers. They are now drawn in a simpler way.
+- **Long album titles ran over each other**: on artist pages and "Show all" albums, long titles grew past their card and covered the next one (Android and some Windows setups). They are cut off with "…" again.
+
+
+### Changed
+
+- **Artist pictures in "Recently played"**: an artist you played from now shows their photo instead of the cover of the song you played (home, the full Recently played list and the recent items in search).
+- **Welcome tour on phones**: big buttons across the bottom (Back and Next, "Bring my music" on its own row), a larger Skip button and text, and the tour no longer runs under the status and navigation bars.
+- **Tighter artist header on phones**: less space between the name, the fans line, the buttons and the songs.
+- **Artist photo up to the top on phones**: on artist pages the photo now runs up under the status bar instead of leaving a dark strip above it. Once you scroll, the bar at the top turns dark and covers the status bar too.
+- **No listening time on the Home cards**: the "Welcome back" cards no longer show how long you listened, and artist cards there are round on the left, like an artist photo.
+- **No more [ BRACKETS ]**: labels like "[ 0 SONGS · 0 FOLDERS ]" are now plain text (local files, the welcome tour, badges).
+- **Update channel "Stable" and "Latest"**: the channel choice in Settings > About now reads Stable / Latest instead of Stable / Pre-release.
+- **Add songs tabs on one row**: the tabs of the Add songs panel (Suggested, Liked, Recent, Import) always fit on one row now.
+- **Tidier playlist header**: the "0/12 saved offline · 0.0 MB" line only shows once a song of the playlist is saved offline.
+- **No strip under the status bar (phones)**: the top bar now covers the status bar too and darkens together with it, and lists and playlists run up under the status bar like artist pages, so the cover is no longer cut off at the top.
+- **Errors on phones**: when a page fails, phones show a calm full-screen message with big buttons instead of a small card.
+- **Settings tabs on phones**: sub-pages (like "Version & updates" and "Support") are now tabs under the title with an accent line, instead of small chips.
+- **No outlines**: buttons and choices no longer have thin outlines (Follow, round buttons, the choice cards in Settings, background shapes, text size previews, check boxes, input fields). They stand out by their fill now; the picked choice is the lighter one.
+- **Mini player card controls**: the controls on the cover are now two rows (back, play, next, and below shuffle, volume, repeat, share), so nothing is squeezed. The volume button turns the lower row into a volume bar, which nothing covers any more. Very small cards keep only the top row.
 
 ## 0.12.9 - 2026-11-19
 

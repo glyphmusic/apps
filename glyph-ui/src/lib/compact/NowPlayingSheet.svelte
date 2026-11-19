@@ -71,6 +71,7 @@
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
   const tile = $derived(accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent));
   const close = () => (phone.npOpen = false);
+  const fromTarget = $derived(app.playingFromTarget());
   $effect(() => {
     void bodyH;
     if (!contentEl) return;
@@ -107,10 +108,18 @@
     {#if sk < 0.5}
       <div class="normal" style:opacity={1 - sk * 2}>
         <IconAction name="chevron-down" onclick={close} />
-        <div class="from">
-          {#if app.queue.context}<span class="pf">{t("np.playing_from")}</span><span class="pn trunc">{app.queue.context}</span>
-          {:else}<span class="pn">{t("nav.now_playing")}</span>{/if}
-        </div>
+        {#if app.queue.context && fromTarget}
+          <!-- "Playing from": a tap opens that playlist, album or artist. -->
+          <button class="from link" onclick={() => { if (app.openPlayingFrom()) close(); }}>
+            <span class="pf">{t("np.playing_from")}</span>
+            <span class="pn-row"><span class="pn trunc">{app.queue.context}</span><Icon name="chevron-right" size={13} color="var(--dim)" /></span>
+          </button>
+        {:else}
+          <div class="from">
+            {#if app.queue.context}<span class="pf">{t("np.playing_from")}</span><span class="pn trunc">{app.queue.context}</span>
+            {:else}<span class="pn">{t("nav.now_playing")}</span>{/if}
+          </div>
+        {/if}
         <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: cur })} />
       </div>
     {:else}
@@ -202,6 +211,9 @@
   .from { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; }
   .pf { font-size: 11.5px; color: var(--dim); }
   .pn { max-width: 100%; font-size: 13.5px; font-weight: 700; color: var(--text); }
+  .from.link { padding: 2px 8px; border-radius: 8px; transition: background-color .12s ease-out, transform .14s var(--ease); }
+  .from.link:active { background: rgba(255, 255, 255, .08); transform: scale(.97); }
+  .pn-row { max-width: 100%; min-width: 0; display: flex; align-items: center; gap: 2px; }
   .mb { position: absolute; inset: var(--safe-top, env(safe-area-inset-top)) 0 0; padding: 0 8px 0 16px; display: flex; align-items: center; gap: 10px; text-align: left; }
   .mt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .mt .t { font-size: var(--md); font-weight: 500; min-width: 0; }

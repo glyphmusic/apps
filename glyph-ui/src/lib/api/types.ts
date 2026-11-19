@@ -346,7 +346,7 @@ export interface Config {
   language: string;
   keys: Record<string, string | null>;
   providers: { local_search: boolean; youtube_mode: string; youtube_only: boolean; enabled: ProviderId[]; priority: ProviderId[]; extractor: string; ytdlp_path?: string | null; rdlp_path?: string | null };
-  visuals: { intensity: number; music_reactivity: number; ascii_covers: boolean; startup_animation: boolean; ascii_effects: boolean; theme: string; throttle_unfocused: boolean; glow_shape: string; performance_mode?: boolean; render_mode?: string };
+  visuals: { intensity: number; music_reactivity: number; ascii_covers: boolean; startup_animation: boolean; ascii_effects: boolean; theme: string; throttle_unfocused: boolean; glow_shape: string; solid_color?: string; performance_mode?: boolean; render_mode?: string; gpu_blocked?: boolean };
   updates: { repo: string; check_on_start: boolean; auto_install: boolean; channel: string };
   audio: {
     crossfade_s: number; quality: string; download_quality: string; download_parallelism: number; download_adaptive: boolean; level: string; normalize: boolean;
@@ -364,7 +364,7 @@ export interface Config {
   devices: { discovery: boolean };
   plugins: { auto_update: boolean; skip_install_warning: boolean; sort: string; disabled: string[] };
   desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
-  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; zen?: boolean; reduce_motion?: boolean };
+  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
   local: { folders: string[] };
   [k: string]: unknown;
 }

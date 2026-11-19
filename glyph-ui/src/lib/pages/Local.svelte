@@ -2,7 +2,7 @@
   // ui/local.rs view() + body() + crumbs(): "Local files", the music folders
   // on this computer by folder, artist, album or as one list of songs. Files
   // play where they are; nothing is copied or uploaded.
-  //  page: gap 16; back pill; head (round play 44 + heading + `[ INFO ]`
+  //  page: gap 16; back pill; head (round play 44 + heading + info line
   //  mono 11.5 faint; bordered actions: shuffle / rescan / add folder, h 32,
   //  px 14, radius 8); tabs (chips: folders / artists / albums / songs) with
   //  a 240 x 32 filter field; crumbs ("Folders > Music > Album", the last
@@ -121,7 +121,7 @@
       {/if}
       <div class="tt">
         <SectionTitle heading title={t("local.title")} />
-        <div class="info mono" use:ink>[ {info.toUpperCase()} ]</div>
+        <div class="info" use:ink>{info}</div>
       </div>
     </div>
     <div class="acts">
@@ -166,7 +166,7 @@
         <Button kind="primary" onclick={addFolder}>{t("local.add")}</Button>
       </div>
     {:else if !loaded}
-      <div class="load mono" use:ink>[ {t("local.scanning_start").toUpperCase()} ]</div>
+      <div class="load" use:ink>{t("local.scanning_start")}</div>
     {:else if local.tab === LOCAL_FOLDERS && local.dir == null}
       <!-- The music folders themselves; each can be removed again. -->
       <div class="list">
@@ -231,7 +231,7 @@
   .head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
   .hl { display: flex; align-items: center; gap: 14px; }
   .tt { display: flex; flex-direction: column; gap: 4px; }
-  .info { font-size: 11.5px; color: var(--faint); }
+  .info { font-size: var(--sm); color: var(--dim); }
   /* round_play: 44, white, hover .1 black fill */
   .play { flex: none; width: 44px; height: 44px; border-radius: 50%; background: #fff; display: grid; place-items: center; position: relative; transition: transform .15s var(--ease); }
   .play::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: #000; opacity: 0; transition: opacity .12s ease-out; }
@@ -240,12 +240,12 @@
   .nudge { padding-left: 2px; display: grid; }
   .acts { display: flex; gap: 8px; }
   /* action: h 32, px 14, radius 8, 1 px border, solid dark surface, sm, white 90 % */
-  .act { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px; background: #18181a; border: 1px solid var(--border); font-size: var(--sm); color: rgba(255, 255, 255, .9); transition: background-color .12s ease-out, opacity .15s; }
+  .act { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 8px; background: #222226; font-size: var(--sm); color: rgba(255, 255, 255, .9); transition: background-color .12s ease-out, opacity .15s; }
   .act:hover { background: #242428; }
   .act.busy { opacity: .5; }
   .tabs { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
   .chips { display: flex; gap: 8px; }
-  .field { display: flex; align-items: center; gap: 8px; width: 240px; height: 32px; padding: 0 10px; border-radius: 8px; background: #141414; border: 1px solid rgba(255, 255, 255, .08); font-size: var(--sm); transition: border-color .15s; }
+  .field { display: flex; align-items: center; gap: 8px; width: 240px; height: 32px; padding: 0 10px; border-radius: 8px; background: #1c1c1f; font-size: var(--sm); transition: border-color .15s; }
   .field:focus-within { border-color: rgba(255, 255, 255, .2); }
   .field input { flex: 1; min-width: 0; background: none; border: 0; padding: 0; outline: none; font-size: var(--sm); }
   .field input::placeholder { color: rgba(255, 255, 255, .4); }
@@ -259,5 +259,5 @@
   .list { display: flex; flex-direction: column; }
   .rm { display: inline-flex; }
   .note { padding-top: 12px; font-size: var(--xs); color: var(--faint); }
-  .load { padding: 24px 0; font-size: var(--xs); color: var(--faint); }
+  .load { padding: 24px 0; font-size: var(--sm); color: var(--dim); }
 </style>

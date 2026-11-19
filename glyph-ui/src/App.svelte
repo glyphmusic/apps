@@ -205,9 +205,11 @@
   $effect(() => {
     if (!app.config) return;
     applyTheme(app.config.visuals.theme, app.config.ui.text_scale);
-    // Performance mode: no decode / shimmer effects and no blur behind panels.
+    // Performance mode: no decode effects, placeholder characters stand
+    // still, no blur behind panels.
     const perf = !!app.config.visuals.performance_mode;
-    fx.ascii = app.config.visuals.ascii_effects && !perf;
+    fx.ascii = app.config.visuals.ascii_effects;
+    fx.still = perf;
     document.documentElement.classList.toggle("perf", perf);
   });
 

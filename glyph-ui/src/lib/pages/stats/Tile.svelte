@@ -1,6 +1,6 @@
 <script lang="ts">
   // stats.rs tile: flex 1, min-w 150, p 16, radius 12, card fill, 1 px
-  // border-faint, gap 4: `[ LABEL ]` (mono 11 faint), value (26 bold) and an
+  // border-faint, gap 4: label (sm dim), value (26 bold) and an
   // optional sub line (sm dim).
   let { label, value, sub, delay = 0 }: { label: string; value: string; sub?: string | null; delay?: number } = $props();
 </script>

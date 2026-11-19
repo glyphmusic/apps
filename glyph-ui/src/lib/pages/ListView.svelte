@@ -29,7 +29,7 @@
   import { t, tf } from "../i18n.svelte";
   import { ink, pageChrome, tip } from "../ui.svelte";
   import { listMeta } from "../fmt";
-  import { rating, trackKey, type ListKey, type Track } from "../api/types";
+  import { listId, rating, trackKey, type ListKey, type Track } from "../api/types";
   import {
     downloadTip, downloadsView, listSort, listSortDir, playShuffled, playingFrom, playlistX,
     removeDownloads, scopeKey, setListSort, shownTracks, sortId, openNameDialog,
@@ -41,6 +41,13 @@
   const tracks = $derived(l ? shownTracks(l) : []);
   const title = $derived(l ? app.listTitle(l) : "");
   const has = $derived(tracks.length > 0);
+  // Select mode (Liked Songs, own playlists): rows are picked, then removed together.
+  const pickable = $derived(app.canPick(l) && l?.kind !== "artist_liked");
+  const pickMode = $derived(app.isPicking(l));
+  const pickedN = $derived(pickMode ? tracks.filter((x) => app.isPicked(x)).length : 0);
+  const allPicked = $derived(pickMode && pickedN === tracks.length && tracks.length > 0);
+  // Another list, or leaving it: select mode ends.
+  $effect(() => { void (l && listId(l)); return () => app.stopPicking(); });
   const own = $derived(l?.kind === "playlist" ? playlistX(l.id) : undefined);
   const author = $derived(l?.kind === "album" && l.artist.startsWith("@") ? l.artist : null);
   const sort = $derived(l ? listSort(l) : "custom");
@@ -52,7 +59,8 @@
   let rawRecs = $state<Track[]>([]);
   let recsLoading = $state(false);
   let recEpoch = $state(0);
-  const ownId = $derived(own?.id ?? "");
+  // Settings > Playback > Content "Song suggestions" off: no recommendations at all.
+  const ownId = $derived(app.config.ui.recommendations !== false ? (own?.id ?? "") : "");
   const haveKeys = $derived(new Set((own?.tracks ?? []).map(trackKey)));
   $effect(() => {
     const pid = ownId;
@@ -144,6 +152,8 @@
       : t("list.kind.playlist");
     if (l.kind !== "playlist" && l.kind !== "downloads") return base;
     const saved = tracks.filter((x) => app.isDownloaded(x)).length;
+    // Nothing saved offline yet: no "0/12 · 0.0 MB" noise in the header.
+    if (!saved) return base;
     return `${base} · ${tf("playlist.offline_progress", { done: saved, total: tracks.length })} · ${(bytes / 1e6).toFixed(1)} MB`;
   });
 
@@ -391,7 +401,7 @@
 {/snippet}
 
 {#snippet recsSection()}
-  {#if own && !q}
+  {#if own && !q && app.config.ui.recommendations !== false}
     <section class="recs" aria-label={t("playlist.recs.title")}>
       <div class="recs-head">
         <div class="recs-ht">
@@ -463,6 +473,16 @@
       </VirtualRows>
     </div>
   {:else}
+    {#if pickMode && l}
+      <div class="pickbar" role="toolbar">
+        <Button icon="x" onclick={() => app.stopPicking()}>{t("pick.done")}</Button>
+        <span class="pick-n">{tf("pick.n", { n: pickedN })}</span>
+        <Button kind="text" onclick={() => app.pickAll(tracks)}>{t(allPicked ? "pick.none" : "pick.all")}</Button>
+        <span class="flex1"></span>
+        {#if l.kind === "liked"}<Button kind="text" icon="trash-2" onclick={() => app.clearLiked()}>{t("liked.clear")}</Button>{/if}
+        <Button kind="danger" icon="trash-2" disabled={!pickedN} onclick={() => app.removePicked(l)}>{t("pick.remove")}</Button>
+      </div>
+    {/if}
     <div class="colwrap" bind:this={colHeadEl}>
       {@render colHead(false)}
     </div>
@@ -473,7 +493,7 @@
           <div class="slot">
             <div class="mover" class:lifted={drag?.from === entry.idx} style:transform="translateY({shift(entry.idx)}px)">
               <SongRow {tracks} index={entry.idx} number={entry.idx + 1} from={l} album={l.kind !== "album" || !!author} context={title} selected={app.selectedRow === entry.idx}
-                draggable={!!reorder} ondragstart={(e) => startDrag(entry.idx, e)} />
+                draggable={!!reorder && !pickMode} ondragstart={(e) => startDrag(entry.idx, e)} picking={pickMode} picked={pickMode && app.isPicked(entry.track)} />
             </div>
           </div>
         {/snippet}
@@ -570,6 +590,9 @@
           {/if}
           {#if own}
             <IconButton name="pencil" size={17} box={36} label={t("list.edit")} onclick={() => openNameDialog([], own.id)} />
+          {/if}
+          {#if pickable && has && l}
+            <IconButton name="circle-check" size={18} box={38} label={t("pick.select")} color={pickMode ? "var(--accent)" : undefined} onclick={() => (pickMode ? app.stopPicking() : app.startPicking(l))} />
           {/if}
           <IconButton name="ellipsis-vertical" size={18} box={38} label={t("ctx.more")} onpointerdown={more} />
         </div>
@@ -675,6 +698,9 @@
 
   /* Column headers aligned pixel-for-pixel with SongRow */
   .colwrap { margin-top: 6px; }
+  /* Select mode bar: stays at the top while the rows scroll under it. */
+  .pickbar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 12px; background: #161618; }
+  .pick-n { font-size: var(--md); font-weight: 600; color: var(--text); padding: 0 4px; }
   .colhead { display: flex; align-items: center; gap: 14px; height: 34px; padding: 0 10px; border-bottom: 1px solid rgba(255, 255, 255, .08); font-size: 12px; font-weight: 500; color: var(--faint); }
   .colhead.pinned { border-bottom: 0; }
   .colhead.hidden { visibility: hidden; }
@@ -716,7 +742,7 @@
   .settle .mover { transition: none; }
   .mover.lifted { opacity: 0; }
   .dragging { cursor: grabbing; }
-  .dragview { position: fixed; z-index: 60; width: 420px; height: 56px; padding: 0 10px; display: flex; align-items: center; gap: 14px; border-radius: 8px; background: hsl(0 0% 16%); border: 1px solid rgba(255, 255, 255, .1); color: var(--text); cursor: grabbing; pointer-events: none; animation: fade-in .12s ease-out; }
+  .dragview { position: fixed; z-index: 60; width: 420px; height: 56px; padding: 0 10px; display: flex; align-items: center; gap: 14px; border-radius: 8px; background: hsl(0 0% 18%); color: var(--text); cursor: grabbing; pointer-events: none; animation: fade-in .12s ease-out; }
   .dt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .dtt { font-size: var(--md); min-width: 0; }
   .dta { font-size: var(--sm); color: var(--dim); }

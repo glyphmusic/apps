@@ -192,6 +192,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             commands::like(core, req(&args, "track")?, req(&args, "on")?);
             Ok(Value::Null)
         }
+        "like_many" => {
+            commands::like_many(core, req(&args, "tracks")?, req(&args, "on")?);
+            Ok(Value::Null)
+        }
         "playlist_create" => ok(commands::playlist_create(core, req(&args, "name")?, req(&args, "tracks")?)),
         "playlist_rename" => {
             commands::playlist_rename(core, req(&args, "id")?, req(&args, "name")?);
@@ -206,6 +210,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "playlist_add" => ok(commands::playlist_add(core, req(&args, "id")?, req(&args, "tracks")?)),
         "playlist_remove" => {
             commands::playlist_remove(core, req(&args, "id")?, req(&args, "index")?);
+            Ok(Value::Null)
+        }
+        "playlist_remove_many" => {
+            commands::playlist_remove_many(core, req(&args, "id")?, req(&args, "indices")?);
             Ok(Value::Null)
         }
         "playlist_move" => {

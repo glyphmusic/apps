@@ -108,8 +108,8 @@
         <Row label={t("update.auto")} info={t("sp.about.auto.desc")}>
           <Tog on={app.config.updates.auto_install} onchange={(v) => app.setConfig((c) => { c.updates.auto_install = v; })} label={t("update.auto")} />
         </Row>
-        <Row label={t("update.channel")} info={t("sp.about.channel.desc")}>
-          <Segmented value={prerelease} options={[{ value: false, label: t("update.channel.stable") }, { value: true, label: t("update.channel.prerelease") }]}
+        <Row label={t("update.channel")} info={t("sp.about.channel.latest_desc")}>
+          <Segmented value={prerelease} options={[{ value: false, label: t("update.channel.stable") }, { value: true, label: t("update.channel.latest") }]}
             onpick={(v) => app.setConfig((c) => { c.updates.channel = v ? "prerelease" : "stable"; })} />
         </Row>
         {/if}

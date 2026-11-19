@@ -7,9 +7,11 @@
 // computes the field and everything on top on the graphics card
 // (glow-gpu.ts, WebGL 2; with only WebGL 1 just the characters, glow-gl.ts),
 // "cpu" draws everything here without WebGL. Performance mode samples
-// coarser and draws less often.
+// coarser and draws less often. The graphics card is checked before it is
+// used (`gpuProbe`) and watched while it draws; when it fails, the CPU takes
+// over and `Glow.onGpuFail` tells the app to stay on the CPU.
 import { AsciiGl } from "./glow-gl";
-import { FieldGpu } from "./glow-gpu";
+import { FieldGpu, type GpuFrame, type GpuProbe } from "./glow-gpu";
 
 export type Rgb = [number, number, number];
 export type Palette = [Rgb, Rgb, Rgb];
@@ -180,9 +182,135 @@ function cellLum(b: number, c0: number, c1: number, c2: number, level: number, d
   return (0.2126 * c0 + 0.7152 * c1 + 0.0722 * c2) * k + ascii;
 }
 
-/** Whether this device can draw the background on the graphics card (WebGL 2). */
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+const lum = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+/** A fixed frame (strahl, its own colours) for checking the GPU and timing the CPU. */
+function testFrames(W: number, H: number): { cf: CellFrame; gf: GpuFrame } {
+  const iw = Math.max(2, Math.ceil(W / PITCH)), ih = Math.max(2, Math.ceil(H / PITCH)), aspect = W / H;
+  const [cool, warm] = native("strahl");
+  const m: Motion = { t: 4.2, dx: 0, dy: 0, size: 1, gain: 0.94, energy: 0.7 };
+  const sh = 0.1 + 0.08 * m.energy, level = 0.9, density = 0.83, threshold = 0.42;
+  return {
+    cf: { preset: "strahl", prevPreset: "strahl", presetT: 1, cool, warm, prev: null, m, t: m.t, sh, level, density, threshold, aspect, iw, ih },
+    gf: {
+      W, H, iw, ih, pitch: PITCH, aspect, preset: 0, prevPreset: 0, presetT: 1,
+      cool, warm, prevCool: cool, prevWarm: warm, dx: 0, dy: 0, size: 1, gain: m.gain, t: m.t, sh, level,
+      density, threshold, dotLevel: 0.3, blend: 0, ascii: true, dots: true,
+    },
+  };
+}
+
+/**
+ * Checks the frame the GPU just drew against the CPU maths for the same
+ * frame (`cf`): the field cell by cell, then one row of the window picture
+ * (the light may not be darker than the field says; characters only add).
+ * Returns what is wrong, or null.
+ */
+function verifyGpu(f: FieldGpu, cf: CellFrame, H: number, pitch: number): string | null {
+  const err = f.check();
+  if (err) return err;
+  const px = f.readField(0);
+  const total = cf.iw * cf.ih;
+  if (!px || px.length < total * 4) return "could not read the field back";
+  const step = Math.max(1, Math.floor(total / 900));
+  let n = 0, bad = 0, lit = 0, gpuLit = 0;
+  for (let i = 0; i < total; i += step) {
+    cellInto(cf, i % cf.iw, (i / cf.iw) | 0);
+    const b = Math.min(1, _fb * 0.5), o = i * 4;
+    const e = Math.max(Math.abs(px[o] / 255 - clamp01(_cr)), Math.abs(px[o + 1] / 255 - clamp01(_cg)), Math.abs(px[o + 2] / 255 - clamp01(_cb)), Math.abs(px[o + 3] / 255 - b));
+    if (!(e <= 0.12)) bad++;
+    if (b > 0.1) lit++;
+    if (px[o + 3] > 25) gpuLit++;
+    n++;
+  }
+  if (lit > n * 0.02 && gpuLit === 0) return "the field came out black";
+  if (bad > n * 0.25) return `the field came out wrong (${bad} of ${n} cells)`;
+  const y = Math.floor(H / 2), row = f.readScreenRow(y);
+  if (!row) return null;
+  const cy = Math.min(cf.ih - 1, Math.floor(y / pitch));
+  let want = 0;
+  for (let x = 0; x < cf.iw; x++) {
+    cellInto(cf, x, cy);
+    const k = smooth(0.02, 1.1, _fb) * cf.level * 0.5;
+    want += lum(clamp01(_cr * k), clamp01(_cg * k), clamp01(_cb * k));
+  }
+  want /= cf.iw;
+  let got = 0;
+  for (let i = 0; i < row.length; i += 4) got += lum(row[i], row[i + 1], row[i + 2]) / 255;
+  got /= row.length / 4;
+  if (want > 0.02 && !(got >= want * 0.35)) return "the window picture came out black";
+  return null;
+}
+
+const PROBE_W = 256, PROBE_H = 160;
+let probeCache: GpuProbe | null = null;
+let pickCache: VisualsPick | null = null;
+
+/** Whether (and how well) this device draws the background on the graphics card. Checked once per run. */
+export function gpuProbe(): GpuProbe {
+  if (probeCache) return probeCache;
+  if (typeof document === "undefined") return { ok: false, broken: false, software: false, renderer: "", reason: "no window" };
+  probeCache = FieldGpu.probe(FONT, PROBE_W, PROBE_H, (f) => {
+    const { cf, gf } = testFrames(PROBE_W, PROBE_H);
+    f.draw(gf);
+    return verifyGpu(f, cf, PROBE_H, PITCH);
+  });
+  return probeCache;
+}
+
+/** Checks the graphics card again (Settings > Appearance > Animations: "Try again"). */
+export function gpuRecheck(): GpuProbe {
+  probeCache = null;
+  pickCache = null;
+  return gpuProbe();
+}
+
+/** The real background failed on the graphics card: remember it for this run. */
+function markGpuBroken(reason: string) {
+  probeCache = { ok: false, broken: true, software: probeCache?.software ?? false, renderer: probeCache?.renderer ?? "", reason };
+  pickCache = null;
+}
+
+/** Whether this device can draw the background on the graphics card (WebGL 2, and it draws right). */
 export function gpuBackgroundSupported(): boolean {
-  return FieldGpu.supported(FONT);
+  return gpuProbe().ok;
+}
+
+/** What suits this device: who draws the background and whether performance mode helps. */
+export interface VisualsPick { render: RenderMode; perf: boolean }
+
+/** Milliseconds the processor needs for the field of a 1280 x 800 window (best of three). */
+function cpuFieldMs(): number {
+  const { cf } = testFrames(1280, 800);
+  let best = Infinity;
+  for (let r = 0; r < 3; r++) {
+    const a = performance.now();
+    for (let y = 0; y < cf.ih; y++) for (let x = 0; x < cf.iw; x++) cellInto(cf, x, y);
+    best = Math.min(best, performance.now() - a);
+  }
+  return best;
+}
+
+/**
+ * The best settings for this device, worked out once (first start, and the
+ * "Recommended" mark in the onboarding): the graphics card draws when it
+ * passes the check and is a real one (not a software renderer); performance
+ * mode when the processor is slow, there are few cores or little memory,
+ * or the processor has to draw everything and is not fast.
+ */
+export function recommendVisuals(): VisualsPick {
+  if (pickCache) return pickCache;
+  const g = gpuProbe();
+  const gpu = g.ok && !g.software;
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
+  const mem = typeof navigator !== "undefined" ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory : undefined;
+  const ms = cpuFieldMs();
+  const slow = ms > 6 || cores <= 2 || (mem !== undefined && mem <= 4);
+  const perf = slow || (!gpu && (ms > 3 || cores <= 4));
+  pickCache = { render: gpu ? "gpu" : "cpu", perf };
+  console.info(`[glow] device check: ${g.renderer || "no renderer"}${g.software ? " (software)" : ""}, gpu ${g.ok ? "ok" : g.broken ? "broken" : "missing"}, ${cores} cores, ${mem ?? "?"} GB, field ${ms.toFixed(1)} ms -> ${pickCache.render}${perf ? " + performance mode" : ""}`);
+  return pickCache;
 }
 
 /** field.rs sample: brightness and warm/cool mix at (x, y). */
@@ -349,6 +477,13 @@ export function renderGlowPreview(
 }
 
 /** The background field. `spectrum()` gives bass / mids / highs 0..1. */
+/** When a page last scrolled (any scroll area); see Glow.loop. */
+let scrollAt = 0;
+const SCROLL_QUIET = 160;
+if (typeof document !== "undefined") {
+  document.addEventListener("scroll", () => { scrollAt = performance.now(); }, { capture: true, passive: true });
+}
+
 export class Glow {
   private gctx: CanvasRenderingContext2D | null;
   private actx: CanvasRenderingContext2D | null = null;
@@ -406,6 +541,7 @@ export class Glow {
       this.releaseAsciiBuffer();
       return;
     }
+    this.watchLost();
     if (!this.paused && !this.resizing && !this.uiPaused && !this.opts.solid) {
       if (this.W !== Math.max(1, innerWidth) || this.H !== Math.max(1, innerHeight)) {
         this.resize();
@@ -414,6 +550,16 @@ export class Glow {
       this.loop();
     }
   };
+  /** GPU frames drawn since the GPU was (re)started; the second one is checked. */
+  private gpuFrames = 0;
+  private gpuChecked = false;
+  /** When the GPU context was lost lately (window visible), to spot a card that keeps failing. */
+  private losses: number[] = [];
+  private lostTimer = 0;
+  /** Why the graphics card was given up (the CPU draws since), or null. */
+  failReason: string | null = null;
+  /** The graphics card failed and the CPU took over: the app should stay on the CPU. */
+  onGpuFail: ((reason: string) => void) | null = null;
   playing = false;
   opts: GlowOptions = { intensity: 0.8, reactivity: 1, throttleUnfocused: true, reduce: false, titlebarDots: true };
   spectrum: () => [number, number, number] = () => [0, 0, 0];
@@ -428,8 +574,14 @@ export class Glow {
   constructor(private glowEl: HTMLCanvasElement, private asciiEl: HTMLCanvasElement, mode: RenderMode = "gpu") {
     this.gctx = glowEl.getContext("2d");
     if (mode === "gpu") {
-      this.fgpu = FieldGpu.create(asciiEl, FONT, this.onGpuChange);
-      if (!this.fgpu) this.agl = AsciiGl.create(asciiEl, FONT);
+      // A graphics card that failed the check is not used at all (also not
+      // for the characters alone): `failReason` tells the app.
+      const p = gpuProbe();
+      if (p.broken) this.failReason = p.reason;
+      else {
+        if (p.ok) this.fgpu = FieldGpu.create(asciiEl, FONT, this.onGpuChange);
+        if (!this.fgpu) this.agl = AsciiGl.create(asciiEl, FONT);
+      }
     }
     if (!this.fgpu && !this.agl) this.actx = asciiEl.getContext("2d");
     if (!this.gctx) return;
@@ -471,10 +623,51 @@ export class Glow {
 
   /** The GPU context was lost (the CPU field takes over) or came back. */
   private onGpuChange = () => {
-    if (!this.gctx) return;
+    if (!this.gctx || !this.fgpu) return;
+    clearTimeout(this.lostTimer);
+    this.lostTimer = 0;
+    if (this.fgpu.lost) {
+      // Phones drop it in the background: only count losses in view.
+      if (!document.hidden) {
+        const now = performance.now();
+        this.losses = this.losses.filter((at) => now - at < 120_000);
+        this.losses.push(now);
+        if (this.losses.length >= 3) { this.gpuFail("the graphics card kept dropping the picture"); return; }
+      }
+      this.watchLost();
+    } else {
+      // Back: check its first frames again.
+      this.gpuFrames = 0;
+      this.gpuChecked = false;
+    }
     this.resize();
     if (!document.hidden && !this.resizing && !this.opts.solid) this.draw();
   };
+
+  /** A lost GPU that does not come back within 5 s (window visible) is given up. */
+  private watchLost() {
+    if (this.lostTimer || !this.fgpu?.lost || document.hidden) return;
+    this.lostTimer = window.setTimeout(() => {
+      this.lostTimer = 0;
+      if (this.fgpu?.lost && !document.hidden) this.gpuFail("the graphics card did not come back");
+    }, 5000);
+  }
+
+  /** The graphics card failed: the CPU draws from now on (the characters
+   *  come back once the app gives this background new canvases). */
+  private gpuFail(reason: string) {
+    if (!this.fgpu) return;
+    this.failReason = reason;
+    console.warn("[glow] GPU background failed, the CPU draws instead:", reason);
+    markGpuBroken(reason);
+    clearTimeout(this.lostTimer);
+    this.lostTimer = 0;
+    try { this.fgpu.destroy(); } catch { /* already gone */ }
+    this.fgpu = null;
+    this.cellFrame = null;
+    this.resize();
+    this.onGpuFail?.(reason);
+  }
 
   private releaseAsciiBuffer() {
     this.aimg = null;
@@ -527,6 +720,12 @@ export class Glow {
         if (document.hidden) {
           this.releaseAsciiBuffer();
         }
+        return;
+      }
+      // Phones: the glow holds still while a page scrolls, so the scroll gets
+      // all the time it needs (the glow moves too slowly for anyone to notice).
+      if (performance.now() - scrollAt < SCROLL_QUIET && document.documentElement.classList.contains("compact")) {
+        this.timer = window.setTimeout(tick, SCROLL_QUIET);
         return;
       }
       const slow = this.opts.throttleUnfocused && !document.hasFocus();
@@ -584,6 +783,9 @@ export class Glow {
     this.timer = 0;
     clearTimeout(this.resizeTimer);
     this.resizeTimer = 0;
+    clearTimeout(this.lostTimer);
+    this.lostTimer = 0;
+    this.onGpuFail = null;
     this.releaseAsciiBuffer();
     this.fgpu?.destroy();
     this.fgpu = null;
@@ -684,15 +886,33 @@ export class Glow {
       if (this.asciiEl.width !== W || this.asciiEl.height !== H) { this.asciiEl.width = W; this.asciiEl.height = H; }
       const pr: [Ramp, Ramp] = prev ?? [cool, warm];
       this.lumSolid = -1;
-      this.cellFrame = { preset: this.preset, prevPreset: this.prevPreset, presetT: prev ? presetT : 1, cool, warm, prev, m, t, sh, level, density, threshold, aspect, iw, ih };
-      this.fgpu!.draw({
-        W, H, iw, ih, pitch: this.pitch, aspect,
-        preset: PRESETS.indexOf(this.preset), prevPreset: PRESETS.indexOf(this.prevPreset), presetT: prev ? presetT : 1,
-        cool, warm, prevCool: pr[0], prevWarm: pr[1],
-        dx: m.dx, dy: m.dy, size: m.size, gain: m.gain, t, sh, level,
-        density, threshold, dotLevel, blend,
-        ascii: !o.reduce, dots: !o.reduce && o.titlebarDots !== false,
-      });
+      const cf: CellFrame = { preset: this.preset, prevPreset: this.prevPreset, presetT: prev ? presetT : 1, cool, warm, prev, m, t, sh, level, density, threshold, aspect, iw, ih };
+      this.cellFrame = cf;
+      // Some graphics cards pass the small check and still fail on the real
+      // window (errors, a black picture): the second frame is checked against
+      // the CPU maths too, and any error hands over to the CPU.
+      let why: string | null = null;
+      try {
+        this.fgpu!.draw({
+          W, H, iw, ih, pitch: this.pitch, aspect,
+          preset: PRESETS.indexOf(this.preset), prevPreset: PRESETS.indexOf(this.prevPreset), presetT: prev ? presetT : 1,
+          cool, warm, prevCool: pr[0], prevWarm: pr[1],
+          dx: m.dx, dy: m.dy, size: m.size, gain: m.gain, t, sh, level,
+          density, threshold, dotLevel, blend,
+          ascii: !o.reduce, dots: !o.reduce && o.titlebarDots !== false,
+        });
+        if (!this.gpuChecked && ++this.gpuFrames >= 2) {
+          this.gpuChecked = true;
+          why = verifyGpu(this.fgpu!, cf, H, this.pitch);
+        }
+      } catch (e) {
+        why = e instanceof Error ? e.message : String(e);
+      }
+      if (why && !this.fgpu!.lost) {
+        this.gpuFail(why);
+        this.draw();
+        return;
+      }
       this.onFrame?.();
       return;
     }

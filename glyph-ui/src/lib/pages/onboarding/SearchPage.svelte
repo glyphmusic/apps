@@ -3,7 +3,7 @@
   // the accent), the sources search (their dots pulse), results from all of
   // them fall into one list. The chips switch sources on and off. Field h 36,
   // px 12, radius 10, white 6 %; chips h 24, px 10, round, gap 6; result rows
-  // h 28, gap 10 (cover 24, title 13, artist 12, `[ SOURCE ]` mono 10).
+  // h 28, gap 10 (cover 24, title 13, artist 12, the source as a small chip).
   import Icon from "../../components/Icon.svelte";
   import Skeleton from "../../components/Skeleton.svelte";
   import { t } from "../../i18n.svelte";
@@ -40,7 +40,7 @@
   {#if searching}
     <div class="sk">{#each Array.from({ length: Math.min(room, 3) }, (_, i) => i) as i (i)}<Skeleton w={160 + 50 * (i % 2)} h={18} radius={5} id="onb-sk-{i}" />{/each}</div>
   {:else if shown.length === 0 && since > 0}
-    <div class="none mono">[ {t("onboarding.search.none")} ]</div>
+    <div class="none">{t("onboarding.search.none")}</div>
   {:else}
     <div class="rows">
       {#each shown as [title, artist, src, cover], j (`${title}-${artist}-${src}`)}
@@ -48,7 +48,7 @@
         <div class="r" style:opacity={e} style:transform="translateY({8 * (1 - e)}px)">
           <span class="cv" style:background="hsl({SOURCES[src][1] * 360} 45% 42%)" style:background-image="url({cover})" style:background-size="cover"></span>
           <span class="tt"><span class="a">{title}</span><span class="b">{artist}</span></span>
-          <span class="src mono">[ {SOURCES[src][0].toUpperCase()} ]</span>
+          <span class="src">{SOURCES[src][0]}</span>
         </div>
       {/each}
     </div>
@@ -66,12 +66,12 @@
   .chip:hover { background: rgba(255, 255, 255, .14); }
   .nm { font-size: 11.5px; transition: color .15s; }
   .sk { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
-  .none { padding-top: 10px; font-size: 11px; color: rgba(255, 255, 255, .4); }
+  .none { padding-top: 10px; font-size: 12px; color: rgba(255, 255, 255, .45); }
   .rows { display: flex; flex-direction: column; gap: 4px; min-height: 0; }
   .r { display: flex; align-items: center; gap: 10px; height: 28px; }
   .cv { flex: none; width: 24px; height: 24px; border-radius: 4.8px; }
   .tt { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
   .a { font-size: 13px; color: rgba(255, 255, 255, .9); }
   .b { font-size: 12px; color: rgba(255, 255, 255, .42); }
-  .src { flex: none; font-size: 10px; color: rgba(255, 255, 255, .45); }
+  .src { flex: none; padding: 1px 6px; border-radius: 4px; font-size: 10.5px; font-weight: 500; color: rgba(255, 255, 255, .6); background: rgba(255, 255, 255, .07); }
 </style>

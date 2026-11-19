@@ -92,7 +92,7 @@
   .row { position: relative; display: flex; align-items: center; gap: 14px; padding: 6px 10px; border-radius: 8px; cursor: pointer; transition: background-color .24s ease-out; }
   .row.lyrics { padding: 8px 10px; }
   .row:hover, .row.menu { background: var(--card); transition-duration: .12s; }
-  .row.sel { background: rgba(255, 255, 255, .08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); }
+  .row.sel { background: rgba(255, 255, 255, .1); }
   .row.off { opacity: .4; }
   .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .tl { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--md); color: var(--text); }

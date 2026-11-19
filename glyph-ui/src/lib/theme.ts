@@ -23,6 +23,12 @@ export function themeColors(id: string): ThemeColors {
 }
 
 export const css = (h: number) => `#${h.toString(16).padStart(6, "0")}`;
+/** The solid background's colour (`0xRRGGBB`): the one picked in Settings >
+ *  Appearance, else the theme's base colour. */
+export function solidBase(v: { theme?: string; solid_color?: string } | undefined): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(v?.solid_color ?? "");
+  return m ? parseInt(m[1], 16) : themeColors(v?.theme || "glyph").base;
+}
 
 const DEFAULT_ACCENT = 0xff5fd2;
 let baseIconPromise: Promise<ImageData | null> | null = null;

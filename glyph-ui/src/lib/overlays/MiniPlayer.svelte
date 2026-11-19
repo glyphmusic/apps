@@ -68,9 +68,9 @@
   const liked = $derived(cur ? app.isLiked(cur) : false);
   let vw = $state(untrack(() => pipWindow?.innerWidth) || (typeof window !== "undefined" ? window.innerWidth : 300));
   let vh = $state(untrack(() => pipWindow?.innerHeight) || (typeof window !== "undefined" ? window.innerHeight : 384));
-  let volPinned = $state(false), volHover = $state(false);
+  let volPinned = $state(false);
   let resizing = $state(false);
-  const volOpen = $derived(volPinned || volHover);
+  const volOpen = $derived(volPinned);
 
   function resizePip(target: Window, w: number, h: number) {
     try {
@@ -174,6 +174,31 @@
       try { pipWindow.close(); } catch {}
     }
   };
+  /** Right click: card or bar, or close. In its own window the mini player
+   *  is too small for the app's menu, so the system's menu opens there. */
+  async function menu(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isTauri() && inMiniWindow()) {
+      try {
+        const { Menu } = await import("@tauri-apps/api/menu");
+        const m = await Menu.new({
+          items: [
+            { text: t("ctl.mini.card"), checked: big, action: () => setBig(true) },
+            { text: t("ctl.mini.bar"), checked: !big, action: () => setBig(false) },
+            { item: "Separator" },
+            { text: t("ctl.mini.close"), action: closeMini },
+          ],
+        });
+        await m.popup();
+      } catch (err) {
+        console.warn("[mini] menu failed:", err);
+      }
+      return;
+    }
+    if (pipWindow) return;
+    app.controlMenu = { menu: "mini", x: e.clientX, y: e.clientY };
+  }
   const liveW = $derived(windowed ? vw : card.w);
   const liveH = $derived(windowed ? vh : card.h);
   const side = $derived(Math.max(60, Math.min(liveW - CARD_PAD * 2, liveH - cardTop - CARD_PAD - INFO_GAP - INFO_H)));
@@ -184,7 +209,7 @@
 
 {#if !big}
   <!-- the slim bar -->
-  <div class="mini bar" class:pip={!!pipWindow} class:win={windowed} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
+  <div class="mini bar" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
     <div class="grp">
       <div class="art" onpointerdown={grab} role="presentation">
         {#if cur}<Cover track={cur} size={34} radius={6} />{:else}<span class="ph"><Icon name="music-2" size={16} color="var(--faint)" /></span>{/if}
@@ -205,7 +230,7 @@
   </div>
 {:else}
   <!-- the card -->
-  <div class="mini cardw" class:pip={!!pipWindow} class:win={windowed} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{cardTop}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
+  <div class="mini cardw" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{cardTop}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
     {#if showTopbar}
       <div class="topbar" style:height="{CARD_TOP}px" style:padding="{TOP_INSET}px">
         <button class="tbtn" aria-label={tipFor("minimize-2")} use:tip={tipFor("minimize-2")} onclick={() => setBig(false)}><Icon name="minimize-2" size={14} /></button>
@@ -218,22 +243,30 @@
       {#if cur}<Cover track={cur} size={side} radius={8} />{:else}<div class="cph"><Icon name="music-2" size={48} color="var(--faint)" /></div>{/if}
       <div class="ov">
         <div class="fl"></div>
+        <!-- Two rows, so nothing is squeezed: back / play / next, and below
+             shuffle, volume, repeat and share. The volume button turns the
+             lower row into a volume bar (inside the cover, so nothing covers
+             it). Small cards keep only the top row. -->
         <div class="ctl">
-          <div class="volw" onpointerenter={() => (volHover = true)} onpointerleave={() => (volHover = false)} role="presentation">
-            <IconButton name={app.volume <= 0.001 ? "volume-x" : "volume-2"} size={15} color="#fff" onclick={() => (volPinned = !volPinned)} />
+          <span use:press><IconButton name="skip-back" size={18} color="#fff" onclick={() => app.previous()} /></span>
+          <button class="play lg" class:xl={side >= 150} use:press aria-label={app.playing ? t("common.pause") : t("common.play")} onclick={() => app.togglePlay()}>
+            <PlayGlyph loading={app.loading} playing={app.playing} size={16} button={side >= 150 ? 44 : 38} />
+          </button>
+          <span use:press><IconButton name="skip-forward" size={18} color="#fff" onclick={() => app.next()} /></span>
+        </div>
+        {#if side >= 150}
+          <div class="ctl2">
             {#if volOpen}
-              <div class="vpop"><FracBar vertical value={app.volume} track="rgba(255,255,255,.2)" fill="var(--accent)" wheelStep={wheelVol} onpick={(f) => app.setVolume(f)} /></div>
+              <IconButton name={app.volume <= 0.001 ? "volume-x" : "volume-2"} size={15} color="var(--accent)" label={t("tip.x")} onclick={() => (volPinned = false)} />
+              <div class="hvol"><FracBar value={app.volume} track="rgba(255,255,255,.25)" fill="var(--accent)" wheelStep={wheelVol} onpick={(f) => app.setVolume(f)} /></div>
+            {:else}
+              <IconButton name="shuffle" size={15} color={app.player.shuffle ? "var(--accent)" : "#fff"} onclick={() => app.toggleShuffle()} />
+              <IconButton name={app.volume <= 0.001 ? "volume-x" : "volume-2"} size={15} color="#fff" onclick={() => (volPinned = true)} />
+              <IconButton name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={15} color={app.player.repeat !== "off" ? "var(--accent)" : "#fff"} onclick={() => app.cycleRepeat()} />
+              <IconButton name="link-2" size={15} color="#fff" onclick={() => cur && app.share({ track: cur })} />
             {/if}
           </div>
-          <IconButton name="shuffle" size={15} color={app.player.shuffle ? "var(--accent)" : "#fff"} onclick={() => app.toggleShuffle()} />
-          <span use:press><IconButton name="skip-back" size={16} color="#fff" onclick={() => app.previous()} /></span>
-          <button class="play lg" use:press aria-label={app.playing ? t("common.pause") : t("common.play")} onclick={() => app.togglePlay()}>
-            <PlayGlyph loading={app.loading} playing={app.playing} size={14} button={38} />
-          </button>
-          <span use:press><IconButton name="skip-forward" size={16} color="#fff" onclick={() => app.next()} /></span>
-          <IconButton name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={15} color={app.player.repeat !== "off" ? "var(--accent)" : "#fff"} onclick={() => app.cycleRepeat()} />
-          <IconButton name="link-2" size={15} color="#fff" onclick={() => cur && app.share({ track: cur })} />
-        </div>
+        {/if}
         <div class="fl"></div>
         <div class="prog2">
           <div class="times mono"><span>{fmtTime(app.position)}</span><span>{dur != null ? fmtTime(dur) : "-:--"}</span></div>
@@ -272,6 +305,7 @@
   .play:hover { opacity: .88; }
   .play.sm { width: 28px; height: 28px; }
   .play.lg { width: 38px; height: 38px; }
+  .play.lg.xl { width: 44px; height: 44px; }
   .play:global(.pressing) { animation: press .25s var(--ease); }
   .prog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); }
   /* ---- card ---- */
@@ -287,11 +321,9 @@
   .ov { position: absolute; inset: 0; border-radius: 8px; background: rgba(0, 0, 0, .55); display: flex; flex-direction: column; opacity: 0; transition: opacity .2s ease-out; }
   .cover:hover .ov, .cover.pinned .ov { opacity: 1; }
   .fl { flex: 1; }
-  .ctl { display: flex; align-items: center; justify-content: center; gap: 2px; }
-  .volw { position: relative; }
-  .vpop { position: absolute; bottom: 29px; left: 1px; width: 28px; height: 108px; padding: 10px 0 14px; display: flex; justify-content: center; z-index: 4; animation: fade-in .12s ease-out; }
-  .vpop::before { content: ""; position: absolute; inset: 0 0 4px; border-radius: 8px; background: hsl(0 0% 10% / .98); }
-  .vpop :global(.hit) { position: relative; }
+  .ctl { display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .ctl2 { height: 29px; margin-top: 10px; padding: 0 14px; display: flex; align-items: center; justify-content: center; gap: 16px; }
+  .hvol { flex: 1; max-width: 170px; display: flex; align-items: center; animation: fade-in .12s ease-out; }
   .prog2 { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 12px; }
   .times { display: flex; justify-content: space-between; font-size: 11px; color: rgba(255, 255, 255, .8); }
   .info { flex: none; display: flex; align-items: center; gap: 10px; }

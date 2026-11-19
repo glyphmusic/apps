@@ -7,7 +7,6 @@
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
-  import Chip from "../components/Chip.svelte";
   import { app, type SettingsPage } from "../state.svelte";
   import { t } from "../i18n.svelte";
   import { phone } from "./cstate.svelte";
@@ -35,6 +34,7 @@
   ]).filter((p) => pages?.pageShown(p as SettingsPage) ?? true) as SettingsPage[]);
   const page = $derived(app.settingsPage);
   const Body = $derived(pages?.pageComponent(page));
+  let pageEl: HTMLElement | undefined = $state();
   const tabs = $derived(pages?.subtabs(page) ?? []);
   const sub = $derived(Math.min(phone.settingsSub, Math.max(0, tabs.length - 1)));
   function back() {
@@ -56,10 +56,16 @@
     <span class="sp"></span>
   </div>
   {#if phone.settingsInPage}
-    <div class="scroll body page" use:fadeEdges={{ top: 18, bottom: 18 }}>
-      {#if tabs.length}
-        <div class="chips">{#each tabs as k, i}<Chip on={i === sub} onclick={() => (phone.settingsSub = i)}>{t(k)}</Chip>{/each}</div>
-      {/if}
+    {#if tabs.length}
+      <!-- Sub-pages as tabs under the title (they stay put while the page scrolls):
+           equal widths when they fit, else a row that scrolls sideways. -->
+      <div class="tabs" class:fit={tabs.length <= 3} role="tablist">
+        {#each tabs as k, i}
+          <button class="tb" class:on={i === sub} role="tab" aria-selected={i === sub} onclick={() => { phone.settingsSub = i; pageEl?.scrollTo(0, 0); }}>{t(k)}</button>
+        {/each}
+      </div>
+    {/if}
+    <div class="scroll body page" class:tabbed={tabs.length > 0} bind:this={pageEl} use:fadeEdges={{ top: 18, bottom: 18 }}>
       {#if Body}<Body {sub} />{/if}
     </div>
   {:else}
@@ -92,7 +98,14 @@
   h1 { flex: 1; margin: 0; text-align: center; font-size: 17px; font-weight: 700; color: #fff; }
   .body { flex: 1; min-height: 0; padding-bottom: calc(max(var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)) + 24px); }
   .page { padding-left: 16px; padding-right: 16px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 12px; }
+  .tabs { flex: none; display: flex; gap: 2px; padding: 0 10px; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tb { position: relative; flex: none; height: 46px; padding: 0 14px; border-radius: 10px 10px 0 0; font-size: 14.5px; font-weight: 600; color: rgba(255, 255, 255, .5); white-space: nowrap; text-align: center; transition: color .15s ease-out; }
+  .tabs.fit .tb { flex: 1 1 0; min-width: 0; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; }
+  .tb.on { color: #fff; }
+  .tb.on::after { content: ""; position: absolute; left: 22%; right: 22%; bottom: 0; height: 3px; border-radius: 3px 3px 0 0; background: var(--accent); }
+  .tb:active { background: rgba(255, 255, 255, .05); }
+  .page.tabbed { padding-top: 14px; }
   .quick { display: flex; gap: 8px; padding: 0 16px 10px; }
   .qt { flex: 1; min-width: 0; height: 84px; padding: 0 6px; border-radius: 10px; background: rgba(255, 255, 255, .07); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
   .qt.on { background: rgba(255, 255, 255, .14); }

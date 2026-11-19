@@ -36,7 +36,7 @@
   .pill { height: 36px; padding: 0 18px; gap: 8px; border-radius: 8px; background: #fff; color: #000; font-size: 12.5px; font-weight: 600; }
   .pill:hover { opacity: .88; }
   /* round icon button: 36, radius 8, solid dark fill, 1 px white 14 % */
-  .round { width: 36px; height: 36px; border-radius: 8px; background: #18181a; border: 1px solid rgba(255, 255, 255, .14); color: rgba(255, 255, 255, .9); }
+  .round { width: 36px; height: 36px; border-radius: 8px; background: #222226; color: rgba(255, 255, 255, .9); }
   .round:hover { background: #242428; }
   /* back pill: h 30, px 12, radius 8, solid dark surface visible on dark pages and bright hero banners */
   .back { height: 30px; padding: 0 12px; border-radius: 8px; background: #222226; font-size: 12.5px; font-weight: 500; color: rgba(255, 255, 255, .94); }

@@ -61,11 +61,21 @@ html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
 html.mini-window, html.mini-window body { background: transparent; }
 body { color: var(--text); font: var(--md)/1.35 var(--font); -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: default; }
 #app { height: 100%; }
-button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; }
+/* align-items: older WebViews (Android System WebView, some WebView2) line a
+   flex button's children up at the start instead of stretching them, so a
+   title inside a card button grew past the card instead of being cut off. */
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; align-items: normal; }
 input, textarea { font: inherit; color: inherit; user-select: text; -webkit-user-select: text; }
 a { color: inherit; text-decoration: none; }
 img { display: block; -webkit-user-drag: none; }
 :focus, :focus-visible { outline: none; }
+
+/* Scroll direction memory (lib/scroll-intent.ts): right after scrolling up or
+   down, sideways rows only pan up/down, so a swipe that starts on them keeps
+   moving the page; right after swiping a row sideways, that row only pans
+   sideways. */
+:root.scroll-y [data-hscroll] { touch-action: pan-y; }
+[data-hscroll].scroll-x { touch-action: pan-x; }
 
 .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

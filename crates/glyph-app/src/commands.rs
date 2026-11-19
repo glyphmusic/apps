@@ -123,6 +123,26 @@ pub fn like(core: C, track: Track, on: bool) {
     });
 }
 
+/// Likes or unlikes many songs in one go (clearing Liked Songs, removing a
+/// selection, or many hearts tapped quickly): one save, one library update
+/// for the UI and one sync, however many songs. One update per song made the
+/// UI redraw the whole library again and again (a black screen on phones).
+pub fn like_many(core: C, tracks: Vec<Track>, on: bool) {
+    if tracks.is_empty() {
+        return;
+    }
+    lib(&core, |l| {
+        if on {
+            l.record_list_use(&ListKey::Liked, 0.3, glyph_core::paths::now_unix());
+        }
+        for t in &tracks {
+            if l.is_liked(t) != on {
+                l.toggle_like(t);
+            }
+        }
+    });
+}
+
 pub fn playlist_create(core: C, name: String, tracks: Vec<Track>) -> String {
     let limit = glyph_core::library::playlist_track_limit();
     let over = tracks.len() > limit;
@@ -185,6 +205,22 @@ pub fn playlist_add(core: C, id: String, tracks: Vec<Track>) -> usize {
 
 pub fn playlist_remove(core: C, id: String, index: usize) {
     lib(&core, |l| l.remove_from_playlist(&id, index));
+}
+
+/// Removes several songs of a playlist (a selection) with one save and one
+/// library update. `indices` are positions in the playlist as it is now.
+pub fn playlist_remove_many(core: C, id: String, mut indices: Vec<usize>) {
+    if indices.is_empty() {
+        return;
+    }
+    // From the back, so the positions still to remove stay where they are.
+    indices.sort_unstable_by(|a, b| b.cmp(a));
+    indices.dedup();
+    lib(&core, |l| {
+        for i in indices {
+            l.remove_from_playlist(&id, i);
+        }
+    });
 }
 
 pub fn playlist_move(core: C, id: String, from: usize, to: usize) {

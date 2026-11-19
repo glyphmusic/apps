@@ -22,6 +22,7 @@
   import Skeletons from "./search/Skeletons.svelte";
   import { app, type SearchFilter } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
+  import { uniqBy } from "../fmt";
   import { PROVIDER_NAME, primaryArtist, type Release, type SearchItem, type Track } from "../api/types";
 
   const s = $derived(app.search);
@@ -33,7 +34,7 @@
   const FILTERS: [SearchFilter, string][] = [["all", "search.filter.all"], ["tracks", "search.filter.tracks"], ["albums", "search.filter.albums"], ["artists", "search.filter.artists"]];
 
   // Matching artists on top (search_artists).
-  const artistRows = $derived(filter === "all" ? s.artists.slice(0, 3) : []);
+  const artistRows = $derived(filter === "all" ? uniqBy(s.artists, (a) => a.name).slice(0, 3) : []);
   /** Query completions from history, suggestions, artists, and tracks. */
   const cleanCompletion = (t: string) =>
     t.replace(/[\(\[]\s*(?:official|lyrics?|audio|video|visualizer|explicit|hd|4k|hq|mv)[^\)\]]*[\)\]]/gi, "")

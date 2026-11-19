@@ -25,10 +25,11 @@
 </button>
 
 <style>
-  .fb { position: relative; flex: none; display: flex; align-items: center; padding: 0 16px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, .45); background: #18181a; font-size: var(--sm); font-weight: 600; color: rgba(255, 255, 255, .95); transition: background-color .12s ease-out, border-color .2s ease-out, padding-left .3s var(--ease), transform .14s var(--ease); }
-  .fb.on { border-color: rgba(255, 255, 255, .14); padding-left: 12px; }
-  .fb:hover { background: #26262a; }
-  .fb:active { background: #303036; transform: scale(.96); }
+  .fb { position: relative; flex: none; display: flex; align-items: center; padding: 0 16px; border-radius: 8px; background: #2a2a2f; font-size: var(--sm); font-weight: 600; color: rgba(255, 255, 255, .95); transition: background-color .12s ease-out, padding-left .3s var(--ease), transform .14s var(--ease); }
+  .fb.on { background: #1c1c1f; padding-left: 12px; }
+  .fb:hover { background: #34343a; }
+  .fb.on:hover { background: #26262a; }
+  .fb:active { background: #3c3c42; transform: scale(.96); }
   .ck { display: flex; align-items: center; justify-content: flex-start; width: 0; opacity: 0; overflow: hidden; transform: scale(.6); transform-origin: left center; transition: width .3s var(--ease), opacity .3s var(--ease), transform .3s var(--ease); }
   .ck.on { width: 18px; opacity: 1; transform: none; }
 </style>

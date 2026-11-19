@@ -56,6 +56,9 @@
       <Row label={t("sp.radio")} info={radio.ok === false ? t("radio.off") : t("sp.radio.desc")}>
         <Tog on={radio.on} disabled={radio.ok === false} why={t("radio.off")} onchange={setRadio} label={t("sp.radio")} />
       </Row>
+      <Row label={t("sp.recommendations")} info={t("sp.recommendations.desc")}>
+        <Tog on={app.config.ui.recommendations !== false} onchange={(v) => app.setConfig((c) => { c.ui.recommendations = v; })} label={t("sp.recommendations")} />
+      </Row>
     </Rows>
     <div class="hid">
       <Row label={t("sp.hidden")} info={hidden.length ? t("sp.hidden.desc") : t("sp.hidden.none")}>

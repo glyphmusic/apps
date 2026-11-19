@@ -314,7 +314,7 @@
   .startcard :global(.full) { width: 100%; height: 34px; }
   .joincard { margin: 0 12px; padding: 10px; }
   .join { display: flex; align-items: center; gap: 8px; }
-  .join input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; background: rgba(20, 20, 20, .92); border: 1px solid rgba(255, 255, 255, .08); font-size: var(--sm); outline: none; text-transform: uppercase; transition: border-color .15s; }
+  .join input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; background: rgba(34, 34, 38, .92); font-size: var(--sm); outline: none; text-transform: uppercase; transition: border-color .15s; }
   .join input::placeholder { text-transform: none; color: rgba(255, 255, 255, .4); }
   .join input:focus { border-color: rgba(255, 255, 255, .22); }
 

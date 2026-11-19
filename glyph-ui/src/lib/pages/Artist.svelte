@@ -36,6 +36,9 @@
   import { artistRadio, compactCount, groupAlbums, playShuffled, playingFrom, releaseKind } from "./lists/actions";
   import { albumLabel } from "./lists/albumMeta.svelte";
   import type { ListKey, Release, Track } from "../api/types";
+  import { uniqBy } from "../fmt";
+  import { phone, scrollFx } from "../compact/cstate.svelte";
+  import { sideScroll } from "../scroll-intent";
 
   const ROW = 6; // ARTIST_ALBUM_ROW
   const name = $derived(app.openArtist ?? "");
@@ -45,6 +48,13 @@
   const info = $derived(page?.info ?? null);
   const infoLoading = $derived((page as any)?.info_loading ?? (loading && !info));
   const compact = $derived(app.compact);
+  // Phones: scrolling down zooms into the photo (up to 125 % over 400 px)
+  // and lets it lag a little behind the page, so it feels deeper.
+  const heroZoom = $derived.by(() => {
+    if (!compact || scrollFx) return undefined;
+    const y = Math.min(400, Math.max(0, phone.scroll));
+    return y > 0 ? `translateY(${(y * 0.3).toFixed(1)}px) scale(${(1 + y * 0.000625).toFixed(4)})` : undefined;
+  });
   const has = $derived(tracks.length > 0);
   const fans = $derived(info?.fans && info.fans > 0 ? info.fans : null);
   const compactMeta = $derived.by(() => {
@@ -56,6 +66,19 @@
   const verified = $derived(!!info?.verified);
   let showAll = $state(false);
   let aboutOpen = $state(false);
+  /** The closed bio is cut off (more text than its three lines): only then "Show more". */
+  let aboutCut = $state(false);
+  function measureCut(el: HTMLElement, _text: string | null) {
+    let raf = 0;
+    const check = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => { if (!el.classList.contains("open")) aboutCut = el.scrollHeight > el.clientHeight + 2; });
+    };
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    check();
+    return { update: check, destroy() { cancelAnimationFrame(raf); ro.disconnect(); } };
+  }
 
   // Hero picture: the photo/banner, else the top song's cover (only once the info
   // is in, so it never flashes before the photo).
@@ -124,7 +147,7 @@
   const accent = $derived(themeColors(app.config?.visuals.theme ?? "glyph").accent);
 
   // The catalog's discography when known, else the songs found grouped.
-  const releases = $derived(page?.releases ?? []);
+  const releases = $derived(uniqBy(page?.releases ?? [], (r) => r.id));
   const grouped = $derived(releases.length ? [] : groupAlbums(tracks));
   const seed = (r: Release): Track => ({ id: r.id, source: "deezer", title: r.title, artist: r.artist, album: r.title, cover_url: r.cover_url ?? undefined });
   const similar = $derived(page?.similar ?? []);
@@ -133,28 +156,21 @@
     e.preventDefault(); e.stopPropagation();
     app.openCtx({ x: e.clientX, y: e.clientY, track: liked[0] ?? null, list: likedList });
   }
-  /** Mouse wheel scrolls the sideways rows (widgets smooth_wheel, horizontal). */
-  function sideways(e: WheelEvent) {
-    const el = e.currentTarget as HTMLElement;
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || el.scrollWidth <= el.clientWidth) return;
-    const max = el.scrollWidth - el.clientWidth;
-    if ((e.deltaY < 0 && el.scrollLeft <= 0) || (e.deltaY > 0 && el.scrollLeft >= max)) return;
-    e.preventDefault();
-    el.scrollBy({ left: e.deltaY, behavior: "smooth" });
-  }
 </script>
 
 {#snippet aboutCard(mobile: boolean)}
   <div class="about" class:mob={mobile}>
     <div class="at">{t("artist.about")}</div>
     {#if about}
-      <div class="ab scroll" class:open={aboutOpen} style:opacity={0.15 + 0.85 * aboutK} use:fadeEdges={{ top: 16, bottom: 16, minOverflow: 8, active: aboutOpen }}>{about}</div>
+      <div class="ab scroll" class:open={aboutOpen} style:opacity={0.15 + 0.85 * aboutK} use:measureCut={about} use:fadeEdges={{ top: 16, bottom: 16, minOverflow: 8, active: aboutOpen }}>{about}</div>
+      {#if aboutCut || aboutOpen || wiki}
       <div class="af">
-        <button class="more" onclick={() => (aboutOpen = !aboutOpen)}>{aboutOpen ? t("artist.less") : t("artist.more")}</button>
+        {#if aboutCut || aboutOpen}<button class="more" onclick={() => (aboutOpen = !aboutOpen)}>{aboutOpen ? t("artist.less") : t("artist.more")}</button>{:else}<span></span>{/if}
         {#if wiki}
           <button class="wiki" onclick={() => backend().call("open_url", { url: wiki }).catch(() => {})}>Wikipedia<Icon name="external-link" size={11} /></button>
         {/if}
       </div>
+      {/if}
     {:else}
       <Skeleton w={mobile ? 260 : 310} h={64} radius={6} id="about-sk-{name}" />
     {/if}
@@ -164,7 +180,8 @@
 <div class="ap" class:mob={compact}>
   <section class="hero" class:mob={compact}>
     {#if heroReady}
-      <img class="photo" class:mob={compact} src={loaded} alt="" style:opacity={0.1 + 0.9 * heroE} />
+      <!-- The fade at the bottom sits on a still frame, so it stays at the hero's edge while the photo zooms. -->
+      <div class="pmask" class:mob={compact}><img class="photo" class:mob={compact} class:sd={compact && scrollFx} src={loaded} alt="" style:opacity={0.1 + 0.9 * heroE} style:transform={heroZoom} /></div>
       {#if heroE < 1}<div class="sk" style:opacity={1 - heroE}><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-rv-{name}" /></div>{/if}
     {/if}
     {#if stillLoading}<div class="sk"><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-sk-{name}" /></div>{/if}
@@ -262,7 +279,7 @@
         <span class="flex1"></span>
         <Button kind="text" onclick={() => app.navigate("releases")}>{t("artist.show_all")}</Button>
       </div>
-      <div class="side" onwheel={sideways} use:fadeEdges={{ axis: "x", size: 28, minOverflow: 16 }}>
+      <div class="side" use:sideScroll use:fadeEdges={{ axis: "x", size: 28, minOverflow: 16 }}>
         {#if releases.length}
           {#each releases.slice(0, ROW) as r (r.id)}
             <ReleaseCard title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r))} />
@@ -283,7 +300,7 @@
         <span class="flex1"></span>
         <Button kind="text" onclick={() => app.navigate("similar")}>{t("artist.show_all")}</Button>
       </div>
-      <div class="side" onwheel={sideways} use:fadeEdges={{ axis: "x", size: 28, minOverflow: 16 }}>
+      <div class="side" use:sideScroll use:fadeEdges={{ axis: "x", size: 28, minOverflow: 16 }}>
         {#each similar as n (n)}<ArtistCard name={n} />{/each}
       </div>
     </div>
@@ -296,31 +313,37 @@
 
 <style>
   .ap { display: flex; flex-direction: column; gap: 22px; padding-bottom: 20px; }
-  .ap.mob { gap: 18px; }
+  .ap.mob { gap: 12px; }
   .hero { position: relative; margin: -12px -24px 0; height: 420px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
-  .hero.mob { margin: calc(-1 * var(--page-top, 8px)) calc(-1 * var(--page-x, 16px)) 0; height: min(320px, 44vh); min-height: 240px; border-radius: 0; }
+  /* Phones: the photo also fills the status bar strip (Compact.svelte .bleed), so it is that much taller. */
+  .hero.mob { margin: calc(-1 * var(--page-top, 8px)) calc(-1 * var(--page-x, 16px)) 0; height: calc(min(320px, 44vh) + var(--safe-top, env(safe-area-inset-top, 0px))); min-height: calc(240px + var(--safe-top, env(safe-area-inset-top, 0px))); border-radius: 0; }
   /* ascii.rs photo_fade: crop at 30 % from the top, 80 % brightness, alpha
      fades (smoothstep) from 60 % of the height to the bottom. */
-  .photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; border-radius: 14px 14px 0 0; filter: brightness(.8);
+  .pmask { position: absolute; inset: 0; overflow: hidden; border-radius: 14px 14px 0 0;
     -webkit-mask-image: linear-gradient(#000 60%, rgba(0,0,0,.84) 68%, rgba(0,0,0,.5) 80%, rgba(0,0,0,.16) 92%, transparent);
     mask-image: linear-gradient(#000 60%, rgba(0,0,0,.84) 68%, rgba(0,0,0,.5) 80%, rgba(0,0,0,.16) 92%, transparent); }
-  .photo.mob { object-position: center 22%; border-radius: 0; filter: brightness(.9); }
+  .pmask.mob { border-radius: 0; }
+  .photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; filter: brightness(.8); }
+  .photo.mob { object-position: center 22%; filter: brightness(.9); transform-origin: 50% 22%; will-change: transform; }
+  /* Same zoom as heroZoom, run by the browser along the phone page scroll. */
+  .photo.sd { animation: hero-zoom linear both; animation-timeline: --page; animation-range: 0px 400px; }
+  @keyframes hero-zoom { from { transform: none; } to { transform: translateY(120px) scale(1.25); } }
   .scrim { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to bottom, rgba(0,0,0,.28) 0%, transparent 30%, rgba(0,0,0,.38) 64%, rgba(0,0,0,.5) 82%, transparent 100%); }
   .sk { position: absolute; inset: 0; }
   .back { position: absolute; top: 20px; left: 32px; }
   .hinfo { position: absolute; left: 32px; bottom: 40px; display: flex; flex-direction: column; min-width: 0; }
-  .hinfo.mob { left: var(--page-x, 16px); right: var(--page-x, 16px); bottom: 16px; }
+  .hinfo.mob { left: var(--page-x, 16px); right: var(--page-x, 16px); bottom: 6px; }
   .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .nrow { padding-top: 2px; display: flex; align-items: center; gap: 12px; min-width: 0; }
   .name { margin: 0; font-size: 46px; line-height: 52px; font-weight: 700; color: #fff; }
   .hinfo.mob .name { font-size: clamp(28px, 8.5vw, 38px); line-height: 1.08; display: -webkit-box; line-clamp: 2; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .hmeta { padding-top: 6px; font-size: 13px; color: rgba(255, 255, 255, .65); }
   .hacts { padding-top: 18px; display: flex; align-items: center; gap: 10px; }
-  .mob-bar { display: flex; flex-direction: column; gap: 12px; }
+  .mob-bar { display: flex; flex-direction: column; gap: 8px; }
   .mob-meta { font-size: 13px; color: var(--dim); font-weight: 500; }
   .mob-acts { display: flex; align-items: center; gap: 12px; }
   .pl { margin-right: 6px; display: flex; }
-  .about { position: absolute; right: 32px; bottom: 40px; width: 340px; padding: 14px; border-radius: 12px; background: rgba(0, 0, 0, .6); border: 1px solid rgba(255, 255, 255, .1); display: flex; flex-direction: column; gap: 8px; }
+  .about { position: absolute; right: 32px; bottom: 40px; width: 340px; padding: 14px; border-radius: 12px; background: rgba(0, 0, 0, .6); display: flex; flex-direction: column; gap: 8px; }
   .about.mob { position: static; width: 100%; background: var(--card); border-color: rgba(255, 255, 255, .07); }
   .at { font-size: 14px; font-weight: 600; color: rgba(255, 255, 255, .95); }
   .ab { font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .72); max-height: 72px; overflow: hidden; user-select: text; transition: max-height .25s var(--ease); white-space: pre-line; }
@@ -331,7 +354,7 @@
   .wiki { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: rgba(255, 255, 255, .45); transition: color .12s; }
   .wiki:hover { color: rgba(255, 255, 255, .85); }
   .top { display: flex; align-items: flex-start; gap: 32px; }
-  .top.mob { flex-direction: column; align-items: stretch; gap: 20px; }
+  .top.mob { flex-direction: column; align-items: stretch; gap: 14px; }
   .pop { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
   .rows { display: flex; flex-direction: column; }
   .all { display: flex; padding-top: 4px; }

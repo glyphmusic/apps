@@ -3,7 +3,9 @@
   // the bottom (86 % of the height), a grab handle, dim behind; pull down or
   // tap outside to close. Queue sheet supports edit mode (multi-select
   // move-to-top / remove), drag-to-reorder handles, pinned current song with
-  // play/pause, and bottom Shuffle / Repeat / Sleep Timer bar.
+  // play/pause, and bottom Shuffle / Repeat / Sleep Timer bar. Swipe a row
+  // right to add the song to the queue again, left to take it out; songs
+  // added to the queue by hand carry an accent queue mark.
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
@@ -19,7 +21,7 @@
   import { fadeEdges } from "../ui.svelte";
   import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "../overlays/sleep.svelte";
   import ConnectView from "../shell/ConnectView.svelte";
-  import { drag, sheetIn, sheetOut, shouldClose } from "./cstate.svelte";
+  import { drag, sheetIn, sheetOut, shouldClose, SWIPE_ACT } from "./cstate.svelte";
 
   let pull = $state(0);
   let editing = $state(false);
@@ -28,6 +30,11 @@
   let listEl: HTMLDivElement | undefined = $state();
   let dragRow = $state<{ from: number; slot: number; dy: number; h: number } | null>(null);
   let queueCap = $state(30);
+  /** The row being swiped sideways (its key) and how far. */
+  let swipe = $state<{ key: string; dx: number } | null>(null);
+  /** Rows swiped out to the left, gone once the new queue arrives. */
+  let leaving = $state<string[]>([]);
+  $effect(() => { void app.queue; leaving = []; });
 
   const kind = $derived(app.showDevices ? "devices" : "queue");
   const close = () => { app.showQueue = false; app.showDevices = false; app.jamOpen = false; jam.page = "main"; };
@@ -120,6 +127,15 @@
     addEventListener("pointermove", onMove);
     addEventListener("pointerup", onEnd);
     addEventListener("pointercancel", onCancel);
+  }
+
+  const rowKey = (u: { track: Track; index: number }) => `${u.index}:${u.track.source}:${u.track.id}`;
+  /** Sideways swipe on a queue row: right adds it again, left removes it. */
+  function swipeEnd(u: { track: Track; index: number }, dx: number, vx: number) {
+    const key = rowKey(u);
+    swipe = null;
+    if (dx >= SWIPE_ACT || (vx > 0.5 && dx > 24)) app.queueAdd([u.track], false);
+    else if (dx <= -SWIPE_ACT || (vx < -0.5 && dx < -24)) { leaving = [...leaving, key]; app.queueRemove(u.index); }
   }
 
   function rowShift(i: number): number {
@@ -222,17 +238,30 @@
         {#if !editing && manual > 0 && up.length > manual}
           <div class="sec">{tf("queue.next_n", { n: manual })}</div>
         {/if}
-        {#each upShown as u, i (`${u.index}:${u.track.source}:${u.track.id}`)}
+        {#each upShown as u, i (rowKey(u))}
           {@const checked = selected.includes(u.index)}
           {@const dragging = dragRow?.from === i}
+          {@const key = rowKey(u)}
+          {@const sx = swipe?.key === key ? swipe.dx : 0}
+          {@const gone = leaving.includes(key)}
+          {@const queued = i < manual}
           {#if !editing && i === manual && manual > 0 && up.length > manual}
             <div class="sec">{app.queue.context ? tf("queue.from_n", { name: app.queue.context, n: up.length - manual }) : tf("queue.later_n", { n: up.length - manual })}</div>
           {/if}
+          <div class="q-wrap" class:gone>
+          {#if sx > 0}<span class="under add" style:opacity={Math.min(1, sx / SWIPE_ACT)}><Icon name="list-plus" size={20} color="var(--accent)" /></span>{/if}
+          {#if sx < 0}<span class="under rm" style:opacity={Math.min(1, -sx / SWIPE_ACT)}><Icon name="trash-2" size={20} color="hsla(0, 75%, 68%, .95)" /></span>{/if}
           <div
             class="r tap q-row"
             class:dragging
+            class:swiping={sx !== 0}
             data-qrow
-            style:transform="translateY({rowShift(i)}px)"
+            style:transform="translate({gone ? -110 : 0}%, 0) translate({sx}px, {rowShift(i)}px)"
+            use:drag={{
+              axis: "x",
+              move: (dx) => { if (!editing && !dragRow && !gone) swipe = { key, dx: Math.max(-140, Math.min(120, dx)) }; },
+              end: (dx, _dy, vx) => { if (!editing && !dragRow && !gone) swipeEnd(u, dx, vx); else swipe = null; },
+            }}
             onclick={() => (editing ? toggleSel(u.index) : app.queueJump(u.index))}
             oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: u.track }); }}
             onkeydown={() => {}}
@@ -247,7 +276,10 @@
             <Cover track={u.track} size={46} radius={4} />
             <span class="tx">
               <span class="t"><SongTitle rating={rating(u.track)}>{u.track.title}</SongTitle></span>
-              <span class="a trunc">{u.track.artist}</span>
+              <span class="a qa">
+                {#if queued}<span class="qd" aria-label={t("queue.added")}><Icon name="list-plus" size={12} color="var(--accent)" /></span>{/if}
+                <span class="trunc">{u.track.artist}</span>
+              </span>
             </span>
             <button class="grip" aria-label="Reorder" onpointerdown={(e) => startRowDrag(e, i, u)} onclick={(e) => e.stopPropagation()}>
               <svg width="18" height="14" viewBox="0 0 18 14" fill="none" aria-hidden="true">
@@ -256,6 +288,7 @@
                 <line x1="2" y1="11.5" x2="16" y2="11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
               </svg>
             </button>
+          </div>
           </div>
         {/each}
         {#if !up.length}<p class="empty">{t("queue.empty")}</p>{/if}
@@ -331,15 +364,25 @@
   .list { flex: 1; min-height: 0; position: relative; }
   .sec { padding: 12px 16px 4px; font-size: 13px; font-weight: 700; color: var(--dim); }
   .r { width: 100%; height: 60px; padding: 0 8px 0 16px; display: flex; align-items: center; gap: 12px; text-align: left; }
-  .q-row { transition: transform .14s var(--ease), background-color .12s ease-out; }
+  .q-wrap { position: relative; overflow: hidden; transition: opacity .2s ease-out; }
+  .q-wrap.gone { opacity: 0; pointer-events: none; }
+  .under { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; pointer-events: none; }
+  .under.add { left: 20px; }
+  .under.rm { right: 20px; }
+  .q-row { position: relative; background: hsl(0 0% 8%); touch-action: pan-y; transition: transform .14s var(--ease), background-color .12s ease-out; }
+  .q-row.swiping { transition: background-color .12s ease-out; }
+  /* Solid while pressed, so the swipe icons underneath never show through. */
+  .q-row.tap:active { background: hsl(0 0% 11%); }
   .q-row.dragging { position: relative; z-index: 3; transition: none; background: rgba(255, 255, 255, .09); border-radius: 10px; }
   .tap:active { background: rgba(255, 255, 255, .06); }
-  .chk { flex: none; width: 19px; height: 19px; border-radius: 4px; border: 1.5px solid rgba(255, 255, 255, .4); display: grid; place-items: center; transition: background-color .12s ease-out, border-color .12s ease-out; }
-  .chk.on { background: var(--accent); border-color: var(--accent); }
+  .chk { flex: none; width: 19px; height: 19px; border-radius: 4px; background: rgba(255, 255, 255, .16); display: grid; place-items: center; transition: background-color .12s ease-out; }
+  .chk.on { background: var(--accent); }
   .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .t { font-size: 15px; color: var(--text); min-width: 0; display: flex; align-items: center; }
   .t.on { color: var(--accent); font-weight: 500; }
   .a { font-size: 12.5px; color: var(--dim); }
+  .qa { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .qd { flex: none; display: inline-flex; }
   .grip { flex: none; width: 42px; height: 48px; display: grid; place-items: center; color: rgba(255, 255, 255, .45); touch-action: none; cursor: grab; }
   .grip:active { color: #fff; cursor: grabbing; }
   .empty { padding: 16px; color: var(--dim); }

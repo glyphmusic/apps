@@ -2,7 +2,7 @@
   import { app } from "../state.svelte";
   import { t } from "../i18n.svelte";
   import { hex, renderGlowPreview, type GlowShape, type Palette } from "../glow";
-  import { allThemes, css, themeColors } from "../theme";
+  import { allThemes, css, solidBase, themeColors } from "../theme";
   import { pl } from "./plugins-state.svelte";
   import { debounced } from "./util";
   import { tip } from "../ui.svelte";
@@ -25,9 +25,10 @@
     const pal = themePalette;
     const inten = v.intensity;
     const base = themeDef.base;
+    const solidHex = solidBase(v);
     for (const sh of SHAPES) {
       const c = canvases[sh];
-      if (c) renderGlowPreview(c, sh, pal, inten, base);
+      if (c) renderGlowPreview(c, sh, pal, inten, sh === "solid" ? solidHex : base);
     }
   });
 
@@ -35,6 +36,15 @@
   function slide(key: "intensity" | "music_reactivity", f: number) {
     app.config.visuals[key] = Math.min(1, Math.max(0, f));
     saveSoon();
+  }
+
+  // Solid background colours: the theme's own ("") and a few calm dark
+  // ones; the last button opens a free colour picker.
+  const SOLIDS = ["", "#000000", "#141418", "#0f1a2e", "#1b1030", "#0f2219", "#2a0f14", "#2b2b30"];
+  const solidCustom = $derived(!!v.solid_color && !SOLIDS.includes(v.solid_color.toLowerCase()));
+  function setSolid(c: string, now = true) {
+    app.config.visuals.solid_color = c;
+    if (now) app.setConfig(() => {}); else saveSoon();
   }
 
   const shapeLabel = (n: string) => (n ? t(`sp.appearance.shape.${n}`) : t("sp.appearance.shape.auto_short"));
@@ -74,6 +84,27 @@
   </div>
 
   <div class="sub-rows">
+    {#if v.glow_shape === "solid"}
+      <div class="srow-inline">
+        <div class="s-lab"><span>{t("sp.appearance.solid_color")}</span></div>
+        <div class="sw">
+          {#each SOLIDS as c (c)}
+            {@const on = (v.solid_color ?? "").toLowerCase() === c}
+            {@const name = c || t("sp.appearance.solid_color.theme")}
+            <button class="th" class:on use:tip={name} aria-label={name} aria-pressed={on} onclick={() => setSolid(c)}>
+              <span class="ring solid" style:background={c || css(themeDef.base)}></span>
+            </button>
+          {/each}
+          <label class="th pick" class:on={solidCustom} use:tip={t("sp.appearance.solid_color.custom")}>
+            <span class="ring solid" style:background={solidCustom ? v.solid_color : undefined}>
+              {#if !solidCustom}<Icon name="plus" size={12} color="rgba(255,255,255,.85)" />{/if}
+            </span>
+            <input type="color" aria-label={t("sp.appearance.solid_color.custom")} value={v.solid_color || css(solidBase(v))}
+              oninput={(e) => setSolid(e.currentTarget.value, false)} onchange={(e) => setSolid(e.currentTarget.value)} />
+          </label>
+        </div>
+      </div>
+    {/if}
     <div class="srow-inline">
       <div class="s-lab">
         <span>{t("sp.appearance.theme")}</span>
@@ -146,6 +177,9 @@
     flex-direction: column;
     align-items: center;
     gap: 7px;
+    padding: 6px;
+    border-radius: 10px;
+    transition: background-color .15s ease-out;
   }
   .prev {
     position: relative;
@@ -154,16 +188,15 @@
     border-radius: 8px;
     overflow: hidden;
     background: #030303;
-    border: 1.5px solid rgba(255, 255, 255, .16);
-    transition: border-color .15s ease-out, transform .15s var(--ease);
+    transition: transform .15s var(--ease);
   }
   .prev canvas {
     display: block;
     width: 100%;
     height: 100%;
   }
-  .scard:hover .prev { border-color: rgba(255, 255, 255, .45); }
-  .scard.on .prev { border-color: #fff; }
+  .scard:hover { background: #18181b; }
+  .scard.on { background: #26262b; }
   .scard:active .prev { transform: scale(.97); }
 
   .auto-cross {
@@ -238,6 +271,11 @@
   .th.on { border-color: #fff; }
   .ring { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
   .in { width: 12px; height: 12px; border-radius: 50%; }
+  /* A thin light edge, so near-black swatches still show on the dark card. */
+  .ring.solid { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .2); }
+  .th.pick { position: relative; cursor: pointer; }
+  .th.pick .ring:not([style*="background"]) { background: conic-gradient(#ff5f6d, #ffc371, #5fff9f, #5fb8ff, #c35fff, #ff5f6d); }
+  .th.pick input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
   .bar { display: flex; align-items: center; gap: 10px; margin-left: auto; }
   .val { width: 36px; display: flex; justify-content: flex-end; font-size: 12px; color: rgba(255, 255, 255, .6); }
 

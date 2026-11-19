@@ -53,6 +53,8 @@ struct Desk {
     theme_accent: Option<u32>,
     /// "Mini player on top" as last handed to the player and the window.
     mini_on_top: Option<bool>,
+    /// Ticks since the mini window was last put on top again.
+    mini_top_ticks: u8,
 }
 
 thread_local! {
@@ -62,6 +64,28 @@ thread_local! {
 static THEME_ACCENT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
 use glyph_app::i18n::tr;
+
+/// Puts the mini window back on top of all other windows, without focusing
+/// it. (Setting "always on top" again would do nothing: the window system
+/// keeps the flag and skips the call.)
+#[cfg(windows)]
+fn raise_mini(w: &tauri::WebviewWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE};
+    let Ok(handle) = w.window_handle() else { return };
+    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+        // SAFETY: the handle belongs to our live mini window; only its z-order changes.
+        unsafe {
+            let _ = SetWindowPos(HWND(h.hwnd.get() as *mut _), Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn raise_mini(w: &tauri::WebviewWindow) {
+    let _ = w.set_always_on_top(true);
+}
 
 fn hwnd(app: &tauri::AppHandle) -> Option<usize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -538,7 +562,7 @@ pub fn tick(core: &Arc<Core>) {
 
     // Runs ten times a second: only the few settings it needs, not a copy
     // of the whole config.
-    let (current, liked, playing, position, discord_want, on_top) = {
+    let (current, liked, playing, position, discord_want) = {
         let st = core.st();
         let liked = st.current.as_ref().is_some_and(|c| st.library.is_liked(c));
         let ps = core.player_state();
@@ -548,8 +572,11 @@ pub fn tick(core: &Arc<Core>) {
             || (st.resolving && !glyph_app::jam::hold_play());
         let pos = ps.map_or(Duration::ZERO, |s| s.position);
         let discord_want = st.config.integrations.discord_presence.then(|| crate::discord::client_id(&st.config)).flatten();
-        (st.current.clone(), liked, playing, pos, discord_want, st.config.player.mini_on_top)
+        (st.current.clone(), liked, playing, pos, discord_want)
     };
+    // The mini players always stay on top: they must never slip behind
+    // other windows (the old "mini_on_top" setting no longer turns it off).
+    let on_top = true;
     #[cfg(windows)]
     crate::thumbbar::set_state(playing, liked);
     #[cfg(not(windows))]
@@ -592,6 +619,17 @@ pub fn tick(core: &Arc<Core>) {
                 let _ = w.set_always_on_top(on_top);
             }
             d.mini_on_top = Some(on_top);
+        }
+        // Every 2 s the mini window is put on top again: other always-on-top
+        // windows, full-screen apps or minimising can push it behind.
+        d.mini_top_ticks = d.mini_top_ticks.wrapping_add(1);
+        if d.mini_top_ticks >= 20 {
+            d.mini_top_ticks = 0;
+            if let Some(w) = app.get_webview_window("mini") {
+                if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) {
+                    raise_mini(&w);
+                }
+            }
         }
         // Window title (taskbar, alt-tab).
         let title = current.as_ref().map_or_else(|| "Glyph".to_string(), |t| format!("{} - {}", t.artist, t.title));
@@ -747,9 +785,11 @@ pub async fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>,
         let _ = w.set_focus();
         return Ok(());
     }
-    let (on_top, large, cw, ch) = {
+    // Always on top (see the tick above).
+    let on_top = true;
+    let (large, cw, ch) = {
         let p = &core.st().config.player;
-        (p.mini_on_top, p.mini_large, p.mini_card_w as f64, p.mini_card_h as f64)
+        (p.mini_large, p.mini_card_w as f64, p.mini_card_h as f64)
     };
     let (w, h) = if large { (cw.max(240.0), ch.max(220.0)) } else { (300.0, 52.0) };
     let b = tauri::WebviewWindowBuilder::new(&app, "mini", tauri::WebviewUrl::App("index.html#mini".into()))

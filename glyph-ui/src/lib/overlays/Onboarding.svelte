@@ -1,7 +1,9 @@
 <script lang="ts">
   // ui/onboarding.rs layer(): first start, a short tour of what Glyph does,
   // one idea per page (welcome, search, library, sound, lyrics, devices,
-  // theme), each with a small live illustration to play with. It follows the
+  // speed, theme), each with a small live illustration to play with; on the
+  // speed page the user picks full effects or performance mode (the one that
+  // suits the device, checked on first start, is marked). It follows the
   // splash on a fresh install; Settings > About opens it again
   // (`app.onboarding = true`). Arrow keys / Enter go on, Escape skips; on
   // touch screens a sideways swipe turns the page and the sheet is full
@@ -26,9 +28,10 @@
   import LyricsPage from "../pages/onboarding/LyricsPage.svelte";
   import DevicesPage from "../pages/onboarding/DevicesPage.svelte";
   import ThemePage from "../pages/onboarding/ThemePage.svelte";
+  import SpeedPage from "../pages/onboarding/SpeedPage.svelte";
   import { easeOut, k, ob, resetTour } from "../pages/onboarding/anim.svelte";
 
-  const PAGES = ["welcome", "search", "library", "sound", "lyrics", "devices", "theme"] as const;
+  const PAGES = ["welcome", "search", "library", "sound", "lyrics", "devices", "speed", "theme"] as const;
   const CLOSE = 240;
 
   let page = $state(0), prev = $state(0), dir = $state(0);
@@ -128,6 +131,7 @@
     {:else if key === "sound"}<SoundPage {s} {now} {still} w={stageW} h={stageH} />
     {:else if key === "lyrics"}<LyricsPage {now} {still} w={stageW} h={stageH} />
     {:else if key === "devices"}<DevicesPage {s} {now} {still} w={stageW} h={stageH} />
+    {:else if key === "speed"}<SpeedPage {s} w={stageW} />
     {:else}<ThemePage {s} {still} w={stageW} />{/if}
   {/snippet}
 
@@ -163,7 +167,7 @@
       </div>
       <div class="btns">
         {#if page > 0}<Button onclick={back}>{t("onboarding.back")}</Button>{/if}
-        {#if last}<Button icon="arrow-right-left" onclick={() => finish(true)}>{t("onboarding.migrate")}</Button>{/if}
+        {#if last}<Button icon="arrow-right-left" class="migrate" onclick={() => finish(true)}>{t("onboarding.migrate")}</Button>{/if}
         <Button kind="primary" onclick={next}>{t(last ? "onboarding.start" : "onboarding.next")}<Icon name={last ? "check" : "arrow-right"} size={14} color="rgba(0,0,0,.9)" /></Button>
       </div>
     </div>
@@ -171,7 +175,7 @@
 
   {#if touch}
     <div class="sheet" style:background="rgba(5,5,5,{vis})" onpointerdown={pdown} onpointerup={pup} role="presentation">
-      <div class="inner" style:opacity={vis} style:padding="14px {pad}px 16px">{@render content()}</div>
+      <div class="inner" style:opacity={vis} style:padding-left="{pad}px" style:padding-right="{pad}px">{@render content()}</div>
     </div>
   {:else}
     <ModalLayer dim={0.45} blur={16} {vis} z={85} onbackdrop={() => {}}>
@@ -202,7 +206,19 @@
   .dotw { padding: 8px 3px; }
   .dot { display: block; height: 6px; border-radius: 3px; }
   .btns { display: flex; align-items: center; gap: 8px; }
-  .sheet .foot { margin-top: auto; flex-direction: column; gap: 12px; }
-  .sheet .title { font-size: 24px; }
-  .sheet .body { min-height: 88px; font-size: 15px; line-height: 22px; }
+  /* Phones: clear of the status and navigation bars, big thumb-sized buttons
+     across the bottom (Back | Next, "Bring my music" on its own row above). */
+  .sheet .inner { padding-top: calc(10px + var(--safe-top, env(safe-area-inset-top, 0px))); padding-bottom: calc(16px + var(--safe-bottom, env(safe-area-inset-bottom, 0px))); }
+  .sheet .no { font-size: 13px; }
+  .sheet .top :global(.skip) { font-size: 14.5px; font-weight: 500; padding: 9px 14px; border-radius: 10px; color: rgba(255, 255, 255, .72); }
+  .sheet .spacer { height: 38px; }
+  .sheet .foot { margin-top: auto; flex-direction: column; gap: 14px; }
+  .sheet .dotw { padding: 10px 4px; }
+  .sheet .dot { height: 7px; }
+  .sheet .btns { width: 100%; flex-wrap: wrap; gap: 10px; }
+  .sheet .btns :global(.btn) { flex: 1; height: 52px; padding: 0 18px; border-radius: 14px; font-size: 15.5px; font-weight: 600; gap: 8px; }
+  .sheet .btns :global(.btn.primary) { flex: 1.7; }
+  .sheet .btns :global(.btn.migrate) { flex-basis: 100%; order: -1; }
+  .sheet .title { font-size: 26px; line-height: 1.15; }
+  .sheet .body { min-height: 88px; font-size: 15.5px; line-height: 23px; }
 </style>

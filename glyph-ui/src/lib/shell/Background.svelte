@@ -5,10 +5,11 @@
   import { untrack } from "svelte";
   import { Glow, paletteFromImage, paletteFromSeed, presetFromSeed, hex, solidIsDarkInk, type GlowShape, type Palette, type RenderMode } from "../glow";
   import { app } from "../state.svelte";
-  import { THEMES, themeColors } from "../theme";
+  import { THEMES, solidBase, themeColors } from "../theme";
   import { backend } from "../api/backend";
   import { trackKey } from "../api/types";
   import { fx, setGlow } from "../ui.svelte";
+  import { t } from "../i18n.svelte";
 
   let { blurred = false }: { blurred?: boolean } = $props();
 
@@ -18,9 +19,17 @@
 
   const solid = $derived(!app.config || app.config.visuals.glow_shape === "solid");
   // Settings > Appearance > Animations. A canvas keeps the kind of drawing it
-  // started with, so a switch brings new canvases (the {#key} below).
-  const renderMode = $derived<RenderMode>(app.config?.visuals.render_mode === "cpu" ? "cpu" : "gpu");
-  const baseColor = $derived(themeColors(app.config?.visuals.theme ?? "glyph").base);
+  // started with, so a switch brings new canvases (the {#key} below). A
+  // graphics card that failed here stays off (`gpu_blocked`).
+  const renderMode = $derived<RenderMode>(app.config?.visuals.render_mode === "cpu" || app.config?.visuals.gpu_blocked ? "cpu" : "gpu");
+
+  /** The graphics card failed: stay on the processor on this device and say so once. */
+  function gpuFailed() {
+    if (!app.config || app.config.visuals.gpu_blocked) return;
+    void app.setConfig((c) => { c.visuals.render_mode = "cpu"; c.visuals.gpu_blocked = true; });
+    app.toast(t("toast.gpu_fallback"), "info");
+  }
+  const baseColor = $derived(solidBase(app.config?.visuals));
   const baseCss = $derived(`#${baseColor.toString(16).padStart(6, "0")}`);
 
   $effect(() => {
@@ -29,6 +38,8 @@
       return;
     }
     const g = new Glow(glowEl, asciiEl, untrack(() => renderMode));
+    g.onGpuFail = () => untrack(gpuFailed);
+    if (g.failReason) queueMicrotask(gpuFailed);
     glow = g;
     setGlow(g);
     return () => {

@@ -5,6 +5,7 @@
   // device). Click a device to play there (a ripple). Everything pops in
   // with a small overshoot.
   import Icon from "../../components/Icon.svelte";
+  import { t } from "../../i18n.svelte";
   import { backOut, DEVICES, easeOut, k, ob } from "./anim.svelte";
   let { s, now, still, w, h }: { s: number; now: number; still: boolean; w: number; h: number } = $props();
 
@@ -47,7 +48,7 @@
   <span class="me" style:left="{cx0 - av / 2}px" style:top="{cy0 - av / 2}px" style:width="{av}px" style:height="{av}px"><Icon name="user-round" size={26 * ak} color="rgba(255,255,255,.85)" /></span>
   <div class="who" style:left="{cx0 - 60}px" style:top="{cy0 + 34}px" style:opacity={easeOut(k(s, 0.4, 0.4))}>
     <span class="mono h1">@handle</span>
-    <span class="mono h2">[ E2E ]</span>
+    <span class="h2">{t("onboarding.devices.e2e")}</span>
   </div>
   {#each spots as [dx, dy], i (i)}
     {@const nk = backOut(k(s, 0.2 + 0.09 * i, 0.45))}
@@ -73,7 +74,7 @@
   .me { position: absolute; border-radius: 50%; background: rgba(255, 255, 255, .09); display: grid; place-items: center; }
   .who { position: absolute; width: 120px; display: flex; flex-direction: column; align-items: center; }
   .h1 { font-size: 11px; color: rgba(255, 255, 255, .75); }
-  .h2 { font-size: 9.5px; color: rgba(255, 255, 255, .4); }
+  .h2 { font-size: 10.5px; color: rgba(255, 255, 255, .45); white-space: nowrap; }
   .rip { position: absolute; border-radius: 50%; border: 2px solid; pointer-events: none; }
   .dev { position: absolute; border-radius: 50%; background: rgba(255, 255, 255, .07); display: grid; place-items: center; transition: background-color .2s ease-out, opacity .12s; }
   .dev.on { background: var(--accent); }
