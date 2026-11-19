@@ -41,8 +41,24 @@ jobs:
         run: |
           SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;36.0.0" > /dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          # NDK: the runner image ships recent ones, so use 28.2 or the newest
+          # 27+ already there; download only when none is, with retries (the
+          # NDK download kept failing with a broken zip on 2026-11-19).
+          NDK=""
+          for d in "$ANDROID_HOME/ndk/28.2.13676358" $(ls -d "$ANDROID_HOME"/ndk/2[7-9].* 2>/dev/null | sort -rV); do
+            if [ -f "$d/source.properties" ]; then NDK="$d"; break; fi
+          done
+          if [ -z "$NDK" ]; then
+            for i in 1 2 3; do
+              "$SDKMANAGER" --install "ndk;28.2.13676358" > /dev/null && break
+              rm -rf "$ANDROID_HOME/ndk/28.2.13676358"; sleep 15
+            done
+            NDK="$ANDROID_HOME/ndk/28.2.13676358"
+          fi
+          test -f "$NDK/source.properties"
+          echo "Using NDK $NDK"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           cargo install cargo-ndk --locked
       - name: Build Rust libraries
         run: cargo ndk -t arm64-v8a -t x86_64 -P 26 -o mobile/android/app/src/main/jniLibs build -p glyph-android --release
