@@ -7,6 +7,7 @@ import type {
 } from "./types";
 import type { ProfileSettingsData } from "../settings/types";
 import { listId, sameList, trackKey } from "./types";
+import { adminPathOk } from "../admin/api";
 import {
   b64url, DataKey, deriveLoginKey, derivePasswordKey, DeviceKey, openFromDevice, randomBytes,
   sealToDevice, splitPairCode, suspiciousSignInSalt, SYNC_KIND, type SyncItem, unwrapWithPassword, wrapWithPassword,
@@ -1256,6 +1257,20 @@ export class WebAccountManager {
         const token = await this.validToken();
         const res = await server.recoveryCode(token);
         return res.recovery_code;
+      },
+
+      admin_call: async (a) => {
+        if (!this.session) throw new Error("signed_out");
+        const path = String(a.path ?? "").replace(/^\/+/, "");
+        const method = String(a.method ?? "GET").toUpperCase();
+        if (!adminPathOk(path)) throw new Error("bad_path");
+        if (method !== "GET" && method !== "POST" && method !== "PUT") throw new Error("bad_method");
+        try {
+          return await this.runAuthed((t) => server.admin(t, method as "GET" | "POST" | "PUT", path, a.body ?? undefined));
+        } catch (e) {
+          if (e instanceof ApiError) throw new Error(e.status === 400 ? e.message : e.code);
+          throw e;
+        }
       },
 
       account_remove_device: async (a) => {

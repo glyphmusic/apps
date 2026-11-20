@@ -58,6 +58,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "account_approve" => res(account::account_approve(core, req(&args, "code")?).await),
         "account_recovery" => res(account::account_recovery(core).await),
         "account_remove_device" => res(account::account_remove_device(core, req(&args, "id")?).await),
+        "admin_call" => res(account::admin_call(core, req(&args, "method")?, req(&args, "path")?, opt(&args, "body")?).await),
         "account_sign_out" => res(account::account_sign_out(core).await),
         "account_sign_out_all" => res(account::account_sign_out_all(core).await),
         "account_delete" => res(account::account_delete(core, req(&args, "handle")?).await),
@@ -482,7 +483,13 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             system::mcp_rotate_token(core);
             Ok(Value::Null)
         }
-        "mcp_server_token" => res(system::mcp_server_token(core).await),
+        "mcp_server_token" => {
+            mcp_tools::request_server_token(core, opt(&args, "name")?).await;
+            Ok(Value::Null)
+        }
+        "mcp_sessions" => res(mcp_tools::sessions(core).await),
+        "mcp_rename_session" => res(mcp_tools::rename_session(core, req(&args, "id")?, req(&args, "name")?).await),
+        "mcp_revoke_session" => res(mcp_tools::revoke_session(core, req(&args, "id")?).await),
         "ytdlp_status" => res(system::ytdlp_status(core, opt(&args, "force")?).await),
         "ytdlp_install" => res(system::ytdlp_install(core).await),
         "prefetch_hover" => {

@@ -10,7 +10,7 @@
   import { onWeb } from "../web";
   import { jam } from "../jam.svelte";
   import { press } from "../ui.svelte";
-  import { t } from "../i18n.svelte";
+  import { t, tf } from "../i18n.svelte";
   import { playingFrom } from "../pages/lists/actions";
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import Header from "./Header.svelte";
@@ -28,6 +28,9 @@
   import ShareSheet from "./ShareSheet.svelte";
   import Page from "../shell/Page.svelte";
   import { installCompactLongPress, phone } from "./cstate.svelte";
+  import { admin } from "../admin/admin.svelte";
+  // The drawer's "Server" entry is ready before the drawer opens.
+  $effect(() => admin.check(app.account?.handle));
 
   onMount(() => installCompactLongPress());
 
@@ -114,6 +117,7 @@
   const barTitle = $derived(
     app.view === "list" && app.openList ? app.listTitle(app.openList)
     : app.view === "section" ? app.section?.title ?? ""
+    : app.view === "server" ? t({ "": "admin.title", people: "admin.people.title", settings: "admin.limits", versions: "admin.versions" }[admin.sub])
     : app.view === "artist" ? app.openArtist ?? ""
     : app.view === "releases" || app.view === "similar" ? `${app.openArtist} · ${t(app.view === "releases" ? "artist.albums" : "artist.similar")}`
     : "",
@@ -178,10 +182,14 @@
       {/snippet}
     </Header>
   {:else}
-    <div class="backbar" bind:this={barEl}>
+    <div class="backbar" class:titled={app.view === "server"} bind:this={barEl}>
       <IconAction name="arrow-left" onclick={back} />
-      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
+      <span class="bt trunc" style:opacity={app.view === "server" ? 1 : titleK}>{barTitle}</span>
       {@render barPlayBtn()}
+      {#if app.view === "server" && admin.me}
+        <span class="admin-role trunc">{admin.me.owner ? t("admin.role.owner") : tf("admin.role.admin", { handle: admin.me.handle ?? "" })}</span>
+        <IconAction name="refresh-cw" label={t("admin.refresh")} onclick={() => admin.reload++} />
+      {/if}
     </div>
   {/if}
   </div>
@@ -249,6 +257,9 @@
   .pill-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: color-mix(in srgb, #141414, transparent calc(var(--bar-k, 0) * 100%)); }
   .pill-ic > :global(*) { width: 38px; height: 38px; }
   .bt { flex: 1; font-size: 16px; font-weight: 700; color: var(--text); }
+  /* Pages whose name lives in the bar (Server): as big as the tab headers (Header.svelte), centred. */
+  .backbar.titled { height: 60px; }
+  .backbar.titled .bt { font-size: 22px; line-height: 60px; height: 60px; margin-left: 2px; }
   .bar-play { flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; transition: transform .12s; }
   .bar-play.nudge :global(.ic) { margin-left: 1.5px; }
   .bar-play:global(.pressing) { animation: press .25s var(--ease); }
@@ -264,4 +275,5 @@
   .tail.with-mini { height: calc(150px + var(--safe-bottom, env(safe-area-inset-bottom))); }
   .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 6px 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: linear-gradient(to bottom, rgba(10, 10, 10, 0), rgba(10, 10, 10, .55) 60%, rgba(10, 10, 10, .75)); }
   .bottom > :global(*) { pointer-events: auto; }
+  .admin-role { flex: none; max-width: 46%; height: 26px; padding: 0 10px; border-radius: 13px; background: rgba(255, 255, 255, .08); display: inline-flex; align-items: center; font-size: var(--xs); color: var(--dim); }
 </style>

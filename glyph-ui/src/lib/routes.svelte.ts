@@ -9,6 +9,7 @@
 //   /artist/<name>        artist          /artist/<name>/releases|similar
 //   /profile/<handle>     profile         /stats?range=…&recap=… stats
 //   /local?tab=…&q=…      local files     /p/<id>                a shared glyph.my link
+//   /server[/people|/settings|/versions]   server dashboard (admins only)
 //
 // The browser's back and forward buttons move through the pages; the app's
 // own back button does the same. Each history entry keeps the page and the
@@ -21,6 +22,7 @@ import { local, LOCAL_ALBUMS, LOCAL_ARTISTS, LOCAL_FOLDERS } from "./pages/local
 import { statsState } from "./pages/stats/stats.svelte";
 import type { StatsRange } from "./pages/stats/types";
 import { applySettingsHash, isSettingsHash, settingsHash } from "./settings/hash.svelte";
+import { admin, ADMIN_SUBS, type AdminSub } from "./admin/admin.svelte";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 const enc = encodeURIComponent;
@@ -62,6 +64,7 @@ function pathOf(r: Route, query: string): string | null {
       if (statsState.recap) sp.set("recap", statsState.recap);
       return withQuery("/stats", sp);
     }
+    case "server": return admin.sub ? `/server/${admin.sub}` : "/server";
     case "local": {
       const sp = new URLSearchParams();
       const tabSlug = LOCAL_TABS[local.tab];
@@ -154,6 +157,9 @@ function open(path: string, search: string) {
   if (head === "search") {
     const q = new URLSearchParams(search).get("q") ?? "";
     if (q.trim()) app.searchFor(q); else app.navigate("search");
+  } else if (head === "server") {
+    app.navigate("server");
+    admin.sub = ADMIN_SUBS.includes(a as AdminSub) ? (a as AdminSub) : "";
   } else if (simple[head]) app.navigate(simple[head]);
   else if (head === "artist" && a) {
     app.openArtistPage(a);

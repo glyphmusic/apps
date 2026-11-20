@@ -281,6 +281,7 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
                 if x.eq_gains.len() == 10 {
                     a.eq_gains = x.eq_gains.into_iter().map(|g| g.clamp(-12.0, 12.0)).collect();
                 }
+                crate::config::migrate_eq(a);
                 if let Some(b) = x.eq_bass_db.filter(|b| b.is_finite()) {
                     a.eq_bass_db = b.clamp(-12.0, 12.0);
                 }

@@ -9,7 +9,7 @@ import type { EqPreset } from "../api/types";
 /** Equalizer presets: name key and gains (dB) for 32 Hz .. 16 kHz. */
 export const EQ_PRESETS: [string, number[]][] = [
   ["flat", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
-  ["bass_boost", [6, 5, 4, 2.5, 1, 0, 0, 0, 0, 0]],
+  ["bass_boost", [6, 5, 3, 0, 0, 0, 0, 0, 0, 0]],
   ["bass_reducer", [-6, -5, -4, -2.5, -1, 0, 0, 0, 0, 0]],
   ["treble_boost", [0, 0, 0, 0, 0, 1, 2.5, 4, 5, 6]],
   ["treble_reducer", [0, 0, 0, 0, 0, -1, -2.5, -4, -5, -6]],

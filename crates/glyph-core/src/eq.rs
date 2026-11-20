@@ -19,7 +19,8 @@ pub const MAX_DB: f32 = 12.0;
 /// Built-in equalizer presets: `(key, gains)` for 32 Hz .. 16 kHz.
 pub const BUILTIN_PRESETS: &[(&str, [f32; BANDS])] = &[
     ("flat", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-    ("bass_boost", [6.0, 5.0, 4.0, 2.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    // Bass only: lifting 250-500 Hz too made songs sound muffled and far away.
+    ("bass_boost", [6.0, 5.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     ("bass_reducer", [-6.0, -5.0, -4.0, -2.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     ("treble_boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0]),
     ("treble_reducer", [0.0, 0.0, 0.0, 0.0, 0.0, -1.0, -2.5, -4.0, -5.0, -6.0]),

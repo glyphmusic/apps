@@ -32,7 +32,7 @@
     busy = "checking";
     try {
       const s = await backend().call<UpdateState>("update_check", { manual: true });
-      if (s?.kind !== "available") {
+      if (s?.kind !== "available" || s.downgrade) {
         // No newer version on this update channel: the download page has one.
         busy = null;
         page = DOWNLOAD_URL;

@@ -66,13 +66,23 @@
     const s = u.status;
     if (s.kind === "up_to_date") return [tf("update.up_to_date", { v: s.current }), "var(--ok)"];
     if (s.kind === "skipped") return [t("update.skipped"), "rgba(255,255,255,.55)"];
+    if (s.kind === "available" && s.downgrade) return [tf("update.back_to_stable", { v: s.version.replace(/^v/, "") }), "rgba(255,255,255,.85)"];
     if (s.kind === "available") return [tf("update.badge", { v: s.version.replace(/^v/, "") }), "var(--ok)"];
     return [t("update.not_checked"), "rgba(255,255,255,.55)"];
   });
   const avail = $derived(u.status.kind === "available" ? u.status : null);
   const installable = $derived(!!avail && avail.can_self_install && (!u.installed || android) && !u.installing);
   const prerelease = $derived(app.config.updates.channel === "prerelease");
-  const manual = $derived(avail && !avail.can_self_install ? tf(avail.release_package ? "update.release_package" : "update.package_manager", { url: avail.html_url }) : null);
+  const manual = $derived(avail && !avail.can_self_install
+    ? tf(avail.downgrade && android ? "update.back_to_stable_android" : avail.release_package ? "update.release_package" : "update.package_manager", { url: avail.html_url })
+    : null);
+
+  /** Switching the channel checks right away: back on Stable after a
+   * Latest build, the newest stable version can then be installed. */
+  async function setChannel(latest: boolean) {
+    await app.setConfig((c) => { c.updates.channel = latest ? "prerelease" : "stable"; });
+    if (!u.installing && !u.installed) void check();
+  }
 
   function intro() { app.settingsOpen = false; app.onboarding = true; }
   void copyText;
@@ -91,7 +101,7 @@
           <div class="nm"><span class="g">Glyph</span><span class="ver"><span class="dot"></span><span class="mono">v{app.version}</span></span></div>
           <div class="acts">
             {#if !web}<button class="chk" onclick={check} disabled={u.checking}><Icon name="refresh-cw" size={14} color="rgba(255,255,255,.85)" /><span>{t("update.check")}</span></button>{/if}
-            {#if installable}<Button kind="primary" onclick={install}>{t("update.install")}</Button>{/if}
+            {#if installable}<Button kind="primary" onclick={install}>{avail?.downgrade ? tf("update.install_stable", { v: avail.version.replace(/^v/, "") }) : t("update.install")}</Button>{/if}
             {#if u.installed && !android}<Button kind="primary" onclick={restart}>{t("update.restart")}</Button>{/if}
           </div>
           {#if !web}<div class="mono st" style:color={status[1]}>{#if u.checking}<Spin label={status[0]} />{:else}{status[0]}{/if}</div>{/if}
@@ -110,7 +120,7 @@
         </Row>
         <Row label={t("update.channel")} info={t("sp.about.channel.latest_desc")}>
           <Segmented value={prerelease} options={[{ value: false, label: t("update.channel.stable") }, { value: true, label: t("update.channel.latest") }]}
-            onpick={(v) => app.setConfig((c) => { c.updates.channel = v ? "prerelease" : "stable"; })} />
+            onpick={setChannel} />
         </Row>
         {/if}
         <Row label={t("sp.about.intro")} info={t("sp.about.intro.desc")}>

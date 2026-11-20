@@ -947,6 +947,17 @@ impl ServerClient {
     }
 
     /// Space the account uses on the server: `{ used_bytes, limit_bytes }`.
+    /// The server's admin API (`/admin/v1/<path>`) with an app sign-in; only
+    /// accounts the owner made admins get in (others: 403 `not_admin`).
+    pub async fn admin(&self, token: &str, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+        let rb = self.authed(method, &format!("/admin/v1/{path}"), token);
+        let rb = match body {
+            Some(b) => rb.json(&b),
+            None => rb,
+        };
+        Self::json_of(rb).await
+    }
+
     pub async fn account_storage(&self, token: &str) -> Result<serde_json::Value> {
         Self::json_of(self.authed(reqwest::Method::GET, "/v1/account/storage", token)).await
     }

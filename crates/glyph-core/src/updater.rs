@@ -4,6 +4,8 @@
 //!   non-draft; channel "stable" also skips pre-releases. GitHub's "Latest"
 //!   flag is not used, so a pre-release wrongly marked Latest stays out.
 //! * SemVer compare with `env!("CARGO_PKG_VERSION")`.
+//! * Channel "stable" while running a newer "latest" build: the newest
+//!   stable version is offered as `downgrade` (manual install only).
 //! * Asset naming: `glyph-{version}-{target}.zip` (Windows) / `.tar.gz`
 //!   (macOS, Linux), `glyph-{version}-android.apk` (Android) plus
 //!   `SHA256SUMS.txt` and its signature `SHA256SUMS.txt.minisig`. The
@@ -44,6 +46,10 @@ pub struct UpdateInfo {
     pub repo: String,
     pub tag: String,
     pub can_self_install: bool,
+    /// Channel "stable" while running a newer "latest" build: this is the
+    /// newest stable version, older than the running one. Only offered,
+    /// never installed automatically.
+    pub downgrade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +179,7 @@ fn to_info(rel: &GhRelease, repo: &str, target: &str, can_self_install: bool) ->
         repo: repo.to_string(),
         tag: rel.tag_name.clone(),
         can_self_install: can_self_install && asset.is_some() && sha.is_some() && sig.is_some(),
+        downgrade: false,
     }
 }
 
@@ -185,16 +192,44 @@ pub fn verified_checksum(sums: &str, minisig: &str, repo: &str, tag: &str, filen
         .ok_or_else(|| anyhow!("checksum manifest has no valid, unique entry for {filename}"))
 }
 
+/// The release the connected server's owner picked for each channel
+/// (`/v1/health` `stable_app_version` / `latest_app_version`). Only picks
+/// among the signed GitHub releases; unknown or missing: GitHub decides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pins {
+    pub stable: Option<String>,
+    pub latest: Option<String>,
+}
+
 /// Pure decision logic: picks the release for the channel and compares versions.
 fn evaluate(releases: Vec<GhRelease>, repo: &str, channel: &str, current: &str, target: &str, managed: bool) -> UpdateStatus {
+    evaluate_pinned(releases, repo, channel, &Pins::default(), current, target, managed)
+}
+
+fn evaluate_pinned(releases: Vec<GhRelease>, repo: &str, channel: &str, pins: &Pins, current: &str, target: &str, managed: bool) -> UpdateStatus {
     let prerelease_channel = channel.eq_ignore_ascii_case("prerelease");
-    let best = releases
+    let pin = if prerelease_channel { pins.latest.as_deref() } else { pins.stable.as_deref() }.and_then(parse_version);
+    let (pinned, rest): (Vec<GhRelease>, Vec<GhRelease>) = releases
         .into_iter()
-        .filter(|r| !r.draft && (prerelease_channel || !r.prerelease))
-        .filter(|r| parse_version(&r.tag_name).is_some())
-        .max_by(|a, b| parse_version(&a.tag_name).cmp(&parse_version(&b.tag_name)));
+        .filter(|r| !r.draft)
+        .partition(|r| pin.is_some() && parse_version(&r.tag_name) == pin);
+    // The server's pick wins (even a GitHub pre-release called "stable");
+    // a pick that is not among the releases falls back to the flags.
+    let best = pinned.into_iter().next().or_else(|| {
+        rest.into_iter()
+            .filter(|r| prerelease_channel || !r.prerelease)
+            .filter(|r| parse_version(&r.tag_name).is_some())
+            .max_by(|a, b| parse_version(&a.tag_name).cmp(&parse_version(&b.tag_name)))
+    });
     match best {
         Some(rel) if is_newer(current, &rel.tag_name) => UpdateStatus::Available(to_info(&rel, repo, target, !managed)),
+        // Back on "stable" after a newer "latest" build: offer the newest
+        // stable version. Android refuses to install an older APK over a
+        // newer one, so there it is a manual download.
+        Some(rel) if !prerelease_channel && is_newer(&rel.tag_name, current) => {
+            let self_install = !managed && !target.ends_with("-android");
+            UpdateStatus::Available(UpdateInfo { downgrade: true, ..to_info(&rel, repo, target, self_install) })
+        }
         _ => UpdateStatus::UpToDate { current: current.to_string() },
     }
 }
@@ -217,7 +252,7 @@ fn record_check() {
 
 /// Checks GitHub. With `automatic = true` the 24 h throttle and
 /// `check_on_start` apply (`Skipped`); manual checks always hit GitHub.
-pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool) -> Result<UpdateStatus> {
+pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool, pins: &Pins) -> Result<UpdateStatus> {
     if automatic && (!cfg.check_on_start || checked_recently()) {
         return Ok(UpdateStatus::Skipped);
     }
@@ -242,7 +277,7 @@ pub async fn check(http: &reqwest::Client, cfg: &UpdatesConfig, automatic: bool)
         bail!("GitHub answered HTTP {}", resp.status());
     }
     let releases: Vec<GhRelease> = resp.json().await?;
-    Ok(evaluate(releases, repo, &cfg.channel, current_version(), current_target(), exe_is_package_managed()))
+    Ok(evaluate_pinned(releases, repo, &cfg.channel, pins, current_version(), current_target(), exe_is_package_managed()))
 }
 
 // ---------------------------------------------------------------- install
@@ -517,6 +552,72 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(evaluate(rels(), "o/glyph", "stable", "0.2.0", t, false), UpdateStatus::UpToDate { current: "0.2.0".into() });
+    }
+
+    #[test]
+    fn server_picks_the_release_per_channel() {
+        let t = "x86_64-unknown-linux-gnu";
+        let rels = || {
+            vec![
+                release("v0.12.12", true, false, &[]),
+                release("v0.12.11", true, false, &[]),
+                release("v0.12.10", false, false, &[]),
+            ]
+        };
+        let pins = Pins { stable: Some("0.12.11".into()), latest: Some("v0.12.11".into()) };
+        // A pre-release the owner calls stable is offered on Stable.
+        match evaluate_pinned(rels(), "o/glyph", "stable", &pins, "0.12.10", t, false) {
+            UpdateStatus::Available(i) => assert_eq!(i.version, "0.12.11"),
+            other => panic!("{other:?}"),
+        }
+        // Latest held back at 0.12.11 instead of the newest 0.12.12.
+        match evaluate_pinned(rels(), "o/glyph", "prerelease", &pins, "0.12.10", t, false) {
+            UpdateStatus::Available(i) => assert_eq!(i.version, "0.12.11"),
+            other => panic!("{other:?}"),
+        }
+        // A pick that does not exist: GitHub's flags decide.
+        let gone = Pins { stable: Some("0.99.0".into()), latest: None };
+        match evaluate_pinned(rels(), "o/glyph", "stable", &gone, "0.12.0", t, false) {
+            UpdateStatus::Available(i) => assert_eq!(i.version, "0.12.10"),
+            other => panic!("{other:?}"),
+        }
+        match evaluate_pinned(rels(), "o/glyph", "prerelease", &gone, "0.12.0", t, false) {
+            UpdateStatus::Available(i) => assert_eq!(i.version, "0.12.12"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stable_offers_going_back_from_latest() {
+        let t = "x86_64-unknown-linux-gnu";
+        let rels = || {
+            vec![
+                release("v0.13.1", true, false, &[]),
+                release("v0.12.10", false, false, &["glyph-0.12.10-x86_64-unknown-linux-gnu.tar.gz", "SHA256SUMS.txt", "SHA256SUMS.txt.minisig"]),
+            ]
+        };
+        // Running a "latest" build, channel back on stable: newest stable offered.
+        match evaluate(rels(), "o/glyph", "stable", "0.13.1", t, false) {
+            UpdateStatus::Available(i) => {
+                assert_eq!(i.version, "0.12.10");
+                assert!(i.downgrade);
+                assert!(i.can_self_install);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Channel "latest" never goes back.
+        assert_eq!(evaluate(rels(), "o/glyph", "prerelease", "0.13.1", t, false), UpdateStatus::UpToDate { current: "0.13.1".into() });
+        // A real update is not a downgrade.
+        match evaluate(rels(), "o/glyph", "stable", "0.12.0", t, false) {
+            UpdateStatus::Available(i) => assert!(!i.downgrade),
+            other => panic!("{other:?}"),
+        }
+        // Android cannot install an older APK over a newer one.
+        let apk = vec![release("v0.12.10", false, false, &["glyph-0.12.10-android.apk", "SHA256SUMS.txt", "SHA256SUMS.txt.minisig"])];
+        match evaluate(apk, "o/glyph", "stable", "0.13.1", "aarch64-linux-android", false) {
+            UpdateStatus::Available(i) => assert!(i.downgrade && !i.can_self_install),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

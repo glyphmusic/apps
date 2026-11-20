@@ -1145,6 +1145,19 @@ impl Backend {
         .await?
     }
 
+    /// One admin API call for the server dashboard (see `ServerClient::admin`).
+    pub async fn account_admin(&self, method: reqwest::Method, path: String, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+        let c = self.account_client()?;
+        self.spawn(async move {
+            with_auth(&c, |t| {
+                let (c, method, path, body) = (c.clone(), method.clone(), path.clone(), body.clone());
+                async move { c.admin(&t, method, &path, body).await }
+            })
+            .await
+        })
+        .await?
+    }
+
     pub async fn account_remove_device(&self, id: &str) -> Result<()> {
         let (c, id) = (self.account_client()?, id.to_string());
         self.spawn(async move {

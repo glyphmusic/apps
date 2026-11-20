@@ -43,6 +43,7 @@ pub mod http;
 pub mod eq;
 pub mod loudness;
 pub mod pcm;
+pub mod resample;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod media_keys;
 /// Phones: the app shell (Android MediaSession / iOS remote commands) shows

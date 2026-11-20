@@ -198,6 +198,14 @@ pub struct HealthResponse {
     /// ([`APP_OUTDATED`]). Missing: every version works.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_app_version: Option<String>,
+    /// App version the server owner calls "Stable": the app's Stable update
+    /// channel offers exactly this release. Missing: GitHub's normal releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_app_version: Option<String>,
+    /// Same for the "Latest" channel (holds back a bad pre-release).
+    /// Missing: the newest GitHub release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_app_version: Option<String>,
 }
 
 /// Error code (HTTP 426) for an app older than the server's

@@ -5,9 +5,8 @@
 //!
 //! Boosts need room below the top. A song that volume levelling turned down
 //! already has that room ([`Equalizer::set_room`]), so the equalizer only
-//! turns the whole song down by what is still missing. Before, it always
-//! took 60 % of the biggest boost off everything: a +6 dB bass boost made
-//! the bass barely louder and the rest quieter, which sounded like no boost.
+//! turns the whole song down by what is still missing, so boosted peaks end
+//! right at the top and the limiter after it has (almost) nothing to do.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -99,6 +98,27 @@ fn design(kind: Kind, f: f32, gain_db: f32, rate: f32) -> Coef {
     Coef { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
 }
 
+/// Highest gain of the filter chain over 20 Hz .. 20 kHz (dB, at least 0).
+fn curve_max_db(coefs: &[Coef], rate: f32) -> f32 {
+    let mut max = 0f32;
+    for i in 0..=160 {
+        let f = 20.0 * 1000f32.powf(i as f32 / 160.0);
+        if f >= rate * 0.5 {
+            break;
+        }
+        let w = 2.0 * std::f32::consts::PI * f / rate;
+        let (c1, s1, c2, s2) = (w.cos(), -w.sin(), (2.0 * w).cos(), -(2.0 * w).sin());
+        let mut g = 1f32;
+        for k in coefs {
+            let (nr, ni) = (k.b0 + k.b1 * c1 + k.b2 * c2, k.b1 * s1 + k.b2 * s2);
+            let (dr, di) = (1.0 + k.a1 * c1 + k.a2 * c2, k.a1 * s1 + k.a2 * s2);
+            g *= ((nr * nr + ni * ni) / (dr * dr + di * di).max(1e-12)).sqrt();
+        }
+        max = max.max(20.0 * g.max(1e-9).log10());
+    }
+    max
+}
+
 /// Per-song filter state (one set of biquads per channel).
 pub struct Equalizer {
     rate: f32,
@@ -111,7 +131,7 @@ pub struct Equalizer {
     want: f32,
     /// Per-sample step of `pre` towards `want`.
     glide: f32,
-    /// Room the boosts would like (dB, 60 % of the biggest boost).
+    /// Room the boosts need (dB, the biggest boost).
     need_db: f32,
     /// What the user takes off on top (dB).
     extra_db: f32,
@@ -182,8 +202,11 @@ impl Equalizer {
             }
             // Room for boosts (the limiter after this catches the rest),
             // plus what the user takes off on top.
-            let boost = gains.iter().cloned().fold(0.0f32, f32::max).max(bass.max(0.0) + gains[0].max(0.0) * 0.5);
-            self.need_db = boost * 0.6;
+            // A boost can lift the loudest peak by its full amount (a bass
+            // shelf lifts every kick), and neighbouring bands add up: the
+            // room is the highest point of the whole curve. Asking for less
+            // made the limiter duck each kick, which sounded flat and pumping.
+            self.need_db = curve_max_db(&self.coefs, self.rate);
             self.extra_db = headroom;
         }
         if self.coefs.is_empty() && self.extra_db < 0.05 {
@@ -295,5 +318,17 @@ mod tests {
         assert!((quiet - 0.5).abs() < 0.03, "6 dB headroom gave {quiet}");
         set_extras(0.0, 0.0);
         set(false, [0.0; 10]);
+    }
+
+    #[test]
+    fn curve_max_matches_the_filters() {
+        let rate = 48_000.0;
+        // Old Bass Boost: neighbouring bands add up past the biggest single band.
+        let g = [6.0, 5.0, 4.0, 2.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let coefs: Vec<Coef> = BANDS.iter().zip(g).enumerate().filter(|(_, (_, g))| *g != 0.0)
+            .map(|(i, (&f, g))| design(if i == 0 { Kind::LowShelf } else { Kind::Peak }, f, g, rate)).collect();
+        let m = curve_max_db(&coefs, rate);
+        assert!((6.4..7.2).contains(&m), "{m}");
+        assert_eq!(curve_max_db(&[], rate), 0.0);
     }
 }

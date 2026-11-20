@@ -97,7 +97,9 @@
         <Select value={au.output_device} options={outputOptions} label={au.output_device ?? t("sp.output.default")} onpick={(v) => app.setConfig((c) => { c.audio.output_device = v; })} />
       </Row>
       <Row label={t("sp.level")} info={t("sp.level.desc")}>
-        <Select value={au.level} options={levelOptions} onpick={(v) => app.setConfig((c) => { c.audio.level = v; })} />
+        <div class:dim={!au.normalize}>
+          <Select value={au.level} options={levelOptions} onpick={(v) => app.setConfig((c) => { c.audio.level = v; })} />
+        </div>
       </Row>
       <Row label={t("sp.normalize")} info={t("sp.normalize.desc")}>
         <Tog on={au.normalize} onchange={(v) => app.setConfig((c) => { c.audio.normalize = v; })} label={t("sp.normalize")} />
@@ -122,4 +124,5 @@
 <style>
   .val { width: 36px; text-align: right; font-size: 13px; color: rgba(255, 255, 255, .75); }
   .gap { height: 14px; }
+  .dim { opacity: .45; transition: opacity .2s ease-out; }
 </style>

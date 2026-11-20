@@ -546,6 +546,7 @@ impl Engine {
                 tracing::info!(device = ?self.opened_device, channels, default_buffer = self.use_default_buffer, "audio output opened");
                 // Surround outputs can take multichannel songs as they are.
                 crate::spatial::set_device_channels(channels);
+                crate::resample::set_device_rate(d.config().sample_rate().get());
                 d.log_on_drop(false);
                 self.device = Some(d);
                 true

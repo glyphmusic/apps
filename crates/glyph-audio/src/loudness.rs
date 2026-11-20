@@ -48,15 +48,6 @@ impl Level {
             Level::Quiet => -19.0,
         }
     }
-
-    /// Fixed offset when songs are not normalized.
-    fn fixed_db(self) -> f32 {
-        match self {
-            Level::Loud => 3.0,
-            Level::Normal => 0.0,
-            Level::Quiet => -6.0,
-        }
-    }
 }
 
 static NORMALIZE: AtomicBool = AtomicBool::new(true);
@@ -86,9 +77,12 @@ fn level() -> Level {
     }
 }
 
-/// Highest level a sample may reach (-1 dBFS).
+/// Highest level a sample may reach when normalized (-1 dBFS).
 pub const CEILING_DB: f32 = -1.0;
 const CEILING: f32 = 0.891_250_9;
+/// Safety ceiling when normalization is off (-0.08 dBFS): stops digital
+/// clipping without squashing commercial 0 dBFS masters down to -1 dBFS.
+const SAFETY_CEILING: f32 = 0.99;
 const MAX_BOOST_DB: f32 = 12.0;
 const MAX_CUT_DB: f32 = -24.0;
 /// Assumed loudness of a song not measured yet (a typical modern master):
@@ -391,10 +385,13 @@ impl Leveller {
     }
 
     fn desired_db(&self, shared: &TrackLoudness) -> f32 {
-        let lvl = level();
         if !NORMALIZE.load(Ordering::Relaxed) {
-            return lvl.fixed_db();
+            // Normalization off: play at unity gain (Loud/Normal/Quiet only set
+            // the normalization target; boosting an un-normalized master above
+            // 0 dB just crushes it into the limiter).
+            return 0.0;
         }
+        let lvl = level();
         let a = shared.known().or(self.live).unwrap_or(Analysis { lufs: GUESS_LUFS, peak_db: 0.0 });
         gain_db_for(lvl, a)
     }
@@ -412,7 +409,9 @@ impl Leveller {
     }
 
     fn update_room(&mut self, shared: &TrackLoudness) {
-        let peak = shared.known().or(self.live).map_or(0.0, |a| a.peak_db.min(0.0));
+        // Keep real peaks above 0 dBFS (lossy AAC/MP3 masters often decode to
+        // +1..+2.3 dBFS); clamping to 0 dBFS hid that overshoot from EQ headroom.
+        let peak = shared.known().or(self.live).map_or(0.0, |a| a.peak_db);
         // While the gain moves, the larger of now and where it goes.
         let g = self.target_db.max(lin_to_db(self.gain));
         self.room = (CEILING_DB - (peak + g)).max(0.0);
@@ -480,7 +479,8 @@ impl Leveller {
         if self.bypass {
             return s;
         }
-        self.limiter.push(s)
+        let ceiling = if NORMALIZE.load(Ordering::Relaxed) { CEILING } else { SAFETY_CEILING };
+        self.limiter.push_ceiling(s, ceiling)
     }
 }
 
@@ -541,9 +541,13 @@ const CROSSOVER_HZ: f32 = 150.0;
 /// The bass is never turned down more than this (-15 dB).
 const BASS_FLOOR: f32 = 0.178;
 const BASS_LOOKAHEAD_S: f32 = 0.010;
-const BASS_RELEASE_S: f32 = 0.250;
+const BASS_RELEASE_S: f32 = 0.120;
 const FULL_LOOKAHEAD_S: f32 = 0.005;
-const FULL_RELEASE_S: f32 = 0.120;
+const FULL_RELEASE_S: f32 = 0.060;
+/// Short peak envelope decay on the real input (bridges the ~3 ms lowpass group delay).
+const X_ENV_S: f32 = 0.006;
+/// Band envelope decay (>1 cycle at 50 Hz, so `hi` zero-crossings never look like bass-only peaks).
+const BAND_ENV_S: f32 = 0.025;
 
 #[derive(Clone, Copy, Default)]
 struct Bq {
@@ -561,6 +565,8 @@ struct BqMem {
 }
 
 impl Bq {
+    const IDENTITY: Bq = Bq { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+
     /// Second order Butterworth (RBJ, Q = 1/√2); two in a row make one half
     /// of a Linkwitz-Riley crossover, whose halves add up flat.
     fn butterworth(high: bool, f: f32, rate: f32) -> Self {
@@ -589,7 +595,11 @@ impl Bq {
 /// 2. **Everything.** Whatever is still over the ceiling turns the whole
 ///    signal down for a few milliseconds.
 ///
-/// Below the ceiling the signal passes unchanged (the crossover adds up flat).
+/// Below the ceiling the signal passes unchanged, only delayed. The bass /
+/// rest split only measures; the bass is turned down with a shelf filter
+/// that does nothing at all while there is nothing to catch. (Splitting the
+/// sound itself and adding it back shifted the bass ~3 ms behind the rest
+/// and took the punch out of every kick.)
 struct Limiter {
     channels: usize,
     ch: usize,
@@ -598,6 +608,21 @@ struct Limiter {
     mem: Vec<[BqMem; 4]>,
     lo: Vec<f32>,
     hi: Vec<f32>,
+    /// The input frame as it is.
+    x: Vec<f32>,
+    /// Per-channel peak envelopes of `x`, `lo`, and `hi` so the bass shelf
+    /// only acts when the real signal clips AND bass genuinely dominates.
+    x_env: Vec<f32>,
+    lo_env: Vec<f32>,
+    hi_env: Vec<f32>,
+    x_decay: f32,
+    band_decay: f32,
+    /// Bass shelf that turns the bass down by the bass gain (exactly
+    /// nothing at full gain), its gain and per-channel state.
+    shelf: Bq,
+    shelf_g: f32,
+    shelf_mem: Vec<BqMem>,
+    shelf_cs: (f32, f32),
     bass: Smoother,
     bass_len: usize,
     bass_delay: Vec<f32>,
@@ -622,11 +647,24 @@ impl Limiter {
             lp: Bq::butterworth(false, CROSSOVER_HZ, r),
             hp: Bq::butterworth(true, CROSSOVER_HZ, r),
             mem: vec![[BqMem::default(); 4]; ch],
+            x: vec![0.0; ch],
+            x_env: vec![0.0; ch],
+            lo_env: vec![0.0; ch],
+            hi_env: vec![0.0; ch],
+            x_decay: (-1.0 / (X_ENV_S * r).max(1.0)).exp(),
+            band_decay: (-1.0 / (BAND_ENV_S * r).max(1.0)).exp(),
+            shelf: Bq::IDENTITY,
+            shelf_g: 1.0,
+            shelf_mem: vec![BqMem::default(); ch],
+            shelf_cs: {
+                let w = 2.0 * std::f32::consts::PI * (CROSSOVER_HZ / r).min(0.45);
+                (w.cos(), w.sin())
+            },
             lo: vec![0.0; ch],
             hi: vec![0.0; ch],
             bass: Smoother::new(bass_len, BASS_RELEASE_S * r),
             bass_len,
-            bass_delay: vec![0.0; bass_len * ch * 2],
+            bass_delay: vec![0.0; bass_len * ch],
             bass_pos: 0,
             full: Smoother::new(full_len, FULL_RELEASE_S * r),
             full_len,
@@ -637,49 +675,91 @@ impl Limiter {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[inline]
     fn push(&mut self, s: f32) -> f32 {
+        self.push_ceiling(s, CEILING)
+    }
+
+    #[inline]
+    fn push_ceiling(&mut self, s: f32, ceiling: f32) -> f32 {
         let c = self.ch;
+        // Bass and rest only decide how far the bass must come down; the
+        // sound itself goes on unsplit (see `frame`).
         let [l1, l2, h1, h2] = &mut self.mem[c];
         let lo = self.lp.run(l1, s);
-        self.lo[c] = self.lp.run(l2, lo);
+        let lo = self.lp.run(l2, lo);
+        self.lo[c] = lo;
         let hi = self.hp.run(h1, s);
-        self.hi[c] = self.hp.run(h2, hi);
+        let hi = self.hp.run(h2, hi);
+        self.hi[c] = hi;
+        self.x[c] = s;
+        self.x_env[c] = s.abs().max(self.x_env[c] * self.x_decay);
+        self.lo_env[c] = lo.abs().max(self.lo_env[c] * self.band_decay);
+        self.hi_env[c] = hi.abs().max(self.hi_env[c] * self.band_decay);
         let y = self.out[c];
         self.ch += 1;
         if self.ch == self.channels {
             self.ch = 0;
-            self.frame();
+            self.frame(ceiling);
         }
         y
     }
 
-    fn frame(&mut self) {
+    /// Low shelf at the crossover with gain `g` (RBJ, slope 1). At full
+    /// gain it is the identity, so the song passes sample for sample.
+    fn set_shelf(&mut self, g: f32) {
+        if (g - self.shelf_g).abs() < 1e-5 {
+            return;
+        }
+        self.shelf_g = g;
+        if g >= 0.99999 {
+            self.shelf = Bq::IDENTITY;
+            return;
+        }
+        let a = g.max(1e-4).sqrt();
+        let (c, s) = self.shelf_cs;
+        let alpha = s / std::f32::consts::SQRT_2;
+        let k = 2.0 * a.sqrt() * alpha;
+        let a0 = (a + 1.0) + (a - 1.0) * c + k;
+        self.shelf = Bq {
+            b0: a * ((a + 1.0) - (a - 1.0) * c + k) / a0,
+            b1: 2.0 * a * ((a - 1.0) - (a + 1.0) * c) / a0,
+            b2: a * ((a + 1.0) - (a - 1.0) * c - k) / a0,
+            a1: -2.0 * ((a - 1.0) + (a + 1.0) * c) / a0,
+            a2: ((a + 1.0) + (a - 1.0) * c - k) / a0,
+        };
+    }
+
+    fn frame(&mut self, ceiling: f32) {
         let ch = self.channels;
-        // 1. Bass: how far must the bass go down for this frame?
+        // 1. Bass: only pull the bass down on its own when the real signal
+        //    actually exceeds the ceiling AND the overload is genuinely
+        //    bass-dominated. Checking instantaneous `lo + hi` both false-
+        //    triggered on crossover phase dispersion and slammed bass to -15 dB
+        //    on normal balanced loud mixes whenever `hi` was also near ceiling.
         let mut want = 1.0f32;
         for c in 0..ch {
-            let (lo, hi) = (self.lo[c], self.hi[c]);
-            let y = lo + hi;
-            if y.abs() > CEILING && lo.abs() > hi.abs() {
-                want = want.min(((CEILING.copysign(y) - hi) / lo).clamp(BASS_FLOOR, 1.0));
+            let (xe, le, he) = (self.x_env[c], self.lo_env[c], self.hi_env[c]);
+            if xe > ceiling && le > ceiling && le > 2.0 * he {
+                let need = (ceiling - he).max(0.0) / le;
+                let floor = (ceiling / le) * 0.75;
+                want = want.min(need.max(floor).clamp(BASS_FLOOR, 1.0));
             }
         }
         let g = self.bass.push(want);
-        let w = self.bass_pos * ch * 2;
-        for c in 0..ch {
-            self.bass_delay[w + 2 * c] = self.lo[c];
-            self.bass_delay[w + 2 * c + 1] = self.hi[c];
-        }
+        let w = self.bass_pos * ch;
+        self.bass_delay[w..w + ch].copy_from_slice(&self.x);
         self.bass_pos = (self.bass_pos + 1) % self.bass_len;
-        let r = self.bass_pos * ch * 2;
+        let r = self.bass_pos * ch;
+        self.set_shelf(g);
         // 2. Everything: whatever is still over the ceiling.
         let mut want = 1.0f32;
         for c in 0..ch {
-            let v = g * self.bass_delay[r + 2 * c] + self.bass_delay[r + 2 * c + 1];
+            let v = self.shelf.run(&mut self.shelf_mem[c], self.bass_delay[r + c]);
             self.mid[c] = v;
-            if v.abs() > CEILING {
-                want = want.min(CEILING / v.abs());
+            if v.abs() > ceiling {
+                want = want.min(ceiling / v.abs());
             }
         }
         let g = self.full.push(want);
@@ -1172,17 +1252,55 @@ mod eq_tests {
         shared.set_known(m.result().unwrap());
         let mut l = Leveller::new(rate, 2);
         let mut e = crate::eq::Equalizer::new(rate, 2);
+        let skip = (rate as usize * 2).min(input.len() / 2) * 2;
+        let mut over = 0f32;
         let out: Vec<f32> = input
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(i, s)| {
                 let y = l.gain(*s, &shared);
                 e.set_room(l.room_db());
                 let y = e.process(y);
+                if i >= skip {
+                    over = over.max(lin_to_db(y.abs()) - CEILING_DB);
+                }
                 l.limit(y)
             })
             .collect();
-        let skip = (rate as usize * 2).min(out.len());
+        *OVER.lock().unwrap() = over;
         bands(rate, &out[skip..])
+    }
+
+    /// How far the loudest sample of the last [`play`] went over -1 dBFS
+    /// before the limiter (dB; what the limiter had to take off).
+    static OVER: Mutex<f32> = Mutex::new(0.0);
+
+    /// Below the ceiling the limiter must give back the input, only later:
+    /// it never touches quiet music.
+    #[test]
+    fn limiter_passes_quiet_music_unchanged() {
+        let rate = 44_100u32;
+        let mut lim = Limiter::new(rate, 2);
+        let n = rate as usize;
+        let src: Vec<f32> = (0..n * 2)
+            .map(|i| {
+                let t = (i / 2) as f32 / rate as f32;
+                let s = 0.2 * (TAU * 60.0 * t).sin() + 0.1 * (TAU * 1000.0 * t).sin() + 0.05 * (TAU * 5000.0 * t).sin();
+                if i % 2 == 0 { s } else { -s * 0.5 }
+            })
+            .collect();
+        let out: Vec<f32> = src.iter().map(|s| lim.push(*s)).collect();
+        // Find the delay on the left channel, then compare everything.
+        let (mut best, mut bd) = (f64::MIN, 0usize);
+        for d in 0..2000 {
+            let c: f64 = (0..20_000).map(|k| (out[(10_000 + k + d) * 2] * src[(10_000 + k) * 2]) as f64).sum();
+            if c > best { best = c; bd = d; }
+        }
+        let err = (10_000..30_000)
+            .flat_map(|k| (0..2).map(move |c| (k, c)))
+            .map(|(k, c)| (out[(k + bd) * 2 + c] - src[k * 2 + c]).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-4, "delay {bd}, max error {err}");
     }
 
     #[test]
@@ -1195,9 +1313,39 @@ mod eq_tests {
         crate::eq::set_extras(0.0, 0.0);
         crate::eq::set(false, [0.0; 10]);
         set(Level::Normal, true);
-        // The bass really gets louder; the rest stays where levelling put it.
-        assert!(b1 - b0 > 3.5, "bass only {:+.1} dB", b1 - b0);
-        assert!((m1 - m0).abs() < 0.5, "mids moved {:+.1} dB", m1 - m0);
+        let over = *OVER.lock().unwrap();
+        // The bass really gets louder against the rest, and the boosted kicks
+        // stay under the top: the limiter does not duck them (pumping).
+        assert!((b1 - m1) - (b0 - m0) > 4.0, "bass only {:+.1} dB over the rest", (b1 - m1) - (b0 - m0));
+        assert!(over < 1.0, "limiter takes {over:.1} dB off the kicks");
+        assert!(m1 - m0 > -4.0, "rest turned down {:+.1} dB", m1 - m0);
+    }
+
+    /// A dynamic master: big kicks, quiet rest. Levelling leaves it little
+    /// room, so a bass boost must turn the song down instead of letting the
+    /// limiter squash every kick.
+    #[test]
+    fn bass_boost_does_not_pump_kicks() {
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = 48_000;
+        let n = rate as usize * 6;
+        let mut song = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f32 / rate as f32;
+            let beat = (t * 2.0).fract();
+            let kick = (-beat * 10.0).exp() * (TAU * 55.0 * t).sin() * 0.8;
+            let rest = 0.08 * (TAU * 440.0 * t).sin() + 0.05 * (TAU * 1320.0 * t).sin();
+            song.push(kick + rest);
+            song.push(kick + rest);
+        }
+        let (b0, m0) = play(rate, &song, true, false, 0.0);
+        let (b1, m1) = play(rate, &song, true, true, 6.0);
+        let over = *OVER.lock().unwrap();
+        crate::eq::set_extras(0.0, 0.0);
+        crate::eq::set(false, [0.0; 10]);
+        set(Level::Normal, true);
+        assert!((b1 - m1) - (b0 - m0) > 5.0, "bass only {:+.1} dB over the rest", (b1 - m1) - (b0 - m0));
+        assert!(over < 0.3, "limiter takes {over:.1} dB off the kicks");
     }
 
     #[test]
@@ -1213,6 +1361,71 @@ mod eq_tests {
         crate::eq::set(false, [0.0; 10]);
         set(Level::Normal, true);
         assert!(m1 < m0 - 2.5, "no room made: mids {m0:.1} -> {m1:.1}");
+    }
+
+    #[test]
+    fn loud_balanced_mix_keeps_its_bass_and_tonal_balance() {
+        // Hot modern master (balanced bass + mids, AAC peaks up to +2.3 dBFS):
+        // with normalization off (even when Level is Loud) and Flat EQ, the
+        // limiter must never carve bass out or overdrive into heavy pumping.
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = 44_100;
+        let song: Vec<f32> = loud_master(rate, 4.0).into_iter().map(|s| s * 1.32).collect();
+        let (b_raw, m_raw) = bands(rate, &song[rate as usize * 2..]);
+        for lvl in [Level::Loud, Level::Normal] {
+            set(lvl, false);
+            crate::eq::set(false, [0.0; 10]);
+            crate::eq::set_extras(0.0, 0.0);
+            let shared = TrackLoudness::default();
+            let mut l = Leveller::new(rate, 2);
+            let mut e = crate::eq::Equalizer::new(rate, 2);
+            let out: Vec<f32> = song
+                .iter()
+                .map(|s| {
+                    let y = l.gain(*s, &shared);
+                    e.set_room(l.room_db());
+                    l.limit(e.process(y))
+                })
+                .collect();
+            let (b_out, m_out) = bands(rate, &out[rate as usize * 2..]);
+            let tilt = (b_out - m_out) - (b_raw - m_raw);
+            assert!(tilt.abs() < 0.6, "{lvl:?} skewed bass vs mids by {tilt:+.2} dB");
+            assert!((l.current_gain() - 1.0).abs() < 1e-4, "{lvl:?} gain {}", l.current_gain());
+        }
+        set(Level::Normal, true);
+    }
+
+    #[test]
+    fn crossover_phase_shift_does_not_false_trigger_bass_limiter() {
+        // Real peaks stay just under -1 dBFS (0.87), even though LR4 phase
+        // dispersion makes `lo + hi` overshoot the ceiling: must pass untouched.
+        let rate = 44_100u32;
+        let mut lim = Limiter::new(rate, 2);
+        let song: Vec<f32> = loud_master(rate, 3.0).into_iter().map(|s| s * 0.88).collect();
+        let out: Vec<f32> = song.iter().map(|s| lim.push(*s)).collect();
+        let (mut best, mut bd) = (f64::MIN, 0usize);
+        for d in 0..1500 {
+            let c: f64 = (0..10_000).map(|k| (out[(20_000 + k + d) * 2] * song[(20_000 + k) * 2]) as f64).sum();
+            if c > best { best = c; bd = d; }
+        }
+        let err = (20_000..40_000)
+            .flat_map(|k| (0..2).map(move |c| (k, c)))
+            .map(|(k, c)| (out[(k + bd) * 2 + c] - song[k * 2 + c]).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-4, "false-triggered limiter: delay {bd}, max err {err}");
+    }
+
+    #[test]
+    fn update_room_respects_peaks_above_zero_dbfs() {
+        // Real AAC masters often peak around +2.3 dBFS; room must account for it.
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set(Level::Normal, true);
+        let shared = TrackLoudness::default();
+        shared.set_known(Analysis { lufs: -7.17, peak_db: 2.30 });
+        let mut l = Leveller::new(44_100, 2);
+        let _ = l.gain(0.0, &shared);
+        // gain = -6.83 dB, peak = +2.30 dBFS -> peak after gain = -4.53 dBFS -> room = 3.53 dB.
+        assert!((l.room_db() - 3.53).abs() < 0.05, "room was {}", l.room_db());
     }
 
     /// Real songs: `GLYPH_TEST_SONGS="a.m4a;b.mp3" cargo test -p glyph-audio

@@ -2,6 +2,7 @@
 // lives in the Rust core (config, library, queue, player) is mirrored from
 // backend events; everything else (which page, open menus, dialogs) is UI
 // state kept here.
+import { admin } from "./admin/admin.svelte";
 import { backend, connect, type Backend } from "./api/backend";
 import type {
   Account, ArtistPage, BackendState, Config, Device, HomeFeeds, Library, ListKey, Lyrics, PlayerState, Playlist,
@@ -17,7 +18,7 @@ import { applyTheme } from "./theme";
 import { gpuProbe, recommendVisuals } from "./glow";
 
 export type View =
-  | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local";
+  | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local" | "server";
 
 export type SettingsPage =
   | "overview" | "playback" | "audio" | "appearance" | "server" | "account" | "storage" | "transfer" | "migrate" | "integrations" | "plugins" | "about" | "system" | "notifications";
@@ -893,6 +894,7 @@ class App {
     this.trimOffscreen(prev);
   }
   back() {
+    if (this.view === "server" && admin.sub && !this.settingsOpen) { admin.sub = ""; return; }
     this.sharedPreview = null;
     const r = this.history.pop();
     this.settingsOpen = false;

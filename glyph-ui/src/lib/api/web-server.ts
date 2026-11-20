@@ -439,6 +439,12 @@ export const server = {
     return r.json();
   },
 
+  /** The admin API (`/admin/v1/<path>`) with an app sign-in (admins only). */
+  admin: (token: string, method: "GET" | "POST" | "PUT", path: string, body?: unknown) =>
+    method === "GET"
+      ? getJson<unknown>(`/admin/v1/${path}`, {}, undefined, token, false)
+      : sendJson<unknown>(method, `/admin/v1/${path}`, body ?? {}, token, undefined, false),
+
   accountStorage: (token: string) =>
     getJson<{ used_bytes: number; limit_bytes: number }>("/v1/account/storage", {}, undefined, token),
 

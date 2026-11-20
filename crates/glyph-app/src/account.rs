@@ -1956,6 +1956,43 @@ pub async fn account_recovery(core: C<'_>) -> Res<String> {
     b.account_new_recovery_code().await.map_err(err)
 }
 
+/// Admin API paths the dashboard may call (`/admin/v1/<path>`).
+fn admin_path_ok(path: &str) -> bool {
+    const ROOTS: &[&str] = &["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "cache/stats", "cache/clear", "companion/status", "app-releases"];
+    let root = path.split('?').next().unwrap_or("");
+    path.len() <= 200
+        && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./?=&@%".contains(&b))
+        && !path.contains("..")
+        && ROOTS.iter().any(|r| root == *r || root.strip_prefix(r).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// The server dashboard (admins only): `method` GET/POST/PUT, `path` under
+/// `/admin/v1/`. Errors are the server's code (`not_admin`, `owner_only`,
+/// `bad_request: <why>` ...).
+pub async fn admin_call(core: C<'_>, method: String, path: String, body: Option<Value>) -> Res<Value> {
+    let b = need_backend(&core)?;
+    let path = path.trim_start_matches('/').to_string();
+    if !admin_path_ok(&path) {
+        return Err("bad_path".into());
+    }
+    let m = match method.to_ascii_uppercase().as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        _ => return Err("bad_method".into()),
+    };
+    b.account_admin(m, path, body).await.map_err(|e| {
+        if is_signed_out(&e) {
+            return "signed_out".to_string();
+        }
+        match e.downcast_ref::<glyph_core::server_client::ServerError>() {
+            Some(s) if s.status == 400 => format!("bad_request: {}", s.message),
+            Some(s) => s.code.clone(),
+            None => "offline".to_string(),
+        }
+    })
+}
+
 pub async fn account_remove_device(core: C<'_>, id: String) -> Res {
     let b = need_backend(&core)?;
     b.account_remove_device(&id).await.map_err(err)
@@ -2391,4 +2428,19 @@ pub async fn server_store_token(url: String, token: String) -> Res {
     crate::rt::spawn_blocking(move || glyph_core::server_access::store(&base, &token).map_err(|e| e.to_string()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod admin_tests {
+    use super::admin_path_ok;
+
+    #[test]
+    fn dashboard_only_reaches_its_own_admin_paths() {
+        for ok in ["me", "stats", "history", "accounts?limit=100&offset=0&q=al", "accounts/alice", "accounts/alice/revoke", "bans/remove", "limits", "cache/clear"] {
+            assert!(admin_path_ok(ok), "{ok}");
+        }
+        for bad in ["keys", "update/apply", "login", "accounts/alice/admin/../../keys", "statsx", "", "logs", "companion/update/apply", "http://evil/x"] {
+            assert!(!admin_path_ok(bad), "{bad}");
+        }
+    }
 }

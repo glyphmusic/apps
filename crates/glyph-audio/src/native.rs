@@ -443,6 +443,7 @@ pub struct TrackSource {
     base_frame: u64,
     gen: u64,
     channels: ChannelCount,
+    #[cfg_attr(not(test), allow(dead_code))]
     rate: SampleRate,
     duration: Option<Duration>,
     ctl: Arc<DecodeCtl>,
@@ -465,6 +466,9 @@ pub struct TrackSource {
     frame_in: Vec<f32>,
     frame_out: Vec<f32>,
     out_idx: usize,
+    /// To the output device's rate (None: same rate, or not known).
+    resample: Option<crate::resample::Resampler>,
+    out_rate: SampleRate,
 }
 
 impl TrackSource {
@@ -473,7 +477,11 @@ impl TrackSource {
         let eq = crate::eq::Equalizer::new(opened.rate.get(), opened.channels.get());
         let render = crate::spatial::Renderer::new(opened.rate.get(), opened.channels.get(), opened.layout);
         let out_channels = NonZeroU16::new(render.out_channels()).unwrap_or(opened.channels);
+        let out_rate = crate::resample::device_rate().and_then(NonZeroU32::new).unwrap_or(opened.rate);
+        let resample = crate::resample::Resampler::new(opened.rate.get(), out_rate.get(), out_channels.get() as usize);
         Self {
+            resample,
+            out_rate,
             render,
             out_channels,
             frame_in: vec![0.0; opened.channels.get() as usize],
@@ -536,6 +544,8 @@ impl TrackSource {
     fn with_renderer(mut self, r: crate::spatial::Renderer) -> Self {
         self.out_channels = NonZeroU16::new(r.out_channels()).unwrap();
         self.frame_out = vec![0.0; r.out_channels() as usize];
+        self.resample = None;
+        self.out_rate = self.rate;
         self.render = r;
         self
     }
@@ -557,16 +567,41 @@ impl Iterator for TrackSource {
             self.out_idx += 1;
             return Some(s);
         }
-        for c in 0..self.frame_in.len() {
-            self.frame_in[c] = self.next_input()?;
+        if let Some(mut rs) = self.resample.take() {
+            let mut out = std::mem::take(&mut self.frame_out);
+            let more = rs.next_frame(&mut out, |f| self.render_frame(f));
+            self.frame_out = out;
+            self.resample = Some(rs);
+            if !more {
+                return None;
+            }
+        } else {
+            let mut out = std::mem::take(&mut self.frame_out);
+            let more = self.render_frame(&mut out);
+            self.frame_out = out;
+            if !more {
+                return None;
+            }
         }
-        self.render.process(&self.frame_in, &mut self.frame_out);
         self.out_idx = 1;
         Some(self.frame_out[0])
     }
 }
 
 impl TrackSource {
+    /// Decodes, filters and renders one frame at the song's rate into `out`.
+    /// `false` at the end of the song.
+    fn render_frame(&mut self, out: &mut [f32]) -> bool {
+        for c in 0..self.frame_in.len() {
+            match self.next_input() {
+                Some(s) => self.frame_in[c] = s,
+                None => return false,
+            }
+        }
+        self.render.process(&self.frame_in, out);
+        true
+    }
+
     /// Next decoded sample of the song's own channel layout (after the
     /// equalizer and levelling).
     fn next_input(&mut self) -> Option<f32> {
@@ -732,7 +767,7 @@ impl Source for TrackSource {
         self.out_channels
     }
     fn sample_rate(&self) -> SampleRate {
-        self.rate
+        self.out_rate
     }
     fn total_duration(&self) -> Option<Duration> {
         self.duration

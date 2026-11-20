@@ -245,6 +245,7 @@ fn main() {
             tauri_commands::account_password_submit,
             tauri_commands::account_recovery,
             tauri_commands::account_remove_device,
+            tauri_commands::admin_call,
             tauri_commands::account_rename,
             tauri_commands::account_sign_out,
             tauri_commands::account_sign_out_all,

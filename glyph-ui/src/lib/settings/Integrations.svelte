@@ -22,13 +22,14 @@
   import Spin from "./Spin.svelte";
   import PluginHost from "./PluginHost.svelte";
   import McpModeVisual from "./McpModeVisual.svelte";
-  import { copyText, openUrl, whenMs } from "./util";
+  import { copyText, onPhone, openUrl, whenMs } from "./util";
   import { onWeb } from "../web";
   import type { McpInfo, McpSession, ServerInfo } from "./types";
 
   let { sub = 0 }: { sub?: number } = $props();
-  // Web player only exposes AI assistants (Discord is desktop-only).
-  const tab = $derived(onWeb() ? 1 : sub);
+  // Web player and phones only show AI assistants (Discord is desktop-only).
+  const phone = onPhone();
+  const tab = $derived(onWeb() || phone ? 1 : sub);
   type Access = "none" | "read" | "write";
   const mcp = $derived(app.config.mcp as typeof app.config.mcp & { access?: Partial<Record<string, Access>> });
   const signedIn = $derived(app.account != null);
@@ -88,9 +89,15 @@
     }
   });
 
+  // A phone that had the assistant on in "this computer" mode moves to the server.
+  $effect(() => {
+    if (phone && mcp.enabled && mcp.mode !== "server") app.setConfig((c) => { c.mcp.mode = "server"; });
+  });
+
   const custom = $derived(app.config.integrations.discord_client_id.trim() !== "");
   const idDesc = $derived(!custom && builtin ? t("sp.discord.id.builtin") : t("sp.discord.id.desc"));
-  const local = $derived(!onWeb() && mcp.mode !== "server");
+  // Phones always go through the server (no assistant runs on the phone).
+  const local = $derived(!onWeb() && !phone && mcp.mode !== "server");
   const modeDesc = $derived(!local ? (signedIn ? t("sp.mcp.server.desc") : t("sp.mcp.server.signin")) : t("sp.mcp.local.desc"));
   const access = (area: string): Access => mcp.access?.[area] ?? DEFAULTS[area];
   const status = $derived(info.error ? `${t("sp.mcp.problem")} ${info.error}` : !local && info.relay_running ? t("sp.mcp.relay_on") : local ? t("sp.mcp.running") : !local && !signedIn ? t("sp.mcp.server.signin") : t("sp.mcp.idle"));
@@ -151,6 +158,16 @@
     }
   }
 
+  // Sessions whose site icon did not load show the bot icon instead.
+  let badIcon = $state<Record<string, boolean>>({});
+
+  /** The site's own favicon (straight from the site, no lookup service). */
+  function favicon(site?: string | null): string | null {
+    const host = (site ?? "").trim().replace(/^[a-z]+:\/\//i, "").split(/[/?#]/)[0].toLowerCase();
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}(:\d+)?$/.test(host)) return null;
+    return `https://${host}/favicon.ico`;
+  }
+
   function sessionStatus(s: McpSession): string {
     const parts: string[] = [];
     if (s.client_name && s.client_name !== s.name) {
@@ -186,12 +203,12 @@
       </Rows>
     {:else}
       <Rows>
-        <Row label={t("sp.mcp")} info={onWeb() ? modeDesc : t("sp.mcp.desc")}>
-          <Tog on={mcp.enabled} onchange={(v) => app.setConfig((c) => { c.mcp.enabled = v; })} label={t("sp.mcp")} />
+        <Row label={t("sp.mcp")} info={onWeb() || phone ? modeDesc : t("sp.mcp.desc")}>
+          <Tog on={mcp.enabled} onchange={(v) => app.setConfig((c) => { c.mcp.enabled = v; if (phone) c.mcp.mode = "server"; })} label={t("sp.mcp")} />
         </Row>
       </Rows>
       {#if mcp.enabled}
-        {#if !onWeb()}
+        {#if !onWeb() && !phone}
           <div class="vis">
             <McpModeVisual />
           </div>
@@ -301,7 +318,11 @@
                     <RowBase label={s.name} status={sessionStatus(s)}>
                       {#snippet leading()}
                         <span class="dicon">
-                          <Icon name="bot" size={20} color="rgba(255,255,255,.55)" />
+                          {#if favicon(s.site) && !badIcon[s.id]}
+                            <img src={favicon(s.site)} alt="" width="22" height="22" loading="lazy" referrerpolicy="no-referrer" onerror={() => (badIcon[s.id] = true)} />
+                          {:else}
+                            <Icon name="bot" size={20} color="rgba(255,255,255,.55)" />
+                          {/if}
                         </span>
                       {/snippet}
                       <IconButton name="pencil" size={14} label={t("sp.mcp.sessions.rename")} onclick={() => startRename(s)} />
@@ -326,7 +347,8 @@
   .row-controls { display: flex; align-items: center; gap: 12px; }
   .out { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 20px 0; }
   .notice { font-size: 13.5px; color: rgba(255, 255, 255, .7); margin: 0; line-height: 1.5; }
-  .dicon { width: 40px; height: 40px; border-radius: 8px; background: rgba(255, 255, 255, .04); display: grid; place-items: center; }
+  .dicon { width: 40px; height: 40px; border-radius: 8px; background: rgba(255, 255, 255, .04); display: grid; place-items: center; overflow: hidden; }
+  .dicon img { width: 22px; height: 22px; object-fit: contain; border-radius: 4px; }
   .pad { padding: 14px 0; font-size: 13px; }
   .dim13 { font-size: 13px; color: rgba(255, 255, 255, .55); padding: 10px 0; }
   .inline-edit { display: flex; align-items: center; gap: 8px; padding: 10px 0; width: 100%; }

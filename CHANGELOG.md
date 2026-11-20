@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.13 - 2026-11-20
+
+### Added
+
+- **Server dashboard in the app**: server owners and accounts given the admin role see a new **Server** page in the sidebar (and mobile menu) showing accounts, storage per person, 30-day charts, device limits, sign-out and bans, server limits, cache stats and pinned app versions.
+- **Go back from Latest to Stable**: switching the update channel back to Stable while running a newer Latest build now offers the newest stable version instead of saying Glyph is up to date.
+- **Server-pinned update channels**: when a server owner pins a specific version for Stable or Latest, apps connected to that server follow that choice automatically.
+
+### Fixed
+
+- **Cleaner sound when sample rates differ**: natively decoded songs (such as 44.1 kHz played on a 48 kHz output) now use windowed-sinc resampling instead of linear interpolation, keeping highs clear without dullness or aliasing.
+- **Equalizer and bass boost headroom**: the equalizer now measures the real peak of the full filter curve so neighbouring boosted bands and bass boosts stay punchy without pumping or clipping the limiter.
+
 ## 0.12.12 - 2026-11-20
 
 ### Added

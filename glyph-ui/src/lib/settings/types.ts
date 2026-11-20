@@ -144,7 +144,7 @@ export interface YtDlpStatus {
 // ---- updates (UpdateStatus of the backend) ---------------------------
 export type UpdateState =
   | { kind: "none" } | { kind: "up_to_date"; current: string } | { kind: "skipped" }
-  | { kind: "available"; version: string; can_self_install: boolean; html_url: string; release_package: boolean };
+  | { kind: "available"; version: string; can_self_install: boolean; html_url: string; release_package: boolean; downgrade?: boolean };
 
 // ---- connection / servers --------------------------------------------
 export interface ConnTestResult { ok: boolean; text: string; auth_required?: boolean }

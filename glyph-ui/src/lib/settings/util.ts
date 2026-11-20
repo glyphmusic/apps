@@ -7,6 +7,11 @@ export function isMobile(): boolean {
   return app.compact || app.platform === "android" || app.platform === "ios";
 }
 
+/** The phone app (Android / iOS), not just a narrow window. */
+export function onPhone(): boolean {
+  return app.platform === "android" || app.platform === "ios";
+}
+
 /** Opens a link in the system browser. */
 export function openUrl(url: string) {
   backend().call("open_url", { url }).catch(() => {});

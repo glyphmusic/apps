@@ -1478,13 +1478,21 @@ impl Backend {
     /// for updates" action, never returns `Skipped`.
     pub async fn check_for_update(&self) -> anyhow::Result<UpdateStatus> {
         let inner = self.cur();
-        self.spawn(async move { updater::check(&inner.http, &inner.config.updates, false).await }).await?
+        self.spawn(async move {
+            let pins = update_pins(inner.server.as_ref()).await;
+            updater::check(&inner.http, &inner.config.updates, false, &pins).await
+        })
+        .await?
     }
 
     /// Start-up check: honours `check_on_start` and the 24 h throttle (`Skipped`).
     pub async fn check_for_update_auto(&self) -> anyhow::Result<UpdateStatus> {
         let inner = self.cur();
-        self.spawn(async move { updater::check(&inner.http, &inner.config.updates, true).await }).await?
+        self.spawn(async move {
+            let pins = update_pins(inner.server.as_ref()).await;
+            updater::check(&inner.http, &inner.config.updates, true, &pins).await
+        })
+        .await?
     }
 
     /// Plugin catalog straight from GitHub (see [`plugins`]): cached for an
@@ -1669,5 +1677,15 @@ mod perf_tests {
             prune_search_cache_locked(&mut guard, 0);
             assert!(guard.is_empty());
         }
+    }
+}
+
+/// The connected server's release picks for the update channels (see
+/// [`updater::Pins`]); none when there is no server or it does not answer.
+async fn update_pins(server: Option<&ServerClient>) -> updater::Pins {
+    let Some(server) = server else { return updater::Pins::default() };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), server.health()).await {
+        Ok(Ok(h)) => updater::Pins { stable: h.stable_app_version, latest: h.latest_app_version },
+        _ => updater::Pins::default(),
     }
 }

@@ -7,7 +7,7 @@ import { app, type SettingsPage } from "../state.svelte";
 import { t } from "../i18n.svelte";
 import { pl } from "./plugins-state.svelte";
 import { onWeb } from "../web";
-import { isMobile } from "./util";
+import { isMobile, onPhone } from "./util";
 import { adv, pageAdvanced } from "./advanced.svelte";
 import Overview from "./Overview.svelte";
 import Playback from "./Playback.svelte";
@@ -89,7 +89,8 @@ export function subtabs(p: SettingsPage): string[] {
       return mobile ? ["sp.sub.general", "sp.sub.content", "settings.sources"] : ["sp.sub.general", "sp.sub.content", "settings.sources", "sp.sub.player"];
     case "account": return app.account ? ["sp.sub.overview", "sp.sub.profile", "sp.sub.devices", "account.security"] : [];
     case "server": return ["sp.sub.connection", "settings.keys", "privacy.tab"];
-    case "integrations": return onWeb() ? [] : ["sp.discord.section", "sp.mcp.section"];
+    // Phones: only AI assistants (no Discord there).
+    case "integrations": return onWeb() || onPhone() ? [] : ["sp.discord.section", "sp.mcp.section"];
     // Installed, Browse, then one tab per plugin with its own page.
     case "plugins": return ["plugins.tab.installed", "plugins.tab.browse", ...pl.ui.pages.map((x) => `plugin-page.${x.id}`)];
     case "about": return mobile ? ["sp.sub.version", "sp.support"] : ["sp.sub.version", "sp.support", "sp.sub.shortcuts"];
@@ -115,7 +116,9 @@ export function pageShown(p: SettingsPage): boolean {
     if (p === "integrations") return app.account != null;
     return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "about";
   }
-  if (p === "system" || p === "integrations") return !isMobile();
+  // Phones show integrations for the AI assistant settings only.
+  if (p === "integrations") return onPhone() || !isMobile();
+  if (p === "system") return !isMobile();
   // Only the Android app shows notifications of its own.
   if (p === "notifications") return app.platform === "android";
   return true;

@@ -523,6 +523,16 @@ impl Default for AudioConfig {
     }
 }
 
+/// Moves configs still carrying the old muddy Bass Boost curve (which also
+/// lifted 250–500 Hz) onto the current Bass Boost preset.
+pub fn migrate_eq(audio: &mut AudioConfig) {
+    if audio.eq_preset == "bass_boost" && audio.eq_gains == [6.0, 5.0, 4.0, 2.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0] {
+        if let Some(&(_, g)) = crate::eq::BUILTIN_PRESETS.iter().find(|&&(k, _)| k == "bass_boost") {
+            audio.eq_gains = g.to_vec();
+        }
+    }
+}
+
 /// How sound reaches the speakers / headphones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -783,6 +793,9 @@ impl Config {
         if matches!(cfg.updates.repo.trim(), "glyphmusic/glyph" | "glyphmusic/desktop") {
             cfg.updates.repo = RELEASES_REPO.into();
         }
+        // The old Bass Boost also lifted 250-500 Hz (muffled sound): move
+        // configs still on it to the new curve.
+        migrate_eq(&mut cfg.audio);
         cfg.keys.blank_to_none();
         cfg.file_keys = Some(cfg.keys.clone());
         cfg.apply_env();

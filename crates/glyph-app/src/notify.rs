@@ -216,7 +216,7 @@ pub async fn find(b: &Backend, cfg: &Config, followed: Vec<String>, hidden: &[St
     let _one = RUNNING.lock().await;
     let update = if n.app_updates {
         match b.check_for_update().await {
-            Ok(UpdateStatus::Available(i)) => Some(i.version),
+            Ok(UpdateStatus::Available(i)) if !i.downgrade => Some(i.version),
             _ => None,
         }
     } else {

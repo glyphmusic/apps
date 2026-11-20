@@ -206,11 +206,6 @@ pub fn mcp_rotate_token(core: C) {
     crate::mcp_tools::rotate_token(core);
 }
 
-pub async fn mcp_server_token(core: C<'_>) -> Res {
-    crate::mcp_tools::request_server_token(core, None).await;
-    Ok(())
-}
-
 // -------------------------------------------------------------- yt-dlp
 
 fn ytdlp_json(s: &glyph_core::ytdlp::YtDlpStatus) -> Value {
@@ -290,6 +285,7 @@ fn status_json(s: &Option<UpdateStatus>) -> Value {
         Some(UpdateStatus::Available(i)) => json!({
             "kind": "available", "version": i.version, "can_self_install": i.can_self_install,
             "html_url": i.html_url, "release_package": glyph_core::updater::is_release_package(),
+            "downgrade": i.downgrade,
         }),
     }
 }
@@ -311,10 +307,14 @@ pub async fn run_check(core: &Arc<Core>, manual: bool) -> Res<Value> {
         match r {
             Ok(UpdateStatus::Skipped) if !manual => {}
             Ok(st) => {
+                // Going back to stable is only offered in Settings > About:
+                // no "update" event, never installed by itself.
                 if let UpdateStatus::Available(i) = &st {
-                    core.emit("update", json!({ "version": i.version, "notes": i.notes }));
-                    if !manual && i.can_self_install && core.st().config.updates.auto_install {
-                        auto_install = Some(i.clone());
+                    if !i.downgrade {
+                        core.emit("update", json!({ "version": i.version, "notes": i.notes }));
+                        if !manual && i.can_self_install && core.st().config.updates.auto_install {
+                            auto_install = Some(i.clone());
+                        }
                     }
                 }
                 u.status = Some(st);

@@ -732,6 +732,11 @@ pub async fn account_recovery(core: C<'_>) -> Res<String> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn admin_call(core: C<'_>, method: String, path: String, body: Option<Value>) -> Res<Value> {
+    account::admin_call(&core, method, path, body).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn account_remove_device(core: C<'_>, id: String) -> Res {
     account::account_remove_device(&core, id).await
 }

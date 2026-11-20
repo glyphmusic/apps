@@ -11,6 +11,7 @@
   import { t } from "../i18n.svelte";
   import { tip } from "../ui.svelte";
   import { sameList } from "../api/types";
+  import { admin } from "../admin/admin.svelte";
 
   let { width = app.leftSidebarW }: { width?: number } = $props();
   const expanded = $derived(width >= 112);
@@ -22,6 +23,8 @@
     { view: "now_playing", icon: "disc-3", label: "nav.now_playing", motion: "spin" },
   ];
   const items = $derived(app.sidebarItems(5));
+  // The server dashboard shows up only for accounts the server made admins.
+  $effect(() => admin.check(app.account?.handle));
   const active = (v: View | "settings") => (v === "settings" ? app.settingsOpen : app.view === v && !app.settingsOpen);
   function activeItem(it: SideItem) {
     if (it.kind === "list") return app.view === "list" && sameList(app.openList, it.list);
@@ -56,6 +59,12 @@
     {/each}
   {/if}
   <span class="flex1"></span>
+  {#if admin.on}
+    <button class="it pulse" class:on={active("server")} onclick={() => { admin.sub = ""; app.navigate("server"); }} use:tip={{ label: expanded ? "" : t("admin.title"), side: "right" }} aria-label={t("admin.title")}>
+      <span class="ico"><Icon name="server" size={20} color={active("server") ? "var(--text)" : "var(--dim)"} /></span>
+      {#if expanded}<span class="lab trunc">{t("admin.title")}</span>{/if}
+    </button>
+  {/if}
   <button class="it turn" class:on={app.settingsOpen} onclick={() => app.navigate("settings")} use:tip={{ label: expanded ? "" : t("nav.settings"), side: "right" }} aria-label={t("nav.settings")}>
     <span class="ico"><Icon name="settings" size={20} color={app.settingsOpen ? "var(--text)" : "var(--dim)"} /></span>
     {#if expanded}<span class="lab trunc">{t("nav.settings")}</span>{/if}
@@ -77,6 +86,7 @@
   .grow:hover .ico { animation: grow .3s ease-out; }
   .spin:hover .ico { animation: spin 1.4s linear infinite; }
   .turn:hover .ico { transform: rotate(90deg); transition-duration: .5s; }
+  .pulse:hover .ico { animation: grow .3s ease-out; }
   @keyframes hop { 50% { transform: translateY(-3px); } }
   @keyframes wiggle { 15% { transform: rotate(14deg); } 30% { transform: rotate(-10deg); } 45% { transform: rotate(6deg); } 60% { transform: rotate(-3deg); } 100% { transform: none; } }
   @keyframes grow { 50% { transform: scale(1.16); } }
