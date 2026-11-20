@@ -16,6 +16,44 @@ pub enum IncomingAction {
     Plugin(String),
     Shared(String),
     Files(Vec<String>),
+    /// A page of the app (a tapped notification): `{"settings": "about"}`,
+    /// `{"album": {"artist", "title"}}` or `{}` (just open Glyph).
+    Page(serde_json::Value),
+}
+
+/// `glyph://update` (Settings > About), `glyph://album/<artist>/<title>`
+/// and `glyph://open`: where the app's own notifications lead.
+pub fn page_link(url: &str) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let rest = url.trim().strip_prefix("glyph://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/');
+    let dec = |s: &str| -> Option<String> {
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let h = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(h, 16).ok()?);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        let s = String::from_utf8(out).ok()?;
+        let s = s.trim();
+        (!s.is_empty() && s.len() <= 300 && !s.chars().any(char::is_control)).then(|| s.to_string())
+    };
+    match rest {
+        "update" => Some(json!({ "settings": "about" })),
+        "open" => Some(json!({})),
+        _ => {
+            let parts: Vec<&str> = rest.strip_prefix("album/")?.split('/').collect();
+            let [artist, title] = parts.as_slice() else { return None };
+            Some(json!({ "album": { "artist": dec(artist)?, "title": dec(title)? } }))
+        }
+    }
 }
 
 /// Maps a `glyph://` URL or `https://glyph.my/...` link to a request string
@@ -77,6 +115,9 @@ pub fn parse_incoming(raw: &str) -> Option<IncomingAction> {
         let paths: Vec<String> = list.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
         return (!paths.is_empty()).then_some(IncomingAction::Files(paths));
     }
+    if let Some(page) = page_link(raw) {
+        return Some(IncomingAction::Page(page));
+    }
     let req = request_for_url(raw)?;
     if let Some(code) = req.strip_prefix("jam ") {
         Some(IncomingAction::Jam(code.to_string()))
@@ -98,6 +139,7 @@ pub fn apply(core: &Arc<Core>, raw: &str) -> bool {
         IncomingAction::Jam(code) => crate::jam::open_link(core, &code),
         IncomingAction::Plugin(id) => crate::plugins::open_plugin(core, &id),
         IncomingAction::Shared(text) => core.emit("shared", text),
+        IncomingAction::Page(page) => core.emit("open_page", page),
         // The phone: the sheet asks whether to play, like or add them.
         IncomingAction::Files(paths) => {
             crate::opened::open_files(core, paths.into_iter().map(std::path::PathBuf::from).collect(), crate::opened::Then::Ask)
@@ -109,6 +151,21 @@ pub fn apply(core: &Arc<Core>, raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_links_open_pages() {
+        use serde_json::json;
+        assert_eq!(page_link("glyph://update"), Some(json!({ "settings": "about" })));
+        assert_eq!(page_link("glyph://open/"), Some(json!({})));
+        assert_eq!(page_link("glyph://album/AC%2FDC/Back%20in%20Black"), Some(json!({ "album": { "artist": "AC/DC", "title": "Back in Black" } })));
+        assert_eq!(page_link("glyph://album/K%C3%A4ptn/Peng%21"), Some(json!({ "album": { "artist": "Käptn", "title": "Peng!" } })));
+        for bad in ["glyph://album/x", "glyph://album/x/y/z", "glyph://album/%0A/y", "glyph://album/%ZZ/y", "glyph://nope", "https://glyph.my/update"] {
+            assert_eq!(page_link(bad), None, "{bad}");
+        }
+        assert_eq!(parse_incoming("glyph://update"), Some(IncomingAction::Page(json!({ "settings": "about" }))));
+        // Other glyph:// links keep working.
+        assert_eq!(parse_incoming("glyph://jam/k7p2qx"), Some(IncomingAction::Jam("K7P2QX".into())));
+    }
 
     #[test]
     fn links_parse() {

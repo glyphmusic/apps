@@ -17,12 +17,19 @@
   import Nav from "./Nav.svelte";
   import { pageComponent, pageInfo, pageShown, subtabs } from "./pages";
   import { setTab, sui } from "./settings.svelte";
+  import { subHidden } from "./advanced.svelte";
   import { closeDetail, findListing, loadPlugins, pl } from "./plugins-state.svelte";
   import { mg, serviceOf, toPick } from "./migrate-state.svelte";
 
   // Redirect away if the active settings page is not available (e.g. Integrations while signed out on /web).
   $effect(() => {
     if (!pageShown(app.settingsPage)) app.openSettings("overview");
+  });
+
+  // Advanced turned off while one of its sub-tabs is open: back to the first tab.
+  $effect(() => {
+    const k = subtabs(app.settingsPage)[sui.sub];
+    if (k && subHidden(k)) sui.sub = 0;
   });
 
   // A page opened from elsewhere (app.openSettings(page)) starts at its first tab.

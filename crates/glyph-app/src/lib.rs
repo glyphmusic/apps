@@ -14,6 +14,7 @@ pub mod links;
 pub mod mcp;
 pub mod mcp_tools;
 pub mod mpd;
+pub mod notify;
 pub mod opened;
 pub mod page_cache;
 pub mod plugins;
@@ -78,6 +79,7 @@ pub fn setup(core: &Arc<controller::Core>) {
     plugins::setup(core);
     system::setup(core);
     jam::setup(core);
+    notify::setup(core);
     let c = core.clone();
     account::on_devices_changed(move || c.emit("devices", jam::devices_json(&c)));
     theme_icon::sync_host_icon(core);

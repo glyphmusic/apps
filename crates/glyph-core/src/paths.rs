@@ -76,6 +76,7 @@ pub fn hash_hex(s: &str) -> String {
 /// Runs a blocking OS-keyring operation safely off the caller thread on Linux
 /// (`secret-service` uses a blocking wrapper over an async zbus runtime that
 /// can stall or fail if invoked from the main UI thread or a Tokio worker).
+#[cfg(any(windows, target_os = "macos", target_os = "ios", target_os = "linux"))]
 pub(crate) fn run_keyring<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     #[cfg(target_os = "linux")]
     {

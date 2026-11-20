@@ -17,7 +17,8 @@ import { PROVIDER_NAME, isYoutubeCover, primaryArtist, sameList, trackKey } from
 import { WebAccountManager } from "./web-account";
 import { WebConnectManager } from "./web-connect";
 import { WebMcpManager } from "./web-mcp";
-import { ApiError, server, type PlaybackCommandWire, type PlaybackSource, type SearchEvent } from "./web-server";
+import { ApiError, server, serverOrigin, type PlaybackCommandWire, type PlaybackSource, type SearchEvent } from "./web-server";
+import { decodeShare, encodeShare } from "./share-code";
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
 import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
@@ -1318,6 +1319,19 @@ export class WebBackend implements Backend {
   private pageUrl(path: string) {
     return `${location.origin}${import.meta.env.BASE_URL.replace(/\/$/, "")}/${path}`;
   }
+  /** A glyph.my/p/<id> link for `tracks` (signed in only, like the app);
+   *  null when there is no account or the server said no. */
+  private async shortLink(name: string, tracks: Track[], kind: "track" | "playlist" | "album"): Promise<string | null> {
+    if (!this.account.isSignedIn() || !tracks.length) return null;
+    try {
+      const token = await this.account.validToken();
+      const code = await encodeShare(name, tracks);
+      const res = await server.shareCreate({ code, name, songs: tracks.length, kind }, token);
+      return res?.url || null;
+    } catch {
+      return null;
+    }
+  }
   private async copyLink(link: string) {
     try { await navigator.clipboard.writeText(link); this.toast("toast.link_copied_plain"); } catch { /* no clipboard access */ }
     return link;
@@ -1462,6 +1476,11 @@ export class WebBackend implements Backend {
         this.saveLibrary();
       },
       playlist_move: (a) => { const x = playlist(a.id); if (x) { const [it] = x.tracks.splice(a.from, 1); x.tracks.splice(a.to, 0, it); } this.saveLibrary(); },
+      // The UI picks and encodes the picture (lib/picture.ts); it stays in the browser.
+      playlist_set_cover: (a) => {
+        const x = playlist(a.id);
+        if (x && typeof a.data === "string" && a.data.startsWith("data:image/")) { x.cover = a.data; this.saveLibrary(); }
+      },
       playlist_remove_cover: (a) => { const x = playlist(a.id); if (x) { x.cover = null; this.saveLibrary(); } },
       list_insert: (a) => {
         const l = a.list as ListKey, tr = a.track as Track, i = a.index as number;
@@ -1545,35 +1564,21 @@ export class WebBackend implements Backend {
       },
       // ---- links ----
       // `copy: false` (phone share menu) only returns the link.
+      // Signed in: a short glyph.my/p/<id> link made from a share code (the
+      // server only takes codes); else a search or album page of the web player.
       share: async (a) => {
         const out = (link: string) => (a.copy === false ? link : this.copyLink(link));
         if (a.track) {
-          if (this.config.sharing.glyph_links) {
-            try {
-              const token = this.account.isSignedIn() ? await this.account.validToken().catch(() => undefined) : undefined;
-              const res = await server.shareCreate(
-                { kind: "song", title: a.track.title, subtitle: a.track.artist, cover_url: a.track.cover_url ?? null, tracks: [a.track] },
-                token,
-              );
-              return out(res.url);
-            } catch { /* fall back to search link */ }
-          }
-          return out(this.pageUrl(`search?q=${enc(`${primaryArtist(a.track.artist)} ${a.track.title}`)}`));
+          const link = this.config.sharing.glyph_links ? await this.shortLink(a.track.title, [a.track], "track") : null;
+          return out(link ?? this.pageUrl(`search?q=${enc(`${primaryArtist(a.track.artist)} ${a.track.title}`)}`));
         }
         const l = a.list as ListKey | undefined;
         if (l?.kind === "album") return out(this.pageUrl(`album/${enc(l.artist)}/${enc(l.title)}`));
-        if (l?.kind === "playlist") {
-          const pl = playlist(l.id);
-          if (pl?.tracks.length) {
-            try {
-              const token = this.account.isSignedIn() ? await this.account.validToken().catch(() => undefined) : undefined;
-              const res = await server.shareCreate(
-                { kind: "playlist", title: pl.name, cover_url: pl.cover ?? pl.tracks[0]?.cover_url ?? null, tracks: pl.tracks },
-                token,
-              );
-              return out(res.url);
-            } catch { /* fall through */ }
-          }
+        const own = l?.kind === "playlist" ? playlist(l.id) : null;
+        const tracks = own ? own.tracks : l?.kind === "liked" ? lib().liked : [];
+        if (tracks.length) {
+          const link = await this.shortLink(own?.name ?? "Liked Songs", tracks, "playlist");
+          if (link) return out(link);
         }
         this.toast("web.app_only", "info");
         return null;
@@ -1582,16 +1587,25 @@ export class WebBackend implements Backend {
         const tracks = (a.tracks ?? []) as Track[];
         if (!tracks.length) return null;
         const out = (link: string) => (a.copy === false ? link : this.copyLink(link));
-        try {
-          const token = this.account.isSignedIn() ? await this.account.validToken().catch(() => undefined) : undefined;
-          const res = await server.shareCreate(
-            { kind: a.kind === "album" || a.kind === "song" ? a.kind : "playlist", title: String(a.title ?? "Glyph"), cover_url: tracks[0]?.cover_url ?? null, tracks },
-            token,
-          );
-          return out(res.url);
-        } catch {
-          return out(this.pageUrl(`search?q=${enc(`${primaryArtist(tracks[0].artist)} ${tracks[0].title}`)}`));
-        }
+        const kind = a.kind === "album" ? "album" : a.kind === "song" ? "track" : "playlist";
+        const link = await this.shortLink(String(a.title ?? "Glyph"), tracks, kind);
+        return out(link ?? this.pageUrl(`search?q=${enc(`${primaryArtist(tracks[0].artist)} ${tracks[0].title}`)}`));
+      },
+      // A shared glyph.my/p/<id> link opened in the web player: its songs.
+      share_open: async (a) => {
+        const id = String(a.id ?? "");
+        const item = await server.shareGet(id);
+        const { name, tracks } = await decodeShare(item.code);
+        return { kind: "share_preview", share_kind: item.kind, id, name: item.name?.trim() || name, code: item.code, link: `${serverOrigin()}/p/${id}`, author: item.author ?? null, tracks };
+      },
+      // "Add to library" on a shared playlist: a new playlist with its songs.
+      share_save: async (a) => {
+        const { name, tracks } = await decodeShare(String(a.code ?? ""));
+        if (!tracks.length) return null;
+        const id = `pl-${Date.now().toString(36)}`;
+        lib().playlists.unshift({ id, name, tracks, created_at: Date.now(), local_only: !this.account.isSignedIn(), shared_by: (a.author as string | null) ?? null });
+        this.saveLibrary();
+        return id;
       },
       // Phone share menu: the browser's own share sheet, else copy.
       share_system: async (a) => {
@@ -1609,7 +1623,10 @@ export class WebBackend implements Backend {
         await this.copyLink(text);
       },
       copy_text: async (a) => { await navigator.clipboard.writeText(String(a.text ?? "")); },
-      copy_artist_link: (a) => this.copyLink(this.pageUrl(`artist/${enc(a.artist)}`)),
+      copy_artist_link: (a) => {
+        const link = this.pageUrl(`artist/${enc(a.artist)}`);
+        return a.copy === false ? link : this.copyLink(link);
+      },
       open_url: (a) => {
         const url = String(a.url);
         // mailto: / sms: hand off to the phone's app; a new tab would stay blank.

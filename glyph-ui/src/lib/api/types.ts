@@ -359,11 +359,13 @@ export interface Config {
   playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; autoplay?: boolean; gapless?: boolean };
   lists: { sort: Record<string, string> };
   stats: { enabled: boolean };
-  mcp: { enabled: boolean; mode: string; port: number; token: string; access?: Partial<Record<"playback" | "library" | "stats" | "settings", "none" | "read" | "write">> };
+  mcp: { enabled: boolean; mode: string; port: number; token: string; access?: Partial<Record<"playback" | "library" | "stats" | "settings" | "plugins", "none" | "read" | "write">> };
   mpd: { enabled: boolean; address: string };
   devices: { discovery: boolean };
   plugins: { auto_update: boolean; skip_install_warning: boolean; sort: string; disabled: string[] };
   desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
+  /** Phone notifications (Android, notify.rs); missing in older configs. */
+  notifications?: { app_updates: boolean; new_releases: boolean };
   ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
   local: { folders: string[] };
   [k: string]: unknown;
@@ -412,6 +414,10 @@ export interface BackendEvents {
   /** The sleep timer ran out. */
   sleep: { state: "done" };
   update: UpdateInfo | null;
+  /** A tapped notification (glyph://update, glyph://album/..): the page to show. */
+  open_page: { settings?: string; album?: { artist: string; title: string } };
+  /** The server takes this app version no more (or again): "Update Glyph". */
+  app_outdated: { outdated: boolean; min: string | null; current: string };
   spectrum: [number, number, number];
   /** Text or link shared to Glyph (deep link, share sheet). */
   shared: string;
@@ -428,7 +434,9 @@ export interface BackendEvents {
     | { kind: "page"; id: string }
     | { kind: "search"; query: string }
     | { kind: "artist"; name: string }
-    | { kind: "install"; id: string };
+    | { kind: "install"; id: string }
+    /** An AI assistant changed the plugins (mcp_tools.rs plugins_changed). */
+    | { kind: "changed"; what: "install" | "uninstall" | "enable" | "disable"; name: string };
   /** Lyrics a plugin published for the song with this key (the UI's trackKey). */
   plugin_lyrics: { key: string; lyrics: Lyrics };
   /** Plugins started or stopped: plugin lyrics may be gone. */

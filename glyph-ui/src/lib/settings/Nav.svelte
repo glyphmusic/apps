@@ -17,6 +17,8 @@
   import { fadeEdges } from "../ui.svelte";
   import { clickPage, flashOption, setTab, sui } from "./settings.svelte";
   import { isMobile } from "./util";
+  import Tog from "./Tog.svelte";
+  import { adv, ADVANCED_ROWS, ADVANCED_SUBTABS, pageAdvanced, setAdvanced, subHidden } from "./advanced.svelte";
 
   const q = $derived(sui.query.trim().toLowerCase());
   const hit = (text: string) => !q || text.toLowerCase().includes(q);
@@ -56,10 +58,18 @@
   ]);
 
   /** Single options matching the search (with their page / sub-tab). */
+  /** An option that only shows with Advanced on (its page, sub-tab or row). */
+  // OPTIONS count Playback sub-tabs the desktop way (the web player drops General).
+  const PLAYBACK_TABS = ["sp.sub.general", "sp.sub.content", "settings.sources", "sp.sub.player"];
+  const advOpt = (p: SettingsPage, s: number, key: string) =>
+    pageAdvanced(p) || ADVANCED_ROWS.has(key) || ADVANCED_SUBTABS.has((p === "playback" ? PLAYBACK_TABS[s] : subtabs(p)[s]) ?? "");
+  /** Options the search would find with Advanced on but hides now. */
+  const hiddenHits = $derived(!q || adv.on ? 0 : OPTIONS.filter(([p, s, key, words]) => advOpt(p, s, key) && (hit(t(key)) || words.includes(q))).length);
   const found = $derived.by(() => {
     if (!q) return [];
     return OPTIONS
       .filter(([p]) => p !== "account" || signedIn)
+      .filter(([p, s, key]) => adv.on || !advOpt(p, s, key))
       .filter(([p]) => pageShown(p))
       // Web player: only its own pages, supported Playback sub-tabs, and browser-supported options.
       .filter(([p, s, key]) => !onWeb() || (!WEB_HIDDEN_KEYS.has(key) && (p !== "playback" || s === 1 || s === 2 || (!mobile && s === 3))))
@@ -74,7 +84,7 @@
     label: t(g.label),
     items: g.pages.filter(pageShown).map((p) => {
       const subs = subtabs(p);
-      const subHit = subs.map((k) => !!q && hit(t(k)));
+      const subHit = subs.map((k) => !!q && !subHidden(k) && hit(t(k)));
       const info = pageInfo(p);
       const page = hit(info.name) || PAGE_WORDS[p].includes(q) || found.some((f) => f.page === p);
       return { p, info, subs, subHit, show: page || subHit.includes(true) };
@@ -108,7 +118,7 @@
         {#if open}
           <div class="subs" transition:slide={{ duration: 180, easing: cubicInOut }}>
             {#each subs as key, i (key)}
-              <button class="sub" class:sel={on && sui.sub === i} onclick={() => setTab(p, i)}>{t(key)}</button>
+              {#if !subHidden(key)}<button class="sub" class:sel={on && sui.sub === i} onclick={() => setTab(p, i)}>{t(key)}</button>{/if}
             {/each}
           </div>
         {/if}
@@ -123,6 +133,13 @@
         </button>
       {/each}
     {/if}
+    {#if hiddenHits}
+      <button class="more" onclick={() => setAdvanced(true)}>{t("settings.advanced.more")}</button>
+    {/if}
+  </div>
+  <div class="advrow">
+    <span class="al">{t("settings.advanced")}</span>
+    <Tog on={adv.on} label={t("settings.advanced")} onchange={setAdvanced} />
   </div>
 </div>
 
@@ -144,6 +161,10 @@
   .sub { flex: none; height: 32px; padding: 0 10px; display: flex; align-items: center; border-radius: 7px; font-size: 13.5px; color: rgba(255, 255, 255, .6); transition: background-color .15s ease-out, color .15s ease-out; }
   .sub:hover { background: rgba(255, 255, 255, .04); color: #fff; }
   .sub.sel { background: rgba(255, 255, 255, .08); color: #fff; font-weight: 500; }
+  .more { flex: none; margin-top: 6px; padding: 8px 10px; border-radius: 8px; text-align: left; font-size: 12.5px; color: rgba(255, 255, 255, .55); transition: background-color .12s, color .12s; }
+  .more:hover { background: rgba(255, 255, 255, .05); color: #fff; }
+  .advrow { flex: none; height: 44px; margin: 0 6px 6px; padding: 0 10px; display: flex; align-items: center; gap: 10px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
+  .al { flex: 1; min-width: 0; font-size: 13.5px; color: rgba(255, 255, 255, .75); }
   .opt { flex: none; padding: 6px 10px; display: flex; flex-direction: column; justify-content: center; gap: 1px; border-radius: 8px; text-align: left; transition: background-color .12s; }
   .opt:hover { background: rgba(255, 255, 255, .05); }
   .ol { font-size: 13.5px; color: rgba(255, 255, 255, .9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

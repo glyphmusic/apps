@@ -3,6 +3,7 @@
 // controls.rs mcp_approval, import.rs open_list after an import).
 import { backend } from "../api/backend";
 import { app } from "../state.svelte";
+import { tf } from "../i18n.svelte";
 import { openPlugin, setTab } from "./settings.svelte";
 import { loadPlugins, pl } from "./plugins-state.svelte";
 import { lyr } from "../pages/nowplaying/lyrics-state.svelte";
@@ -32,6 +33,11 @@ export async function initPluginEvents() {
     } else if (e.kind === "search") app.searchFor(e.query);
     else if (e.kind === "artist") app.openArtistPage(e.name);
     else if (e.kind === "install") openPlugin(e.id);
+    // An AI assistant installed, removed or switched a plugin: show the new list and say so.
+    else if (e.kind === "changed") {
+      await loadPlugins();
+      app.toast(tf(`mcp.plugins.${e.what}`, { name: e.name }), "info");
+    }
   });
 
   // Lyrics a plugin published: shown when the song has none (or already shows plugin lyrics).

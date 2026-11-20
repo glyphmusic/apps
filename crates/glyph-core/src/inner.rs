@@ -20,6 +20,7 @@ impl Inner {
             0 => u64::MAX,
             mb => mb * 1024 * 1024,
         };
+        crate::album_names::set_store(paths::data_dir().join("album-names.tsv"));
         let covers = CoverCache::new(storage::covers_dir(), http.clone(), providers.clone()).with_max_bytes(limit);
         let lyrics_cache = LyricsCache::new(paths::data_dir().join("lyrics"));
 
@@ -36,6 +37,7 @@ impl Inner {
             match client.check_compat().await {
                 Ok(Compat::Compatible(h)) => {
                     if crate::outage::is_official(&url) { crate::outage::clear(); }
+                    crate::app_outdated::note_health(h.min_app_version.as_deref());
                     library::set_playlist_track_limit(h.playlist_max_tracks);
                     server_rates = h.supports(glyph_protocol::capability::RATINGS);
                     server_providers = Some(h.providers);

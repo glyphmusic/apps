@@ -13,6 +13,7 @@
   import IconButton from "../components/IconButton.svelte";
   import Row from "./Row.svelte";
   import Rows from "./Rows.svelte";
+  import RiskNote from "./RiskNote.svelte";
   import RowBase from "./RowBase.svelte";
   import SectionLabel from "./SectionLabel.svelte";
   import Tog from "./Tog.svelte";
@@ -36,8 +37,10 @@
     ["library", "sp.mcp.access.library", "sp.mcp.access.library.desc", true],
     ["settings", "sp.mcp.access.settings", "sp.mcp.access.settings.desc", true],
     ["stats", "sp.mcp.access.stats", "sp.mcp.access.stats.desc", false],
+    // The web player has no plugins.
+    ...(onWeb() ? [] : [["plugins", "sp.mcp.access.plugins", "sp.mcp.access.plugins.desc", true] as [string, string, string, boolean]]),
   ];
-  const DEFAULTS: Record<string, Access> = { playback: "write", library: "read", settings: "write", stats: "none" };
+  const DEFAULTS: Record<string, Access> = { playback: "write", library: "read", settings: "write", stats: "none", plugins: "none" };
 
   let builtin = $state(false);
   let info = $state<McpInfo>({ url: null, token: null, config: null, error: null, relay_running: false, token_loading: false });
@@ -93,7 +96,7 @@
   const status = $derived(info.error ? `${t("sp.mcp.problem")} ${info.error}` : !local && info.relay_running ? t("sp.mcp.relay_on") : local ? t("sp.mcp.running") : !local && !signedIn ? t("sp.mcp.server.signin") : t("sp.mcp.idle"));
 
   async function copy(text: string | null) {
-    if (text && (await copyText(text))) app.toast(t("sp.mcp.copied"));
+    if (text && (await copyText(text))) app.copied(t("sp.mcp.copied"));
   }
 
   async function rotate() {
@@ -129,8 +132,8 @@
     const name = editName.trim();
     if (!name) return;
     try {
+      // The list shows the new name: no toast on top.
       await backend().call("mcp_rename_session", { id, name });
-      app.toast(t("sp.mcp.sessions.renamed"));
       editingId = null;
       await loadSessions();
     } catch (e) {
@@ -140,8 +143,8 @@
 
   async function revoke(id: string) {
     try {
+      // The session leaves the list: no toast on top.
       await backend().call("mcp_revoke_session", { id });
-      app.toast(t("sp.mcp.sessions.revoked"));
       await loadSessions();
     } catch (e) {
       app.toast(String(e));
@@ -245,6 +248,7 @@
             </Row>
           {/each}
         </Rows>
+        {#if !onWeb() && access("plugins") === "write"}<RiskNote />{/if}
 
         <SectionLabel text={t("sp.mcp.connection")} />
         <Rows>

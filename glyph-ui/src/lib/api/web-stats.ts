@@ -3,7 +3,7 @@
 // and synced as `stats` items keyed `<install_id>:<YYYY-MM>` when signed in.
 import type { StatsRange, StatsRecap, StatsSummary } from "../pages/stats/types";
 import { primaryArtist, trackKey, type Track } from "./types";
-import { load, remove, saveSoon } from "./web-store";
+import { load, loadBig, remove, saveSoon } from "./web-store";
 
 const MAX_ARTISTS = 150;
 const MAX_TRACKS = 200;
@@ -175,11 +175,18 @@ export class WebStats {
   constructor(onChange?: () => void) {
     this.onChange = onChange;
     const raw = load<StatsData>("stats");
-    if (raw?.months) {
-      for (const [k, v] of Object.entries(raw.months)) this.months[k] = normalizeMonth(v);
+    if (raw) this.take(raw);
+    // Too big for localStorage: the IndexedDB mirror has it.
+    else void loadBig<StatsData>("stats").then((r) => { if (r) { this.take(r); this.onChange?.(); } });
+  }
+
+  private take(raw: StatsData) {
+    // Months counted since startup (before IndexedDB answered) stay; saved ones fill the rest.
+    if (raw.months) {
+      for (const [k, v] of Object.entries(raw.months)) if (!this.months[k]) this.months[k] = normalizeMonth(v);
     }
-    if (raw?.remote) {
-      for (const [k, v] of Object.entries(raw.remote)) this.remote[k] = normalizeMonth(v);
+    if (raw.remote) {
+      for (const [k, v] of Object.entries(raw.remote)) if (!this.remote[k]) this.remote[k] = normalizeMonth(v);
     }
   }
 

@@ -81,6 +81,22 @@ export default defineConfig(({ mode }) => {
       "import.meta.env.VITE_GLYPH_VERSION": JSON.stringify(version),
       "import.meta.env.VITE_GLYPH_WEB": JSON.stringify(web ? "1" : ""),
     },
-    build: { target: "es2022", outDir: web ? "dist-web" : "dist", emptyOutDir: true },
+    build: {
+      target: "es2022",
+      outDir: web ? "dist-web" : "dist",
+      emptyOutDir: true,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              { name: "vendor", test: /[\\/]node_modules[\\/]/, priority: 20 },
+              { name: "pages", test: /[\\/]src[\\/]lib[\\/]pages[\\/]/, maxSize: 380_000, priority: 18 },
+              { name: "settings", test: /[\\/]src[\\/]lib[\\/]settings[\\/]/, maxSize: 380_000, priority: 15 },
+              { name: "compact", test: /[\\/]src[\\/]lib[\\/]compact[\\/]/, priority: 10 },
+            ],
+          },
+        },
+      },
+    },
   };
 });

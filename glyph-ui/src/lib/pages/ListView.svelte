@@ -549,7 +549,10 @@
             {#if author}<button class="author" onclick={() => app.openProfilePage(author.slice(1))}>{author}</button>{/if}
           </div>
           <div class="sub">
-            {#if l.kind === "album" && !author}
+            {#if app.sharedPreview && l.kind === "album" && !l.artist.trim()}
+              <!-- A shared playlist before it is saved: who shared it, not an empty artist. -->
+              {#if app.sharedPreview.author}<span>{tf("list.shared_by", { handle: app.sharedPreview.author })}</span><span class="sep">·</span>{/if}
+            {:else if l.kind === "album" && !author}
               <button class="link trunc" onclick={() => app.openArtistPage(l.artist)}>{l.artist}</button>
               {#if !albumLoading}<span class="sep">·</span>{/if}
             {:else if own?.shared_by}
@@ -584,6 +587,10 @@
           {/if}
           {#if app.sharedPreview}
             <Button kind="primary" onclick={addShared}>{t("list.add_shared")}</Button>
+            {#if app.sharedPreview.id && onWeb()}
+              <!-- A glyph.my link opened in the browser: the app takes it from here, if it is installed. -->
+              <Button onclick={() => (location.href = `glyph://p/${app.sharedPreview?.id}`)}>{t("list.open_in_app")}</Button>
+            {/if}
           {/if}
           {#if saveable}
             <ToggleButton name="heart" size={18} on={app.isSavedAlbum(l)} accent="var(--accent)" label={t(app.isSavedAlbum(l) ? "ctx.unsave" : "ctx.save")} onclick={() => app.toggleSaveAlbum(l)} />

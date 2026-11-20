@@ -180,15 +180,14 @@ export interface PublicPlaylistFull {
   handle: string;
 }
 
+/** `GET /v1/share/<id>` (server share.rs SharedPlaylist): the share code
+ *  holds the songs (api/share-code.ts reads it). */
 export interface SharedItem {
-  id: string;
-  kind: "song" | "playlist" | "album";
-  title: string;
-  subtitle?: string | null;
-  cover_url?: string | null;
-  tracks: Track[];
-  created_at: number;
-  expires_at: number;
+  code: string;
+  name: string;
+  songs: number;
+  kind: string;
+  author?: string | null;
 }
 
 export interface McpCall {
@@ -440,6 +439,9 @@ export const server = {
     return r.json();
   },
 
+  accountStorage: (token: string) =>
+    getJson<{ used_bytes: number; limit_bytes: number }>("/v1/account/storage", {}, undefined, token),
+
   profileDeleteImage: (token: string, kind: "avatar" | "banner") =>
     sendJson<void>("DELETE", `/v1/profile/${kind}`, undefined, token),
 
@@ -456,8 +458,9 @@ export const server = {
     `${serverOrigin()}/v1/profiles/${encodeURIComponent(handle.replace(/^@/, ""))}/images/${encodeURIComponent(sha)}`,
 
   // ---- Share ----
-  shareCreate: (req: { kind: "song" | "playlist" | "album"; title: string; subtitle?: string | null; cover_url?: string | null; tracks: Track[] }, token?: string) =>
-    sendJson<{ id: string; url: string; expires_at: number }>("POST", "/v1/share", { ...req, tracks: req.tracks.map(wireTrack) }, token),
+  /** Short link for a share code (needs an account, like the app). */
+  shareCreate: (req: { code: string; name: string; songs: number; kind: "song" | "track" | "playlist" | "album" }, token?: string) =>
+    sendJson<{ id: string; url: string }>("POST", "/v1/share", req, token),
 
   shareGet: (id: string) =>
     getJson<SharedItem>(`/v1/share/${encodeURIComponent(id)}`),

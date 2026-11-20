@@ -11,34 +11,34 @@ def glyphVersionCode = glyphVersion.tokenize("-")[0].tokenize(".").collect { it 
         .with { it[0] * 10000 + it[1] * 100 + it[2] }
 
 android {
-    namespace "app.glyph"
-    compileSdk 36
+    namespace = "app.glyph"
+    compileSdk = 36
 
     defaultConfig {
-        applicationId "app.glyph"
-        minSdk 26
-        targetSdk 36
-        versionCode glyphVersionCode
-        versionName glyphVersion
+        applicationId = "app.glyph"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = glyphVersionCode
+        versionName = glyphVersion
     }
 
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled = false
             // Local builds use the debug key; CI re-signs release APKs with the
             // Glyph release key (.github/workflows/android.yml).
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     packaging {
         jniLibs {
-            useLegacyPackaging false
+            useLegacyPackaging = false
         }
     }
 }

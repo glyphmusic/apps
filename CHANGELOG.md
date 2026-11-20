@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.12 - 2026-11-20
+
+### Added
+
+- **Notifications on phones (Android)**: Glyph tells you when a new version is ready and when an artist you follow puts out something new (several at once become one notification). Tap one to open the update page or the album. Glyph checks about twice a day, also while it is closed. Turn each kind off in the new Settings > Notifications (or in Android's settings).
+- **"Update Glyph" when the server needs a newer app**: when a server change no longer works with an older version, that version shows "Update Glyph" over the whole app, with "Update now" (or the download page) instead of half-working screens.
+- **Shared links play in the browser**: opening a glyph.my link (playlist, album, song) in a browser now opens the web player with the list ready to play, save to your library or open in the app.
+- **Advanced settings toggle**: power-user settings start hidden behind an "Advanced" switch in Settings so new users are not overwhelmed.
+- **AI assistants can manage plugins (MCP)**: new `list_plugins`, `browse_plugins`, `install_plugin`, `uninstall_plugin` and `enable_plugin` tools (off by default under Integrations > AI assistants, verified plugins only, notifies the UI on changes).
+- **Account storage bar**: Settings > Account shows how much of the server's account storage limit is used and warns when it is almost or completely full.
+- **Playlist picture picker on the web**: picking a playlist cover works in the web player and encodes covers and profile pictures as small WebP images across web and desktop.
+
+### Changed
+
+- **Share instead of "Copy link" on phones**: every "Copy link" in the phone app (artists, Jam invites) now opens the share menu, like songs and playlists already did.
+- **Fewer confirmations**: copying a link in the share menu only changes its button to "Copied" (no message on top; Android shows its own). Adding a song to a playlist or taking it out again in the "Save to" menu shows only the tick, no message with "Undo". Also no message any more where the screen already shows the change (Jam started or joined, copied buttons in settings, hidden artists shown again, MCP sessions renamed or removed, equalizer preset saved). Adding shared songs to several places says so once.
+- **Album names show at once**: album names Glyph looked up for your songs are remembered on the device, so Liked Songs and playlists show them right away when you scroll, also after a restart or a sync. Lookups for new songs run two at a time and appear on the row at once.
+
+### Fixed
+
+- **Bass boost with "Even out volume"**: with volume levelling on, a bass boost now really makes the bass louder (about +5 dB on most songs for +6 dB). Before, the equalizer turned the whole song down to make room, so the boost was hardly audible. Songs levelling already turned down use that room for the boost instead.
+- **Sharing from the web player**: the web player could not make glyph.my links (the server refused them) and always fell back to a search link. It now makes real links when you are signed in.
+- **Shared playlist preview**: shows "Shared by @name" instead of an empty artist in front of the song count.
+
 ## 0.12.11 - 2026-11-20
 
 ### Added

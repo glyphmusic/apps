@@ -100,7 +100,7 @@
   function toggle(tr: Track) {
     const i = (pl?.tracks ?? []).findIndex((x) => x.id === tr.id && x.source === tr.source);
     if (i >= 0) app.removeFromList({ kind: "playlist", id }, i);
-    else app.addToPlaylist(id, [tr]);
+    else app.addToPlaylist(id, [tr], true);
   }
   async function doImportLink() {
     const v = linkInput.trim();

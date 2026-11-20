@@ -106,6 +106,8 @@ export interface AccountStatus {
   sync_pending: number;
   devices: AccountDevice[] | null;
   devices_error: string | null;
+  /** Space the account uses on the server (null: unknown or no limit there). */
+  storage?: { used_bytes: number; limit_bytes: number } | null;
 }
 
 export interface LoginStart { login_id: string; user_code: string; url: string; expires_in_s: number }

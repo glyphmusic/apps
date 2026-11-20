@@ -94,7 +94,7 @@
     }
     if (eq) {
       close();
-      if (typed) { addEqPreset({ name: typed, gains: [...app.config.audio.eq_gains] }); app.toast(`${t("toast.eq_saved")} · ${typed}`); }
+      if (typed) { addEqPreset({ name: typed, gains: [...app.config.audio.eq_gains] }); }
       return;
     }
     const nm = typed || tf("library.new_playlist_name", { n: app.library.playlists.length + 1 });

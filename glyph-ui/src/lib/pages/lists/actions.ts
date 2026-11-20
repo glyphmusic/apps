@@ -6,6 +6,7 @@ import { listSortDirs } from "../../ui.svelte";
 import { backend } from "../../api/backend";
 import { listId, trackKey, type ArtistPage, type Library, type ListKey, type Playlist, type Track } from "../../api/types";
 import { t, tf } from "../../i18n.svelte";
+import { pickSquarePicture } from "../../picture";
 
 export type PlaylistX = Playlist;
 export type LibraryX = Library;
@@ -166,22 +167,19 @@ export function indexInPlaylist(id: string, tr: Track): number {
   const k = trackKey(tr);
   return app.playlist(id)?.tracks.findIndex((x) => trackKey(x) === k) ?? -1;
 }
-/** Adds `tr` to playlist `id`, or takes it out when it is already there (with undo). */
+/** Adds `tr` to playlist `id`, or takes it out when it is already there.
+ *  The tick in the menu shows it (tap again to undo): no toast on top. */
 export function toggleInPlaylist(id: string, tr: Track) {
   const p = app.playlist(id);
   if (!p) return;
   const i = indexInPlaylist(id, tr);
   if (i < 0) {
     p.tracks = [...p.tracks, tr];
-    app.addToPlaylist(id, [tr]);
+    app.addToPlaylist(id, [tr], true);
     return;
   }
   p.tracks = p.tracks.filter((_, j) => j !== i);
   app.removeFromList({ kind: "playlist", id }, i);
-  app.toast(`${tf("toast.removed_from", { name: p.name })} · ${tr.title}`, "ok", {
-    label: t("toast.undo"),
-    run: () => backend().call("list_insert", { list: { kind: "playlist", id }, index: i, track: tr }),
-  });
 }
 
 export function openNameDialog(tracks: Track[] = [], rename: string | null = null) {
@@ -232,7 +230,15 @@ export const restoreVersion = (revision: string) => backend().call("playlist_res
 export const setPlaylistStorage = (id: string, mode: 0 | 1 | 2) => backend().call("playlist_storage", { id, mode });
 export const toggleAutoDownload = (id: string) => backend().call("playlist_auto_download", { id, on: !playlistX(id)?.auto_download });
 export const setLikedAutoDownload = (on: boolean) => backend().call("liked_auto_download", { on });
-export const pickCover = (id: string) => backend().call("playlist_pick_cover", { id });
+/** Picks a picture for playlist `id` (512 px WebP, made here) and hands it to the backend. */
+export async function pickCover(id: string) {
+  try {
+    const data = await pickSquarePicture();
+    if (data) await backend().call("playlist_set_cover", { id, data });
+  } catch (e) {
+    app.toast(tf("toast.cover_error", { e: String((e as Error)?.message ?? e) }), "info");
+  }
+}
 export const removeCover = (id: string) => backend().call("playlist_remove_cover", { id });
 export const shareList = (l: ListKey) => app.share({ list: l });
 export const hideSidebar = (id: string) => backend().call("hide_sidebar", { id });
@@ -263,7 +269,8 @@ export function toggleHiddenArtist(name: string) {
   backend().call("hide_artist", { artist: name, on: hidden });
   app.toast(tf(hidden ? "toast.artist_hidden" : "toast.artist_shown", { name }));
 }
-export const copyArtistLink = (artist: string) => backend().call("copy_artist_link", { artist });
+/** Phones: the share menu; desktop: copies the artist's link. */
+export const copyArtistLink = (artist: string) => app.shareArtist(artist);
 export const recommendFeedback = (artist: string, preference: 1 | -1 | -2 | null) => backend().call("recommend_feedback", { artist, preference });
 
 /** lists.rs artist_releases: the songs found, grouped by album name. */

@@ -651,9 +651,11 @@ impl TrackSource {
             self.publish_pos();
         }
         // The song's one gain first (measured on the decoded sample, so the
-        // equalizer never changes it), then the equalizer, then the limiter
-        // that only catches peaks.
+        // equalizer never changes it), then the equalizer (it spends the room
+        // the gain left on its boosts), then the limiter that only catches
+        // peaks.
         let s = self.level.gain(s, &self.shared.loudness);
+        self.eq.set_room(self.level.room_db());
         let s = self.eq.process(s);
         Some(self.level.limit(s))
     }

@@ -364,6 +364,13 @@ pub async fn install(core: &Arc<Core>) -> Res {
     }
 }
 
+/// Whether the server asked this app to update (`app_outdated` event too):
+/// `{ outdated, min, current }`.
+pub fn app_outdated() -> Value {
+    let o = glyph_core::app_outdated::current();
+    json!({ "outdated": o.is_some(), "min": o.and_then(|o| o.min), "current": glyph_core::app_outdated::APP_VERSION })
+}
+
 pub fn update_state() -> Value {
     let u = upd();
     json!({ "checking": u.checking, "installing": u.installing, "installed": u.installed, "error": u.error, "status": status_json(&u.status) })

@@ -8,6 +8,7 @@ import { t } from "../i18n.svelte";
 import { pl } from "./plugins-state.svelte";
 import { onWeb } from "../web";
 import { isMobile } from "./util";
+import { adv, pageAdvanced } from "./advanced.svelte";
 import Overview from "./Overview.svelte";
 import Playback from "./Playback.svelte";
 import Audio from "./Audio.svelte";
@@ -21,18 +22,19 @@ import Integrations from "./Integrations.svelte";
 import Plugins from "./Plugins.svelte";
 import About from "./About.svelte";
 import System from "./System.svelte";
+import Notifications from "./Notifications.svelte";
 
 /** Every page, in the order of the nav (nav.rs groups: preferences, then the app). */
 export const PAGES: SettingsPage[] = [
   "overview", "playback", "audio", "appearance",
-  "account", "server", "system", "integrations", "plugins", "storage", "migrate", "transfer", "about",
+  "account", "server", "system", "notifications", "integrations", "plugins", "storage", "migrate", "transfer", "about",
 ];
 
 /** Nav groups: label key and pages (nav.rs `groups`). */
 export const GROUPS: { label: string; pages: SettingsPage[] }[] = [
   { label: "", pages: ["overview"] },
   { label: "sp.group.prefs", pages: ["playback", "audio", "appearance"] },
-  { label: "sp.group.app", pages: ["account", "server", "system", "integrations", "plugins", "storage", "migrate", "transfer", "about"] },
+  { label: "sp.group.app", pages: ["account", "server", "system", "notifications", "integrations", "plugins", "storage", "migrate", "transfer", "about"] },
 ];
 
 /** Extra words the nav search finds a page by (nav.rs `groups`). */
@@ -44,6 +46,7 @@ export const PAGE_WORDS: Record<SettingsPage, string> = {
   account: "account konto login sign in anmelden sync devices geräte handle passkey profile profil privacy privatsphäre picture bild banner public öffentlich",
   server: "url api key keys schlüssel",
   system: "system autostart startup start boot tray systray hintergrund background",
+  notifications: "notifications benachrichtigungen mitteilungen push update version release releases neu new artist künstler follow folgen",
   integrations: "discord rich presence integration integrations status activity listening mcp ai assistant claude",
   plugins: "plugin plugins erweiterungen extensions addons themes github community",
   storage: "cache download downloads speicher ordner folder lokal local",
@@ -66,6 +69,7 @@ const INFO: Record<SettingsPage, [string, string, string]> = {
   plugins: ["sp.plugins", "sp.plugins.sub", "puzzle"],
   about: ["sp.about", "sp.about.sub", "info"],
   system: ["sp.system", "sp.system.sub", "monitor"],
+  notifications: ["sp.notify", "sp.notify.sub", "bell"],
 };
 
 /** Title, subtitle and nav icon of a page (modal.rs page_info). */
@@ -100,22 +104,28 @@ export function pageComponent(p: SettingsPage): Component<{ sub?: number }> {
 const COMPONENTS: Record<SettingsPage, Component<{ sub?: number }>> = {
   overview: Overview, playback: Playback, audio: Audio, appearance: Appearance, server: Server, account: Account,
   storage: Storage, transfer: Transfer, migrate: Migrate, integrations: Integrations, plugins: Plugins, about: About, system: System,
+  notifications: Notifications,
 };
 
 /** A page is shown at all (phones have no autostart/tray or integrations; Web player shows a smaller set). */
 export function pageShown(p: SettingsPage): boolean {
+  if (!adv.on && pageAdvanced(p)) return false;
   // The web player has no equalizer, server, storage, plugins or system settings.
   if (onWeb()) {
     if (p === "integrations") return app.account != null;
     return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "about";
   }
   if (p === "system" || p === "integrations") return !isMobile();
+  // Only the Android app shows notifications of its own.
+  if (p === "notifications") return app.platform === "android";
   return true;
 }
 
 /** Every option the settings search finds on its own: page, sub-tab, label key
  *  (the row's label, so the row can light up), extra search words (modal.rs OPTIONS). */
 export const OPTIONS: [SettingsPage, number, string, string][] = [
+  ["notifications", 0, "sp.notify.updates", "update version neue new benachrichtigung notification"],
+  ["notifications", 0, "sp.notify.releases", "release releases neu new artist künstler folgen follow benachrichtigung notification"],
   ["playback", 0, "sp.audio.quality", "streaming quality qualität bitrate"],
   ["server", 2, "privacy.title", "privacy datenschutz transparency transparenz encryption verschlüsselung e2e end-to-end ende-zu-ende server sees sieht"],
   ["playback", 0, "sp.audio.dl_quality", "download quality qualität flac"],

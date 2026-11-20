@@ -17,6 +17,8 @@ pub const ERR_NOT_ON_YOUTUBE: &str = "Song not found on YouTube.";
 pub const ERR_YOUTUBE_FAILED: &str = "YouTube audio could not be loaded on this device.";
 
 pub mod account;
+pub mod album_names;
+pub mod app_outdated;
 pub mod config;
 pub mod connectivity;
 pub mod artist;

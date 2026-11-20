@@ -169,6 +169,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_codes_made_by_the_web_player() {
+        // From glyph-ui/src/lib/api/share-code.ts encodeShare (browser deflate-raw).
+        let code = "glyph:playlist:LcwxCsIwGEDhq5Q3_0vVxX_T3Uk3cWhskEJpICZaLdmcvYKn8AReyCNIMMubHt_EBa2FAWXTjdX39XwjBHQ_5bJ1w6n6PBAalJUPCGeUm4shGovQoTTmmI8-L71BaNF6Nl8IIxp8tEn-3O7qCrUuUGvt3friLEmH9AM";
+        let (name, back) = decode(code).unwrap();
+        assert_eq!(name, "Mix 🎵");
+        assert_eq!(back.len(), 2);
+        assert_eq!((back[0].title.as_str(), back[0].artist.as_str(), back[0].source), ("Song Ä", "Art", ProviderId::YouTube));
+        assert_eq!((back[0].album.as_deref(), back[0].duration_ms, back[0].explicit), (Some("Alb"), Some(1234), true));
+        assert_eq!((back[1].id.as_str(), back[1].source, back[1].album.as_deref()), ("9", ProviderId::Deezer, None));
+    }
+
+    #[test]
     fn short_links() {
         assert_eq!(link_id(" https://glyph.my/p/AbC123xy \n").as_deref(), Some("AbC123xy"));
         assert_eq!(link_id("glyph.my/p/AbC123xyAbC1/").as_deref(), Some("AbC123xyAbC1"));

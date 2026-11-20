@@ -21,7 +21,7 @@
   async function diag() {
     const text = await backend().call<string>("diagnostics");
     if (text && (await copyText(text))) {
-      app.toast(t("sp.support.copied"));
+      // The button turns into "Copied": no toast on top.
       copied = true;
       clearTimeout(timer);
       timer = setTimeout(() => { copied = false; }, 1800);

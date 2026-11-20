@@ -43,10 +43,13 @@ const CODES: Record<string, string> = {
   signed_out: "account.signed_out", device_limit: "account.err.device_limit", handle_taken: "account.err.taken",
   handle_invalid: "account.err.invalid", handle_reserved: "account.err.reserved", handle_cooldown: "account.err.cooldown",
   too_many_devices: "account.err.too_many", not_found: "account.err.code", rate_limited: "account.err.slow",
+  account_full: "account.storage.full",
 };
 /** account.rs err_text: the backend rejects with a short code. */
 export function errMessage(e: unknown): string {
-  return t(CODES[errText(e)] ?? "account.err.generic");
+  const m = errText(e);
+  if (m.includes("account_full")) return t("account.storage.full");
+  return t(CODES[m] ?? "account.err.generic");
 }
 
 export async function loadStatus() {
@@ -186,7 +189,7 @@ export function newRecoveryCode() {
 }
 
 export async function copyRecovery(copy: (s: string) => Promise<boolean>) {
-  if (ac.recovery && (await copy(ac.recovery))) app.toast(t("account.recovery.copied"));
+  if (ac.recovery && (await copy(ac.recovery))) app.copied(t("account.recovery.copied"));
 }
 
 export function downloadRecovery() {
@@ -239,6 +242,7 @@ export async function pickAvatar() {
   try {
     await backend().call("profile_pick_image", { banner: false });
     await app.ensureOwnProfile(true);
+    loadStatus();
   } catch (e) {
     app.toastInfo(errMessage(e));
   }

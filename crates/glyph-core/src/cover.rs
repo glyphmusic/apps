@@ -216,6 +216,14 @@ impl CoverCache {
         *last = Some(std::time::Instant::now());
     }
 
+    /// A fetched cover; an album found on the way is remembered for the song.
+    fn found(&self, track: &Track, path: PathBuf, album: Option<String>, cover_url: Option<String>) -> CoverResult {
+        if album.as_deref().is_some_and(|a| !a.trim().is_empty()) {
+            crate::album_names::remember(track, album.as_deref());
+        }
+        CoverResult { path: self.finish(path), album, cover_url }
+    }
+
     /// Cached cover for the song, fetching it through the fallback chain if needed.
     pub async fn get(&self, track: &Track) -> Result<Option<PathBuf>> {
         Ok(self.get_with_meta(track).await?.map(|r| r.path))
@@ -234,7 +242,7 @@ impl CoverCache {
                 let _permit = self.fetch_sem.acquire().await?;
                 let (ok, _, album, cover_url) = self.fetch_non_youtube_meta(track, &path).await;
                 if ok {
-                    return Ok(Some(CoverResult { path: self.finish(path), album, cover_url }));
+                    return Ok(Some(self.found(track, path, album, cover_url)));
                 }
                 touch(&path);
                 return Ok(Some(CoverResult { path, album: None, cover_url: None }));
@@ -254,7 +262,7 @@ impl CoverCache {
         }
         let (ok, mut transient, album, cover_url) = self.fetch_non_youtube_meta(track, &path).await;
         if ok {
-            return Ok(Some(CoverResult { path: self.finish(path), album, cover_url }));
+            return Ok(Some(self.found(track, path, album, cover_url)));
         }
         // Last resort: YouTube thumbnail only when no square/non-YouTube cover exists.
         if let Some(u) = track.cover_url.as_deref().filter(|u| is_youtube_cover(u)) {
@@ -288,6 +296,12 @@ impl CoverCache {
         }
         if track.title.trim().is_empty() || track.artist.trim().is_empty() {
             return Ok(None);
+        }
+        // Found (or not found) before, also in an earlier run: no network.
+        match crate::album_names::lookup(track) {
+            crate::album_names::Known::Album(a) => return Ok(Some((None, Some(a)))),
+            crate::album_names::Known::Missing => return Ok(None),
+            crate::album_names::Known::Unknown => {}
         }
         let key = paths::hash_hex(&track_key(track));
         if self.meta_checked.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
@@ -331,6 +345,7 @@ impl CoverCache {
         }
         if !transient {
             self.meta_checked.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+            crate::album_names::remember(track, found_album.as_deref());
         }
         if found_album.is_some() || found_cover.is_some() {
             Ok(Some((found_cover, found_album)))

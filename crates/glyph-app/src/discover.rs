@@ -743,10 +743,13 @@ async fn artist_tracks(core: &Core, name: &str) -> Vec<Track> {
     out
 }
 
-pub async fn copy_artist_link(core: C<'_>, artist: String) -> Res<String> {
+/// `copy: Some(false)` returns the link without copying it or saying so
+/// (the phone share menu copies or sends it itself).
+pub async fn copy_artist_link(core: C<'_>, artist: String, copy: Option<bool>) -> Res<String> {
+    let quiet = copy == Some(false);
     let tracks = artist_tracks(&core, &artist).await;
     if glyph_links(&core) {
-        return Ok(copy_glyph_link(&core, &artist, &tracks, "artist", false).await);
+        return Ok(copy_glyph_link(&core, &artist, &tracks, "artist", quiet).await);
     }
     let lg = core.st().config.language.clone();
     let wiki = match core.backend() {
@@ -755,8 +758,10 @@ pub async fn copy_artist_link(core: C<'_>, artist: String) -> Res<String> {
     };
     match wiki.or_else(|| tracks.iter().find_map(|t| t.permalink.clone())) {
         Some(u) => {
-            copy(&core, &u);
-            toast(&core, "toast.link_copied_plain", None, Some(&artist), "ok");
+            if !quiet {
+                self::copy(&core, &u);
+                toast(&core, "toast.link_copied_plain", None, Some(&artist), "ok");
+            }
             Ok(u)
         }
         None => {

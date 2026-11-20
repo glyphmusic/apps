@@ -323,6 +323,20 @@ impl Host for AndroidHost {
         }
     }
 
+    fn can_notify(&self) -> bool {
+        true
+    }
+
+    /// Glyph's own notifications (`notify.rs`) through `MainActivity.gpuiNotify`.
+    fn notify(&self, notice: &glyph_app::notify::Notice) {
+        let json = serde_json::to_string(notice).unwrap_or_default();
+        with_activity("gpuiNotify", |env, activity| {
+            let s = env.new_string(&json)?;
+            env.call_method(activity, jni_str!("gpuiNotify"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&s)])?;
+            Ok(())
+        });
+    }
+
     fn write_clipboard(&self, text: &str) -> Result<(), String> {
         let called = with_activity("gpuiSetClipboard", |env, activity| {
             let s = env.new_string(text)?;
@@ -545,6 +559,47 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
 
         Arc::new(AndroidAppState { rt, core })
     });
+}
+
+/// `CheckJob` (Android's job scheduler, about twice a day): what to tell the
+/// user (a new Glyph version, new releases of followed artists) as a JSON
+/// array of notices. Uses the running app when there is one, else starts a
+/// backend just for this check.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_CheckJob_nativeCheck<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    files_dir: JString<'local>,
+) -> jni::sys::jstring {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("glyph"),
+    );
+    let dir = env
+        .with_env(|env| -> jni::errors::Result<String> { files_dir.try_to_string(env) })
+        .resolve::<LogErrorAndDefault>();
+    let notices = if let Some(state) = STATE.get().cloned() {
+        let core = state.core.clone();
+        state.rt.block_on(glyph_app::notify::check_core(&core))
+    } else if dir.is_empty() {
+        Vec::new()
+    } else {
+        configure_dirs(&dir);
+        match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt.block_on(glyph_app::notify::check_headless()),
+            Err(e) => {
+                log::warn!("check job: {e}");
+                Vec::new()
+            }
+        }
+    };
+    log::info!("check job: {} notice(s)", notices.len());
+    let json = serde_json::to_string(&notices).unwrap_or_else(|_| "[]".into());
+    let raw = env
+        .with_env(|env| -> jni::errors::Result<usize> { Ok(env.new_string(&json)?.into_raw() as usize) })
+        .resolve::<LogErrorAndDefault>();
+    raw as jni::sys::jstring
 }
 
 /// Clears the cached Activity reference when `activity` is destroyed, without

@@ -38,7 +38,8 @@
 
   const status = $derived.by(() => {
     if (!st) return "";
-    let s = st.syncing ? t("account.sync.running") : st.sync_error ? st.sync_error : st.last_sync ? tf("account.sync.done", { when: whenMs(st.last_sync, t, tf) }) : t("account.sync.never");
+    const syncErr = st.sync_error?.includes("account_full") ? t("account.storage.full") : st.sync_error;
+    let s = st.syncing ? t("account.sync.running") : syncErr ? syncErr : st.last_sync ? tf("account.sync.done", { when: whenMs(st.last_sync, t, tf) }) : t("account.sync.never");
     if (st.sync_pending > 0) s += ` · ${tf("account.sync.pending", { n: st.sync_pending })}`;
     return s;
   });
@@ -249,6 +250,17 @@
       {:else}
         <Row label={t("account.library")} info={t("account.library.starting.desc")}><span class="dim13">{t("account.library.starting")}</span></Row>
       {/if}
+      {#if st.storage && st.storage.limit_bytes > 0}
+        {@const used = st.storage.used_bytes / 1e6}
+        {@const max = st.storage.limit_bytes / 1e6}
+        {@const share = Math.min(1, st.storage.used_bytes / st.storage.limit_bytes)}
+        <Row label={t("account.storage")} info={t("account.storage.desc")} status={share >= 0.9 ? t("account.storage.almost_full") : null} statusColor="var(--danger)">
+          <span class="store">
+            <span class="bar"><span class="fill" class:full={share >= 0.9} style:width="{share * 100}%"></span></span>
+            <span class="dim13">{tf("account.storage.used", { used: used < 10 ? used.toFixed(1) : Math.round(used), max: Math.round(max) })}</span>
+          </span>
+        </Row>
+      {/if}
       <Row label={t("account.glyph_links")} info={t("account.glyph_links.desc")}>
         <Tog on={app.config.sharing.glyph_links} onchange={(v) => app.setConfig((c) => { c.sharing.glyph_links = v; })} label={t("account.glyph_links")} />
       </Row>
@@ -345,4 +357,8 @@
   .sync-btn:disabled { opacity: .6; pointer-events: none; }
   .sync-btn .spin { display: inline-flex; animation: sync-spin 1s linear infinite; }
   @keyframes sync-spin { to { transform: rotate(360deg); } }
+  .store { display: flex; align-items: center; gap: 10px; }
+  .bar { width: 120px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .1); overflow: hidden; }
+  .fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  .fill.full { background: var(--danger); }
 </style>

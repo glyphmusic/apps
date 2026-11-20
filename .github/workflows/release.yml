@@ -81,10 +81,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install innosetup --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DBinaryPath=$PWD\target\${{ matrix.target }}\release\glyph.exe" packaging/windows/glyph.iss
+          & $iscc "/DAppVersion=$version" "/DBinaryPath=$PWD\target\${{ matrix.target }}\release\glyph.exe" packaging/windows/glyph.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $asset = Get-Item "dist/glyph-$version-windows-x64-setup.exe"
           $hash = (Get-FileHash $asset.FullName -Algorithm SHA256).Hash.ToLower()

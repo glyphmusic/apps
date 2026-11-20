@@ -8,7 +8,7 @@
 //   /playlist/<id>?add=…  playlist        /album/<artist>/<title> album
 //   /artist/<name>        artist          /artist/<name>/releases|similar
 //   /profile/<handle>     profile         /stats?range=…&recap=… stats
-//   /local?tab=…&q=…      local files
+//   /local?tab=…&q=…      local files     /p/<id>                a shared glyph.my link
 //
 // The browser's back and forward buttons move through the pages; the app's
 // own back button does the same. Each history entry keeps the page and the
@@ -80,6 +80,8 @@ function pathOf(r: Route, query: string): string | null {
     case "artist": return r.artist ? `/artist/${enc(r.artist)}` : null;
     case "profile": return r.profile ? `/profile/${enc(r.profile.replace(/^@/, ""))}` : null;
     case "list": {
+      // A shared link opened in the web player keeps its own address.
+      if (r.list?.kind === "album" && r.list === app.openList && app.sharedPreview?.id) return `/p/${enc(app.sharedPreview.id)}`;
       const base = r.list ? listPath(r.list) : null;
       if (base && r.list?.kind === "playlist" && app.addSongs?.id === r.list.id) {
         return `${base}?add=${ADD_TABS[app.addSongs.tab] ?? "suggested"}`;
@@ -163,6 +165,7 @@ function open(path: string, search: string) {
   else if (head === "recent") app.openListView({ kind: "recent" });
   else if (head === "downloads") app.openListView({ kind: "downloads" });
   else if (head === "profile" && a) app.openProfilePage(a);
+  else if (head === "p" && a && /^[A-Za-z0-9]{8}([A-Za-z0-9]{4})?$/.test(a)) void app.openShared(a);
   applyParams(app.view, app.openList, search);
 }
 

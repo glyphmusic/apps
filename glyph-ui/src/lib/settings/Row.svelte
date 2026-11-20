@@ -5,11 +5,12 @@
   import RowBase from "./RowBase.svelte";
   import PluginSection from "./PluginSection.svelte";
   import { hiddenLabels, pl } from "./plugins-state.svelte";
+  import { hiddenAdvancedLabels } from "./advanced.svelte";
   import { t } from "../i18n.svelte";
   import type { PluginHost } from "./host";
   let { label, info, status, statusColor, leading, children }: { label: string; info?: string | null; status?: string | null; statusColor?: string; leading?: Snippet; children?: Snippet } = $props();
   const host = getContext<PluginHost | undefined>("plugin-host");
-  const hidden = $derived(hiddenLabels().has(label));
+  const hidden = $derived(hiddenLabels().has(label) || hiddenAdvancedLabels().has(label));
   const after = $derived(host ? pl.ui.sections.filter((s) => s.page === host.page && s.after && t(s.after) === label) : []);
   onMount(() => { host?.labels.add(label); return () => host?.labels.delete(label); });
 </script>

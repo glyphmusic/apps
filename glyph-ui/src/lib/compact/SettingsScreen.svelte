@@ -3,7 +3,6 @@
   // equalizer, hide explicit; then one row per page with its icon and a
   // sub line). A page opens full screen with its sub-tab chips on top.
   // The page bodies come from the desktop settings (lib/settings/pages.ts).
-  import type { Component } from "svelte";
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
@@ -13,35 +12,34 @@
   import { fadeEdges } from "../ui.svelte";
   import { onWeb } from "../web";
   import { closeDetail, pl } from "../settings/plugins-state.svelte";
-
-  interface PagesModule {
-    PAGES: SettingsPage[];
-    pageInfo(p: SettingsPage): { name: string; sub: string; icon: string };
-    pageShown(p: SettingsPage): boolean;
-    subtabs(p: SettingsPage): string[];
-    pageComponent(p: SettingsPage): Component<{ sub?: number }>;
-  }
-  const mods = import.meta.glob<PagesModule>("../settings/pages.ts");
-  let pages = $state<PagesModule | null>(null);
-  $effect(() => { const load = mods["../settings/pages.ts"]; load?.().then((m) => (pages = m)); });
+  import Tog from "../settings/Tog.svelte";
+  import { adv, setAdvanced, subHidden } from "../settings/advanced.svelte";
+  import { pageComponent, pageInfo, pageShown, subtabs } from "../settings/pages";
 
   const order = $derived<SettingsPage[]>((onWeb() ? [
     "overview", "account",
     "playback", "appearance", "integrations", "about",
   ] : [
     "overview", "account",
-    "playback", "audio", "appearance", "storage", "migrate", "transfer", "server", "plugins", "about",
-  ]).filter((p) => pages?.pageShown(p as SettingsPage) ?? true) as SettingsPage[]);
+    "playback", "audio", "appearance", "storage", "migrate", "transfer", "server", "plugins", "notifications", "about",
+  ]).filter((p) => pageShown(p as SettingsPage)) as SettingsPage[]);
   const page = $derived(app.settingsPage);
-  const Body = $derived(pages?.pageComponent(page));
+  const Body = $derived(pageComponent(page));
   let pageEl: HTMLElement | undefined = $state();
-  const tabs = $derived(pages?.subtabs(page) ?? []);
-  const sub = $derived(Math.min(phone.settingsSub, Math.max(0, tabs.length - 1)));
+  const tabs = $derived(subtabs(page));
+  // Sub-tabs keep their index (the page body maps it), Advanced ones just hide.
+  const shownTabs = $derived(tabs.map((k, i) => ({ k, i })).filter((x) => !subHidden(x.k)));
+  const sub = $derived.by(() => {
+    const s = Math.min(phone.settingsSub, Math.max(0, tabs.length - 1));
+    return tabs[s] && subHidden(tabs[s]) ? 0 : s;
+  });
   function back() {
     if (phone.settingsInPage && page === "plugins" && pl.detail && phone.settingsSub < 2) { closeDetail(); return; }
     if (phone.settingsInPage) phone.settingsInPage = false; else app.settingsOpen = false;
   }
   function open(p: SettingsPage) { if (p !== app.settingsPage) phone.settingsSub = 0; app.settingsPage = p; phone.settingsInPage = true; }
+  // Opened for one page (a tapped notification): straight into it.
+  $effect(() => { const d = app.settingsDirect; if (d) { app.settingsDirect = null; open(d); } });
   const quick = $derived([
     ...(onWeb() ? [] : [{ icon: "chart-column", label: t("sp.storage.saver"), on: app.config.storage.data_saver, run: () => app.setConfig((c) => (c.storage.data_saver = !c.storage.data_saver)) },
     { icon: "sliders-horizontal", label: t("sp.eq"), on: app.config.audio.eq_enabled, run: () => app.setConfig((c) => (c.audio.eq_enabled = !c.audio.eq_enabled)) }]),
@@ -52,20 +50,20 @@
 <div class="screen" transition:fly|global={{ x: 24, duration: 200, easing: cubicOut }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="head">
     <button class="bk" onclick={back} aria-label={t("tip.chevron-left")}><Icon name="arrow-left" size={22} color="#fff" /></button>
-    <h1>{phone.settingsInPage && pages ? pages.pageInfo(page).name : t("nav.settings")}</h1>
+    <h1>{phone.settingsInPage ? pageInfo(page).name : t("nav.settings")}</h1>
     <span class="sp"></span>
   </div>
   {#if phone.settingsInPage}
-    {#if tabs.length}
+    {#if shownTabs.length}
       <!-- Sub-pages as tabs under the title (they stay put while the page scrolls):
            equal widths when they fit, else a row that scrolls sideways. -->
-      <div class="tabs" class:fit={tabs.length <= 3} role="tablist">
-        {#each tabs as k, i}
+      <div class="tabs" class:fit={shownTabs.length <= 3} role="tablist">
+        {#each shownTabs as { k, i }}
           <button class="tb" class:on={i === sub} role="tab" aria-selected={i === sub} onclick={() => { phone.settingsSub = i; pageEl?.scrollTo(0, 0); }}>{t(k)}</button>
         {/each}
       </div>
     {/if}
-    <div class="scroll body page" class:tabbed={tabs.length > 0} bind:this={pageEl} use:fadeEdges={{ top: 18, bottom: 18 }}>
+    <div class="scroll body page" class:tabbed={shownTabs.length > 0} bind:this={pageEl} use:fadeEdges={{ top: 18, bottom: 18 }}>
       {#if Body}<Body {sub} />{/if}
     </div>
   {:else}
@@ -80,12 +78,16 @@
         {/each}
       </div>
       {#each order as p}
-        {@const info = pages?.pageInfo(p)}
+        {@const info = pageInfo(p)}
         <button class="mr" onclick={() => open(p)}>
-          <Icon name={info?.icon ?? "settings"} size={22} color="rgba(255,255,255,.85)" />
-          <span class="mt"><span class="trunc">{info?.name ?? p}</span>{#if info?.sub}<span class="ms">{info.sub}</span>{/if}</span>
+          <Icon name={info.icon} size={22} color="rgba(255,255,255,.85)" />
+          <span class="mt"><span class="trunc">{info.name}</span>{#if info.sub}<span class="ms">{info.sub}</span>{/if}</span>
         </button>
       {/each}
+      <div class="adv">
+        <span class="mt"><span class="trunc">{t("settings.advanced")}</span><span class="ms">{t("settings.advanced.sub")}</span></span>
+        <Tog on={adv.on} label={t("settings.advanced")} onchange={setAdvanced} />
+      </div>
     </div>
   {/if}
 </div>
@@ -115,5 +117,6 @@
   .mr { width: 100%; display: flex; align-items: center; gap: 16px; min-height: 52px; padding: 8px 16px; text-align: left; }
   .mr:active { background: rgba(255, 255, 255, .06); }
   .mt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 15px; color: #fff; }
+  .adv { display: flex; align-items: center; gap: 16px; min-height: 52px; margin-top: 8px; padding: 8px 16px; }
   .ms { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 </style>

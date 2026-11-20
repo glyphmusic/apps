@@ -243,6 +243,10 @@ impl ServerClient {
             .and_then(|s| s.parse::<u64>().ok());
         let body = resp.text().await.unwrap_or_default();
         let api: Option<ApiError> = serde_json::from_str(&body).ok();
+        if status.as_u16() == 426 && api.as_ref().is_some_and(|a| a.code == glyph_protocol::APP_OUTDATED) {
+            // The server takes this app no more: the UI asks to update.
+            crate::app_outdated::note_rejected();
+        }
         // Cloudflare's own page (not JSON) when the Worker's daily requests are used up.
         let edge = api.is_none() && crate::outage::is_daily_limit_page(status.as_u16(), &body);
         Err(ServerError {
@@ -940,6 +944,11 @@ impl ServerClient {
     pub async fn approve_login(&self, token: &str, user_code: &str) -> Result<ApproveResponse> {
         let body = ApproveRequest { user_code: user_code.into() };
         Self::json_of(self.authed(reqwest::Method::POST, "/v1/account/login/approve", token).json(&body)).await
+    }
+
+    /// Space the account uses on the server: `{ used_bytes, limit_bytes }`.
+    pub async fn account_storage(&self, token: &str) -> Result<serde_json::Value> {
+        Self::json_of(self.authed(reqwest::Method::GET, "/v1/account/storage", token)).await
     }
 
     pub async fn devices(&self, token: &str) -> Result<DevicesResponse> {

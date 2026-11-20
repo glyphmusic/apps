@@ -389,8 +389,8 @@ pub fn copy_text(text: String) -> Res {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn copy_artist_link(core: C<'_>, artist: String) -> Res<String> {
-    discover::copy_artist_link(&core, artist).await
+pub async fn copy_artist_link(core: C<'_>, artist: String, copy: Option<bool>) -> Res<String> {
+    discover::copy_artist_link(&core, artist, copy).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -461,8 +461,8 @@ pub fn playlist_restore_version(core: C, revision: String) -> bool {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn playlist_pick_cover(core: C<'_>, id: String) -> Res {
-    storage::playlist_pick_cover(&core, id).await
+pub fn playlist_set_cover(core: C, id: String, data: String) -> Res {
+    storage::playlist_set_cover(&core, id, data)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -615,6 +615,11 @@ pub async fn ytdlp_install(core: C<'_>) -> Res<Value> {
 #[tauri::command(rename_all = "snake_case")]
 pub fn prefetch_hover(core: C, track: Track) {
     system::prefetch_hover(&core, track)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn app_outdated() -> Value {
+    system::app_outdated()
 }
 
 #[tauri::command(rename_all = "snake_case")]

@@ -89,7 +89,7 @@
       if (!p) continue;
       const have = new Set(p.tracks.map(trackKey));
       const add = tracks.filter((x) => !have.has(trackKey(x)));
-      if (add.length) { wait.push(app.addToPlaylist(id, add)); n++; }
+      if (add.length) { wait.push(app.addToPlaylist(id, add, true)); n++; }
     }
     if (data.sheet) await Promise.allSettled(wait);
     return n;
@@ -107,8 +107,11 @@
       closeShareSheet(msg);
       return;
     }
-    // addToPlaylist says where it went; Liked Songs alone says it here.
+    // One toast for all of it (a saved list says so itself).
+    if (saved && n === 1) return;
     if (liked && n === 1) app.toast(tracks.length === 1 ? t("import.song.added") : tf("share_in.liked_n", { n: tracks.length }));
+    else if (n === 1 && picked.length === 1) app.toast(tf("toast.added_to_playlist", { name: app.playlist(picked[0])?.name ?? "" }));
+    else if (n > 1) app.toast(t("share_in.saved"));
   }
   async function newPlaylist() {
     if (!ready) return;

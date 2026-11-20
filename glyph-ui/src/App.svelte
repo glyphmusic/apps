@@ -21,6 +21,7 @@
   import RightPanel from "./lib/shell/RightPanel.svelte";
   import Page from "./lib/shell/Page.svelte";
   import Overlays from "./lib/shell/Overlays.svelte";
+  import Outdated from "./lib/overlays/Outdated.svelte";
   import SettingsModal from "./lib/settings/SettingsModal.svelte";
   import Compact from "./lib/compact/Compact.svelte";
   import { loadPlugins, pl } from "./lib/settings/plugins-state.svelte";
@@ -363,6 +364,7 @@
   <Overlays />
   <Toasts />
   <TooltipLayer />
+  {#if app.outdated}<Outdated />{/if}
 {/if}
 
 <style>

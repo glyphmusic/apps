@@ -1,6 +1,7 @@
 // Account sign-in, E2E keyring, library/stats sync, and public profiles for the
 // browser player (/web). Mirrors glyph-core::{account, sync, e2e, e2e_sync} and
 // glyph-tauri::account commands.
+import { encodePicture, pictureCanvas } from "../picture";
 import type {
   Account, BackendEvents, Config, Library, ListKey, Playlist, Profile, RecentItem, SearchItem, Track,
 } from "./types";
@@ -221,6 +222,8 @@ export interface WebAccountHost {
 export class WebAccountManager {
   private session: StoredAccountSession | null;
   private devices: DeviceInfo[] = [];
+  /** Space the account uses on the server (null: unknown or no limit there). */
+  private storage: { used_bytes: number; limit_bytes: number } | null = null;
   private syncing = false;
   private syncError: string | null = null;
   private lastSyncedAt: number | null = null;
@@ -523,6 +526,7 @@ export class WebAccountManager {
         this.session.account.device_limit = devs.limit || this.session.account.device_limit;
         save(`devices.${this.session.account.id}`, this.devices);
       }
+      this.storage = await this.runAuthed((t) => server.accountStorage(t)).catch(() => null);
       if (this.session) await this.syncNow();
     } catch { /* offline or signed out cleanly */ }
   }
@@ -804,6 +808,7 @@ export class WebAccountManager {
       this.saveJournal(accountId, journal);
       save(`account_lib.${accountId}`, this.host.getLibrary());
       this.lastSyncedAt = nowSec();
+      this.storage = await this.runAuthed((t) => server.accountStorage(t)).catch(() => this.storage);
     } catch (e) {
       this.syncError = String((e as Error)?.message ?? e);
     } finally {
@@ -1080,7 +1085,7 @@ export class WebAccountManager {
 
   handlers(): Record<string, (a: Record<string, any>) => unknown> {
     return {
-      account_status: () => {
+      account_status: async () => {
         if (!this.session) {
           return {
             signed_in: false,
@@ -1088,6 +1093,7 @@ export class WebAccountManager {
             syncing: false,
           };
         }
+        this.storage = await this.runAuthed((t) => server.accountStorage(t)).catch(() => this.storage);
         return {
           signed_in: true,
           available: true,
@@ -1102,6 +1108,7 @@ export class WebAccountManager {
           last_synced_at: this.lastSyncedAt,
           sync_error: this.syncError,
           devices: this.devices,
+          storage: this.storage,
         };
       },
 
@@ -1456,6 +1463,7 @@ export class WebAccountManager {
       profile_pick_image: async (a) => {
         const token = await this.validToken();
         const banner = Boolean(a.banner);
+        let mime = "image/webp";
         const bytes = await new Promise<Uint8Array | null>((resolve, reject) => {
           const input = document.createElement("input");
           input.type = "file";
@@ -1473,12 +1481,10 @@ export class WebAccountManager {
                 const [cw, ch] = w >= h * aspect ? [h * aspect, h] : [w, w / aspect];
                 const sx = Math.floor((w - cw) / 2);
                 const sy = Math.floor((h - ch) / 2);
-                const cv = document.createElement("canvas");
-                cv.width = ow; cv.height = oh;
-                const g = cv.getContext("2d")!;
-                g.imageSmoothingQuality = "high";
+                const [cv, g] = pictureCanvas(ow, oh);
                 g.drawImage(im, sx, sy, cw, ch, 0, 0, ow, oh);
-                const dataUrl = cv.toDataURL("image/jpeg", 0.86);
+                const dataUrl = encodePicture(cv, 0.86);
+                mime = dataUrl.slice(5, dataUrl.indexOf(";"));
                 const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
                 const bin = atob(b64);
                 const out = new Uint8Array(bin.length);
@@ -1497,7 +1503,7 @@ export class WebAccountManager {
           input.click();
         });
         if (!bytes) return;
-        await server.profilePutImage(token, banner ? "banner" : "avatar", "image/jpeg", bytes);
+        await server.profilePutImage(token, banner ? "banner" : "avatar", mime, bytes);
       },
 
       profile_set_image: async (a) => {

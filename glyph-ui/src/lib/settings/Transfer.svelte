@@ -23,7 +23,7 @@
 
   async function copy() {
     const c = await backend().call<string>("settings_code");
-    if (c && (await copyText(c))) app.toast(t("sp.transfer.copied"));
+    if (c && (await copyText(c))) app.copied(t("sp.transfer.copied"));
   }
   async function save() {
     const f = await backend().call<{ name: string; text: string }>("settings_file");

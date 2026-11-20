@@ -59,6 +59,9 @@ pub struct Config {
     pub ui: UiConfig,
     /// Music folders on this computer (never synced or shared).
     pub local: LocalConfig,
+    /// Phone notifications (Android): a new Glyph version, new releases of
+    /// artists you follow.
+    pub notifications: NotificationsConfig,
     /// Keys as they stand in the file (before env overrides), so `save()` never
     /// writes env-provided secrets to disk.
     #[serde(skip)]
@@ -394,6 +397,23 @@ pub struct VisualsConfig {
 
 fn default_bg_dim() -> f32 {
     0.35
+}
+
+/// Notifications on the phone (Settings > Notifications, Android). Each
+/// kind also has its own channel in Android's settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    /// "Glyph x.y is ready".
+    pub app_updates: bool,
+    /// "New from <artist>" for artists you follow.
+    pub new_releases: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self { app_updates: true, new_releases: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

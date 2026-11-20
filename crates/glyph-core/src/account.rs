@@ -461,6 +461,8 @@ pub struct SyncRound {
     /// Waiting for something another device sends soon (a pairing's key, a
     /// keyring written at the same time): sync again in a few seconds.
     pub retry_soon: bool,
+    /// A cover picture did not fit in the account's storage limit.
+    pub account_full: bool,
 }
 
 /// Bumped when this version must read the whole account once.
@@ -1131,6 +1133,18 @@ impl Backend {
         .await?
     }
 
+    pub async fn account_storage(&self) -> Result<serde_json::Value> {
+        let c = self.account_client()?;
+        self.spawn(async move {
+            with_auth(&c, |t| {
+                let c = c.clone();
+                async move { c.account_storage(&t).await }
+            })
+            .await
+        })
+        .await?
+    }
+
     pub async fn account_remove_device(&self, id: &str) -> Result<()> {
         let (c, id) = (self.account_client()?, id.to_string());
         self.spawn(async move {
@@ -1322,6 +1336,10 @@ impl Backend {
                         st.uploaded_covers.insert(sha.clone());
                     }
                     Err(e) if is_signed_out(&e) => return Err(e),
+                    Err(e) if crate::server_client::server_error(&e).is_some_and(|(_, c)| c == "account_full") => {
+                        round.account_full = true;
+                        tracing::info!("cover upload skipped (account full): {e:#}");
+                    }
                     Err(e) => tracing::info!("cover upload skipped: {e:#}"),
                 }
             }

@@ -217,7 +217,7 @@ public class MainActivity extends AppCompatActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         super.onCreate(savedInstanceState);
         if (isSheet()) {
-            overridePendingTransition(android.R.anim.fade_in, 0);
+            applyTransition(true, android.R.anim.fade_in, 0);
         }
 
         nativeInit(this, getFilesDir().getAbsolutePath(), isSheet());
@@ -263,6 +263,8 @@ public class MainActivity extends AppCompatActivity {
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
+        // New versions and releases also while Glyph is closed (Settings > Notifications).
+        Notifications.schedule(getApplicationContext());
     }
 
     private void setupWebView() {
@@ -278,7 +280,6 @@ public class MainActivity extends AppCompatActivity {
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
@@ -965,7 +966,16 @@ public class MainActivity extends AppCompatActivity {
             android.widget.Toast.makeText(getApplicationContext(), message, android.widget.Toast.LENGTH_SHORT).show();
         }
         finish();
-        overridePendingTransition(0, android.R.anim.fade_out);
+        applyTransition(false, 0, android.R.anim.fade_out);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyTransition(boolean open, int enterAnim, int exitAnim) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            overrideActivityTransition(open ? OVERRIDE_TRANSITION_OPEN : OVERRIDE_TRANSITION_CLOSE, enterAnim, exitAnim);
+        } else {
+            overridePendingTransition(enterAnim, exitAnim);
+        }
     }
 
     /** Hands what was shared to the app itself and ends the sheet. */
@@ -1495,6 +1505,11 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception ignored) {
             }
         });
+    }
+
+    /** Glyph's own notifications from Rust (`notify.rs`): one notice as JSON. */
+    public void gpuiNotify(String json) {
+        Notifications.post(getApplicationContext(), json);
     }
 
     public void gpuiSetClipboard(String text) {

@@ -8,12 +8,16 @@
   // a check. The row scrolls sideways when they do not fit. Text turns dark on light
   // colours. Then a row of round targets: copy link, WhatsApp, Telegram,
   // SMS, e-mail and More (system share sheet). The link itself stays hidden;
-  // only a failure shows a line with "Try again".
+  // only a failure shows a line with "Try again". Artists show their round
+  // photo, a ready link (Jam invite) its icon, title and code.
+  // Copying says so on its own button only ("Copied" with a check; Android
+  // shows its own copy note too): no toast on top.
   import { fade } from "svelte/transition";
   import Cover from "../components/Cover.svelte";
   import ListCover from "../components/ListCover.svelte";
   import SongTitle from "../components/SongTitle.svelte";
   import Icon from "../components/Icon.svelte";
+  import ArtistAvatar from "../components/ArtistAvatar.svelte";
   import { app } from "../state.svelte";
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
@@ -30,8 +34,10 @@
 
   const close = () => (app.shareSheet = null);
   const track = what.track ?? (what.songs?.kind === "song" ? what.songs.tracks[0] : undefined);
+  const artist = what.artist;
+  const ready = what.link;
   const tracks: Track[] = what.track ? [what.track] : what.list ? app.listTracks(what.list) : what.songs?.tracks ?? [];
-  const title = what.track ? what.track.title : what.list ? app.listTitle(what.list) : what.songs?.title ?? "Glyph";
+  const title = what.track ? what.track.title : what.list ? app.listTitle(what.list) : artist ?? ready?.title ?? what.songs?.title ?? "Glyph";
   const kindLabel = what.list?.kind === "album" || what.songs?.kind === "album" ? t("list.kind.album") : t("share.kind.playlist");
   /** "Title · Artist" for a song, the list name otherwise (mail subject,
    *  share sheet title). Messages carry only the link, so chats show it as
@@ -61,8 +67,9 @@
     return !!m && lum([parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255]) > 0.55;
   });
   const first = track ?? tracks[0];
-  if (first) {
-    backend().cover(first).then((u) => (u ? paletteFromImage(u) : null)).then((p) => {
+  const photo = artist ? app.artistPhoto(artist) : null;
+  if (first || photo) {
+    (photo ? Promise.resolve(photo) : backend().cover(first!)).then((u) => (u ? paletteFromImage(u) : null)).then((p) => {
       if (!p) return;
       // Palette is sorted dark to bright: main colour first, then the brightest.
       coverCols = [p[1], p[2]];
@@ -73,9 +80,13 @@
   function make(): Promise<string | null> {
     failed = false;
     link = null;
-    const req = what.songs
-      ? backend().call<string>("share_songs", { ...what.songs, kind: what.songs.kind ?? "playlist", copy: false })
-      : backend().call<string>("share", { track: what.track, list: what.list, copy: false });
+    const req = ready
+      ? Promise.resolve(ready.url)
+      : artist
+        ? backend().call<string>("copy_artist_link", { artist, copy: false })
+        : what.songs
+          ? backend().call<string>("share_songs", { ...what.songs, kind: what.songs.kind ?? "playlist", copy: false })
+          : backend().call<string>("share", { track: what.track, list: what.list, copy: false });
     return req.then(
       (s) => { const v = s?.trim() || null; link = v; failed = !v; return v; },
       () => { failed = true; return null; },
@@ -92,8 +103,7 @@
   const copy = () => go(async (l) => {
     try { await backend().call("copy_text", { text: l }); } catch { return; }
     copied = true;
-    app.toast(t("toast.link_copied_plain"));
-    setTimeout(close, 650);
+    setTimeout(close, 900);
   });
   const open = (url: (l: string) => string) => go((l) => { backend().call("open_url", { url: url(l) }); close(); });
   const more = () => go(async (l) => {
@@ -118,7 +128,21 @@
     <span class="hdl"></span>
 
     <div class="card" class:light style:background={bg}>
-      {#if track}
+      {#if artist}
+        <div class="art"><ArtistAvatar name={artist} size={art} iconSize={Math.round(art * 0.4)} /></div>
+        <div class="meta">
+          <b class="trunc">{artist}</b>
+          <span class="trunc">{t("share.kind.artist")}</span>
+        </div>
+      {:else if ready}
+        <div class="lhead">
+          <span class="ricon"><Icon name={ready.icon ?? "link-2"} size={32} /></span>
+          <div class="meta">
+            <b class="trunc">{ready.title}</b>
+            {#if ready.sub}<span class="trunc mono">{ready.sub}</span>{/if}
+          </div>
+        </div>
+      {:else if track}
         <div class="art"><Cover {track} size={art} radius={8} /></div>
         <div class="meta">
           <b class="trunc"><SongTitle rating={rating(track)}>{track.title}</SongTitle></b>
@@ -180,6 +204,7 @@
   .meta span { font-size: 13.5px; color: rgba(255, 255, 255, .7); }
   .lhead { display: flex; align-items: center; gap: 12px; }
   .lhead .meta { flex: 1; }
+  .ricon { flex: none; width: 72px; height: 72px; border-radius: 12px; display: grid; place-items: center; background: rgba(255, 255, 255, .12); color: inherit; }
   .rows { display: flex; flex-direction: column; gap: 8px; }
   .row { display: flex; align-items: center; gap: 10px; }
   .rt { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 13.5px; }

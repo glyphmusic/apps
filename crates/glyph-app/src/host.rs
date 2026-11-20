@@ -43,6 +43,16 @@ pub trait Host: Send + Sync + 'static {
     /// Writes `text` to the system clipboard.
     fn write_clipboard(&self, text: &str) -> Result<(), String>;
 
+    /// Shows a phone notification (`crate::notify`); nothing on desktop.
+    fn notify(&self, notice: &crate::notify::Notice) {
+        let _ = notice;
+    }
+
+    /// Whether [`Host::notify`] shows anything (phones).
+    fn can_notify(&self) -> bool {
+        false
+    }
+
     /// Opens the system share sheet with `text` (Android); not on desktop.
     fn share_text(&self, text: &str, title: Option<&str>) -> Result<(), String> {
         let _ = (text, title);

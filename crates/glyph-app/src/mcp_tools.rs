@@ -120,6 +120,10 @@ pub fn remember_search(tracks: &[Track]) {
 
 /// For plugins: runs a tool and waits (on the caller's worker thread).
 fn plugin_handler(core: &Arc<Core>, tool: &str, args: &Value) -> Option<Value> {
+    // A plugin never installs, removes or switches plugins.
+    if matches!(glyph_protocol::mcp::tool_area(tool), Some((glyph_protocol::mcp::Area::Plugins, _))) {
+        return Some(fail("Plugins cannot manage other plugins."));
+    }
     Some(crate::rt::block_on(call(core, tool, args)))
 }
 
@@ -1173,6 +1177,112 @@ pub async fn call(core: &Arc<Core>, name: &str, args: &Value) -> Value {
                 Err(e) => fail(e),
             }
         }
+        "list_plugins" => {
+            let st = crate::plugins::plugins_state(core);
+            let items: Vec<Value> = st["installed"].as_array().map(|v| v.iter().map(plugin_brief).collect()).unwrap_or_default();
+            let theme = core.st().config.visuals.theme.clone();
+            ok(json!({ "plugins": items, "theme": theme }))
+        }
+        "browse_plugins" => {
+            let cat = match crate::plugins::plugins_catalog(core, None).await {
+                Ok(c) => c,
+                Err(e) => return fail(format!("The plugin marketplace could not be reached ({e}).")),
+            };
+            let installed = installed_ids(core);
+            let q = args["query"].as_str().unwrap_or("").trim().to_lowercase();
+            let kind = args["kind"].as_str().unwrap_or("any");
+            let want = |l: &Value| {
+                let k = l["kind"].as_str().unwrap_or("");
+                let kind_ok = match kind {
+                    "theme" => k == "theme",
+                    "plugin" => k != "theme",
+                    _ => true,
+                };
+                let text = format!("{} {} {} {}", l["id"], l["name"], l["author"], l["description"]).to_lowercase();
+                kind_ok && (q.is_empty() || q.split_whitespace().all(|w| text.contains(w)))
+            };
+            let list = |key: &str| -> Vec<Value> {
+                cat[key]
+                    .as_array()
+                    .map(|v| {
+                        v.iter()
+                            .filter(|l| want(l))
+                            .take(40)
+                            .map(|l| {
+                                let mut b = plugin_brief(l);
+                                b["installed"] = json!(l["id"].as_str().is_some_and(|id| installed.iter().any(|i| i == id)));
+                                b["installable"] = l["installable"].clone();
+                                b
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            ok(json!({ "checked": list("checked"), "community": list("community") }))
+        }
+        "install_plugin" => {
+            let Some(id) = args["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return fail("id is missing") };
+            let cat = match crate::plugins::plugins_catalog(core, None).await {
+                Ok(c) => c,
+                Err(e) => return fail(format!("The plugin marketplace could not be reached ({e}).")),
+            };
+            let find = |key: &str| cat[key].as_array().and_then(|v| v.iter().find(|l| l["id"] == id)).cloned();
+            // Only plugins Glyph checked: community ones need the user's own OK in the app.
+            let Some(l) = find("checked") else {
+                return fail(if find("community").is_some() {
+                    format!("\"{id}\" is a community plugin that Glyph has not checked. Only the user can install it, in Glyph: Settings > Plugins.")
+                } else {
+                    format!("No plugin \"{id}\" in the marketplace; use browse_plugins.")
+                });
+            };
+            if l["installable"] != "ok" {
+                return fail(format!("\"{id}\" cannot be installed here ({}).", l["installable"].as_str().unwrap_or("broken")));
+            }
+            let repo = l["repo"].as_str().unwrap_or("").to_string();
+            let path = l["path"].as_str().map(String::from);
+            let rev = l["rev"].as_str().map(String::from);
+            if let Err(e) = crate::plugins::plugin_install(core, id.to_string(), repo, path, rev).await {
+                return fail(format!("Installing \"{id}\" failed: {e}"));
+            }
+            crate::plugins::plugin_enable(core, id.to_string(), true);
+            let name = l["name"].as_str().unwrap_or(id).to_string();
+            let mut applied = false;
+            if l["kind"] == "theme" && args["apply"].as_bool().unwrap_or(true) {
+                let themes = core.plugins().as_deref().map(crate::plugins::installed_theme_ids).unwrap_or_default();
+                let mut cfg = core.st().config.clone();
+                if apply_settings_patch_with(&mut cfg, &themes, &json!({ "theme": format!("plugin:{id}") })).is_ok()
+                    && crate::commands::commit_config(core, cfg, false).await.is_ok()
+                {
+                    applied = true;
+                }
+            }
+            plugins_changed(core, "install", &name);
+            let setup = l["setup"].as_array().filter(|v| !v.is_empty()).cloned();
+            ok(json!({ "installed": id, "name": name, "kind": l["kind"], "theme_applied": applied, "needs_setup": setup }))
+        }
+        "uninstall_plugin" => {
+            let Some(id) = args["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return fail("id is missing") };
+            let Some(p) = installed_plugin(core, id) else { return fail(format!("\"{id}\" is not installed; use list_plugins.")) };
+            // A theme in use goes back to the default first.
+            if core.st().config.visuals.theme == format!("plugin:{id}") {
+                let mut cfg = core.st().config.clone();
+                cfg.visuals.theme = "glyph".into();
+                let _ = crate::commands::commit_config(core, cfg, false).await;
+            }
+            if let Err(e) = crate::plugins::plugin_uninstall(core, id.to_string()).await {
+                return fail(format!("Removing \"{id}\" failed: {e}"));
+            }
+            plugins_changed(core, "uninstall", p["name"].as_str().unwrap_or(id));
+            ok(json!({ "removed": id }))
+        }
+        "enable_plugin" => {
+            let Some(id) = args["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { return fail("id is missing") };
+            let Some(on) = args["on"].as_bool() else { return fail("on is missing") };
+            let Some(p) = installed_plugin(core, id) else { return fail(format!("\"{id}\" is not installed; use list_plugins.")) };
+            crate::plugins::plugin_enable(core, id.to_string(), on);
+            plugins_changed(core, if on { "enable" } else { "disable" }, p["name"].as_str().unwrap_or(id));
+            ok(json!({ "id": id, "on": on }))
+        }
         // The docs: answered by their own MCP server (docs.glyph.my).
         "docs_search" | "docs_read" => {
             let Some(b) = core.backend() else { return fail("Glyph is still starting; try again in a moment.") };
@@ -1184,6 +1294,36 @@ pub async fn call(core: &Arc<Core>, name: &str, args: &Value) -> Value {
         }
         other => fail(format!("unknown tool {other}")),
     }
+}
+
+/// The parts of a plugin listing an assistant needs.
+fn plugin_brief(l: &Value) -> Value {
+    let mut v = json!({
+        "id": l["id"], "name": l["name"], "author": l["author"], "description": l["description"],
+        "version": l["version"], "kind": l["kind"], "checked": l["checked"], "runs_code": l["code"],
+        "permissions": l["permissions"],
+    });
+    if let Some(on) = l.get("enabled") {
+        v["enabled"] = on.clone();
+    }
+    v
+}
+
+fn installed_ids(core: &Arc<Core>) -> Vec<String> {
+    crate::plugins::plugins_state(core)["installed"]
+        .as_array()
+        .map(|v| v.iter().filter_map(|p| p["id"].as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+fn installed_plugin(core: &Arc<Core>, id: &str) -> Option<Value> {
+    crate::plugins::plugins_state(core)["installed"].as_array().and_then(|v| v.iter().find(|p| p["id"] == id)).cloned()
+}
+
+/// Tells the open app that an assistant changed the plugins (it reloads its
+/// list and says so in a toast).
+fn plugins_changed(core: &Core, what: &str, name: &str) {
+    core.emit("plugin_ui", json!({ "kind": "changed", "what": what, "name": name }));
 }
 
 const SUPPORTED_LANGS: &[&str] = &["en", "af", "de", "es", "fr", "it", "pl", "pt", "ru", "tr", "uk"];

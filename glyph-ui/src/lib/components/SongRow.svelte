@@ -2,9 +2,14 @@
   import { backend as getBackend } from "../api/backend";
   import { trackKey as keyOfTrack, type Track as TrackItem } from "../api/types";
 
+  // Songs without an album look it up once they show (one or two at a time).
+  // The core remembers every answer on disk (album_names.rs), so the next
+  // time the album is there at once; a found album is put on the row right
+  // away instead of waiting for the library event.
   const attemptedAlbums = new Set<string>();
   const albumQueue: { track: TrackItem; signal: AbortSignal }[] = [];
-  let albumBusy = false;
+  const ALBUM_WORKERS = 2;
+  let albumBusy = 0;
 
   function scheduleAlbumBackfill(track: TrackItem, signal: AbortSignal) {
     if (track.album?.trim() || !track.title?.trim() || !track.artist?.trim()) return;
@@ -12,11 +17,11 @@
     if (attemptedAlbums.has(k)) return;
     if (albumQueue.some((x) => keyOfTrack(x.track) === k)) return;
     albumQueue.push({ track, signal });
-    if (!albumBusy) void drainAlbumQueue();
+    while (albumBusy < ALBUM_WORKERS && albumBusy < albumQueue.length) void drainAlbumQueue();
   }
 
   async function drainAlbumQueue() {
-    albumBusy = true;
+    albumBusy++;
     try {
       while (albumQueue.length > 0) {
         const next = albumQueue.shift()!;
@@ -24,18 +29,19 @@
         const k = keyOfTrack(next.track);
         if (attemptedAlbums.has(k) || next.track.album?.trim()) continue;
         attemptedAlbums.add(k);
-        if (attemptedAlbums.size > 2000) attemptedAlbums.clear();
+        if (attemptedAlbums.size > 4000) attemptedAlbums.clear();
         try {
-          await getBackend().call("track_album", { track: next.track });
+          const album = await getBackend().call<string | null>("track_album", { track: next.track });
+          if (album?.trim() && !next.track.album?.trim()) next.track.album = album.trim();
         } catch {
           /* transient/offline ignored */
         }
         if (albumQueue.length > 0) {
-          await new Promise((r) => setTimeout(r, 450));
+          await new Promise((r) => setTimeout(r, 60));
         }
       }
     } finally {
-      albumBusy = false;
+      albumBusy--;
     }
   }
 </script>
@@ -90,7 +96,7 @@
   $effect(() => {
     if (!album || tr.album?.trim()) return;
     const ac = new AbortController();
-    const timer = setTimeout(() => scheduleAlbumBackfill(tr, ac.signal), 250);
+    const timer = setTimeout(() => scheduleAlbumBackfill(tr, ac.signal), 120);
     return () => { clearTimeout(timer); ac.abort(); };
   });
   function play() {

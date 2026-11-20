@@ -62,7 +62,7 @@
     const p = currentEqPreset();
     if (what === "copy_code") {
       const code = await backend().call<string>("eq_code", { name: p.name, gains: p.gains });
-      if (code && (await copyText(code))) eqToast("toast.eq_copied", p.name);
+      if (code && (await copyText(code))) app.copied(`${t("toast.eq_copied")} · ${p.name}`);
     } else if (what === "paste_code") {
       if (!(await importText(await readClipboard()))) app.toastInfo(t("toast.eq_no_code"));
     } else if (what === "export_file") {

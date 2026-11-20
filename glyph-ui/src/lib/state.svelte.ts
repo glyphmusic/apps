@@ -9,6 +9,8 @@ import type {
 } from "./api/types";
 import { listId, primaryArtist, sameList, trackKey } from "./api/types";
 import { setLang, t, tf } from "./i18n.svelte";
+import { initPluginEvents } from "./settings/plugin-events.svelte";
+import { openPasted } from "./settings/migrate-state.svelte";
 import { trimReveals } from "./ui.svelte";
 import { inMiniWindow, inSideWindow } from "./window";
 import { applyTheme } from "./theme";
@@ -18,7 +20,7 @@ export type View =
   | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local";
 
 export type SettingsPage =
-  | "overview" | "playback" | "audio" | "appearance" | "server" | "account" | "storage" | "transfer" | "migrate" | "integrations" | "plugins" | "about" | "system";
+  | "overview" | "playback" | "audio" | "appearance" | "server" | "account" | "storage" | "transfer" | "migrate" | "integrations" | "plugins" | "about" | "system" | "notifications";
 
 export type SearchFilter = "all" | "tracks" | "albums" | "artists";
 
@@ -47,8 +49,12 @@ export interface CtxMenu {
 export interface Toast { id: number; title: string; sub?: string; kind: "ok" | "info"; at: number; life: number; undo?: { label?: string; run: () => void }; gone?: number }
 
 export interface NameDialog { tracks: Track[]; rename?: string | null; eqPreset?: boolean; initial?: string }
-/** What the phone share menu shares: one song, a list, or loose songs (recap). */
-export interface ShareTarget { track?: Track; list?: ListKey; songs?: { title: string; tracks: Track[]; kind?: "song" | "playlist" | "album" } }
+/** What the phone share menu shares: one song, a list, loose songs (recap),
+ *  an artist, or a ready link (a Jam invite). */
+export interface ShareTarget {
+  track?: Track; list?: ListKey; songs?: { title: string; tracks: Track[]; kind?: "song" | "playlist" | "album" };
+  artist?: string; link?: { url: string; title: string; sub?: string; icon?: string };
+}
 
 export type SideItem = { kind: "list"; list: ListKey } | { kind: "artist"; name: string; track: Track | null };
 
@@ -118,6 +124,11 @@ class App {
   backendState = $state<BackendState>({ kind: "connecting" });
   account = $state<Account | null>(null);
   update = $state<UpdateInfo | null>(null);
+  /** The server takes this version no more: "Update Glyph" covers the app
+   *  (overlays/Outdated.svelte). `min`: the oldest version it takes, if known. */
+  outdated = $state<{ min: string | null; current: string } | null>(null);
+  /** Phones: open the settings right at this page, not at the list. */
+  settingsDirect = $state<SettingsPage | null>(null);
   outputDevices = $state<string[]>([]);
   devices = $state<Device[]>([]);
   firstRun = $state(false);
@@ -154,7 +165,9 @@ class App {
   toasts = $state<Toast[]>([]);
   confirm = $state<{ title: string; body: string; ok: string; danger?: boolean; run: () => void } | null>(null);
   /** A shared playlist link, shown as a preview until "Add to library" (GPUI shared_preview). */
-  sharedPreview = $state<{ code: string; link: string; author: string | null } | null>(null);
+  /** A shared playlist shown before it is saved; `id` of its glyph.my/p/<id>
+   *  link when the web player opened one (its page address). */
+  sharedPreview = $state<{ code: string; link: string; author: string | null; id?: string } | null>(null);
   /** Phone share menu (compact/ShareSheet.svelte): what is being shared. */
   shareSheet = $state<ShareTarget | null>(null);
   /** Songs shared or opened with Glyph: where they go (overlays/AddShared.svelte). */
@@ -264,11 +277,22 @@ class App {
       }
     });
     api.on("update", (u) => (this.update = u));
+    const setOutdated = (o: { outdated: boolean; min: string | null; current: string } | null | undefined) => {
+      this.outdated = o?.outdated ? { min: o.min ?? null, current: o.current } : null;
+    };
+    api.on("app_outdated", setOutdated);
+    // A tapped notification: Settings > About for a new version, the album for a release.
+    if (!inSideWindow()) api.on("open_page", (p) => {
+      if (p?.settings) { this.settingsDirect = p.settings as SettingsPage; this.openSettings(p.settings as SettingsPage); }
+      else if (p?.album?.title && p.album.artist) this.openAlbum(p.album.title, p.album.artist);
+    });
+    // It may have been noticed before this page listened.
+    void api.call<{ outdated: boolean; min: string | null; current: string } | undefined>("app_outdated").then(setOutdated).catch(() => {});
     api.on("mini", (v) => (this.miniShown = v));
     api.on("memory_pressure", ({ level }) => this.trimMemory(level === "hard"));
     if (inMiniWindow()) this.miniShown = true;
     // Plugins, MCP access questions, finished imports (settings/plugin-events.svelte.ts).
-    if (!inSideWindow()) import("./settings/plugin-events.svelte").then((m) => m.initPluginEvents());
+    if (!inSideWindow()) void initPluginEvents();
     // The mini player window only mirrors the player.
     // Shared to Glyph (share sheet, "Send to", `glyph <link>`): one song asks where it goes.
     if (!inSideWindow()) api.on("shared", (text) => this.importText(text, true));
@@ -640,10 +664,12 @@ class App {
     this.forwardHistory = this.forwardHistory.filter((r) => !isDeleted(r));
     return backend().call("playlist_delete", { id });
   }
-  addToPlaylist(id: string, tracks: Track[]) {
+  /** `quiet`: the place you tapped already shows it (a tick in a menu, a
+   *  row in a panel), so no toast on top. */
+  addToPlaylist(id: string, tracks: Track[], quiet = false) {
     const p = this.playlist(id);
     const viewing = this.view === "list" && this.openList?.kind === "playlist" && this.openList.id === id;
-    if (!viewing) {
+    if (!viewing && !quiet) {
       this.toast(tracks.length === 1 ? tf("toast.added_to_playlist", { name: p?.name ?? "" }) : tf("toast.added_n_to_playlist", { n: tracks.length, name: p?.name ?? "" }));
     }
     return backend().call("playlist_add", { id, tracks });
@@ -675,6 +701,11 @@ class App {
   share(what: { track?: Track; list?: ListKey }) {
     if (this.compact) { this.shareSheet = what; return Promise.resolve(null); }
     return backend().call<string>("share", what);
+  }
+  /** Shares an artist: share menu on phones, on the desktop the link is copied. */
+  shareArtist(artist: string) {
+    if (this.compact) { this.shareSheet = { artist }; return Promise.resolve(null); }
+    return backend().call<string>("copy_artist_link", { artist });
   }
   /** Shares loose songs (recap): share menu on phones, else copied. */
   shareSongs(what: { title: string; tracks: Track[]; kind?: "song" | "playlist" | "album" }) {
@@ -979,6 +1010,17 @@ class App {
   pickSearch(item: { kind: "song"; track: Track } | { kind: "artist"; name: string; track?: Track | null }) {
     return backend().call("search_history_add", { item });
   }
+  /** A glyph.my/p/<id> link opened in the web player (the share page sends
+   *  people here): the songs open as a list to play, save or open in the
+   *  app; an artist link opens the artist. */
+  async openShared(id: string) {
+    let r: { share_kind?: string; name?: string; code?: string; link?: string; author?: string | null; tracks?: Track[] } | null = null;
+    try { r = await backend().call("share_open", { id }); } catch { r = null; }
+    if (!r?.code) { this.toastInfo(t("share.gone")); return; }
+    if (r.share_kind === "artist" && r.name) { this.openArtistPage(r.name); return; }
+    this.openListView({ kind: "album", title: r.name ?? "", artist: "", tracks: r.tracks ?? [] });
+    this.sharedPreview = { code: r.code, link: r.link ?? "", author: r.author ?? null, id };
+  }
   /** Links or codes pasted / shared to Glyph. Several service links open
    *  the "move from another app" screen (Rust answers `{ kind: "migrate" }`). */
   async importText(text: string, ask = false) {
@@ -986,7 +1028,6 @@ class App {
     if (!r || typeof r !== "object") return;
     if (r.kind === "pick" && r.tracks?.length) { this.ctx = null; this.pickSongs = { tracks: r.tracks }; return; }
     if (r.kind === "migrate") {
-      const { openPasted } = await import("./settings/migrate-state.svelte");
       await openPasted(r.text ?? text);
     } else if (r.kind === "playlist" && r.id) this.openListView({ kind: "playlist", id: r.id });
     else if (r.kind === "artist" && r.name) this.openArtistPage(r.name);
@@ -1139,6 +1180,9 @@ class App {
     if (!this.toastsPaused) this.toastTimers.set(id, setTimeout(() => this.dismissToast(id), life));
   }
   toastInfo(msg: string) { this.toast(msg, "info"); }
+  /** "Copied": a toast on the computer; Android already shows its own copy
+   *  note, so phones get no second one. */
+  copied(msg: string) { if (this.platform !== "android") this.toast(msg); }
   pauseToasts(paused: boolean) {
     if (this.toastsPaused === paused) return;
     this.toastsPaused = paused;

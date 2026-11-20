@@ -454,7 +454,11 @@ impl Core {
 
     pub fn library_dto(&self) -> Value {
         let downloads = self.backend().map(|b| b.downloaded_tracks()).unwrap_or_default();
-        dto::library(&self.st().library, &downloads)
+        let mut st = self.st();
+        // Albums found for songs before (also in an earlier run, or lost in
+        // a sync) show at once instead of being looked up again.
+        glyph_core::album_names::fill_library(&mut st.library);
+        dto::library(&st.library, &downloads)
     }
 
     pub fn emit_player(&self) {
@@ -1779,6 +1783,7 @@ impl Core {
                 let mut sent: Option<(PlayerState, Instant)> = None;
                 let mut ticks: u32 = 0;
                 let mut outage_seen: u64 = 0;
+                let mut outdated_seen: u64 = 0;
                 let mut was_playing = false;
                 loop {
                     std::thread::sleep(Duration::from_millis(100));
@@ -1824,6 +1829,11 @@ impl Core {
                     }
                     if ticks % 10 == 0 {
                         core.announce_outage(&mut outage_seen);
+                        let seq = glyph_core::app_outdated::seq();
+                        if seq != outdated_seen {
+                            outdated_seen = seq;
+                            core.emit("app_outdated", crate::system::app_outdated());
+                        }
                     }
                     // The embed player and the OS parts run on the main thread.
                     let c = core.clone();

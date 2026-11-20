@@ -324,7 +324,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "share" => res(discover::share(core, opt(&args, "track")?, opt::<ListKey>(&args, "list")?, opt(&args, "copy")?).await),
         "share_system" => res(commands::share_system(req(&args, "text")?, opt(&args, "title")?)),
         "copy_text" => res(commands::copy_text(req(&args, "text")?)),
-        "copy_artist_link" => res(discover::copy_artist_link(core, req(&args, "artist")?).await),
+        "copy_artist_link" => res(discover::copy_artist_link(core, req(&args, "artist")?, opt(&args, "copy")?).await),
         "hidden_artists" => ok(discover::hidden_artists(core)),
         "toggle_hidden_artist" => {
             discover::toggle_hidden_artist(core, req(&args, "name")?);
@@ -424,7 +424,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             Ok(Value::Null)
         }
         "playlist_restore_version" => ok(storage::playlist_restore_version(core, req(&args, "revision")?)),
-        "playlist_pick_cover" => res(storage::playlist_pick_cover(core, req(&args, "id")?).await),
+        "playlist_set_cover" => res(storage::playlist_set_cover(core, req(&args, "id")?, req(&args, "data")?)),
         "playlist_remove_cover" => {
             storage::playlist_remove_cover(core, req(&args, "id")?);
             Ok(Value::Null)
@@ -490,6 +490,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             Ok(Value::Null)
         }
         "update_state" => Ok(system::update_state()),
+        "app_outdated" => Ok(system::app_outdated()),
         "update_check" => res(system::update_check(core, opt(&args, "manual")?).await),
         "update_install" => res(system::update_install(core).await),
         "update_restart" => {

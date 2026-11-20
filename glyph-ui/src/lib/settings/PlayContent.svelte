@@ -26,8 +26,8 @@
   });
   async function loadHidden() { hidden = (await backend().call<string[]>("hidden_artists")) ?? []; }
   async function show(name: string) {
+    // The row leaves the list: that is the confirmation.
     await backend().call("toggle_hidden_artist", { name });
-    app.toast(tf("toast.artist_shown", { name }));
     loadHidden();
   }
   function setRadio(on: boolean) { radio.on = on; backend().call("set_radio", { on }); }

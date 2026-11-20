@@ -192,6 +192,45 @@ pub struct HealthResponse {
     /// ignored and a missing list means none of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Oldest app version this server still works with (`"0.13.0"`), set
+    /// when a server change breaks older apps. An older app shows "update
+    /// Glyph" and the server answers its other calls with 426
+    /// ([`APP_OUTDATED`]). Missing: every version works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_app_version: Option<String>,
+}
+
+/// Error code (HTTP 426) for an app older than the server's
+/// [`HealthResponse::min_app_version`].
+pub const APP_OUTDATED: &str = "app_outdated";
+
+/// The app version in a Glyph `User-Agent` (`Glyph/0.12.11`), if any.
+pub fn app_version_from_user_agent(ua: &str) -> Option<&str> {
+    let v = ua.trim().strip_prefix("Glyph/")?;
+    let v = v.split([' ', '(', ';']).next()?.trim();
+    (!v.is_empty() && v.len() <= 32 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'+')).then_some(v)
+}
+
+/// Whether app version `app` is older than `min` (`major.minor.patch`,
+/// a leading `v` and a `-suffix` allowed; a pre-release counts as its
+/// version). Versions that cannot be read never count as older.
+pub fn app_older_than(app: &str, min: &str) -> bool {
+    fn parts(v: &str) -> Option<[u64; 3]> {
+        let core = v.trim().trim_start_matches(['v', 'V']).split(['-', '+']).next()?;
+        let mut it = core.split('.');
+        let mut out = [0u64; 3];
+        for slot in &mut out {
+            *slot = match it.next() {
+                Some(x) => x.parse().ok()?,
+                None => 0,
+            };
+        }
+        it.next().is_none().then_some(out)
+    }
+    match (parts(app), parts(min)) {
+        (Some(a), Some(m)) => a < m,
+        _ => false,
+    }
 }
 
 impl HealthResponse {
@@ -1130,6 +1169,22 @@ pub mod mcp {
                     &[],
                 ),
             ),
+            tool("list_plugins", "Installed Glyph plugins and themes (id, name, kind, version, on/off) and the theme in use. Plugins change how Glyph looks (themes, fonts, backgrounds, icons) and add features.", none()),
+            tool(
+                "browse_plugins",
+                "Search the Glyph plugin marketplace. Only `checked` entries (reviewed by Glyph) can be installed with install_plugin; community entries must be installed by the user in the app.",
+                obj(json!({
+                    "query": { "type": "string", "description": "Words to look for in name, author or description (optional)." },
+                    "kind": { "type": "string", "enum": ["any", "theme", "plugin"], "description": "Only themes or only other plugins (default any)." }
+                }), &[]),
+            ),
+            tool(
+                "install_plugin",
+                "Install (or update) a checked plugin or theme from the marketplace by id (from browse_plugins). With `apply`, a theme is also switched on right away.",
+                obj(json!({ "id": { "type": "string" }, "apply": { "type": "boolean", "description": "For themes: use it as the app theme now (default true)." } }), &["id"]),
+            ),
+            tool("uninstall_plugin", "Remove an installed plugin or theme by id.", obj(json!({ "id": { "type": "string" } }), &["id"])),
+            tool("enable_plugin", "Turn an installed plugin on or off without removing it.", obj(json!({ "id": { "type": "string" }, "on": { "type": "boolean" } }), &["id", "on"])),
             tool(
                 "docs_search",
                 "Search Glyph's documentation for how to do something in Glyph (settings, keyboard shortcuts, local files, downloads, equalizer, accounts, devices, plugins, self-hosting). Returns the best sections with their address and the path for docs_read. Use a few English keywords.",
@@ -1170,10 +1225,13 @@ pub mod mcp {
         Settings,
         /// Listening statistics (read only).
         Stats,
+        /// Plugins and themes: reading lists them and the marketplace;
+        /// writing installs, removes and turns them on or off.
+        Plugins,
     }
 
     impl Area {
-        pub const ALL: [Area; 4] = [Area::Playback, Area::Library, Area::Settings, Area::Stats];
+        pub const ALL: [Area; 5] = [Area::Playback, Area::Library, Area::Settings, Area::Stats, Area::Plugins];
 
         /// `false` for areas without tools that change anything.
         pub fn has_write(self) -> bool {
@@ -1197,12 +1255,14 @@ pub mod mcp {
             "listening_stats" => (Area::Stats, false),
             "get_settings" => (Area::Settings, false),
             "set_settings" => (Area::Settings, true),
+            "list_plugins" | "browse_plugins" => (Area::Plugins, false),
+            "install_plugin" | "uninstall_plugin" | "enable_plugin" => (Area::Plugins, true),
             _ => return None,
         })
     }
 
     /// What assistants may do. By default they control playback and search,
-    /// read playlists but do not change them, and see no statistics.
+    /// read playlists but do not change them, and see no statistics and no plugins.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(default)]
     pub struct Permissions {
@@ -1211,6 +1271,8 @@ pub mod mcp {
         #[serde(default = "default_write")]
         pub settings: Access,
         pub stats: Access,
+        /// Off unless the user turns it on (plugins run code).
+        pub plugins: Access,
     }
 
     fn default_write() -> Access {
@@ -1219,7 +1281,7 @@ pub mod mcp {
 
     impl Default for Permissions {
         fn default() -> Self {
-            Self { playback: Access::Write, library: Access::Read, settings: Access::Write, stats: Access::None }
+            Self { playback: Access::Write, library: Access::Read, settings: Access::Write, stats: Access::None, plugins: Access::None }
         }
     }
 
@@ -1230,6 +1292,7 @@ pub mod mcp {
                 Area::Library => self.library,
                 Area::Settings => self.settings,
                 Area::Stats => self.stats,
+                Area::Plugins => self.plugins,
             }
         }
 
@@ -1241,6 +1304,7 @@ pub mod mcp {
                 Area::Library => self.library = access,
                 Area::Settings => self.settings = access,
                 Area::Stats => self.stats = access,
+                Area::Plugins => self.plugins = access,
             }
         }
 
@@ -1290,7 +1354,7 @@ pub mod mcp {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": server_name, "title": "Glyph", "version": version },
-                "instructions": "Controls the Glyph music app: playback, devices & remote playback, queue, radio, sleep timer, search, playlists, likes, followed artists, lyrics, and cross-device settings (appearance, audio/EQ, playback, sources, etc.). Songs are passed between tools by their `ref`. Use list_devices before play_on_device or select_device when targeting another device. Use get_settings before set_settings to inspect current cross-device settings and valid options. For how-to questions about Glyph itself (shortcuts, local setup) use docs_search, then docs_read."
+                "instructions": "Controls the Glyph music app: playback, devices & remote playback, queue, radio, sleep timer, search, playlists, likes, followed artists, lyrics, cross-device settings (appearance, audio/EQ, playback, sources, etc.), and plugins & themes from the marketplace (if the user allows it). Songs are passed between tools by their `ref`. Use list_devices before play_on_device or select_device when targeting another device. Use get_settings before set_settings to inspect current cross-device settings and valid options. To change how Glyph looks, try a theme: browse_plugins (kind theme), then install_plugin. For how-to questions about Glyph itself (shortcuts, local setup) use docs_search, then docs_read."
             }))),
             "ping" => Some(Ok(serde_json::json!({}))),
             "tools/list" => Some(Ok(serde_json::json!({ "tools": tools() }))),
@@ -1331,6 +1395,7 @@ pub mod mcp {
             let p = Permissions::default();
             assert!(p.allows("play") && p.allows("search") && p.allows("list_playlists") && p.allows("set_settings"));
             assert!(!p.allows("delete_playlist") && !p.allows("like") && !p.allows("listening_stats"));
+            assert!(!p.allows("list_plugins") && !p.allows("install_plugin"), "plugins stay off by default");
             assert!(!p.allows("rm_rf"));
             let mut none = p;
             for area in Area::ALL {
@@ -1352,7 +1417,7 @@ pub mod mcp {
             assert!(read.allows("get_settings") && !read.allows("set_settings"));
             // Old settings files without the section keep the defaults.
             let parsed: Permissions = serde_json::from_str(r#"{"library":"write"}"#).unwrap();
-            assert_eq!((parsed.playback, parsed.library, parsed.settings, parsed.stats), (Access::Write, Access::Write, Access::Write, Access::None));
+            assert_eq!((parsed.playback, parsed.library, parsed.settings, parsed.stats, parsed.plugins), (Access::Write, Access::Write, Access::Write, Access::None, Access::None));
         }
 
         #[test]
@@ -1902,3 +1967,27 @@ pub mod jam {
     }
 }
 pub mod playback;
+
+#[cfg(test)]
+mod app_version_tests {
+    use super::*;
+
+    #[test]
+    fn app_versions_from_user_agents_and_their_order() {
+        assert_eq!(app_version_from_user_agent("Glyph/0.12.11"), Some("0.12.11"));
+        assert_eq!(app_version_from_user_agent("Glyph/0.13.0-beta.1 (Android)"), Some("0.13.0-beta.1"));
+        assert_eq!(app_version_from_user_agent("Mozilla/5.0"), None);
+        assert_eq!(app_version_from_user_agent("Glyph/"), None);
+        assert!(app_older_than("0.12.11", "0.13.0"));
+        assert!(app_older_than("v0.9.9", "0.10"));
+        assert!(!app_older_than("0.13.0", "0.13.0"));
+        assert!(!app_older_than("0.13.0-beta.1", "0.13.0"));
+        assert!(!app_older_than("1.0.0", "0.13.0"));
+        assert!(!app_older_than("weird", "0.13.0"));
+        assert!(!app_older_than("0.12.0", "soon"));
+        let h: HealthResponse = serde_json::from_str(r#"{"server_version":"1","protocol_version":1,"providers":[]}"#).unwrap();
+        assert_eq!(h.min_app_version, None);
+        let h: HealthResponse = serde_json::from_str(r#"{"server_version":"1","protocol_version":1,"providers":[],"min_app_version":"0.13.0"}"#).unwrap();
+        assert_eq!(h.min_app_version.as_deref(), Some("0.13.0"));
+    }
+}

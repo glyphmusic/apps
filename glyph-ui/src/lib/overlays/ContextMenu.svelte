@@ -371,7 +371,7 @@
     {/if}
     <MenuItem icon="radio" label={t("ctx.artist_radio")} onenter={closesSub} onclick={run(() => artistRadio(artist))} />
     <MenuItem icon={app.follows(artist) ? "check" : "user-round"} label={t(app.follows(artist) ? "artist.unfollow" : "artist.follow")} onenter={closesSub} onclick={run(() => app.toggleFollow(artist))} />
-    <MenuItem icon="link-2" label={t("ctx.copy_link")} onenter={closesSub} onclick={run(() => copyArtistLink(artist))} />
+    <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => copyArtistLink(artist))} />
     <Sep />
     {#if isHiddenArtist(artist)}
       <MenuItem icon="eye" label={t("ctx.show_artist")} onenter={closesSub} onclick={run(() => toggleHiddenArtist(artist))} />

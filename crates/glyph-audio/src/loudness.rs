@@ -13,7 +13,10 @@
 //!   peak allows (-1 dBFS), like Spotify; Loud boosts and lets the limiter
 //!   catch the peaks.
 //! * **Equalizer after the gain.** The equalizer (bass boost included) runs
-//!   after the gain and never changes it.
+//!   after the gain and never changes it. It gets the room the song has
+//!   left below the top ([`Leveller::room_db`]), so a boost is really heard:
+//!   a loud song turned down by levelling keeps its bass boost instead of
+//!   the equalizer turning everything down again to make room.
 //! * **Peaks only.** What still goes over -1 dBFS (equalizer boosts, Loud)
 //!   is caught by a look-ahead limiter in two parts: a bass peak turns only
 //!   the bass down for a moment, any other peak turns everything down for a
@@ -353,6 +356,8 @@ pub struct Leveller {
     ramp_step: f32,
     ramp_left: usize,
     limiter: Limiter,
+    /// Room below -1 dBFS at the current gain (dB, see [`Leveller::room_db`]).
+    room: f32,
     bypass: bool,
 }
 
@@ -375,6 +380,7 @@ impl Leveller {
             ramp_step: 0.0,
             ramp_left: 0,
             limiter: Limiter::new(rate, channels),
+            room: 0.0,
             bypass: false,
         }
     }
@@ -398,6 +404,20 @@ impl Leveller {
         self.gain
     }
 
+    /// How far the song's loudest peak stays under -1 dBFS at its gain
+    /// (dB, never below 0). The equalizer spends this room on boosts first.
+    /// Without a measurement the peak counts as 0 dBFS.
+    pub fn room_db(&self) -> f32 {
+        self.room
+    }
+
+    fn update_room(&mut self, shared: &TrackLoudness) {
+        let peak = shared.known().or(self.live).map_or(0.0, |a| a.peak_db.min(0.0));
+        // While the gain moves, the larger of now and where it goes.
+        let g = self.target_db.max(lin_to_db(self.gain));
+        self.room = (CEILING_DB - (peak + g)).max(0.0);
+    }
+
     /// One decoded sample in, the same sample at the song's gain out.
     #[inline]
     pub fn gain(&mut self, s: f32, shared: &TrackLoudness) -> f32 {
@@ -410,6 +430,7 @@ impl Leveller {
             self.gen = SETTINGS_GEN.load(Ordering::Relaxed);
             self.target_db = self.desired_db(shared);
             self.gain = db_to_lin(self.target_db);
+            self.update_room(shared);
         }
         if let Some(m) = self.meter.as_mut() {
             m.push(s);
@@ -441,6 +462,7 @@ impl Leveller {
         }
         let gen = SETTINGS_GEN.load(Ordering::Relaxed);
         let want = self.desired_db(shared);
+        self.update_room(shared);
         if (want - self.target_db).abs() < 0.05 && gen == self.gen {
             return;
         }
@@ -773,12 +795,12 @@ pub fn analyze(key: String, url: String, mime: Option<String>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::f32::consts::TAU;
 
     /// Settings are global: tests that play songs run one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 
     fn sine(rate: u32, f: f32, amp: f32, secs: f32) -> impl Iterator<Item = f32> {
         let n = (rate as f32 * secs) as usize;
@@ -1091,5 +1113,131 @@ mod tests {
         assert_eq!(lookup("Spotify:abc"), Some(Analysis { lufs: -8.25, peak_db: -0.5 }));
         assert_eq!(lookup("bad\nkey"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod eq_tests {
+    //! The equalizer behind the levelling: a bass boost must be heard.
+    use super::*;
+    use std::f32::consts::TAU;
+
+    /// A loud modern master: kick, bass line and dense mids, pushed into a
+    /// limiter (peaks at the top, about -8 LUFS).
+    fn loud_master(rate: u32, secs: f32) -> Vec<f32> {
+        let n = (rate as f32 * secs) as usize;
+        let mut seed = 1u32;
+        let mut noise = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        };
+        let mut out = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f32 / rate as f32;
+            let beat = (t * 2.0).fract();
+            let kick = (-beat * 12.0).exp() * (TAU * 55.0 * t).sin() * 0.7;
+            let bass = 0.25 * (TAU * 82.0 * t).sin();
+            let mids = 0.3 * (TAU * 440.0 * t).sin() + 0.2 * (TAU * 1320.0 * t).sin() + 0.15 * noise();
+            let s = ((kick + bass + mids) * 1.2).clamp(-0.98, 0.98);
+            out.push(s);
+            out.push(s);
+        }
+        out
+    }
+
+    /// Level (dB) below and above 150 Hz.
+    fn bands(rate: u32, x: &[f32]) -> (f32, f32) {
+        let lp = Bq::butterworth(false, 150.0, rate as f32);
+        let hp = Bq::butterworth(true, 150.0, rate as f32);
+        let (mut a, mut b, mut c, mut d) = (BqMem::default(), BqMem::default(), BqMem::default(), BqMem::default());
+        let (mut lo, mut hi) = (0f64, 0f64);
+        for s in x.iter().step_by(2) {
+            let l = lp.run(&mut b, lp.run(&mut a, *s));
+            let h = hp.run(&mut d, hp.run(&mut c, *s));
+            lo += (l * l) as f64;
+            hi += (h * h) as f64;
+        }
+        let n = (x.len() / 2).max(1) as f64;
+        (10.0 * (lo / n).max(1e-12).log10() as f32, 10.0 * (hi / n).max(1e-12).log10() as f32)
+    }
+
+    /// Plays `input` the way native.rs does (gain, equalizer, limiter).
+    fn play(rate: u32, input: &[f32], normalize: bool, eq_on: bool, bass_db: f32) -> (f32, f32) {
+        set(Level::Normal, normalize);
+        crate::eq::set(eq_on, [0.0; 10]);
+        crate::eq::set_extras(bass_db, 0.0);
+        let mut m = Meter::new(rate, 2);
+        input.iter().for_each(|s| m.push(*s));
+        let shared = TrackLoudness::default();
+        shared.set_known(m.result().unwrap());
+        let mut l = Leveller::new(rate, 2);
+        let mut e = crate::eq::Equalizer::new(rate, 2);
+        let out: Vec<f32> = input
+            .iter()
+            .map(|s| {
+                let y = l.gain(*s, &shared);
+                e.set_room(l.room_db());
+                let y = e.process(y);
+                l.limit(y)
+            })
+            .collect();
+        let skip = (rate as usize * 2).min(out.len());
+        bands(rate, &out[skip..])
+    }
+
+    #[test]
+    fn bass_boost_is_heard_with_even_volume() {
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = 48_000;
+        let song = loud_master(rate, 6.0);
+        let (b0, m0) = play(rate, &song, true, false, 0.0);
+        let (b1, m1) = play(rate, &song, true, true, 6.0);
+        crate::eq::set_extras(0.0, 0.0);
+        crate::eq::set(false, [0.0; 10]);
+        set(Level::Normal, true);
+        // The bass really gets louder; the rest stays where levelling put it.
+        assert!(b1 - b0 > 3.5, "bass only {:+.1} dB", b1 - b0);
+        assert!((m1 - m0).abs() < 0.5, "mids moved {:+.1} dB", m1 - m0);
+    }
+
+    #[test]
+    fn without_room_the_equalizer_still_makes_room() {
+        // Levelling off and a song at the top: boosts still get room, so
+        // the limiter is not left to flatten them.
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = 48_000;
+        let song = loud_master(rate, 4.0);
+        let (_, m0) = play(rate, &song, false, false, 0.0);
+        let (_, m1) = play(rate, &song, false, true, 6.0);
+        crate::eq::set_extras(0.0, 0.0);
+        crate::eq::set(false, [0.0; 10]);
+        set(Level::Normal, true);
+        assert!(m1 < m0 - 2.5, "no room made: mids {m0:.1} -> {m1:.1}");
+    }
+
+    /// Real songs: `GLYPH_TEST_SONGS="a.m4a;b.mp3" cargo test -p glyph-audio
+    /// real_songs -- --ignored --nocapture` prints bass and mids with and
+    /// without a +6 dB bass boost.
+    #[test]
+    #[ignore]
+    fn real_songs() {
+        let _g = super::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = 48_000;
+        let list = std::env::var("GLYPH_TEST_SONGS").unwrap_or_default();
+        for path in list.split(';').filter(|p| !p.is_empty()) {
+            let mut pcm = crate::pcm::Pcm::open(path, None, rate).expect("open");
+            let _ = pcm.seek(30.0);
+            let mut buf = Vec::new();
+            pcm.read(&mut buf, rate as usize * 40);
+            let song: Vec<f32> = buf.iter().map(|v| *v as f32 / 32768.0).collect();
+            for norm in [true, false] {
+                let (b0, m0) = play(rate, &song, norm, false, 0.0);
+                let (b1, m1) = play(rate, &song, norm, true, 6.0);
+                println!("{path} even={norm}: bass {:+.1} dB, mids {:+.1} dB", b1 - b0, m1 - m0);
+            }
+        }
+        crate::eq::set_extras(0.0, 0.0);
+        crate::eq::set(false, [0.0; 10]);
+        set(Level::Normal, true);
     }
 }

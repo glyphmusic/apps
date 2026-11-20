@@ -1,7 +1,8 @@
 // Crop dialog state (profile.rs CropDialog / profile_pick_image /
 // profile_crop_apply / profile_remove_image). A picked picture waits in the
 // dialog; "Apply" cuts the framed region out in a canvas (picture 512 x 512,
-// banner 1500 x 500, JPEG) and sends it with the command `profile_set_image`.
+// banner 1500 x 500, WebP) and sends it with the command `profile_set_image`.
+import { encodePicture, pictureCanvas } from "../../picture";
 import { backend } from "../../api/backend";
 import { app } from "../../state.svelte";
 import { t, tf } from "../../i18n.svelte";
@@ -65,6 +66,7 @@ export function profileError(e: unknown): string {
   const m = String((e as Error)?.message ?? e ?? "");
   if (m.includes("signed_out")) return t("account.signed_out");
   if (m.includes("not_found") || m.includes("404")) return t("profile.not_found");
+  if (m.includes("account_full")) return t("account.storage.full");
   if (m.includes("too_big") || m.includes("413")) return t("profile.image.too_big");
   if (m.includes("rate_limited")) return t("account.err.slow");
   return t("account.err.generic");
@@ -114,12 +116,9 @@ export async function applyCrop() {
     await new Promise<void>((ok, err) => { im.onload = () => ok(); im.onerror = () => err(new Error("image")); im.src = d.url; });
     const [x, y, w, h] = cropRect(d.w, d.h, d.banner, d);
     const [ow, oh] = d.banner ? [1500, 500] : [512, 512];
-    const cv = document.createElement("canvas");
-    cv.width = ow; cv.height = oh;
-    const g = cv.getContext("2d")!;
-    g.imageSmoothingQuality = "high";
+    const [cv, g] = pictureCanvas(ow, oh);
     g.drawImage(im, x, y, w, h, 0, 0, ow, oh);
-    const data = cv.toDataURL("image/jpeg", 0.86);
+    const data = encodePicture(cv, 0.86);
     await backend().call("profile_set_image", { banner: d.banner, image: data });
     crop.notice = null;
     crop.version++;

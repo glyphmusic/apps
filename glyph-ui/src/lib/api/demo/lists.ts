@@ -14,10 +14,10 @@
 //   playlist_storage         { id, mode: 0 local | 1 account | 2 offline }    -> void   (set_playlist_storage)
 //   playlist_auto_download   { id, on: boolean }                              -> void   (toggle_auto_download)
 //   liked_auto_download      { on: boolean }                                  -> void   (set_liked_auto_download)
-//   playlist_pick_cover      { id }                                           -> void   (pick_playlist_cover: file dialog, 512 px JPEG)
+//   playlist_set_cover       { id, data }                                     -> void   (data = 512 px WebP/JPEG data URL from lib/picture.ts)
 //   playlist_remove_cover    { id }                                           -> void
 //   hide_artist              { artist, on: boolean }                          -> void   (toggle_hidden_artist; library.hidden_artists)
-//   copy_artist_link         { artist }                                       -> string (copies it, toasts)
+//   copy_artist_link         { artist, copy?: false }                         -> string (copies it, toasts; copy false: only returns it)
 //   recommend_feedback       { artist, preference: 1 | -1 | -2 | null }      -> void   (recommendation_feedback)
 //   downloaded_bytes         { tracks: Track[] }                              -> number (bytes on disk of those songs)
 //   album_meta               { title, artist }                                -> { kind: "album"|"ep"|"single"|"compilation", year?: number } | null
@@ -110,7 +110,10 @@ export const handlers: Record<string, DemoHandler> = {
     if (p) { p.auto_download = !!a.on; ctx.saveLibrary(); }
   },
   liked_auto_download: (ctx, a) => { lib(ctx).liked_auto_download = !!a.on; ctx.saveLibrary(); },
-  playlist_pick_cover: () => {},
+  playlist_set_cover: (ctx, a) => {
+    const p = pl(ctx, a.id);
+    if (p && typeof a.data === "string") { p.cover = a.data; ctx.saveLibrary(); }
+  },
   playlist_remove_cover: (ctx, a) => {
     const p = pl(ctx, a.id);
     if (p) { p.cover = null; ctx.saveLibrary(); }
@@ -123,6 +126,7 @@ export const handlers: Record<string, DemoHandler> = {
   },
   copy_artist_link: async (ctx, a) => {
     const link = `https://glyph.my/a/${encodeURIComponent(a.artist)}`;
+    if (a.copy === false) return link;
     try { await navigator.clipboard.writeText(link); } catch { /* preview without clipboard access */ }
     toast(ctx, "Glyph link copied");
     return link;

@@ -17,7 +17,7 @@ export function load<T>(name: string): T | null {
 /** Big entries (the library) are mirrored into IndexedDB: localStorage only
  *  holds about 5 MB, and a large library that no longer fit there used to be
  *  lost on reload (empty playlists until the next sync). */
-const big = (name: string) => name === "library" || name.startsWith("account_lib.");
+const big = (name: string) => name === "library" || name === "stats" || name.startsWith("account_lib.");
 
 export function save(name: string, value: unknown) {
   let json: string;

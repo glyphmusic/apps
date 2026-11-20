@@ -2,6 +2,12 @@
 //! eight peaking bands, high shelf), plus a bass shelf and a headroom cut
 //! before it. Settings are global and apply live; each song's processor
 //! picks up changes within a few milliseconds.
+//!
+//! Boosts need room below the top. A song that volume levelling turned down
+//! already has that room ([`Equalizer::set_room`]), so the equalizer only
+//! turns the whole song down by what is still missing. Before, it always
+//! took 60 % of the biggest boost off everything: a +6 dB bass boost made
+//! the bass barely louder and the rest quieter, which sounded like no boost.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -100,7 +106,18 @@ pub struct Equalizer {
     ch: usize,
     gen: u32,
     on: bool,
+    /// Gain before the filters (moves smoothly to `want`).
     pre: f32,
+    want: f32,
+    /// Per-sample step of `pre` towards `want`.
+    glide: f32,
+    /// Room the boosts would like (dB, 60 % of the biggest boost).
+    need_db: f32,
+    /// What the user takes off on top (dB).
+    extra_db: f32,
+    /// Room the song has below the top before the equalizer (dB).
+    room_db: f32,
+    started: bool,
     coefs: Vec<Coef>,
     state: Vec<St>,
     check: u32,
@@ -121,6 +138,12 @@ impl Equalizer {
             gen: u32::MAX,
             on: false,
             pre: 1.0,
+            want: 1.0,
+            glide: 1.0 - (-1.0 / (0.08 * rate.max(1) as f32 * channels.max(1) as f32)).exp(),
+            need_db: 0.0,
+            extra_db: 0.0,
+            room_db: 0.0,
+            started: false,
             coefs: Vec::new(),
             state: Vec::new(),
             check: 0,
@@ -140,7 +163,8 @@ impl Equalizer {
         let gains = *GAINS.lock().unwrap();
         let (bass, headroom) = *EXTRAS.lock().unwrap();
         self.coefs.clear();
-        self.pre = 1.0;
+        self.need_db = 0.0;
+        self.extra_db = 0.0;
         if self.on {
             for (i, (&f, &g)) in BANDS.iter().zip(gains.iter()).enumerate() {
                 if g.abs() < 0.05 || f >= self.rate * 0.45 {
@@ -156,18 +180,34 @@ impl Equalizer {
             if bass.abs() >= 0.05 {
                 self.coefs.push(design(Kind::LowShelf, BASS_HZ, bass, self.rate));
             }
-            // Headroom for boosts (the limiter after this catches the rest),
+            // Room for boosts (the limiter after this catches the rest),
             // plus what the user takes off on top.
             let boost = gains.iter().cloned().fold(0.0f32, f32::max).max(bass.max(0.0) + gains[0].max(0.0) * 0.5);
-            self.pre = 10f32.powf(-(boost * 0.6 + headroom) / 20.0);
+            self.need_db = boost * 0.6;
+            self.extra_db = headroom;
         }
-        if self.coefs.is_empty() && self.pre >= 0.9999 {
+        if self.coefs.is_empty() && self.extra_db < 0.05 {
             self.on = false;
         }
+        self.aim();
         let n = self.coefs.len() * self.channels;
         if self.state.len() != n {
             self.state = vec![St::default(); n];
         }
+    }
+
+    /// How far the song already sits below the top before the equalizer
+    /// (dB, from volume levelling). Boosts use that room first; only what
+    /// is missing is taken off the whole song.
+    #[inline]
+    pub fn set_room(&mut self, db: f32) {
+        self.room_db = if db.is_finite() { db.clamp(0.0, 24.0) } else { 0.0 };
+    }
+
+    /// The gain before the filters for the current settings and room.
+    fn aim(&mut self) {
+        let cut = (self.need_db - self.room_db).max(0.0) + self.extra_db;
+        self.want = if self.on { 10f32.powf(-cut / 20.0) } else { 1.0 };
     }
 
     /// One interleaved sample in, filtered sample out.
@@ -177,13 +217,24 @@ impl Equalizer {
             return s;
         }
         self.check = self.check.wrapping_add(1);
-        if self.check % 512 == 0 {
+        if !self.started || self.check % 512 == 0 {
             self.refresh();
+            self.aim();
+            if !self.started {
+                // A new song starts right at its gain, no slide.
+                self.started = true;
+                self.pre = self.want;
+            }
         }
         let ch = self.ch;
         self.ch = (self.ch + 1) % self.channels;
         if !self.on {
+            self.pre = 1.0;
             return s;
+        }
+        if self.pre != self.want {
+            let d = self.want - self.pre;
+            self.pre = if d.abs() < 1e-5 { self.want } else { self.pre + d * self.glide };
         }
         let mut x = s * self.pre;
         let nb = self.coefs.len();
@@ -222,7 +273,8 @@ mod tests {
 
     #[test]
     fn bands_boost_and_cut_where_they_should() {
-        // One test: the settings are global.
+        // One test: the settings are global (shared with the loudness tests).
+        let _g = crate::loudness::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let flat = rms_through(1000.0, [0.0; 10]);
         assert!((flat - 1.0).abs() < 0.02, "flat changed the level: {flat}");
         let mut g = [0.0; 10];

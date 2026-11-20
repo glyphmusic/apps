@@ -348,42 +348,39 @@ pub fn playlist_restore_version(core: C, revision: String) -> bool {
 
 // ------------------------------------------------------ playlist covers
 
-/// Lets the user pick a picture for playlist `id` (file dialog); it is
-/// copied into the data dir as a 512 px JPEG.
-pub async fn playlist_pick_cover(core: C<'_>, id: String) -> Res {
-    let Some(src) = core.host.pick_file(None, "Images", &["png", "jpg", "jpeg", "webp"]).await? else {
+/// Sets the picture of playlist `id`: `data` is the data URL the UI made
+/// (lib/picture.ts: 512 px, lossy WebP where the webview can write it). It is
+/// checked, then kept in the data dir as it is: sync uploads these bytes.
+pub fn playlist_set_cover(core: C, id: String, data: String) -> Res {
+    let bytes = data
+        .split_once(";base64,")
+        .filter(|(head, _)| head.starts_with("data:image/"))
+        .and_then(|(_, b64)| crate::account::b64_decode(b64))
+        .ok_or_else(|| "not a picture".to_string())?;
+    if bytes.len() > 512 * 1024 {
+        toast(&core, "toast.cover_error", json!({ "e": "too big" }), "info");
         return Ok(());
-    };
-    let pid = id.clone();
-    let saved = crate::rt::spawn_blocking(move || {
-        let img = image::open(&src).map_err(|e| e.to_string())?;
-        // Square crop from the centre, 512 px.
-        let side = img.width().min(img.height());
-        let img = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side).thumbnail(512, 512);
-        let dir = glyph_core::paths::data_dir().join("playlist-covers");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        // New name per change: the webview caches pictures by address.
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let path = dir.join(format!("{pid}-{stamp}.jpg"));
-        img.to_rgb8().save(&path).map_err(|e| e.to_string())?;
-        Ok::<_, String>(path)
-    })
-    .await
-    .map_err(err)?;
-    match saved {
-        Ok(path) => {
-            let old = core.st().library.playlist(&id).and_then(|p| p.cover.clone());
-            lib(&core, |l| l.set_playlist_cover(&id, Some(path.display().to_string())));
-            if let Some(old) = old {
-                let _ = std::fs::remove_file(old);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            toast(&core, "toast.cover_error", json!({ "e": e }), "info");
-            Ok(())
+    }
+    // Only real pictures, and never larger than the UI makes them.
+    match image::load_from_memory(&bytes) {
+        Ok(img) if img.width() <= 1024 && img.height() <= 1024 => {}
+        _ => {
+            toast(&core, "toast.cover_error", json!({ "e": "unreadable image" }), "info");
+            return Ok(());
         }
     }
+    let dir = glyph_core::paths::data_dir().join("playlist-covers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // New name per change: the webview caches pictures by address.
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("{id}-{stamp}.{}", glyph_core::sync::image_ext(&bytes)));
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    let old = core.st().library.playlist(&id).and_then(|p| p.cover.clone());
+    lib(&core, |l| l.set_playlist_cover(&id, Some(path.display().to_string())));
+    if let Some(old) = old {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
 }
 
 pub fn playlist_remove_cover(core: C, id: String) {

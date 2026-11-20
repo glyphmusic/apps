@@ -345,6 +345,7 @@ fn code(e: &anyhow::Error) -> String {
     }
     match server_error(e) {
         Some((404, _)) => "not_found".into(),
+        Some((_, "account_full")) => "account_full".into(),
         Some((413, _)) => "too_big".into(),
         Some((_, c))
             if matches!(c, "login_failed" | "device_limit" | "handle_taken" | "handle_invalid" | "handle_reserved" | "handle_cooldown" | "too_many_devices" | "not_found" | "rate_limited") =>
@@ -445,6 +446,7 @@ fn err_text(core: &Core, e: &anyhow::Error) -> String {
         "too_many_devices" => "account.err.too_many",
         "not_found" => "account.err.code",
         "rate_limited" => "account.err.slow",
+        "account_full" => "account.storage.full",
         _ => "account.err.generic",
     };
     tr(core, key)
@@ -467,7 +469,7 @@ fn b64_encode(d: &[u8]) -> String {
     out
 }
 
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0);
     for c in s.bytes() {
@@ -975,7 +977,7 @@ impl Acct {
                 let again = {
                     let mut g = self.g();
                     g.last_sync = Some(now_ms());
-                    g.sync_error = merge_error;
+                    g.sync_error = merge_error.or_else(|| round.account_full.then(|| tr(core, "account.storage.full")));
                     g.sync_pending = pending;
                     round.bootstrap || g.sync_gen != generation || pending > 0
                 };
@@ -1826,6 +1828,11 @@ pub async fn account_status(core: C<'_>) -> Res<Value> {
         glyph_core::privacy::Library::Encrypted => "encrypted",
         glyph_core::privacy::Library::Locked => "locked",
     };
+    // Older servers have no size limit (and no answer): null.
+    let storage = match signed.is_some() {
+        true => tokio::time::timeout(Duration::from_secs(6), b.account_storage()).await.ok().and_then(Result::ok),
+        false => None,
+    };
     let g = acc.g();
     Ok(json!({
         "available": available,
@@ -1842,6 +1849,7 @@ pub async fn account_status(core: C<'_>) -> Res<Value> {
         "sync_pending": g.sync_pending,
         "devices": devices,
         "devices_error": devices_error,
+        "storage": storage,
     }))
 }
 

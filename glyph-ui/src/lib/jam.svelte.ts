@@ -204,7 +204,8 @@ export async function start() {
   jam.busy = true; jam.error = null;
   const r = await run<JamSnapshot>("jam_start");
   jam.busy = false;
-  if (r) { apply(r); app.toast(t("jam.started")); }
+  // The Jam page itself shows that it runs: no toast on top.
+  if (r) apply(r);
 }
 
 export async function join(text: string) {
@@ -215,10 +216,8 @@ export async function join(text: string) {
   jam.busy = true; jam.error = null; jam.waiting = null;
   const r = await run<JamSnapshot>("jam_join", { code });
   jam.busy = false;
-  if (r) {
-    apply(r);
-    if (r.jam) app.toast(`${t("jam.joined_you")} · @${r.jam.host_handle}`);
-  }
+  // The Jam page shows whose Jam it is: no toast on top.
+  if (r) apply(r);
 }
 
 export async function stopWaiting() {
@@ -237,14 +236,21 @@ export async function leave() {
   if (backend().kind !== "tauri") app.toastInfo(t(j.host ? "jam.ended_you" : "jam.left"));
 }
 
+/** Copies the code or link; the button itself turns into "Copied" (no
+ *  toast on top). On phones the link opens the share menu instead. */
 export async function copy(link: boolean) {
   const j = jam.state;
   if (!j) return;
+  if (link && app.compact) {
+    app.shareSheet = { link: { url: j.link, title: t("jam.title"), sub: j.code, icon: "users" } };
+    return;
+  }
   const text = link ? j.link : `glyph:jam:${j.code}`;
-  try { await navigator.clipboard.writeText(text); } catch { /* no clipboard access */ }
+  try { await navigator.clipboard.writeText(text); } catch {
+    try { await backend().call("copy_text", { text }); } catch { /* no clipboard access */ }
+  }
   jam.copied = performance.now();
   jam.copiedKind = link ? "link" : "code";
-  app.toast(t(link ? "jam.link_copied" : "jam.copied"));
 }
 
 const after = async <T>(cmd: string, args: Record<string, unknown>) => { const r = await run<JamSnapshot>(cmd, args); if (r) apply(r); return r as T | undefined; };
