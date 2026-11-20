@@ -1415,6 +1415,13 @@ export class WebAccountManager {
         return full.tracks ?? [];
       },
 
+      profile_image: async (a) => {
+        const handle = String(a.handle ?? "").trim().replace(/^@/, "");
+        const sha = String(a.sha ?? "").trim();
+        if (!handle || !/^[0-9a-fA-F]{64}$/.test(sha)) return null;
+        return server.profileImageUrl(handle, sha);
+      },
+
       profile_follow: (a) => {
         const h = `@${String(a.handle ?? "").replace(/^@/, "")}`;
         const lib = this.host.getLibrary();

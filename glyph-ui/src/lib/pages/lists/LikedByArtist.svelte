@@ -121,12 +121,13 @@
   button.ch:hover, button.ch.on { color: var(--text); }
   .sarr { flex: none; fill: var(--accent); }
   .ch-num { flex: none; width: 26px; justify-content: center; text-align: center; }
-  .ch-title { flex: 1; min-width: 214px; }
+  .ch-title { flex: 1; min-width: 0; }
   .ch-al { flex: 0 1 200px; width: 200px; min-width: 0; }
   @container (max-width: 699px) { .ch-al { display: none; } }
   .ch-like { flex: none; width: 29px; }
   .ch-du { flex: none; width: 40px; padding-left: 6px; gap: 4px; }
   .ch-more { flex: none; width: 28px; }
+  @container (max-width: 360px) { .ch-num { width: 20px; } .ch-du { display: none; } }
   .rows { display: flex; flex-direction: column; }
   .rows > :global(*) { content-visibility: auto; contain-intrinsic-size: auto 56px; }
 </style>

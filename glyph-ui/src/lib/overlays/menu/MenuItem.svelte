@@ -14,15 +14,18 @@
   } = $props();
 </script>
 
-<div class="mi" class:danger class:open role="menuitem" tabindex="-1" onclick={onclick} onpointerenter={onenter}
-  onkeydown={(e) => e.key === "Enter" && onclick?.(e as unknown as MouseEvent)}>
-  <Icon name={icon} size={15} color={danger ? "hsla(0, 75%, 68%, .9)" : color} />
-  <span class="lb trunc">{label}</span>
-  {#if sub}<Icon name="chevron-right" size={14} color="rgba(255,255,255,.4)" />{/if}
+<div class="mi-wrap">
+  <div class="mi" class:danger class:open role="menuitem" tabindex="-1" onclick={onclick} onpointerenter={onenter}
+    onkeydown={(e) => e.key === "Enter" && onclick?.(e as unknown as MouseEvent)}>
+    <Icon name={icon} size={15} color={danger ? "hsla(0, 75%, 68%, .9)" : color} />
+    <span class="lb trunc">{label}</span>
+    {#if sub}<Icon name="chevron-right" size={14} color="rgba(255,255,255,.4)" />{/if}
+  </div>
   {#if children}{@render children()}{/if}
 </div>
 
 <style>
+  .mi-wrap { position: relative; flex: none; }
   .mi { position: relative; flex: none; display: flex; align-items: center; gap: var(--mi-gap, 10px); height: var(--mi-h, 32px); padding: 0 var(--mi-px, 10px); border-radius: var(--mi-r, 6px); cursor: pointer; font-size: var(--mi-fs, 13px); color: rgba(255, 255, 255, .88); transition: background-color .12s ease-out, color .12s ease-out, transform .16s var(--ease); }
   .mi:hover, .mi.open { background: rgba(255, 255, 255, .07); }
   .mi:active { background: rgba(255, 255, 255, .1); transform: scale(.975); }

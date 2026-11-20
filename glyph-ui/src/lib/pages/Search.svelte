@@ -16,6 +16,7 @@
   import EmptyState from "../components/EmptyState.svelte";
   import Decode from "../components/Decode.svelte";
   import VirtualRows from "../components/VirtualRows.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import TrackRow from "./search/TrackRow.svelte";
   import FollowButton from "./search/FollowButton.svelte";
   import ArtistName from "./search/ArtistName.svelte";
@@ -224,68 +225,79 @@
     {:else}
       <EmptyState icon="search" title={t("search.empty.title")} sub={t("search.empty.sub")} />
     {/if}
-  {:else if !any && s.loading}
-    <div class="skel">
-      {#if filter === "all"}<Skeletons kind="artists" n={2} prefix="search" />{/if}
-      <Skeletons kind="rows" n={7} prefix="search" />
-    </div>
-  {:else if !any && s.errors.length}
-    <EmptyState icon="refresh-cw" title={t("search.unavailable")} sub={t("search.retry_sources")} />
-  {:else if !any}
-    <EmptyState title={t("search.none.title")} sub={curly(query)} />
-  {:else if filter === "all" || filter === "tracks"}
-    <div class="list">
-      {#each artistRows as a, i (a.name)}
-        {@const tr = artistTrack(a)}
-        <div class="arow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
-          <Cover track={tr} size={48} radius={24} />
-          <span class="an"><ArtistName name={a.name} badge={15}><Decode text={a.name} key="search:artist:{a.name}" /></ArtistName></span>
-          <Chip kind="kind">{t("search.kind.artist")}</Chip>
-          <FollowButton name={a.name} />
+  {:else}
+    <SkeletonSwap loading={!any && s.loading}>
+      {#snippet skeleton()}
+        <div class="skel">
+          {#if filter === "all"}
+            <Skeletons kind="artists" n={2} prefix="search" />
+            <Skeletons kind="rows" n={7} prefix="search" />
+          {:else if filter === "artists"}
+            <Skeletons kind="artists" n={6} prefix="search" />
+          {:else}
+            <Skeletons kind="rows" n={7} prefix="search" />
+          {/if}
         </div>
-      {/each}
-
-      {#if s.lyric_hits.length}
-        {@const hits = s.lyric_hits.map((h) => h.track)}
-        <div class="lyr">
-          <div class="lh"><Icon name="mic-vocal" size={15} color="var(--dim)" /><span>{t("search.lyrics.title")}</span></div>
-          {#each s.lyric_hits as h, i (i)}
-            <div class="r"><TrackRow tracks={hits} index={i} kind="search" lyric={h.line} chip={t("search.lyrics.in")} /></div>
+      {/snippet}
+      {#if !any && s.errors.length}
+        <EmptyState icon="refresh-cw" title={t("search.unavailable")} sub={t("search.retry_sources")} />
+      {:else if !any}
+        <EmptyState title={t("search.none.title")} sub={curly(query)} />
+      {:else if filter === "all" || filter === "tracks"}
+        <div class="list">
+          {#each artistRows as a, i (a.name)}
+            {@const tr = artistTrack(a)}
+            <div class="arow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
+              <Cover track={tr} size={48} radius={24} />
+              <span class="an"><ArtistName name={a.name} badge={15}><Decode text={a.name} key="search:artist:{a.name}" /></ArtistName></span>
+              <Chip kind="kind">{t("search.kind.artist")}</Chip>
+              <FollowButton name={a.name} />
+            </div>
           {/each}
+
+          {#if s.lyric_hits.length}
+            {@const hits = s.lyric_hits.map((h) => h.track)}
+            <div class="lyr">
+              <div class="lh"><Icon name="mic-vocal" size={15} color="var(--dim)" /><span>{t("search.lyrics.title")}</span></div>
+              {#each s.lyric_hits as h, i (i)}
+                <div class="r"><TrackRow tracks={hits} index={i} kind="search" lyric={h.line} chip={t("search.lyrics.in")} /></div>
+              {/each}
+            </div>
+          {/if}
+
+          <VirtualRows count={s.tracks.length} pitch={58}>
+            {#snippet row(i)}<TrackRow tracks={s.tracks} index={i} kind="search" />{/snippet}
+          </VirtualRows>
+        </div>
+      {:else if filter === "albums"}
+        <div class="list">
+          <VirtualRows count={s.albums.length} pitch={58}>
+            {#snippet row(i)}
+              {@const r = s.albums[i]}
+              <div class="grow" onclick={() => app.openAlbum(r.title, r.artist, [], asTrack(r), { kind: r.kind, tracks: r.tracks })} oncontextmenu={albumMenu(r)} onkeydown={(e) => e.key === "Enter" && app.openAlbum(r.title, r.artist, [], asTrack(r), { kind: r.kind, tracks: r.tracks })} role="button" tabindex="-1">
+                <Cover track={asTrack(r)} size={44} radius={6} />
+                <div class="gt"><div class="g1 trunc">{r.title}</div><div class="g2 trunc">{r.artist}</div></div>
+                {#if r.tracks}<div class="gn">{tf("common.n_songs", { n: r.tracks })}</div>{/if}
+              </div>
+            {/snippet}
+          </VirtualRows>
+        </div>
+      {:else}
+        <div class="list">
+          <VirtualRows count={s.artists.length} pitch={58}>
+            {#snippet row(i)}
+              {@const a = s.artists[i]}
+              {@const n = songsOf(a.name)}
+              <div class="grow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
+                <Cover track={artistTrack(a)} size={44} radius={22} />
+                <div class="gt"><div class="g1 trunc">{a.name}</div></div>
+                {#if n}<div class="gn">{tf("common.n_songs", { n })}</div>{/if}
+              </div>
+            {/snippet}
+          </VirtualRows>
         </div>
       {/if}
-
-      <VirtualRows count={s.tracks.length} pitch={58}>
-        {#snippet row(i)}<TrackRow tracks={s.tracks} index={i} kind="search" />{/snippet}
-      </VirtualRows>
-    </div>
-  {:else if filter === "albums"}
-    <div class="list">
-      <VirtualRows count={s.albums.length} pitch={58}>
-        {#snippet row(i)}
-          {@const r = s.albums[i]}
-          <div class="grow" onclick={() => app.openAlbum(r.title, r.artist, [], asTrack(r))} oncontextmenu={albumMenu(r)} onkeydown={(e) => e.key === "Enter" && app.openAlbum(r.title, r.artist, [], asTrack(r))} role="button" tabindex="-1">
-            <Cover track={asTrack(r)} size={44} radius={6} />
-            <div class="gt"><div class="g1 trunc">{r.title}</div><div class="g2 trunc">{r.artist}</div></div>
-            {#if r.tracks}<div class="gn">{tf("common.n_songs", { n: r.tracks })}</div>{/if}
-          </div>
-        {/snippet}
-      </VirtualRows>
-    </div>
-  {:else}
-    <div class="list">
-      <VirtualRows count={s.artists.length} pitch={58}>
-        {#snippet row(i)}
-          {@const a = s.artists[i]}
-          {@const n = songsOf(a.name)}
-          <div class="grow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
-            <Cover track={artistTrack(a)} size={44} radius={22} />
-            <div class="gt"><div class="g1 trunc">{a.name}</div></div>
-            {#if n}<div class="gn">{tf("common.n_songs", { n })}</div>{/if}
-          </div>
-        {/snippet}
-      </VirtualRows>
-    </div>
+    </SkeletonSwap>
   {/if}
 
   <div class="foot">

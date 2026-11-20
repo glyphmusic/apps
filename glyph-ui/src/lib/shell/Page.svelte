@@ -3,6 +3,7 @@
   // the new page in; the scroll frame fades out at its edges (fade_edges).
   import { fade } from "svelte/transition";
   import { app } from "../state.svelte";
+  import { listId } from "../api/types";
   import { t } from "../i18n.svelte";
   import { fadeEdges, pageChrome } from "../ui.svelte";
   import ErrorCard from "../components/ErrorCard.svelte";
@@ -21,7 +22,7 @@
   import NowPlaying from "../pages/NowPlaying.svelte";
 
   const pages = { home: Home, search: Search, library: Library, list: ListView, artist: Artist, profile: Profile, section: Section, releases: Releases, similar: Similar, stats: Stats, local: Local, now_playing: NowPlaying, server: Server };
-  const key = $derived(JSON.stringify([app.view, app.openList && { ...app.openList, tracks: undefined }, app.openArtist, app.openProfile, app.section?.title]));
+  const key = $derived(JSON.stringify([app.view, app.openList ? listId(app.openList) : null, app.openArtist, app.openProfile, app.section?.title]));
   const Current = $derived(pages[app.view]);
   let scroller: HTMLDivElement | undefined = $state();
   $effect(() => { void key; void app.libraryTab; scroller?.scrollTo(0, 0); });

@@ -254,6 +254,7 @@ fn main() {
             tauri_commands::account_unlock_keys,
             tauri_commands::profile,
             tauri_commands::profile_follow,
+            tauri_commands::profile_image,
             tauri_commands::profile_pick_image,
             tauri_commands::profile_playlist,
             tauri_commands::profile_remove_image,

@@ -13,7 +13,7 @@
     const kind = t(`album.kind.${release.kind}`);
     return (release.date ? `${kind} · ${release.date}` : kind).toUpperCase();
   });
-  const open = () => app.openAlbum(release.title, release.artist, [], seed);
+  const open = () => app.openAlbum(release.title, release.artist, [], seed, { kind: release.kind, tracks: release.tracks });
   function menu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
     app.openCtx({ x: e.clientX, y: e.clientY, track: null, list: { kind: "album", title: release.title, artist: release.artist, tracks: [seed] } });

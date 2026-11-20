@@ -66,9 +66,9 @@
   import { t, tf } from "../i18n.svelte";
   import { backend } from "../api/backend";
   let {
-    tracks, index, from = null, album = true, context, selected = false, draggable = false, ondragstart, number, picking = false, picked = false,
+    tracks, index, fromIndex, from = null, album = true, context, selected = false, draggable = false, ondragstart, number, picking = false, picked = false,
   }: {
-    tracks: Track[]; index: number; from?: ListKey | null; album?: boolean; context?: string; selected?: boolean;
+    tracks: Track[]; index: number; fromIndex?: number; from?: ListKey | null; album?: boolean; context?: string; selected?: boolean;
     draggable?: boolean; ondragstart?: (e: PointerEvent) => void; number?: number;
     /** Select mode: a click picks the row instead of playing it. */
     picking?: boolean; picked?: boolean;
@@ -106,7 +106,7 @@
   }
   function menu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
-    app.openCtx({ x: e.clientX, y: e.clientY, track: tr, from: from ? { list: from, index } : null });
+    app.openCtx({ x: e.clientX, y: e.clientY, track: tr, from: from ? { list: from, index: fromIndex ?? index } : null });
   }
 </script>
 
@@ -138,7 +138,7 @@
 </div>
 
 <style>
-  .row { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; }
+  .row { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; min-width: 0; }
   .row:hover, .row.menu { background: rgba(255, 255, 255, .05); transition-duration: .12s; }
   .row:not(:hover) { transition-duration: .24s; }
   .row.sel { background: rgba(255, 255, 255, .1); }
@@ -151,7 +151,7 @@
   .p { opacity: 0; }
   .row:hover .n { opacity: 0; }
   .row:hover .p { opacity: 1; }
-  .tx { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 2px; }
+  .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .tl { font-size: var(--md); color: var(--text); min-width: 0; }
   .tl.on { color: var(--accent); font-weight: 600; }
   .ar { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--sm); color: var(--dim); }
@@ -165,4 +165,5 @@
   .du { flex: none; width: 40px; font-size: var(--sm); color: var(--faint); }
   .more { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; }
   .more:hover { background: rgba(255, 255, 255, .08); }
+  @container (max-width: 360px) { .num { width: 20px; } .du { display: none; } }
 </style>

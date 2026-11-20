@@ -5,6 +5,7 @@
   // while they load, else the empty state.
   import SectionTitle from "../components/SectionTitle.svelte";
   import EmptyState from "../components/EmptyState.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import BackPill from "./lists/BackPill.svelte";
   import ArtistCard from "./lists/ArtistCard.svelte";
   import SkeletonArtistRows from "./lists/SkeletonArtistRows.svelte";
@@ -20,13 +21,16 @@
 <div class="sv">
   <BackPill />
   <SectionTitle heading title="{name} · {t('artist.similar')}" />
-  {#if similar.length}
-    <div class="grid">{#each similar as n (n)}<ArtistCard name={n} />{/each}</div>
-  {:else if loading}
-    <SkeletonArtistRows prefix="similar" n={2} />
-  {:else}
-    <EmptyState title={t("artist.similar")} />
-  {/if}
+  <SkeletonSwap loading={!similar.length && loading}>
+    {#snippet skeleton()}
+      <SkeletonArtistRows prefix="similar" n={2} />
+    {/snippet}
+    {#if similar.length}
+      <div class="grid">{#each similar as n (n)}<ArtistCard name={n} />{/each}</div>
+    {:else}
+      <EmptyState title={t("artist.similar")} />
+    {/if}
+  </SkeletonSwap>
 </div>
 
 <style>

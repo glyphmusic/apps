@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.14 - 2026-11-20
+
+### Added
+
+- **More tools in the Server dashboard**: view and lift active API blocks (abuse blocks, rate limits, YouTube daily limits, login lockouts) with remaining time, sign out individual devices, see each device's app version and device-ban status, and reset an account's profile picture or banner.
+
+### Changed
+
+- **Smoother loading transitions**: pages across desktop, mobile and web (Home, Search, Artist, Releases, Similar, Stats, Profile, Lists, Server and Queue) now crossfade smoothly from loading skeletons to loaded content without blank flashes or layout jumps (instant in performance mode / reduced motion).
+
 ## 0.12.13 - 2026-11-20
 
 ### Added

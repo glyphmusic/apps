@@ -9,6 +9,7 @@
   // explicit ratings via SongTitle, and the radio toggle matches Settings rows.
   import Cover from "../components/Cover.svelte";
   import IconButton from "../components/IconButton.svelte";
+  import ToggleButton from "../components/ToggleButton.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import SongTitle from "../components/SongTitle.svelte";
   import Tog from "../settings/Tog.svelte";
@@ -145,6 +146,7 @@
 <div class="qp" bind:this={panelEl}>
   <div class="head">
     <div class="ttl">{t("queue.title")}</div>
+    <ToggleButton name="shuffle" size={15} on={app.player.shuffle} accent="var(--accent)" onclick={() => app.toggleShuffle()} />
     <IconButton name="x" size={16} onclick={() => (app.showQueue = false)} />
   </div>
 

@@ -7,6 +7,7 @@
   // /server/versions); back returns to the overview. On phones the role and
   // refresh sit in the top bar next to back (compact/Compact.svelte).
   // Everything goes through the server's admin API with the app sign-in.
+  import { backend } from "../api/backend";
   import { app } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
   import Button from "../components/Button.svelte";
@@ -27,7 +28,7 @@
   import { admin, adminCall, type AdminSub } from "../admin/admin.svelte";
   import {
     fmtBytes, OTHER, SERIES,
-    type AdminAccount, type AdminAccountRow, type AppRelease, type Ban, type DayStats, type Limits, type ServerStats, type Slice,
+    type ActiveBlock, type AdminAccount, type AdminAccountRow, type AdminDevice, type AppRelease, type Ban, type BlockReason, type DayStats, type Limits, type ServerStats, type Slice,
   } from "../admin/api";
 
   type Metric = "accounts" | "active" | "space";
@@ -39,6 +40,7 @@
   let limits = $state<Limits | null>(null);
   let draft = $state<Limits | null>(null);
   let bans = $state<Ban[]>([]);
+  let blocks = $state<ActiveBlock[]>([]);
   let releases = $state<AppRelease[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -47,17 +49,30 @@
   let open = $state<string | null>(null);
   let detail = $state<AdminAccount | null>(null);
   let busy = $state(false);
+  let imgUrls = $state<Record<string, string | null>>({});
+  const imgLoading = new Set<string>();
+
+  function loadImage(handle: string, sha?: string | null) {
+    if (!sha || sha in imgUrls || imgLoading.has(sha)) return;
+    imgLoading.add(sha);
+    backend()
+      .call<string | null>("profile_image", { handle, sha })
+      .then((url) => { imgUrls[sha] = url || null; })
+      .catch(() => { imgUrls[sha] = null; })
+      .finally(() => { imgLoading.delete(sha); });
+  }
 
   async function load() {
     loading = true;
     error = null;
     try {
-      const [s, h, a, l, b, r] = await Promise.all([
+      const [s, h, a, l, b, bl, r] = await Promise.all([
         adminCall<ServerStats>("GET", "stats"),
         adminCall<{ days: DayStats[] }>("GET", "history").catch(() => ({ days: [] })),
         adminCall<{ accounts: AdminAccountRow[]; total: number }>("GET", "accounts?limit=500").catch(() => ({ accounts: [], total: 0 })),
         adminCall<Limits>("GET", "limits").catch(() => null),
         adminCall<{ bans: Ban[] }>("GET", "bans").catch(() => ({ bans: [] })),
+        adminCall<{ blocks: ActiveBlock[] }>("GET", "blocks").catch(() => ({ blocks: [] })),
         adminCall<{ releases: AppRelease[] }>("GET", "app-releases").catch(() => ({ releases: [] })),
       ]);
       stats = s;
@@ -67,6 +82,7 @@
       limits = l;
       draft = l ? { ...l } : null;
       bans = b.bans ?? [];
+      blocks = bl.blocks ?? [];
       releases = r.releases ?? [];
     } catch (e) {
       error = String((e as Error).message ?? e);
@@ -163,6 +179,17 @@
     return q ? people.filter((p) => p.handle.toLowerCase().includes(q)) : people;
   });
   const capBytes = $derived((limits?.account_max_mb ?? 0) * 1e6);
+  $effect(() => {
+    const list = sub === "people" ? shown : recent;
+    for (const p of list) {
+      if (p.avatar) loadImage(p.handle, p.avatar);
+    }
+  });
+  $effect(() => {
+    if (!detail) return;
+    if (detail.avatar) loadImage(detail.handle, detail.avatar);
+    if (detail.banner) loadImage(detail.handle, detail.banner);
+  });
   async function toggle(p: AdminAccountRow) {
     if (open === p.handle) { open = null; detail = null; return; }
     open = p.handle;
@@ -171,13 +198,47 @@
   }
   function updateRow(a: AdminAccount) {
     detail = a;
-    people = people.map((p) => (p.id === a.id ? { ...p, banned: a.banned, devices: a.devices.length, device_limit: a.device_limit, device_limit_set: a.device_limit_set } : p));
+    people = people.map((p) => (p.id === a.id ? {
+      ...p, banned: a.banned, devices: a.devices.length, device_limit: a.device_limit, device_limit_set: a.device_limit_set,
+      avatar: a.avatar ?? null, banner: a.banner ?? null,
+    } : p));
+  }
+  function resetProfile(p: AdminAccountRow, which: { avatar?: boolean; banner?: boolean }) {
+    const isBanner = !!which.banner && !which.avatar;
+    app.ask({
+      title: tf(isBanner ? "admin.profile.reset_banner.title" : "admin.profile.reset_avatar.title", { handle: p.handle }),
+      body: t(isBanner ? "admin.profile.reset_banner.body" : "admin.profile.reset_avatar.body"),
+      ok: t("admin.profile.reset.ok"),
+      danger: true,
+      run: async () => {
+        const a = await act(
+          () => adminCall<AdminAccount>("POST", `accounts/${encodeURIComponent(p.handle)}/profile/reset`, { avatar: !!which.avatar, banner: !!which.banner }),
+          t("admin.done"),
+        );
+        if (a) {
+          updateRow(a);
+          if (p.handle === app.account?.handle) void app.ensureOwnProfile(true);
+        }
+      },
+    });
   }
   function signOut(p: AdminAccountRow) {
     app.ask({
       title: tf("admin.signout.title", { handle: p.handle }), body: t("admin.signout.body"), ok: t("admin.signout.ok"), danger: true,
       run: async () => {
         const a = await act(() => adminCall<AdminAccount>("POST", `accounts/${encodeURIComponent(p.handle)}/revoke`, {}), t("admin.done"));
+        if (a) updateRow(a);
+      },
+    });
+  }
+  function signOutDevice(p: AdminAccountRow, d: AdminDevice) {
+    app.ask({
+      title: tf("admin.signout.device.title", { device: d.name }),
+      body: tf("admin.signout.device.body", { handle: p.handle }),
+      ok: t("admin.signout.ok"),
+      danger: true,
+      run: async () => {
+        const a = await act(() => adminCall<AdminAccount>("POST", `accounts/${encodeURIComponent(p.handle)}/revoke`, { device: d.id }), t("admin.done"));
         if (a) updateRow(a);
       },
     });
@@ -263,6 +324,27 @@
   }
 
   const initial = (h: string) => h.slice(0, 1).toUpperCase();
+
+  // ---- active API blocks & rate limits
+  async function clearBlock(id: string) {
+    const r = await act(() => adminCall<{ blocks: ActiveBlock[] }>("POST", "blocks/clear", { id }), t("admin.done"));
+    if (r) blocks = r.blocks ?? [];
+  }
+  function blockLabel(reason: BlockReason): string {
+    if (reason === "abuse_block") return t("admin.blocks.abuse");
+    if (reason === "rate_limited") return t("admin.blocks.rate");
+    if (reason === "youtube_limit") return t("admin.blocks.youtube");
+    return t("admin.blocks.login");
+  }
+  function fmtLeft(expiresAt: number): string {
+    const s = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000));
+    if (s < 90) return tf("admin.blocks.left_s", { n: s });
+    const m = Math.ceil(s / 60);
+    if (m < 120) return tf("admin.blocks.left_m", { n: m });
+    return tf("admin.blocks.left_h", { n: Math.ceil(m / 60) });
+  }
+  const personBlocks = (p: AdminAccountRow) => blocks.filter((b) => b.user_id === p.id || b.handle === p.handle);
+  const hasDeviceBan = (p: AdminAccountRow) => !p.banned && bans.some((b) => b.origin === p.id && b.kind !== "account");
 </script>
 
 {#snippet more(label: string, to: AdminSub)}
@@ -271,14 +353,25 @@
 
 {#snippet person(p: AdminAccountRow)}
   {@const share = capBytes > 0 ? Math.min(1, p.sync_bytes / capBytes) : 0}
+  {@const avSrc = p.avatar ? imgUrls[p.avatar] : null}
+  {@const pBlocks = personBlocks(p)}
+  {@const topBlock = pBlocks[0] ?? null}
   <button class="prow" class:open={open === p.handle} onclick={() => toggle(p)}>
-    <span class="av" class:adm={p.admin}>{initial(p.handle)}</span>
+    <span class="av" class:adm={p.admin && !avSrc} class:pic={!!avSrc}>
+      {#if avSrc}
+        <img src={avSrc} alt="" draggable="false" onerror={() => { if (p.avatar) imgUrls[p.avatar] = null; }} />
+      {:else}
+        {initial(p.handle)}
+      {/if}
+    </span>
     <span class="who">
       <span class="hd trunc">@{p.handle}</span>
       <span class="sub trunc">{p.last_seen ? whenMs(p.last_seen, t, tf) : t("admin.people.never")} · {tf("admin.people.devices", { n: p.devices, max: p.device_limit })}</span>
     </span>
     {#if p.admin}<span class="badge">{t("admin.badge.admin")}</span>{/if}
     {#if p.banned}<span class="badge bad">{t("admin.badge.banned")}</span>{/if}
+    {#if hasDeviceBan(p)}<span class="badge bad">{t("admin.badge.device_banned")}</span>{/if}
+    {#if topBlock}<span class="badge" class:bad={topBlock.reason === "abuse_block" || topBlock.reason === "login_lockout"} class:warn={topBlock.reason === "rate_limited" || topBlock.reason === "youtube_limit"}>{blockLabel(topBlock.reason)}</span>{/if}
     {#if !app.compact}<span class="track"><span class="fill" class:full={share >= 0.9} style:width="{share * 100}%"></span></span>{/if}
     <span class="sz mono">{fmtBytes(p.sync_bytes)}</span>
     <span class="chev"><Icon name="chevron-down" size={14} color="var(--faint)" /></span>
@@ -289,8 +382,28 @@
         <Skeleton w="100%" h={60} radius={8} id="admin-d" />
       {:else}
         {@const may = !p.admin || !!admin.me?.owner || p.handle === admin.me?.handle}
+        {@const banSrc = detail.banner ? imgUrls[detail.banner] : null}
+        {#if banSrc}
+          <div class="pban">
+            <img src={banSrc} alt="" draggable="false" onerror={() => { if (detail?.banner) imgUrls[detail.banner] = null; }} />
+          </div>
+        {/if}
+        {#each pBlocks as blk (blk.id)}
+          <div class="blk">
+            <Icon name="circle-alert" size={14} color={blk.reason === "abuse_block" || blk.reason === "login_lockout" ? "var(--danger)" : "#e5a93b"} />
+            <span class="badge sm" class:bad={blk.reason === "abuse_block" || blk.reason === "login_lockout"} class:warn={blk.reason === "rate_limited" || blk.reason === "youtube_limit"}>{blockLabel(blk.reason)}</span>
+            <span class="dm">{#if blk.scope}{blk.scope} · {/if}{blk.hits}× · {fmtLeft(blk.expires_at)}</span>
+            {#if blk.clearable && may}<Button kind="text" onclick={() => clearBlock(blk.id)} disabled={busy}>{t("admin.blocks.clear")}</Button>{/if}
+          </div>
+        {/each}
         {#each detail.devices as d (d.id)}
-          <div class="dev"><Icon name="smartphone" size={14} color="var(--dim)" /><span class="dn trunc">{d.name}</span><span class="dm">{d.platform} · {whenMs(d.last_seen, t, tf)}</span></div>
+          <div class="dev">
+            <Icon name="smartphone" size={14} color="var(--dim)" />
+            <span class="dn trunc">{d.name}</span>
+            {#if d.app_version}<span class="badge sm mono">v{d.app_version}</span>{/if}
+            <span class="dm">{d.platform} · {whenMs(d.last_seen, t, tf)}</span>
+            {#if may}<IconButton name="log-out" size={14} box={26} label={t("admin.signout.ok")} disabled={busy} onclick={() => signOutDevice(p, d)} />{/if}
+          </div>
         {:else}
           <div class="na">{t("admin.people.no_devices")}</div>
         {/each}
@@ -304,6 +417,12 @@
           </div>
           <div class="acts">
             <Button icon="log-out" onclick={() => signOut(p)} disabled={busy || !detail.devices.length}>{t("admin.signout.ok")}</Button>
+            {#if detail.avatar}
+              <Button icon="rotate-ccw" onclick={() => resetProfile(p, { avatar: true })} disabled={busy}>{t("admin.profile.reset_avatar")}</Button>
+            {/if}
+            {#if detail.banner}
+              <Button icon="rotate-ccw" onclick={() => resetProfile(p, { banner: true })} disabled={busy}>{t("admin.profile.reset_banner")}</Button>
+            {/if}
             {#if detail.banned}
               <Button icon="ban" onclick={() => unban(p.handle, p.id)} disabled={busy}>{t("admin.unban")}</Button>
             {:else}
@@ -331,6 +450,22 @@
         </span>
         {#if set}<Button kind="text" onclick={() => pick(ch, null)} disabled={busy}>{t("admin.versions.unpin")}</Button>{/if}
       </div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet blocksCard(max: number)}
+  <div class="card cbox">
+    <div class="ch"><SectionTitle icon="circle-alert" title={tf("admin.blocks", { n: blocks.length })} /></div>
+    {#each blocks.slice(0, max) as b (b.id)}
+      <div class="ban">
+        <span class="bl trunc">{b.label}</span>
+        <span class="badge sm" class:bad={b.reason === "abuse_block" || b.reason === "login_lockout"} class:warn={b.reason === "rate_limited" || b.reason === "youtube_limit"}>{blockLabel(b.reason)}</span>
+        <span class="bm">{#if b.scope}{b.scope} · {/if}{b.hits}× · {fmtLeft(b.expires_at)}</span>
+        {#if b.clearable}<Button kind="text" onclick={() => clearBlock(b.id)} disabled={busy}>{t("admin.blocks.clear")}</Button>{/if}
+      </div>
+    {:else}
+      <div class="na">{t("admin.blocks.none")}</div>
     {/each}
   </div>
 {/snippet}
@@ -429,6 +564,7 @@
         <div class="na pad">{query ? t("admin.people.no_match") : t("admin.people.none")}</div>
       {/each}
     </div>
+    {@render blocksCard(100)}
     {@render bansCard(100)}
   {:else if stats && sub === "settings"}
     <!-- ---- all settings -->
@@ -542,9 +678,11 @@
     </section>
 
     <div class="two">
-      {@render cacheCard()}
+      {@render blocksCard(5)}
       {@render bansCard(3)}
     </div>
+
+    {@render cacheCard()}
 
     <div class="note">{admin.me?.owner ? t("admin.note.owner") : t("admin.note.admin")}</div>
   {/if}
@@ -578,14 +716,20 @@
   .list { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
   .prow { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 10px; border-radius: 8px; text-align: left; transition: background-color .12s ease-out; }
   .prow:hover, .prow.open { background: rgba(255, 255, 255, .05); }
-  .av { flex: none; width: 32px; height: 32px; border-radius: 50%; background: rgba(255, 255, 255, .08); display: grid; place-items: center; font-size: var(--sm); font-weight: 600; color: var(--dim); }
+  .av { flex: none; width: 32px; height: 32px; border-radius: 50%; background: rgba(255, 255, 255, .08); display: grid; place-items: center; font-size: var(--sm); font-weight: 600; color: var(--dim); overflow: hidden; }
   .av.adm { background: var(--accent); color: #000; }
+  .av.pic { background: rgba(255, 255, 255, .06); }
+  .av img { width: 100%; height: 100%; object-fit: cover; display: block; animation: fade-in .25s var(--ease) both; }
+  .pban { width: 100%; height: 76px; border-radius: 6px; overflow: hidden; background: rgba(255, 255, 255, .05); }
+  .pban img { width: 100%; height: 100%; object-fit: cover; display: block; animation: fade-in .25s var(--ease) both; }
   .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .hd { font-size: var(--md); font-weight: 500; color: var(--text); }
   .sub { font-size: var(--xs); color: var(--faint); }
   .badge { flex: none; height: 20px; padding: 0 8px; border-radius: 10px; background: rgba(255, 255, 255, .08); font-size: 11px; font-weight: 600; color: var(--dim); display: inline-flex; align-items: center; white-space: nowrap; }
   .badge.sm { height: 18px; padding: 0 7px; font-size: 10.5px; }
   .badge.bad { color: var(--danger); }
+  .badge.warn { color: #e5a93b; }
+  .blk { display: flex; align-items: center; gap: 8px; font-size: var(--sm); min-width: 0; }
   .track { flex: none; width: 160px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .07); overflow: hidden; }
   .fill { display: block; height: 100%; border-radius: 2px; background: var(--accent); transform-origin: left; animation: fillin .35s var(--ease) both; }
   .fill.full { background: var(--danger); }

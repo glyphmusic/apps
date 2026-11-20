@@ -3,7 +3,7 @@
 // updates, logs and handing out the role stay with the owner's password.
 // Same list as `admin_path_ok` in crates/glyph-app/src/account.rs.
 
-const ROOTS = ["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "cache/stats", "cache/clear", "companion/status", "app-releases"];
+const ROOTS = ["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "cache/stats", "cache/clear", "companion/status", "app-releases"];
 
 /** Admin API paths the dashboard may call. */
 export function adminPathOk(path: string): boolean {
@@ -39,13 +39,15 @@ export interface DayStats { day: string; accounts: number; devices: number; acti
 export interface AdminAccountRow {
   id: string; handle: string; created_at: number; device_limit: number; device_limit_set?: number | null;
   devices: number; last_seen?: number | null; sync_bytes: number; banned: boolean; admin: boolean;
+  avatar?: string | null; banner?: string | null;
 }
 
-export interface AdminDevice { id: string; name: string; platform: string; last_seen: number }
+export interface AdminDevice { id: string; name: string; platform: string; last_seen: number; app_version?: string | null }
 
 export interface AdminAccount {
   id: string; handle: string; created_at: number; device_limit: number; device_limit_set?: number | null;
   devices: AdminDevice[]; used_bytes: number; banned: boolean; admin: boolean;
+  avatar?: string | null; banner?: string | null;
 }
 
 export interface Limits {
@@ -60,7 +62,23 @@ export interface AppRelease { version: string; prerelease: boolean; published_at
 
 export interface Ban {
   id: string; kind: string; value: string; label?: string | null; reason?: string | null;
-  created_at: number; expires_at?: number | null;
+  created_at: number; expires_at?: number | null; origin?: string | null;
+}
+
+export type BlockReason = "abuse_block" | "rate_limited" | "youtube_limit" | "login_lockout";
+
+export interface ActiveBlock {
+  id: string;
+  reason: BlockReason;
+  kind: string;
+  label: string;
+  handle?: string | null;
+  user_id?: string | null;
+  scope?: string | null;
+  created_at: number;
+  expires_at: number;
+  hits: number;
+  clearable: boolean;
 }
 
 /** One part of a ring chart. */

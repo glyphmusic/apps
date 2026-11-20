@@ -7,6 +7,7 @@
   import { fade } from "svelte/transition";
   import { onMount, untrack } from "svelte";
   import { app } from "../state.svelte";
+  import { listId } from "../api/types";
   import { onWeb } from "../web";
   import { jam } from "../jam.svelte";
   import { press } from "../ui.svelte";
@@ -57,7 +58,7 @@
   let barBgK = $state(0);
   let titleK = $state(0);
   let playK = $state(0);
-  const viewKey = $derived(app.view + JSON.stringify(app.openList && { ...app.openList, tracks: undefined }) + app.openArtist + (app.section?.title ?? ""));
+  const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.section?.title ?? ""));
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
   function syncBar(top = mainEl?.scrollTop ?? 0) {

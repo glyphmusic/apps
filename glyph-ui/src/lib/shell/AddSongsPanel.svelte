@@ -20,6 +20,7 @@
   import EmptyState from "../components/EmptyState.svelte";
   import Segmented from "../settings/Segmented.svelte";
   import FadeScroll from "./panel/FadeScroll.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Skeletons from "../pages/search/Skeletons.svelte";
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
@@ -162,22 +163,27 @@
                 {/if}
               </div>
             </div>
-          {:else if !songs.length && loading}
-            <div class="px"><Skeletons kind="rows" n={8} prefix="add" /></div>
-          {:else if !songs.length}
-            <div class="px"><EmptyState title={t(q ? "search.none.title" : "add.empty")} /></div>
           {:else}
-            {#each songs as tr, i (`${tr.source}:${tr.id}:${i}`)}
-              {@const added = have.has(`${tr.source}:${tr.id}`)}
-              <div class="row" onclick={() => app.play([tr], 0)} onkeydown={(e) => e.key === "Enter" && app.play([tr], 0)} role="row" tabindex="-1">
-                <Cover track={tr} size={40} radius={4} />
-                <span class="tx">
-                  <span class="t"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
-                  <span class="ar trunc">{tr.artist}</span>
-                </span>
-                <ToggleButton name="circle-plus" onName="circle-check" size={18} on={added} accent="var(--accent)" notip onclick={() => toggle(tr)} />
-              </div>
-            {/each}
+            <SkeletonSwap loading={!songs.length && loading}>
+              {#snippet skeleton()}
+                <div class="px"><Skeletons kind="rows" n={8} prefix="add" /></div>
+              {/snippet}
+              {#if !songs.length}
+                <div class="px"><EmptyState title={t(q ? "search.none.title" : "add.empty")} /></div>
+              {:else}
+                {#each songs as tr, i (`${tr.source}:${tr.id}:${i}`)}
+                  {@const added = have.has(`${tr.source}:${tr.id}`)}
+                  <div class="row" onclick={() => app.play([tr], 0)} onkeydown={(e) => e.key === "Enter" && app.play([tr], 0)} role="row" tabindex="-1">
+                    <Cover track={tr} size={40} radius={4} />
+                    <span class="tx">
+                      <span class="t"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
+                      <span class="ar trunc">{tr.artist}</span>
+                    </span>
+                    <ToggleButton name="circle-plus" onName="circle-check" size={18} on={added} accent="var(--accent)" notip onclick={() => toggle(tr)} />
+                  </div>
+                {/each}
+              {/if}
+            </SkeletonSwap>
           {/if}
         </div>
       {/key}

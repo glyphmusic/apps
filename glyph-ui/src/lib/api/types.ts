@@ -82,11 +82,13 @@ export function primaryArtist(s: string): string {
   return splitArtists(s)[0] ?? s;
 }
 
+export type ReleaseKind = "album" | "ep" | "single" | "compilation";
+
 export type ListKey =
   | { kind: "liked" }
   | { kind: "recent" }
   | { kind: "playlist"; id: string }
-  | { kind: "album"; title: string; artist: string; tracks: Track[]; cover?: Track | null; loading?: boolean }
+  | { kind: "album"; title: string; artist: string; tracks: Track[]; cover?: Track | null; loading?: boolean; releaseKind?: ReleaseKind; expectedTracks?: number | null }
   | { kind: "artist_liked"; artist: string }
   | { kind: "downloads" };
 
@@ -222,7 +224,7 @@ export interface Release {
   id: string;
   title: string;
   artist: string;
-  kind: "album" | "ep" | "single" | "compilation";
+  kind: ReleaseKind;
   year?: number | null;
   date?: string | null;
   cover_url?: string | null;

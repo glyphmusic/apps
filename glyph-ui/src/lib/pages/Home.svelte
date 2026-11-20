@@ -6,6 +6,7 @@
   // yet: empty state. While the feeds load: ASCII skeleton cards.
   import SectionTitle from "../components/SectionTitle.svelte";
   import EmptyState from "../components/EmptyState.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import HomeCards from "./home/HomeCards.svelte";
   import HomeSection from "./home/HomeSection.svelte";
   import HScroll from "./home/HScroll.svelte";
@@ -111,30 +112,35 @@
     </HomeSection>
   {/if}
 
-  {#if loading}
-    {#if showRecs}
-      <HomeSection icon="heart" title={t("home.recs")}>
-        <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
-      </HomeSection>
-    {/if}
-    <HomeSection icon="headphones" title={t("home.trending")}>
-      <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-trend" {i} />{/each}</HScroll>
-    </HomeSection>
-  {:else}
-    {#if recs.length}
-      <HomeSection icon="heart" title={t("home.recs")} more={showAll(t("home.recs"), "heart", recs)}>
-        <HScroll>{#each recs as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(recs, i)} />{/each}</HScroll>
-      </HomeSection>
-    {/if}
-    {#if trending.length}
-      <HomeSection icon="headphones" title={t("home.trending")} more={showAll(t("home.trending"), "headphones", trending)}>
-        <HScroll>{#each trending as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(trending, i)} />{/each}</HScroll>
-      </HomeSection>
-    {/if}
-  {/if}
+  <SkeletonSwap {loading}>
+    {#snippet skeleton()}
+      <div class="feeds">
+        {#if showRecs}
+          <HomeSection icon="heart" title={t("home.recs")}>
+            <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
+          </HomeSection>
+        {/if}
+        <HomeSection icon="headphones" title={t("home.trending")}>
+          <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-trend" {i} />{/each}</HScroll>
+        </HomeSection>
+      </div>
+    {/snippet}
+    <div class="feeds">
+      {#if recs.length}
+        <HomeSection icon="heart" title={t("home.recs")} more={showAll(t("home.recs"), "heart", recs)}>
+          <HScroll>{#each recs as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(recs, i)} />{/each}</HScroll>
+        </HomeSection>
+      {/if}
+      {#if trending.length}
+        <HomeSection icon="headphones" title={t("home.trending")} more={showAll(t("home.trending"), "headphones", trending)}>
+          <HScroll>{#each trending as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(trending, i)} />{/each}</HScroll>
+        </HomeSection>
+      {/if}
+    </div>
+  </SkeletonSwap>
 </div>
 
 <style>
-  .home { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
-  :global(html.compact) .home { gap: 20px; }
+  .home, .feeds { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+  :global(html.compact) .home, :global(html.compact) .feeds { gap: 20px; }
 </style>

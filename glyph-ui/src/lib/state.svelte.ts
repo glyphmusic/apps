@@ -6,7 +6,7 @@ import { admin } from "./admin/admin.svelte";
 import { backend, connect, type Backend } from "./api/backend";
 import type {
   Account, ArtistPage, BackendState, Config, Device, HomeFeeds, Library, ListKey, Lyrics, PlayerState, Playlist,
-  QueueState, RecentItem, RepeatMode, SearchResults, Snapshot, Track, UpdateInfo,
+  QueueState, RecentItem, ReleaseKind, RepeatMode, SearchResults, Snapshot, Track, UpdateInfo,
 } from "./api/types";
 import { listId, primaryArtist, sameList, trackKey } from "./api/types";
 import { setLang, t, tf } from "./i18n.svelte";
@@ -763,6 +763,18 @@ class App {
   private albumCoverSeed(title: string, artist: string): Track {
     return { id: `album:${artist}:${title}`, source: "deezer", title, artist, album: title };
   }
+  private albumReleaseMeta(title: string, artist: string): { kind?: ReleaseKind; tracks?: number | null } | null {
+    const tl = title.trim().toLowerCase();
+    const al = primaryArtist(artist).trim().toLowerCase();
+    if (!tl) return null;
+    const match = (r: { title: string; artist: string; kind: ReleaseKind; tracks?: number | null }) =>
+      r.title.trim().toLowerCase() === tl && (!al || primaryArtist(r.artist).trim().toLowerCase() === al);
+    const hit =
+      this.artists[al]?.releases.find((r) => r.title.trim().toLowerCase() === tl)
+      ?? this.home.new_releases.find(match)
+      ?? this.search.albums.find(match);
+    return hit ? { kind: hit.kind, tracks: hit.tracks } : null;
+  }
   private route(): Route {
     const artistView = isArtistView(this.view);
     const list = this.view === "list" && this.openList
@@ -772,6 +784,7 @@ class App {
               tracks: [],
               cover: this.openList.cover ?? this.openList.tracks[0] ?? null,
               loading: true,
+              ...(this.openList.expectedTracks == null && this.openList.tracks.length ? { expectedTracks: this.openList.tracks.length } : {}),
             }
           : this.openList)
       : null;
@@ -920,19 +933,41 @@ class App {
   }
   openListView(l: ListKey, fetchAlbum = true) {
     const albumEmpty = l.kind === "album" && !l.tracks.length && !l.artist.startsWith("@");
-    const target: ListKey = albumEmpty
-      ? { ...l, cover: l.cover ?? this.albumCoverSeed(l.title, l.artist), loading: true }
+    const cached = albumEmpty ? albumCacheGet(l.title, l.artist) : null;
+    const meta = l.kind === "album" && !l.artist.startsWith("@") && (!l.releaseKind || l.expectedTracks == null)
+      ? this.albumReleaseMeta(l.title, l.artist)
+      : null;
+    const releaseKind = l.kind === "album" ? (l.releaseKind ?? meta?.kind) : undefined;
+    const expectedTracks = l.kind === "album" ? (l.expectedTracks ?? meta?.tracks) : undefined;
+    const target: ListKey = l.kind === "album" && !l.artist.startsWith("@")
+      ? {
+          ...l,
+          tracks: cached?.length ? cached : l.tracks,
+          cover: l.cover ?? cached?.[0] ?? this.albumCoverSeed(l.title, l.artist),
+          loading: cached?.length ? false : (l.loading ?? albumEmpty),
+          ...(releaseKind ? { releaseKind } : {}),
+          ...(expectedTracks != null ? { expectedTracks } : {}),
+        }
       : l;
     this.sharedPreview = null;
     const prev = this.pushView("list");
     this.openList = target;
     this.trimOffscreen(prev, true);
     backend().call("list_opened", { list: target });
-    if (fetchAlbum && target.kind === "album" && !target.artist.startsWith("@") && (!target.tracks.length || target.loading)) {
+    if (fetchAlbum && target.kind === "album" && !target.artist.startsWith("@") && (albumEmpty || !target.tracks.length || target.loading)) {
       this.fetchAlbumTracks(target);
     }
   }
-  openAlbum(title: string, artist: string, tracks: Track[] = [], cover: Track | null = null) {
+  openAlbum(
+    title: string,
+    artist: string,
+    tracks: Track[] = [],
+    cover: Track | null = null,
+    meta?: { kind?: ReleaseKind; tracks?: number | null },
+  ) {
+    const inferred = !artist.startsWith("@") && (!meta?.kind || meta?.tracks == null) ? this.albumReleaseMeta(title, artist) : null;
+    const releaseKind = meta?.kind ?? inferred?.kind;
+    const expectedTracks = meta?.tracks ?? inferred?.tracks;
     const l: Extract<ListKey, { kind: "album" }> = {
       kind: "album",
       title,
@@ -940,6 +975,8 @@ class App {
       tracks,
       cover: cover ?? tracks[0] ?? this.albumCoverSeed(title, artist),
       loading: !tracks.length && !artist.startsWith("@"),
+      ...(releaseKind ? { releaseKind } : {}),
+      ...(expectedTracks != null ? { expectedTracks } : {}),
     };
     this.openListView(l, false);
     this.fetchAlbumTracks(l);

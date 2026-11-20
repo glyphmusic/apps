@@ -1,3 +1,17 @@
+<script lang="ts" module>
+  import type { Rgb } from "../glow";
+  // Remember cover-derived hero tints across visits so returning to a playlist
+  // or album renders its gradient on frame 0 without flashing neutral grey first.
+  const tintCache = new Map<string, Rgb>();
+  function rememberTint(key: string, rgb: Rgb) {
+    if (tintCache.size > 128) {
+      const first = tintCache.keys().next().value;
+      if (first !== undefined) tintCache.delete(first);
+    }
+    tintCache.set(key, rgb);
+  }
+</script>
+
 <script lang="ts">
   // Desktop & web list view (Spotify-inspired top hero + unified control bar
   // above full-width song rows). `liked`, `recent` and `downloads` omit cover
@@ -6,6 +20,8 @@
   // the action bar docks a frosted compact bar + column header at the top of
   // `#main-scroll`.
   import { tick } from "svelte";
+  import { fade } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
   import VirtualRows from "../components/VirtualRows.svelte";
   import IconButton from "../components/IconButton.svelte";
@@ -17,21 +33,23 @@
   import SongTitle from "../components/SongTitle.svelte";
   import DownloadBadge from "../components/DownloadBadge.svelte";
   import EmptyState from "../components/EmptyState.svelte";
-  import Skeletons from "./search/Skeletons.svelte";
+  import Skeleton from "../components/Skeleton.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Select from "../settings/Select.svelte";
   import LikedByArtist from "./lists/LikedByArtist.svelte";
   import RecentArtistRow from "./lists/RecentArtistRow.svelte";
   import RoundPlay from "./lists/RoundPlay.svelte";
+  import { cachedAlbumKind } from "./lists/albumMeta.svelte";
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
   import { backend } from "../api/backend";
-  import { paletteFromImage, type Rgb } from "../glow";
+  import { paletteFromImage } from "../glow";
   import { t, tf } from "../i18n.svelte";
-  import { ink, pageChrome, tip } from "../ui.svelte";
+  import { fx, ink, pageChrome, tip } from "../ui.svelte";
   import { listMeta } from "../fmt";
   import { listId, rating, trackKey, type ListKey, type Track } from "../api/types";
   import {
-    downloadTip, downloadsView, listSort, listSortDir, playShuffled, playingFrom, playlistX,
+    albumSkeletonCount, downloadTip, downloadsView, listSort, listSortDir, playShuffled, playingFrom, playlistX,
     removeDownloads, scopeKey, setListSort, shownTracks, sortId, openNameDialog,
   } from "./lists/actions";
 
@@ -91,13 +109,18 @@
   );
 
   // Subtle cover-derived tint for covered headers; dark accent/neutral tint otherwise.
-  let tint = $state<Rgb | null>(null);
+  let fetchedTint = $state<{ key: string; rgb: Rgb } | null>(null);
   const coverTrack = $derived(l?.kind === "album" ? (l.cover ?? tracks[0] ?? null) : (tracks[0] ?? null));
   const firstArtKey = $derived(!noCover ? (own?.cover ?? (coverTrack ? trackKey(coverTrack) : "")) : "");
+  const tint = $derived.by<Rgb | null>(() => {
+    if (noCover || !firstArtKey) return null;
+    const hit = tintCache.get(firstArtKey);
+    if (hit) return hit;
+    return fetchedTint?.key === firstArtKey ? fetchedTint.rgb : null;
+  });
   $effect(() => {
-    void firstArtKey;
-    tint = null;
-    if (noCover || !l) return;
+    const key = firstArtKey;
+    if (noCover || !l || !key || tintCache.has(key)) return;
     let alive = true;
     const applyFromUrl = async (url: string | null) => {
       if (!alive || !url) return;
@@ -106,22 +129,25 @@
       const c = pal[1] ?? pal[0];
       const maxC = Math.max(c[0], c[1], c[2], 0.01);
       const cap = maxC > 0.72 ? 0.72 / maxC : 1;
-      tint = [c[0] * cap, c[1] * cap, c[2] * cap];
+      const next: Rgb = [c[0] * cap, c[1] * cap, c[2] * cap];
+      rememberTint(key, next);
+      fetchedTint = { key, rgb: next };
     };
     if (own?.cover) void applyFromUrl(own.cover);
     else if (coverTrack) backend().cover(coverTrack).then(applyFromUrl);
     return () => { alive = false; };
   });
 
-  const heroWash = $derived.by(() => {
-    if (tint) {
-      const [r, g, b] = tint.map((v) => Math.round(v * 255));
-      return `linear-gradient(180deg, rgba(${r}, ${g}, ${b}, .34) 0%, rgba(${r}, ${g}, ${b}, .12) 58%, rgba(${r}, ${g}, ${b}, 0) 100%)`;
-    }
+  const heroBaseWash = $derived.by(() => {
     if (l?.kind === "liked" || l?.kind === "downloads") {
       return "linear-gradient(180deg, rgba(var(--accent-rgb), .24) 0%, rgba(var(--accent-rgb), .08) 58%, rgba(var(--accent-rgb), 0) 100%)";
     }
     return "linear-gradient(180deg, rgba(255, 255, 255, .07) 0%, rgba(255, 255, 255, .02) 58%, rgba(255, 255, 255, 0) 100%)";
+  });
+  const heroTintWash = $derived.by(() => {
+    if (!tint) return "";
+    const [r, g, b] = tint.map((v) => Math.round(v * 255));
+    return `linear-gradient(180deg, rgba(${r}, ${g}, ${b}, .34) 0%, rgba(${r}, ${g}, ${b}, .12) 58%, rgba(${r}, ${g}, ${b}, 0) 100%)`;
   });
   const pinBg = $derived.by(() => {
     if (tint) {
@@ -144,11 +170,18 @@
     backend().call<number>("downloaded_bytes", { tracks: ts }).then((b) => alive && (bytes = b ?? 0));
     return () => { alive = false; };
   });
+  const albumKind = $derived(l?.kind === "album" ? (l.releaseKind ?? cachedAlbumKind(l.title, l.artist)) : undefined);
+  const skCount = $derived(albumSkeletonCount(l, albumKind));
+  const SK_TW = [0.42, 0.55, 0.36, 0.48, 0.6, 0.4];
+  const SK_AW = [0.24, 0.3, 0.2, 0.27, 0.33, 0.22];
+  const SK_ALW = [0.62, 0.5, 0.72, 0.44, 0.58, 0.66];
+  const fadeMs = $derived(fx.reduce || fx.still ? 0 : 200);
   const kind = $derived.by(() => {
     if (!l) return "";
     const base =
       l.kind === "playlist" ? t(scopeKey(own))
-      : l.kind === "album" && !author && !app.sharedPreview ? t("list.kind.album")
+      : l.kind === "album" && !author && !app.sharedPreview
+        ? (albumKind ? t(`album.kind.${albumKind}`) : t("list.kind.album"))
       : t("list.kind.playlist");
     if (l.kind !== "playlist" && l.kind !== "downloads") return base;
     const saved = tracks.filter((x) => app.isDownloaded(x)).length;
@@ -157,8 +190,6 @@
     return `${base} · ${tf("playlist.offline_progress", { done: saved, total: tracks.length })} · ${(bytes / 1e6).toFixed(1)} MB`;
   });
 
-  // Playing from this list: the button pauses / resumes it.
-  const here = $derived(has && playingFrom(tracks) && (app.queue.context == null || app.queue.context === title));
   const dl = $derived(downloadsView(tracks));
   const saveable = $derived(l?.kind === "album" && !app.sharedPreview);
   async function addShared() {
@@ -169,8 +200,6 @@
     if (id) app.openListView({ kind: "playlist", id });
   }
   const adding = $derived(!!own && app.addSongs?.id === own.id);
-
-  function playAll() { if (here) app.togglePlay(); else app.play(tracks, 0, title); }
   function addSongs() {
     if (!own) return;
     if (adding) { app.addSongs = null; return; }
@@ -248,18 +277,32 @@
   const recent = $derived.by(() => {
     if (l?.kind !== "recent" || sort !== "custom") return null;
     const songs: Track[] = [];
-    const rows: ({ kind: "song"; at: number } | { kind: "artist"; name: string; track: Track | null })[] = [];
+    const rows: ({ kind: "song"; at: number; origAt: number } | { kind: "artist"; name: string; track: Track | null })[] = [];
     for (const it of app.library.recent) {
-      if (it.kind === "song") { rows.push({ kind: "song", at: songs.length }); songs.push(it.track); }
+      if (it.kind === "song") { rows.push({ kind: "song", at: songs.length, origAt: songs.length }); songs.push(it.track); }
       else if (it.kind === "artist") rows.push({ kind: "artist", name: it.name, track: it.track ?? null });
     }
     return { songs, rows };
   });
-  const recentRows = $derived.by(() => {
-    if (!recent) return [];
-    if (!q) return recent.rows;
-    return recent.rows.filter((r) => (r.kind === "artist" ? r.name.toLowerCase().includes(q) : matchTrack(recent.songs[r.at])));
+  const recentFiltered = $derived.by(() => {
+    if (!recent) return null;
+    if (!q) return recent;
+    const songs: Track[] = [];
+    const rows: ({ kind: "song"; at: number; origAt: number } | { kind: "artist"; name: string; track: Track | null })[] = [];
+    for (const r of recent.rows) {
+      if (r.kind === "artist") {
+        if (r.name.toLowerCase().includes(q)) rows.push(r);
+      } else {
+        const tr = recent.songs[r.at];
+        if (matchTrack(tr)) {
+          rows.push({ kind: "song", at: songs.length, origAt: r.origAt });
+          songs.push(tr);
+        }
+      }
+    }
+    return { songs, rows };
   });
+  const recentRows = $derived(recentFiltered?.rows ?? []);
   const filteredTracks = $derived.by(() => {
     const out: { track: Track; idx: number }[] = [];
     for (let i = 0; i < tracks.length; i++) {
@@ -267,6 +310,16 @@
     }
     return out;
   });
+  const visibleTracks = $derived(recentFiltered ? recentFiltered.songs : q ? filteredTracks.map((e) => e.track) : tracks);
+  // Playing from this list (or its active filter): the button pauses / resumes it.
+  const here = $derived(visibleTracks.length > 0 && playingFrom(visibleTracks) && (app.queue.context == null || app.queue.context === title));
+  async function playAll() {
+    if (here) { app.togglePlay(); return; }
+    if (!visibleTracks.length) return;
+    if (app.player.shuffle) await app.setShuffle(false);
+    app.play(visibleTracks, 0, title);
+  }
+  $effect(() => { void q; app.selectedRow = null; });
 
   const albumLoading = $derived(l?.kind === "album" && !!l.loading && !has);
   const empty = $derived(!albumLoading && (l?.kind === "recent" ? !app.library.recent.length : !has));
@@ -413,67 +466,74 @@
           <IconButton name="refresh-cw" size={15} box={32} label={t("plugins.refresh")} onclick={refreshRecs} />
         </div>
       </div>
-      {#if recsLoading && !recTracks.length}
-        <div class="recs-sk" aria-busy="true">
-          {#each Array(4) as _, i}<div class="rec-sk" style:opacity={0.72 - i * 0.12}></div>{/each}
-        </div>
-      {:else if recTracks.length}
-        <div class="recs-list">
-          {#each recTracks as tr, i (`${trackKey(tr)}:${i}`)}
-            <div class="rec-row" role="row" tabindex="-1" onclick={() => app.play(recTracks, i)} onkeydown={(e) => e.key === "Enter" && app.play(recTracks, i)}>
-              <Cover track={tr} size={40} radius={6} />
-              <span class="rec-tx">
-                <span class="rec-tl"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
-                <span class="rec-ar">
-                  <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }}>{tr.artist}</button>
+      <SkeletonSwap loading={recsLoading && !recTracks.length}>
+        {#snippet skeleton()}
+          <div class="recs-sk" aria-busy="true">
+            {#each Array(4) as _, i}
+              <div class="rec-row sk-rec">
+                <Skeleton w={40} h={40} radius={6} id="recs-sk-c{i}" />
+                <span class="rec-tx sk-tx">
+                  <span style:width="{SK_TW[i % 6] * 100}%"><Skeleton w="100%" h={12} radius={4} id="recs-sk-t{i}" /></span>
+                  <span style:width="{SK_AW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="recs-sk-a{i}" /></span>
                 </span>
-              </span>
-              {#if showAlbumCol}
-                <span class="rec-al trunc">
-                  {#if tr.album}<button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openAlbum(tr.album!, tr.artist, [], tr); }}>{tr.album}</button>{/if}
+                {#if showAlbumCol}
+                  <span class="rec-al"><span style:width="{SK_ALW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="recs-sk-al{i}" /></span></span>
+                {/if}
+                <Skeleton w={56} h={28} radius={99} id="recs-sk-b{i}" />
+              </div>
+            {/each}
+          </div>
+        {/snippet}
+        {#if recTracks.length}
+          <div class="recs-list">
+            {#each recTracks as tr, i (`${trackKey(tr)}:${i}`)}
+              <div class="rec-row" role="row" tabindex="-1" onclick={() => app.play(recTracks, i)} onkeydown={(e) => e.key === "Enter" && app.play(recTracks, i)}>
+                <Cover track={tr} size={40} radius={6} />
+                <span class="rec-tx">
+                  <span class="rec-tl"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
+                  <span class="rec-ar">
+                    <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }}>{tr.artist}</button>
+                  </span>
                 </span>
-              {/if}
-              <button type="button" class="rec-add" onclick={(e) => { e.stopPropagation(); addRec(tr); }}>{t("playlist.recs.add")}</button>
-            </div>
-          {/each}
-        </div>
-      {/if}
+                {#if showAlbumCol}
+                  <span class="rec-al trunc">
+                    {#if tr.album}<button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openAlbum(tr.album!, tr.artist, [], tr); }}>{tr.album}</button>{/if}
+                  </span>
+                {/if}
+                <button type="button" class="rec-add" onclick={(e) => { e.stopPropagation(); addRec(tr); }}>{t("playlist.recs.add")}</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </SkeletonSwap>
     </section>
   {/if}
 {/snippet}
 
-{#snippet listBody()}
-  {#if albumLoading}
-    <div class="rows">
-      <Skeletons kind="rows" n={8} prefix="album" />
-    </div>
-  {:else if empty}
-    <div class="body-pad">
-      <EmptyState title={emptyText[0]} sub={emptyText[1]}>
-        {#if own}
-          <Select value={null as "link" | "file" | null} label={t("ctx.more")} options={importOptions} onpick={pickImport} />
+{#snippet albumSkeleton()}
+  <div class="rows" aria-busy="true">
+    {#each Array(skCount) as _, i}
+      <div class="sk-row">
+        <span class="sk-num"><Skeleton w={14} h={10} radius={3} id="album-sk-n{i}" /></span>
+        <Skeleton w={40} h={40} radius={6} id="album-sk-c{i}" />
+        <span class="sk-tx">
+          <span style:width="{SK_TW[i % 6] * 100}%"><Skeleton w="100%" h={12} radius={4} id="album-sk-t{i}" /></span>
+          <span style:width="{SK_AW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="album-sk-a{i}" /></span>
+        </span>
+        {#if showAlbumCol}
+          <span class="sk-al"><span style:width="{SK_ALW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="album-sk-al{i}" /></span></span>
         {/if}
-      </EmptyState>
-    </div>
-    {@render recsSection()}
-  {:else if filterEmpty}
-    <div class="body-pad">
-      <EmptyState icon="search" title={t("search.none.title")} sub={t("local.none.sub")}>
-        <Button onclick={() => clearSearch(true)}>{t("lyrics.timing.reset")}</Button>
-      </EmptyState>
-    </div>
-  {:else if recent}
-    <div class="rows">
-      <VirtualRows count={recentRows.length} pitch={PITCH} overscan={4}>
-        {#snippet row(i)}
-          {@const r = recentRows[i]}
-          {#if r.kind === "artist"}<RecentArtistRow name={r.name} track={r.track} />
-          {:else}<SongRow tracks={recent.songs} index={r.at} from={l} context={title} selected={app.selectedRow === r.at} />{/if}
-        {/snippet}
-      </VirtualRows>
-    </div>
-  {:else}
-    {#if pickMode && l}
+        <span class="sk-like"></span>
+        <span class="sk-du"><Skeleton w={32} h={10} radius={4} id="album-sk-d{i}" /></span>
+        <span class="sk-more"></span>
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet listBody()}
+  {#if !recent && !empty && !filterEmpty}
+    {#if pickMode && l && !albumLoading}
       <div class="pickbar" role="toolbar">
         <Button icon="x" onclick={() => app.stopPicking()}>{t("pick.done")}</Button>
         <span class="pick-n">{tf("pick.n", { n: pickedN })}</span>
@@ -486,21 +546,50 @@
     <div class="colwrap" bind:this={colHeadEl}>
       {@render colHead(false)}
     </div>
-    <div class="rows" bind:this={listEl} class:settle class:dragging={!!drag}>
-      <VirtualRows count={filteredTracks.length} pitch={PITCH} overscan={4}>
-        {#snippet row(i)}
-          {@const entry = filteredTracks[i]}
-          <div class="slot">
-            <div class="mover" class:lifted={drag?.from === entry.idx} style:transform="translateY({shift(entry.idx)}px)">
-              <SongRow {tracks} index={entry.idx} number={entry.idx + 1} from={l} album={l.kind !== "album" || !!author} context={title} selected={app.selectedRow === entry.idx}
-                draggable={!!reorder && !pickMode} ondragstart={(e) => startDrag(entry.idx, e)} picking={pickMode} picked={pickMode && app.isPicked(entry.track)} />
-            </div>
-          </div>
-        {/snippet}
-      </VirtualRows>
-    </div>
-    {@render recsSection()}
   {/if}
+  <SkeletonSwap loading={albumLoading} skeleton={albumSkeleton}>
+    {#if empty}
+      <div class="body-pad">
+        <EmptyState title={emptyText[0]} sub={emptyText[1]}>
+          {#if own}
+            <Select value={null as "link" | "file" | null} label={t("ctx.more")} options={importOptions} onpick={pickImport} />
+          {/if}
+        </EmptyState>
+      </div>
+      {@render recsSection()}
+    {:else if filterEmpty}
+      <div class="body-pad">
+        <EmptyState icon="search" title={t("search.none.title")} sub={t("local.none.sub")}>
+          <Button onclick={() => clearSearch(true)}>{t("lyrics.timing.reset")}</Button>
+        </EmptyState>
+      </div>
+    {:else if recent}
+      <div class="rows">
+        <VirtualRows count={recentRows.length} pitch={PITCH} overscan={4}>
+          {#snippet row(i)}
+            {@const r = recentRows[i]}
+            {#if r.kind === "artist"}<RecentArtistRow name={r.name} track={r.track} />
+            {:else}<SongRow tracks={recentFiltered!.songs} index={r.at} fromIndex={r.origAt} from={l} context={title} selected={app.selectedRow === r.at} />{/if}
+          {/snippet}
+        </VirtualRows>
+      </div>
+    {:else}
+      <div class="rows" bind:this={listEl} class:settle class:dragging={!!drag}>
+        <VirtualRows count={filteredTracks.length} pitch={PITCH} overscan={4}>
+          {#snippet row(i)}
+            {@const entry = filteredTracks[i]}
+            <div class="slot">
+              <div class="mover" class:lifted={drag?.from === entry.idx} style:transform="translateY({shift(entry.idx)}px)">
+                <SongRow tracks={visibleTracks} index={i} fromIndex={entry.idx} number={entry.idx + 1} from={l} album={l.kind !== "album" || !!author} context={title} selected={app.selectedRow === i}
+                  draggable={!!reorder && !pickMode} ondragstart={(e) => startDrag(entry.idx, e)} picking={pickMode} picked={pickMode && app.isPicked(entry.track)} />
+              </div>
+            </div>
+          {/snippet}
+        </VirtualRows>
+      </div>
+      {@render recsSection()}
+    {/if}
+  </SkeletonSwap>
 {/snippet}
 
 {#if l?.kind === "artist_liked"}
@@ -529,7 +618,9 @@
       </div>
     {/if}
 
-    <header class="hero" class:no-cover={noCover} style:background={heroWash}>
+    <header class="hero" class:no-cover={noCover}>
+      <div class="hero-bg hero-base" class:off={!!tint} style:background={heroBaseWash} aria-hidden="true"></div>
+      <div class="hero-bg hero-tint" class:on={!!tint} style:background={heroTintWash || undefined} aria-hidden="true"></div>
       <div class="hero-main" class:narrow>
         {#if !noCover}
           {#if own}
@@ -554,13 +645,13 @@
               {#if app.sharedPreview.author}<span>{tf("list.shared_by", { handle: app.sharedPreview.author })}</span><span class="sep">·</span>{/if}
             {:else if l.kind === "album" && !author}
               <button class="link trunc" onclick={() => app.openArtistPage(l.artist)}>{l.artist}</button>
-              {#if !albumLoading}<span class="sep">·</span>{/if}
+              {#if !albumLoading}<span class="sep" in:fade={{ duration: fadeMs, easing: cubicOut }}>·</span>{/if}
             {:else if own?.shared_by}
               <span>{tf("list.shared_by", { handle: own.shared_by })}</span>
               <span class="sep">·</span>
             {/if}
             {#if !albumLoading}
-              <span class="meta" use:ink>{listMeta(tracks.length, total, t("search.kind.song"), tf("common.n_songs", { n: tracks.length }))}</span>
+              <span class="meta" use:ink in:fade={{ duration: fadeMs, easing: cubicOut }}>{listMeta(tracks.length, total, t("search.kind.song"), tf("common.n_songs", { n: tracks.length }))}</span>
             {/if}
           </div>
         </div>
@@ -569,8 +660,10 @@
       <div class="acts" bind:this={actsEl}>
         <div class="acts-l">
           {#if has}
-            <RoundPlay size={48} playing={here && app.playing} loading={here && app.loading} onclick={playAll} />
-            <IconButton name="shuffle" size={19} box={38} label={t("tip.shuffle")} onclick={() => playShuffled(tracks, title)} />
+            <span class="acts-play" in:fade={{ duration: fadeMs, easing: cubicOut }}>
+              <RoundPlay size={48} playing={here && app.playing} loading={here && app.loading} onclick={playAll} />
+              <IconButton name="shuffle" size={19} box={38} label={t("tip.shuffle")} onclick={() => playShuffled(visibleTracks, title)} />
+            </span>
           {/if}
           {#if !onWeb() && has && l.kind !== "downloads"}
             {#if dl.state === "busy"}
@@ -658,7 +751,7 @@
 
   /* Sticky compact bar on scroll (height 0 anchor avoids any flow shift). */
   .pin-anchor { position: sticky; top: 0; z-index: 20; height: 0; overflow: visible; margin: 0 calc(-1 * min(24px, var(--page-x))); }
-  .pin-bar { border-radius: 14px; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, .52); animation: fade-in .14s ease-out; }
+  .pin-bar { border-radius: 14px; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, .52); animation: fade-in .14s ease-out; transition: background-color .35s ease-out; }
   .pin-top { height: 56px; padding: 0 min(24px, var(--page-x)); display: flex; align-items: center; gap: 12px; min-width: 0; }
   .pin-title { font-size: calc(18px * var(--k)); font-weight: 700; color: var(--text); min-width: 0; }
   .pin-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 160px; height: 26px; padding: 0 9px; border-radius: 99px; background: #202024; font-size: var(--xs); color: var(--text); }
@@ -666,9 +759,13 @@
   .pin-cols { padding: 0 min(24px, var(--page-x)); border-top: 1px solid rgba(255, 255, 255, .08); }
 
   /* Top Spotify-style hero */
-  .hero { margin: -12px -24px 0; padding: 20px 24px 16px; border-radius: 14px 14px 0 0; display: flex; flex-direction: column; gap: 18px; }
+  .hero { position: relative; isolation: isolate; margin: -12px -24px 0; padding: 20px 24px 16px; border-radius: 14px 14px 0 0; display: flex; flex-direction: column; gap: 18px; }
+  .hero-bg { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0; transition: opacity .42s ease-out; }
+  .hero-base.off { opacity: 0; }
+  .hero-tint { opacity: 0; }
+  .hero-tint.on { opacity: 1; }
   .hero.no-cover { padding-bottom: 14px; }
-  .hero-main { display: flex; align-items: flex-end; gap: 22px; min-width: 0; }
+  .hero-main { position: relative; z-index: 1; display: flex; align-items: flex-end; gap: 22px; min-width: 0; }
   .hero-main.narrow { flex-direction: column; align-items: flex-start; gap: 14px; }
   .art { position: relative; flex: none; display: block; border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, .42); }
   .veil { position: absolute; inset: 0; border-radius: 12px; background: rgba(0, 0, 0, .55); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: var(--sm); color: rgba(255, 255, 255, .95); opacity: 0; transition: opacity .15s ease-out; }
@@ -679,15 +776,16 @@
   .title { margin: 0; font-weight: 700; line-height: 1.12; letter-spacing: -.02em; color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
   .author { font-size: var(--sm); color: var(--faint); transition: color .12s; }
   .author:hover { color: var(--text); }
-  .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--sm); color: var(--dim); min-width: 0; }
+  .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 20px; font-size: var(--sm); color: var(--dim); min-width: 0; }
   .sep { color: var(--faint); }
   .link { max-width: 100%; font-weight: 500; color: var(--text); }
   .link:hover { text-decoration: underline; }
   .meta { font-size: var(--sm); color: var(--faint); }
 
   /* Unified options & filter/sort bar */
-  .acts { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-top: 2px; min-width: 0; }
+  .acts { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; min-height: 50px; padding-top: 2px; min-width: 0; }
   .acts-l { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+  .acts-play { display: inline-flex; align-items: center; gap: 8px; }
   .acts-r { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
   .dlb { flex: none; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; transition: background-color .12s ease-out; }
   .act-btn:hover { background: var(--hover); }
@@ -708,7 +806,7 @@
   /* Select mode bar: stays at the top while the rows scroll under it. */
   .pickbar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 12px; background: #161618; }
   .pick-n { font-size: var(--md); font-weight: 600; color: var(--text); padding: 0 4px; }
-  .colhead { display: flex; align-items: center; gap: 14px; height: 34px; padding: 0 10px; border-bottom: 1px solid rgba(255, 255, 255, .08); font-size: 12px; font-weight: 500; color: var(--faint); }
+  .colhead { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 34px; padding: 0 10px; border-bottom: 1px solid rgba(255, 255, 255, .08); font-size: 12px; font-weight: 500; color: var(--faint); min-width: 0; }
   .colhead.pinned { border-bottom: 0; }
   .colhead.hidden { visibility: hidden; }
   .ch { display: inline-flex; align-items: center; gap: 6px; text-align: left; color: inherit; transition: color .12s; white-space: nowrap; }
@@ -716,14 +814,22 @@
   button.ch.on { color: var(--text); }
   .sarr { flex: none; fill: var(--accent); }
   .ch-num { flex: none; width: 26px; justify-content: center; text-align: center; }
-  .ch-title { flex: 1; min-width: 214px; }
+  .ch-title { flex: 1; min-width: 0; }
   .ch-al { flex: 0 1 200px; width: 200px; min-width: 0; }
   .ch-like { flex: none; width: 29px; }
   .ch-du { flex: none; width: 40px; padding-left: 6px; gap: 4px; }
   .ch-more { flex: none; width: 28px; }
+  @container (max-width: 360px) { .ch-num { width: 20px; } .ch-du { display: none; } }
 
   .body-pad { padding-top: 12px; }
   .rows { display: flex; flex-direction: column; padding-top: 4px; }
+  .sk-row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; }
+  .sk-num { flex: none; width: 26px; display: grid; place-items: center; }
+  .sk-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .sk-al { flex: 0 1 200px; width: 200px; min-width: 0; display: flex; }
+  .sk-like { flex: none; width: 29px; }
+  .sk-du { flex: none; width: 40px; display: flex; align-items: center; }
+  .sk-more { flex: none; width: 28px; }
 
   /* Bottom Recommended section for own playlists */
   .recs { margin-top: 28px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, .08); display: flex; flex-direction: column; gap: 12px; }
@@ -732,12 +838,13 @@
   .recs-title { margin: 0; font-size: calc(18px * var(--k)); font-weight: 700; color: var(--text); }
   .recs-sub { margin: 0; font-size: var(--sm); color: var(--dim); }
   .recs-acts { display: flex; align-items: center; gap: 8px; flex: none; }
-  .recs-sk { display: flex; flex-direction: column; gap: 6px; }
-  .rec-sk { height: 56px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
+  .recs-sk { display: flex; flex-direction: column; }
+  .sk-rec { cursor: default; pointer-events: none; }
+  .sk-rec:hover { background: none; }
   .recs-list { display: flex; flex-direction: column; }
-  .rec-row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; }
+  .rec-row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; min-width: 0; }
   .rec-row:hover { background: rgba(255, 255, 255, .05); }
-  .rec-tx { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 2px; }
+  .rec-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .rec-tl { font-size: var(--md); color: var(--text); min-width: 0; }
   .rec-ar { display: flex; align-items: center; min-width: 0; font-size: var(--sm); color: var(--dim); }
   .rec-al { flex: 0 1 200px; width: 200px; min-width: 0; display: flex; font-size: var(--sm); color: var(--faint); }

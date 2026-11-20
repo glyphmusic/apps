@@ -612,7 +612,7 @@ impl Acct {
         let path = b.profile_image(handle, sha).await.ok()?;
         let url = crate::rt::spawn_blocking(move || data_url(&path)).await.ok().flatten()?;
         let mut g = self.g();
-        if g.images.len() > 40 {
+        if g.images.len() > 128 {
             g.images.clear();
         }
         g.images.insert(sha.to_string(), url.clone());
@@ -1958,7 +1958,7 @@ pub async fn account_recovery(core: C<'_>) -> Res<String> {
 
 /// Admin API paths the dashboard may call (`/admin/v1/<path>`).
 fn admin_path_ok(path: &str) -> bool {
-    const ROOTS: &[&str] = &["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "cache/stats", "cache/clear", "companion/status", "app-releases"];
+    const ROOTS: &[&str] = &["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "cache/stats", "cache/clear", "companion/status", "app-releases"];
     let root = path.split('?').next().unwrap_or("");
     path.len() <= 200
         && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./?=&@%".contains(&b))
@@ -1981,7 +1981,7 @@ pub async fn admin_call(core: C<'_>, method: String, path: String, body: Option<
         "PUT" => reqwest::Method::PUT,
         _ => return Err("bad_method".into()),
     };
-    b.account_admin(m, path, body).await.map_err(|e| {
+    let out = b.account_admin(m, path.clone(), body).await.map_err(|e| {
         if is_signed_out(&e) {
             return "signed_out".to_string();
         }
@@ -1990,7 +1990,13 @@ pub async fn admin_call(core: C<'_>, method: String, path: String, body: Option<
             Some(s) => s.code.clone(),
             None => "offline".to_string(),
         }
-    })
+    })?;
+    if path.ends_with("/profile/reset") {
+        if let Some(acc) = acct(core) {
+            acc.refresh_avatar();
+        }
+    }
+    Ok(out)
 }
 
 pub async fn account_remove_device(core: C<'_>, id: String) -> Res {
@@ -2121,6 +2127,18 @@ async fn profile_value(core: &Arc<Core>, acc: &Arc<Acct>, handle: &str) -> Res<V
 pub async fn profile(core: C<'_>, handle: String) -> Res<Value> {
     let acc = need_acct(core)?;
     profile_value(core, &acc, &handle).await
+}
+
+/// Fetches a profile picture or banner (by handle + sha256) as a data URL
+/// using the signed-in account's auth, cached on disk and in memory.
+pub async fn profile_image(core: C<'_>, handle: String, sha: String) -> Res<Option<String>> {
+    let acc = need_acct(core)?;
+    let b = need_backend(&core)?;
+    let h = handle.trim().trim_start_matches('@').to_ascii_lowercase();
+    if h.is_empty() || sha.len() != 64 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    Ok(acc.image_url(&b, &h, &sha).await)
 }
 
 pub async fn profile_playlist(core: C<'_>, handle: String, id: String) -> Res<Vec<Track>> {
@@ -2436,7 +2454,7 @@ mod admin_tests {
 
     #[test]
     fn dashboard_only_reaches_its_own_admin_paths() {
-        for ok in ["me", "stats", "history", "accounts?limit=100&offset=0&q=al", "accounts/alice", "accounts/alice/revoke", "bans/remove", "limits", "cache/clear"] {
+        for ok in ["me", "stats", "history", "accounts?limit=100&offset=0&q=al", "accounts/alice", "accounts/alice/revoke", "accounts/alice/profile/reset", "bans/remove", "blocks", "blocks/clear", "limits", "cache/clear"] {
             assert!(admin_path_ok(ok), "{ok}");
         }
         for bad in ["keys", "update/apply", "login", "accounts/alice/admin/../../keys", "statsx", "", "logs", "companion/update/apply", "http://evil/x"] {

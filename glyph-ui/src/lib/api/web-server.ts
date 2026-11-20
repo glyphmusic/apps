@@ -10,6 +10,7 @@ import type { McpSession } from "../settings/types";
 import { installId } from "./web-store";
 
 const BASE = String(import.meta.env.VITE_GLYPH_SERVER ?? "").replace(/\/+$/, "");
+const APP_VERSION = String(import.meta.env.VITE_GLYPH_VERSION ?? "").trim();
 
 export function serverOrigin(): string {
   return BASE || (typeof location !== "undefined" ? location.origin : "");
@@ -223,6 +224,7 @@ export function setOptionalAuth(fn: (() => string | undefined) | null) {
 
 function headers(json = false, token?: string): HeadersInit {
   const h: Record<string, string> = { "x-glyph-install-id": installId(), accept: "application/json" };
+  if (APP_VERSION) h["x-glyph-app-version"] = APP_VERSION;
   if (json) h["content-type"] = "application/json";
   if (token) h.authorization = `Bearer ${token}`;
   return h;

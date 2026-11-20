@@ -2,12 +2,17 @@
 // album (backend `album_meta`), guessed from the song count until (or
 // unless) the catalog knows it.
 import { backend } from "../../api/backend";
+import type { ReleaseKind } from "../../api/types";
 import { t } from "../../i18n.svelte";
 import { kindFromCount } from "./actions";
 
-type Meta = { kind: "album" | "ep" | "single" | "compilation"; year?: number | null } | null;
+type Meta = { kind: ReleaseKind; year?: number | null } | null;
 const metas = $state<Record<string, Meta>>({});
 const asked = new Set<string>();
+
+export function cachedAlbumKind(title: string, artist: string): ReleaseKind | undefined {
+  return metas[`${title.toLowerCase()}|${artist.toLowerCase()}`]?.kind;
+}
 
 export function albumLabel(title: string, artist: string, n: number): string {
   const key = `${title.toLowerCase()}|${artist.toLowerCase()}`;

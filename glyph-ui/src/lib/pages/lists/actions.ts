@@ -152,6 +152,15 @@ export function kindFromCount(n: number): string {
 export function releaseKind(kind: string): string {
   return t(`album.kind.${kind}`);
 }
+/** How many loading skeleton rows an album/single needs while its tracks load. */
+export function albumSkeletonCount(l: ListKey | null | undefined, fallbackKind?: string): number {
+  if (l?.kind !== "album") return 8;
+  const kind = l.releaseKind ?? fallbackKind;
+  if (kind === "single") return 1;
+  if (l.expectedTracks && l.expectedTracks > 0) return Math.min(10, Math.max(1, l.expectedTracks));
+  if (kind === "ep") return 4;
+  return 8;
+}
 // ---- "Save to" picker (right-click on a heart) ----
 
 /** `oncontextmenu` of a heart: opens the "Save to" picker for `tr` at the pointer. */

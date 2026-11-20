@@ -20,6 +20,7 @@
   import SongRow from "../components/SongRow.svelte";
   import PhoneSongRow from "../compact/PhoneSongRow.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Segmented from "../settings/Segmented.svelte";
   import BackPill from "./lists/BackPill.svelte";
   import Tile from "./stats/Tile.svelte";
@@ -73,11 +74,15 @@
         <EmptyState icon="music-2" title={t("stats.off.title")} sub={t("stats.off.sub")} />
         <Button kind="primary" onclick={() => app.setConfig((c) => (c.stats.enabled = true))}>{t("stats.enable")}</Button>
       </div>
-    {:else if loading && !data}
-      <div class="tiles">{#each [0, 1, 2, 3] as i (i)}<div class="sk"><Skeleton w="100%" h={92} radius={12} id="stats-{i}" /></div>{/each}</div>
-    {:else if empty}
-      <EmptyState icon="music-2" title={t("stats.empty.title")} sub={t("stats.empty.sub")} />
-    {:else if data}
+    {:else}
+      <SkeletonSwap loading={loading && !data}>
+        {#snippet skeleton()}
+          <div class="tiles">{#each [0, 1, 2, 3] as i (i)}<div class="sk"><Skeleton w="100%" h={92} radius={12} id="stats-{i}" /></div>{/each}</div>
+        {/snippet}
+        {#if empty}
+          <EmptyState icon="music-2" title={t("stats.empty.title")} sub={t("stats.empty.sub")} />
+        {:else if data}
+          <div class="stats-body">
       {#if data.years.length}
         <div class="cards">
           {#each data.years.slice(0, 2) as y, i (y)}
@@ -146,13 +151,16 @@
         </div>
       {/if}
 
-      <div class="note" use:ink>{t(app.account ? "stats.note.synced" : "stats.note.local")}</div>
+          <div class="note" use:ink>{t(app.account ? "stats.note.synced" : "stats.note.local")}</div>
+          </div>
+        {/if}
+      </SkeletonSwap>
     {/if}
   </div>
 {/if}
 
 <style>
-  .pg { display: flex; flex-direction: column; gap: 24px; }
+  .pg, .stats-body { display: flex; flex-direction: column; gap: 24px; }
   .head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
   .seg-wrap { max-width: 100%; }
   :global(html.compact) .seg-wrap { width: 100%; }

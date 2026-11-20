@@ -772,6 +772,11 @@ pub async fn profile(core: C<'_>, handle: String) -> Res<Value> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn profile_image(core: C<'_>, handle: String, sha: String) -> Res<Option<String>> {
+    account::profile_image(&core, handle, sha).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn profile_playlist(core: C<'_>, handle: String, id: String) -> Res<Vec<Track>> {
     account::profile_playlist(&core, handle, id).await
 }

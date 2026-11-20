@@ -113,9 +113,9 @@
     phase = "ready";
     timedOut = false;
     clearTimeout(veilTimer);
-    if (fx.ascii && !fx.still && !fx.reduce) {
+    if (!fx.still && !fx.reduce) {
       unveiling = true;
-      veilTimer = setTimeout(() => { unveiling = false; }, 950);
+      veilTimer = setTimeout(() => { unveiling = false; }, 300);
     } else {
       unveiling = false;
     }
@@ -124,17 +124,18 @@
     url = null;
     phase = "none";
     timedOut = false;
+    unveiling = false;
   }
 </script>
 
 <div class="cv" bind:this={box} style:width="{size}px" style:height="{size}px" style:border-radius="{r}px">
-  {#if phase === "loading" && !timedOut}
+  {#if (phase === "loading" && !timedOut) || unveiling}
     <Skeleton w={size} h={size} radius={r} id={key} />
   {:else if phase === "none" || (phase === "loading" && timedOut)}
     <div class="ph"><Icon name="music-2" size={Math.min(64, Math.max(14, size * 0.36))} color="var(--faint)" /></div>
   {/if}
   {#if url && phase !== "none"}
-    <img src={url} alt="" draggable="false" decoding="async" class:hidden={phase !== "ready"} class:reveal={phase === "ready" && fx.ascii && !fx.still && !fx.reduce && unveiling} onload={onImgLoad} onerror={onImgError} />
+    <img src={url} alt="" draggable="false" decoding="async" class:hidden={phase !== "ready"} class:reveal={phase === "ready" && !fx.still && !fx.reduce && unveiling} onload={onImgLoad} onerror={onImgError} />
   {/if}
 </div>
 
@@ -142,7 +143,7 @@
   .cv { position: relative; flex: none; overflow: hidden; background: var(--card); }
   img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   img.hidden { opacity: 0; }
-  img.reveal { animation: cv-in .35s ease-out both; }
-  @keyframes cv-in { from { opacity: .15; } to { opacity: 1; } }
+  img.reveal { animation: cv-in .26s cubic-bezier(.22, 1, .36, 1) both; }
+  @keyframes cv-in { from { opacity: 0; } to { opacity: 1; } }
   .ph { width: 100%; height: 100%; display: grid; place-items: center; }
 </style>

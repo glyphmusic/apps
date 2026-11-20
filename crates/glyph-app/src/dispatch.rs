@@ -65,6 +65,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "account_sync_now" => res(account::account_sync_now(core).await),
         "account_merge" => res(account::account_merge(core, req(&args, "yes")?).await),
         "profile" => res(account::profile(core, req(&args, "handle")?).await),
+        "profile_image" => res(account::profile_image(core, req(&args, "handle")?, req(&args, "sha")?).await),
         "profile_playlist" => res(account::profile_playlist(core, req(&args, "handle")?, req(&args, "id")?).await),
         "profile_follow" => {
             account::profile_follow(req(&args, "handle")?, req(&args, "on")?);

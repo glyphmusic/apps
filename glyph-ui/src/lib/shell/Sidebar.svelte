@@ -75,7 +75,8 @@
   .sb { flex: none; width: var(--sidebar-w); height: 100%; display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 6px; overflow: hidden; }
   .sb.wide { align-items: stretch; padding: 12px 8px; }
   .it { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; transition: background-color .12s ease-out; }
-  .sb.wide .it { width: 100%; height: 42px; padding: 0 10px; display: flex; align-items: center; gap: 11px; justify-content: flex-start; }
+  .sb.wide .it { width: 100%; height: 42px; padding: 0 10px 0 5px; display: flex; align-items: center; gap: 10px; justify-content: flex-start; }
+  .sb.wide .ico { width: 32px; height: 32px; }
   .it:hover { background: var(--hover); }
   .it.on { background: var(--active); }
   .ico { flex: none; display: grid; place-items: center; transition: transform .3s cubic-bezier(.33, 1, .68, 1); }

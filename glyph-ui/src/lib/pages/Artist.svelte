@@ -18,6 +18,7 @@
   import SectionTitle from "../components/SectionTitle.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Button from "../components/Button.svelte";
   import Decode from "../components/Decode.svelte";
   import BackPill from "./lists/BackPill.svelte";
@@ -161,57 +162,62 @@
 {#snippet aboutCard(mobile: boolean)}
   <div class="about" class:mob={mobile}>
     <div class="at">{t("artist.about")}</div>
-    {#if about}
-      <div class="ab scroll" class:open={aboutOpen} style:opacity={0.15 + 0.85 * aboutK} use:measureCut={about} use:fadeEdges={{ top: 16, bottom: 16, minOverflow: 8, active: aboutOpen }}>{about}</div>
-      {#if aboutCut || aboutOpen || wiki}
-      <div class="af">
-        {#if aboutCut || aboutOpen}<button class="more" onclick={() => (aboutOpen = !aboutOpen)}>{aboutOpen ? t("artist.less") : t("artist.more")}</button>{:else}<span></span>{/if}
-        {#if wiki}
-          <button class="wiki" onclick={() => backend().call("open_url", { url: wiki }).catch(() => {})}>Wikipedia<Icon name="external-link" size={11} /></button>
+    <SkeletonSwap loading={!about}>
+      {#snippet skeleton()}
+        <Skeleton w="100%" h={64} radius={6} id="about-sk-{name}" />
+      {/snippet}
+      {#if about}
+        <div class="ab scroll" class:open={aboutOpen} style:opacity={0.15 + 0.85 * aboutK} use:measureCut={about} use:fadeEdges={{ top: 16, bottom: 16, minOverflow: 8, active: aboutOpen }}>{about}</div>
+        {#if aboutCut || aboutOpen || wiki}
+        <div class="af">
+          {#if aboutCut || aboutOpen}<button class="more" onclick={() => (aboutOpen = !aboutOpen)}>{aboutOpen ? t("artist.less") : t("artist.more")}</button>{:else}<span></span>{/if}
+          {#if wiki}
+            <button class="wiki" onclick={() => backend().call("open_url", { url: wiki }).catch(() => {})}>Wikipedia<Icon name="external-link" size={11} /></button>
+          {/if}
+        </div>
         {/if}
-      </div>
       {/if}
-    {:else}
-      <Skeleton w={mobile ? 260 : 310} h={64} radius={6} id="about-sk-{name}" />
-    {/if}
+    </SkeletonSwap>
   </div>
 {/snippet}
 
 <div class="ap" class:mob={compact}>
-  <section class="hero" class:mob={compact}>
-    {#if heroReady}
-      <!-- The fade at the bottom sits on a still frame, so it stays at the hero's edge while the photo zooms. -->
-      <div class="pmask" class:mob={compact}><img class="photo" class:mob={compact} class:sd={compact && scrollFx} src={loaded} alt="" style:opacity={0.1 + 0.9 * heroE} style:transform={heroZoom} /></div>
-      {#if heroE < 1}<div class="sk" style:opacity={1 - heroE}><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-rv-{name}" /></div>{/if}
-    {/if}
-    {#if stillLoading}<div class="sk"><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-sk-{name}" /></div>{/if}
-    {#if compact}<div class="scrim"></div>{/if}
-    <div class="back"><BackPill /></div>
-    <div class="hinfo" class:mob={compact} style:right={compact ? undefined : `${showAbout ? 400 : 32}px`}>
-      {#if !compact}<span class="badge">{t("artist.badge")}</span>{/if}
-      <div class="nrow">
-        <h1 class="name" class:trunc={!compact}><Decode text={name} key="artist:name:{name}" dur={0.7} /></h1>
-        {#if verified}<VerifiedBadge size={compact ? 20 : 24} />{/if}
-      </div>
-      {#if !compact}
-        {#if meta}<span class="hmeta">{meta}</span>{/if}
-        <div class="hacts">
-          {#if has}
-            <span class="pl"><RoundPlay size={48} playing={here && app.playing} loading={here && app.loading} onclick={play} /></span>
-            <HeroIcon name="shuffle" onclick={() => playShuffled(tracks, name)} />
-            <HeroIcon name="radio" onclick={() => artistRadio(name)} />
-            <FollowButton {name} />
-            <HeroIcon name="ellipsis-vertical" onpointerdown={more} />
-          {:else}
-            <FollowButton {name} />
-          {/if}
-        </div>
+  <div class="hero-wrap" class:has-about={showAbout && !compact}>
+    <section class="hero" class:mob={compact}>
+      {#if heroReady}
+        <!-- The fade at the bottom sits on a still frame, so it stays at the hero's edge while the photo zooms. -->
+        <div class="pmask" class:mob={compact}><img class="photo" class:mob={compact} class:sd={compact && scrollFx} src={loaded} alt="" style:opacity={0.1 + 0.9 * heroE} style:transform={heroZoom} /></div>
+        {#if heroE < 1}<div class="sk" style:opacity={1 - heroE}><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-rv-{name}" /></div>{/if}
       {/if}
-    </div>
+      {#if stillLoading}<div class="sk"><Skeleton w="100%" h="100%" radius={compact ? 0 : 14} id="hero-sk-{name}" /></div>{/if}
+      {#if compact}<div class="scrim"></div>{/if}
+      <div class="back"><BackPill /></div>
+      <div class="hinfo" class:mob={compact}>
+        {#if !compact}<span class="badge">{t("artist.badge")}</span>{/if}
+        <div class="nrow">
+          <h1 class="name" class:trunc={!compact}><Decode text={name} key="artist:name:{name}" dur={0.7} /></h1>
+          {#if verified}<VerifiedBadge size={compact ? 20 : 24} />{/if}
+        </div>
+        {#if !compact}
+          {#if meta}<span class="hmeta">{meta}</span>{/if}
+          <div class="hacts">
+            {#if has}
+              <span class="pl"><RoundPlay size={48} playing={here && app.playing} loading={here && app.loading} onclick={play} /></span>
+              <HeroIcon name="shuffle" onclick={() => playShuffled(tracks, name)} />
+              <HeroIcon name="radio" onclick={() => artistRadio(name)} />
+              <FollowButton {name} />
+              <HeroIcon name="ellipsis-vertical" onpointerdown={more} />
+            {:else}
+              <FollowButton {name} />
+            {/if}
+          </div>
+        {/if}
+      </div>
+    </section>
     {#if showAbout && !compact}
       {@render aboutCard(false)}
     {/if}
-  </section>
+  </div>
 
   {#if compact}
     <div class="mob-bar">
@@ -231,24 +237,27 @@
   <div class="top" class:mob={compact}>
     <div class="pop">
       <SectionTitle icon="music-2" title={t("artist.popular")} />
-      {#if !has && loading}
-        <SkeletonRows prefix="artist" n={5} />
-      {:else if !has}
-        <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
-      {:else}
-        <div class="rows">
-          {#each tracks.slice(0, showAll ? tracks.length : 5) as _, i (i)}
-            {#if compact}
-              <PhoneSongRow {tracks} index={i} context={name} number={i + 1} />
-            {:else}
-              <SongRow {tracks} index={i} context={name} selected={app.selectedRow === i} />
-            {/if}
-          {/each}
-        </div>
-        {#if tracks.length > 5}
-          <div class="all"><Button onclick={() => (showAll = !showAll)}>{showAll ? t("artist.show_less") : t("artist.show_more_n")}</Button></div>
+      <SkeletonSwap loading={!has && loading}>
+        {#snippet skeleton()}
+          <SkeletonRows prefix="artist" n={5} />
+        {/snippet}
+        {#if !has}
+          <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
+        {:else}
+          <div class="rows">
+            {#each tracks.slice(0, showAll ? tracks.length : 5) as _, i (i)}
+              {#if compact}
+                <PhoneSongRow {tracks} index={i} context={name} number={i + 1} />
+              {:else}
+                <SongRow {tracks} index={i} context={name} selected={app.selectedRow === i} />
+              {/if}
+            {/each}
+          </div>
+          {#if tracks.length > 5}
+            <div class="all"><Button onclick={() => (showAll = !showAll)}>{showAll ? t("artist.show_less") : t("artist.show_more_n")}</Button></div>
+          {/if}
         {/if}
-      {/if}
+      </SkeletonSwap>
     </div>
     {#if liked.length}
       <div class="liked" class:mob={compact}>
@@ -282,7 +291,7 @@
       <div class="side" use:sideScroll use:fadeEdges={{ axis: "x", size: 28, minOverflow: 16 }}>
         {#if releases.length}
           {#each releases.slice(0, ROW) as r (r.id)}
-            <ReleaseCard title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r))} />
+            <ReleaseCard title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r), { kind: r.kind, tracks: r.tracks })} />
           {/each}
         {:else}
           {#each grouped.slice(0, ROW) as g (g.title)}
@@ -312,8 +321,10 @@
 </div>
 
 <style>
-  .ap { display: flex; flex-direction: column; gap: 22px; padding-bottom: 20px; }
+  .ap { display: flex; flex-direction: column; gap: 22px; padding-bottom: 20px; min-width: 0; }
+  .ap:not(.mob) { container: artist / inline-size; }
   .ap.mob { gap: 12px; }
+  .hero-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
   .hero { position: relative; margin: -12px -24px 0; height: 420px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
   /* Phones: the photo also fills the status bar strip (Compact.svelte .bleed), so it is that much taller. */
   .hero.mob { margin: calc(-1 * var(--page-top, 8px)) calc(-1 * var(--page-x, 16px)) 0; height: calc(min(320px, 44vh) + var(--safe-top, env(safe-area-inset-top, 0px))); min-height: calc(240px + var(--safe-top, env(safe-area-inset-top, 0px))); border-radius: 0; }
@@ -331,42 +342,43 @@
   .scrim { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to bottom, rgba(0,0,0,.28) 0%, transparent 30%, rgba(0,0,0,.38) 64%, rgba(0,0,0,.5) 82%, transparent 100%); }
   .sk { position: absolute; inset: 0; }
   .back { position: absolute; top: 20px; left: 32px; }
-  .hinfo { position: absolute; left: 32px; bottom: 40px; display: flex; flex-direction: column; min-width: 0; }
+  .hinfo { position: absolute; left: 32px; right: 32px; bottom: 40px; display: flex; flex-direction: column; min-width: 0; }
+  .hero-wrap.has-about .hinfo { right: 400px; }
   .hinfo.mob { left: var(--page-x, 16px); right: var(--page-x, 16px); bottom: 6px; }
   .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .nrow { padding-top: 2px; display: flex; align-items: center; gap: 12px; min-width: 0; }
   .name { margin: 0; font-size: 46px; line-height: 52px; font-weight: 700; color: #fff; }
   .hinfo.mob .name { font-size: clamp(28px, 8.5vw, 38px); line-height: 1.08; display: -webkit-box; line-clamp: 2; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .hmeta { padding-top: 6px; font-size: 13px; color: rgba(255, 255, 255, .65); }
-  .hacts { padding-top: 18px; display: flex; align-items: center; gap: 10px; }
+  .hacts { padding-top: 18px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
   .mob-bar { display: flex; flex-direction: column; gap: 8px; }
   .mob-meta { font-size: 13px; color: var(--dim); font-weight: 500; }
   .mob-acts { display: flex; align-items: center; gap: 12px; }
   .pl { margin-right: 6px; display: flex; }
-  .about { position: absolute; right: 32px; bottom: 40px; width: 340px; padding: 14px; border-radius: 12px; background: rgba(0, 0, 0, .6); display: flex; flex-direction: column; gap: 8px; }
+  .about { position: absolute; right: 8px; bottom: 40px; z-index: 2; width: 340px; padding: 14px; border-radius: 12px; background: rgba(0, 0, 0, .6); display: flex; flex-direction: column; gap: 8px; }
   .about.mob { position: static; width: 100%; background: var(--card); border-color: rgba(255, 255, 255, .07); }
   .at { font-size: 14px; font-weight: 600; color: rgba(255, 255, 255, .95); }
   .ab { font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .72); max-height: 72px; overflow: hidden; user-select: text; transition: max-height .25s var(--ease); white-space: pre-line; }
   .ab.open { max-height: 198px; overflow-y: auto; }
-  .af { display: flex; align-items: center; justify-content: space-between; }
+  .af { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .more { font-size: 12px; font-weight: 500; color: rgba(255, 255, 255, .6); transition: color .12s; }
   .more:hover { color: rgba(255, 255, 255, .95); }
   .wiki { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: rgba(255, 255, 255, .45); transition: color .12s; }
   .wiki:hover { color: rgba(255, 255, 255, .85); }
-  .top { display: flex; align-items: flex-start; gap: 32px; }
+  .top { display: flex; align-items: flex-start; gap: 32px; min-width: 0; }
   .top.mob { flex-direction: column; align-items: stretch; gap: 14px; }
   .pop { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-  .rows { display: flex; flex-direction: column; }
+  .rows { display: flex; flex-direction: column; min-width: 0; }
   .all { display: flex; padding-top: 4px; }
-  .liked { flex: none; width: 300px; display: flex; flex-direction: column; gap: 12px; }
+  .liked { flex: none; width: 300px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .liked.mob { order: -1; width: 100%; }
-  .lcard { display: flex; align-items: center; gap: 14px; padding: 10px; border-radius: 8px; background: var(--card); transition: background-color .12s ease-out; }
+  .lcard { display: flex; align-items: center; gap: 14px; padding: 10px; border-radius: 8px; background: var(--card); transition: background-color .12s ease-out; width: 100%; min-width: 0; }
   .lcard.mob { padding: 8px 10px; border-radius: 10px; }
   .l-av { position: relative; flex: none; }
   .l-badge { position: absolute; right: -3px; bottom: -3px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); border: 2px solid #0e0e0e; display: grid; place-items: center; }
   .lcard:hover { background: linear-gradient(rgba(255, 255, 255, .04), rgba(255, 255, 255, .04)), var(--card); }
   .ltile { flex: none; width: 56px; height: 56px; border-radius: 8px; display: grid; place-items: center; }
-  .ltx { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .ltx { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .ln { font-size: var(--md); font-weight: 500; color: rgba(255, 255, 255, .95); }
   .lb { font-size: var(--sm); color: rgba(255, 255, 255, .55); }
   .sect { display: flex; flex-direction: column; }
@@ -377,4 +389,20 @@
   .side { display: flex; gap: 4px; margin: 0 calc(-1 * var(--page-x)) 0 -8px; padding-right: var(--page-x); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
   .ap.mob .side { margin: 0 calc(-1 * var(--page-x)); padding: 0 var(--page-x); }
   .side::-webkit-scrollbar { display: none; }
+
+  /* Cramped desktop (e.g. narrow window or right side panel open): move About below hero and stack Liked songs below Popular songs. */
+  @container artist (max-width: 780px) {
+    .hero-wrap.has-about { gap: 16px; }
+    .hero { height: 350px; }
+    .hero-wrap.has-about .hinfo { right: 32px; }
+    .hero-wrap > .about { position: static; width: 100%; background: var(--card); }
+    .top { flex-direction: column; align-items: stretch; gap: 20px; }
+    .liked { width: 100%; }
+  }
+  @container artist (max-width: 560px) {
+    .hero { height: 320px; }
+    .back { top: 16px; left: 20px; }
+    .hinfo, .hero-wrap.has-about .hinfo { left: 20px; right: 20px; bottom: 24px; }
+    .name { font-size: clamp(26px, 8cqi, 40px); line-height: 1.12; }
+  }
 </style>

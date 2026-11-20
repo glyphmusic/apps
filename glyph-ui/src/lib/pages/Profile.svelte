@@ -25,6 +25,7 @@
   import SongRow from "../components/SongRow.svelte";
   import ListCover from "../components/ListCover.svelte";
   import Skeleton from "../components/Skeleton.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Icon from "../components/Icon.svelte";
   import Avatar from "./profile/Avatar.svelte";
   import SkeletonRows from "./profile/SkeletonRows.svelte";
@@ -89,12 +90,20 @@
   async function openPlaylist(pl: Playlist) {
     if (!p) return;
     const h = p.handle;
-    app.openListView(listKeyOf(pl));
+    const initial = listKeyOf(pl);
+    app.openListView(pl.tracks.length ? initial : { ...initial, loading: true }, false);
     // The songs of a profile playlist come from the server.
     try {
       const full = await backend().call<Track[] | null>("profile_playlist", { handle: h, id: pl.id });
-      if (full?.length && app.openList?.kind === "album" && app.openList.artist === `@${h}` && app.openList.title === pl.name) app.openList = { ...listKeyOf(pl), tracks: full };
-    } catch (e) { app.toastInfo(profileError(e)); }
+      if (app.openList?.kind === "album" && app.openList.artist === `@${h}` && app.openList.title === pl.name) {
+        app.openList = { ...app.openList, tracks: full?.length ? full : app.openList.tracks, loading: false };
+      }
+    } catch (e) {
+      if (app.openList?.kind === "album" && app.openList.artist === `@${h}` && app.openList.title === pl.name) {
+        app.openList = { ...app.openList, loading: false };
+      }
+      app.toastInfo(profileError(e));
+    }
   }
 
   function follow() {
@@ -112,21 +121,26 @@
   {#if app.history.length}<Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button>{/if}
 {/snippet}
 
-{#if !p}
-  <div class="wrap">
-    {#if app.history.length}<div class="bk">{@render backPill()}</div>{/if}
-    {#if signedOut}
-      <EmptyState icon="music-2" title={t("profile.signed_out")} sub={t("profile.signed_out.sub")} />
-    {:else if error}
-      <EmptyState icon="refresh-cw" title={error} sub={handle ? `@${handle}` : ""} />
-    {:else}
+<SkeletonSwap loading={!p && !signedOut && !error}>
+  {#snippet skeleton()}
+    <div class="wrap">
+      {#if app.history.length}<div class="bk">{@render backPill()}</div>{/if}
       <div class="load">
         <Skeleton w="100%" h={220} radius={14} id="profile-banner" />
         <SkeletonRows prefix="profile" n={5} />
       </div>
-    {/if}
-  </div>
-{:else}
+    </div>
+  {/snippet}
+  {#if !p}
+    <div class="wrap">
+      {#if app.history.length}<div class="bk">{@render backPill()}</div>{/if}
+      {#if signedOut}
+        <EmptyState icon="music-2" title={t("profile.signed_out")} sub={t("profile.signed_out.sub")} />
+      {:else if error}
+        <EmptyState icon="refresh-cw" title={error} sub={handle ? `@${handle}` : ""} />
+      {/if}
+    </div>
+  {:else}
   <div class="body">
     <div class="hero">
       {#if !p.banner}
@@ -221,7 +235,8 @@
       {/if}
     {/if}
   </div>
-{/if}
+  {/if}
+</SkeletonSwap>
 
 {#if crop.busy}<div class="busy" use:ink>{t("profile.image.uploading")}</div>{/if}
 <CropDialog />

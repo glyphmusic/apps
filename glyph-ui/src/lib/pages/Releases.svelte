@@ -5,6 +5,7 @@
   // artist loads, else the empty state.
   import SectionTitle from "../components/SectionTitle.svelte";
   import EmptyState from "../components/EmptyState.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import BackPill from "./lists/BackPill.svelte";
   import ReleaseCard from "./lists/ReleaseCard.svelte";
   import SkeletonArtistRows from "./lists/SkeletonArtistRows.svelte";
@@ -27,23 +28,26 @@
 <div class="rv">
   <BackPill />
   <SectionTitle heading title="{name} · {t('artist.albums')}" />
-  {#if releases.length}
-    <div class="grid">
-      {#each releases as r (r.id)}
-        <ReleaseCard size={168} title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r))} />
-      {/each}
-    </div>
-  {:else if grouped.length}
-    <div class="grid">
-      {#each grouped as g (g.title)}
-        <ReleaseCard size={168} title={g.title} artist={name} tracks={g.tracks} label={albumLabel(g.title, name, g.tracks.length)} onopen={() => app.openListView({ kind: "album", title: g.title, artist: name, tracks: g.tracks })} />
-      {/each}
-    </div>
-  {:else if loading}
-    <SkeletonArtistRows prefix="releases" n={2} />
-  {:else}
-    <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
-  {/if}
+  <SkeletonSwap loading={!releases.length && !grouped.length && loading}>
+    {#snippet skeleton()}
+      <SkeletonArtistRows prefix="releases" n={2} />
+    {/snippet}
+    {#if releases.length}
+      <div class="grid">
+        {#each releases as r (r.id)}
+          <ReleaseCard size={168} title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r), { kind: r.kind, tracks: r.tracks })} />
+        {/each}
+      </div>
+    {:else if grouped.length}
+      <div class="grid">
+        {#each grouped as g (g.title)}
+          <ReleaseCard size={168} title={g.title} artist={name} tracks={g.tracks} label={albumLabel(g.title, name, g.tracks.length)} onopen={() => app.openListView({ kind: "album", title: g.title, artist: name, tracks: g.tracks })} />
+        {/each}
+      </div>
+    {:else}
+      <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
+    {/if}
+  </SkeletonSwap>
 </div>
 
 <style>

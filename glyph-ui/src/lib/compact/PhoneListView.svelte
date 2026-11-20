@@ -10,17 +10,20 @@
   import Icon from "../components/Icon.svelte";
   import PhoneSongRow from "./PhoneSongRow.svelte";
   import VirtualRows from "../components/VirtualRows.svelte";
+  import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Skeletons from "../pages/search/Skeletons.svelte";
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
   import { t, tf } from "../i18n.svelte";
   import { listId, trackKey } from "../api/types";
-  import { openNameDialog } from "../pages/lists/actions";
+  import { albumSkeletonCount, openNameDialog, shownTracks } from "../pages/lists/actions";
+  import { cachedAlbumKind } from "../pages/lists/albumMeta.svelte";
   import { phone, scrollFx } from "./cstate.svelte";
   let w = $state(390);
   const l = $derived(app.openList!);
-  const tracks = $derived(app.listTracks(l));
+  const tracks = $derived(shownTracks(l));
   const albumLoading = $derived(l.kind === "album" && !!l.loading && !tracks.length);
+  const skCount = $derived(albumSkeletonCount(l, l.kind === "album" ? cachedAlbumKind(l.title, l.artist) : undefined));
   const art = $derived(Math.min(280, Math.max(140, w * 0.62)));
   /** The cover follows the scroll step by step: down to 50 % over as many px
    *  as it is tall, back up when scrolling back; it fades only in the second half. */
@@ -39,10 +42,13 @@
   $effect(() => { void listId(l); return () => app.stopPicking(); });
   const here = $derived(app.player.current ? tracks.some((x) => trackKey(x) === app.currentKey) : false);
   const allDl = $derived(tracks.length > 0 && tracks.every((x) => app.isDownloaded(x)));
-  function play() {
+  async function play() {
     if (here) return app.togglePlay();
     const i = tracks.findIndex((x) => app.allowed(x));
-    if (i >= 0) app.play(tracks, i, app.listTitle(l));
+    if (i >= 0) {
+      if (app.player.shuffle) await app.setShuffle(false);
+      app.play(tracks, i, app.listTitle(l));
+    }
   }
   function shuffle() { app.setShuffle(true); app.play(tracks, Math.floor(Math.random() * tracks.length), app.listTitle(l)); }
   const noArt = $derived(l.kind === "liked" || l.kind === "artist_liked" || l.kind === "recent" || l.kind === "downloads");
@@ -98,19 +104,22 @@
       {#if l.kind === "liked"}<button class="chip" onclick={() => app.clearLiked()}><Icon name="trash-2" size={15} />{t("liked.clear")}</button>{/if}
     </div>
   {/if}
-  {#if albumLoading}
-    <div class="rows"><Skeletons kind="rows" n={8} prefix="album" /></div>
-  {:else if !tracks.length}
-    <p class="empty">{emptySub}</p>
-  {:else}
-    <div class="rows">
-      <VirtualRows count={tracks.length} pitch={60} overscan={12}>
-        {#snippet row(i)}
-          <PhoneSongRow {tracks} index={i} from={l.kind === "album" ? null : l} context={app.listTitle(l)} />
-        {/snippet}
-      </VirtualRows>
-    </div>
-  {/if}
+  <SkeletonSwap loading={albumLoading}>
+    {#snippet skeleton()}
+      <div class="rows"><Skeletons kind="rows" n={skCount} prefix="album" /></div>
+    {/snippet}
+    {#if !tracks.length}
+      <p class="empty">{emptySub}</p>
+    {:else}
+      <div class="rows">
+        <VirtualRows count={tracks.length} pitch={60} overscan={12}>
+          {#snippet row(i)}
+            <PhoneSongRow {tracks} index={i} from={l.kind === "album" ? null : l} context={app.listTitle(l)} />
+          {/snippet}
+        </VirtualRows>
+      </div>
+    {/if}
+  </SkeletonSwap>
   <div style:height="24px"></div>
 </div>
 
