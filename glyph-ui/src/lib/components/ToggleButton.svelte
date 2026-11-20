@@ -3,7 +3,7 @@
   // line-only icons) in text colour or the accent; off = dim outline. The
   // icon pops 0.7 → 1.18 → 1.0 on click; a liked heart throws a few dots.
   import Icon from "./Icon.svelte";
-  import { tip } from "../ui.svelte";
+  import { holdMenu, tip } from "../ui.svelte";
   import { tipFor } from "../i18n.svelte";
   import { hasFill } from "../icons";
   let {
@@ -31,7 +31,7 @@
   });
 </script>
 
-<button class="tb {cls}" style:width="{box}px" style:height="{box}px" style:color={color} use:tip={notip ? undefined : text} aria-label={text ?? name} aria-pressed={on} onclick={click} {oncontextmenu} {onpointerdown}>
+<button class="tb {cls}" style:width="{box}px" style:height="{box}px" style:color={color} use:tip={notip ? undefined : text} aria-label={text ?? name} aria-pressed={on} onclick={click} {oncontextmenu} {onpointerdown} use:holdMenu={oncontextmenu}>
   {#key pop}<span class="g" class:popping={pop > 0}><Icon name={shownName} {size} /></span>{/key}
   {#if on && !onName && !hasFill(name)}<span class="dot" style:left="{(box - 4) / 2}px"></span>{/if}
   {#key burst}

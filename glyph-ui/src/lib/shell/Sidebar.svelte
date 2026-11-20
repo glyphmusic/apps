@@ -35,7 +35,7 @@
   }
 </script>
 
-<nav class="sb" class:wide={expanded} style:width="{width}px">
+<nav class="sb" class:wide={expanded} style:width="{width}px" data-part="sidebar">
   {#each nav as n}
     <button class="it {n.motion}" class:on={active(n.view)} onclick={() => app.navigate(n.view)} use:tip={{ label: expanded ? "" : t(n.label), side: "right" }} aria-label={t(n.label)}>
       <span class="ico"><Icon name={n.icon} size={20} color={active(n.view) ? "var(--text)" : "var(--dim)"} /></span>

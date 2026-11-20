@@ -24,9 +24,15 @@ struct AndroidAppState {
 
 static JVM: OnceLock<JavaVM> = OnceLock::new();
 static ACTIVITY: Mutex<Option<Global<JObject<'static>>>> = Mutex::new(None);
+/// Share sheets (`ShareActivity`) open over other apps: each runs the UI in
+/// a page of its own. They get every event; the main activity, when there
+/// is one, does everything else.
+static SHEETS: Mutex<Vec<Global<JObject<'static>>>> = Mutex::new(Vec::new());
 static STATE: OnceLock<Arc<AndroidAppState>> = OnceLock::new();
 static URL_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_JAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Waits for the file picker's answer (`nativeFilePicked`).
+static PICK: Mutex<Option<flume::Sender<Option<String>>>> = Mutex::new(None);
 
 fn with_activity<R>(
     label: &str,
@@ -35,7 +41,10 @@ fn with_activity<R>(
     let vm = JVM.get()?;
     let act_ref = {
         let guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
-        let g = guard.as_ref()?;
+        let sheets = SHEETS.lock().unwrap_or_else(|e| e.into_inner());
+        // Without the main activity (the app was started by a share sheet)
+        // the sheet does its work.
+        let g = guard.as_ref().or(sheets.first())?;
         vm.attach_current_thread(|env| env.new_global_ref(g.as_ref()))
             .ok()?
     };
@@ -102,11 +111,13 @@ fn toggle_like_current(core: &Arc<Core>) {
     }
 }
 
-fn call_complete_invoke(id: i64, ok: bool, payload_json: &str) {
-    with_activity("gpuiCompleteInvoke", |env, activity| {
+/// Answers a command in the page that sent it (the main activity or a share sheet).
+fn call_complete_invoke(page: &Global<JObject<'static>>, id: i64, ok: bool, payload_json: &str) {
+    let Some(vm) = JVM.get() else { return };
+    let res = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         let json = env.new_string(payload_json)?;
         env.call_method(
-            activity,
+            page.as_ref(),
             jni_str!("gpuiCompleteInvoke"),
             jni_sig!("(JZLjava/lang/String;)V"),
             &[
@@ -117,20 +128,40 @@ fn call_complete_invoke(id: i64, ok: bool, payload_json: &str) {
         )?;
         Ok(())
     });
+    if let Err(e) = res {
+        log::warn!("jni `gpuiCompleteInvoke` failed: {e}");
+    }
+}
+
+/// Every page showing the UI: the main activity and open share sheets.
+fn pages() -> Vec<Global<JObject<'static>>> {
+    let Some(vm) = JVM.get() else { return Vec::new() };
+    let main = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+    let sheets = SHEETS.lock().unwrap_or_else(|e| e.into_inner());
+    main.iter()
+        .chain(sheets.iter())
+        .filter_map(|g| vm.attach_current_thread(|env| env.new_global_ref(g.as_ref())).ok())
+        .collect()
 }
 
 fn call_emit_event(name: &str, payload_json: &str) {
-    with_activity("gpuiEmitEvent", |env, activity| {
-        let name = env.new_string(name)?;
-        let json = env.new_string(payload_json)?;
-        env.call_method(
-            activity,
-            jni_str!("gpuiEmitEvent"),
-            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
-            &[JValue::Object(&name), JValue::Object(&json)],
-        )?;
-        Ok(())
-    });
+    let Some(vm) = JVM.get() else { return };
+    for page in pages() {
+        let res = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let name = env.new_string(name)?;
+            let json = env.new_string(payload_json)?;
+            env.call_method(
+                page.as_ref(),
+                jni_str!("gpuiEmitEvent"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+                &[JValue::Object(&name), JValue::Object(&json)],
+            )?;
+            Ok(())
+        });
+        if let Err(e) = res {
+            log::warn!("jni `gpuiEmitEvent` failed: {e}");
+        }
+    }
 }
 
 fn take_open_url() -> Option<String> {
@@ -305,6 +336,34 @@ impl Host for AndroidHost {
         }
     }
 
+    /// The system picker (`gpuiPickFile`); the answer comes back through
+    /// `nativeFilePicked` as a copy of the file in the cache.
+    fn pick_file(
+        &self,
+        _title: Option<&str>,
+        _filter_name: &str,
+        extensions: &'static [&'static str],
+    ) -> glyph_app::host::BoxFuture<'static, Result<Option<PathBuf>, String>> {
+        let (tx, rx) = flume::bounded(1);
+        // A picker still waiting is answered with "nothing" (its sender drops).
+        *PICK.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+        let images = !extensions.is_empty()
+            && extensions.iter().all(|e| matches!(*e, "png" | "jpg" | "jpeg" | "webp" | "gif"));
+        // Other files (playlists) carry odd types on phones: show everything.
+        let mimes = if images { "image/*" } else { "*/*" };
+        let called = with_activity("gpuiPickFile", |env, activity| {
+            let m = env.new_string(mimes)?;
+            env.call_method(activity, jni_str!("gpuiPickFile"), jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&m)])?;
+            Ok(())
+        });
+        Box::pin(async move {
+            if called.is_none() {
+                return Err("activity unavailable".into());
+            }
+            Ok(rx.recv_async().await.ok().flatten().map(PathBuf::from))
+        })
+    }
+
     fn share_text(&self, text: &str, title: Option<&str>) -> Result<(), String> {
         let called = with_activity("gpuiShareText", |env, activity| {
             let s = env.new_string(text)?;
@@ -417,13 +476,15 @@ fn configure_dirs(files_dir: &str) {
     std::env::set_var("GLYPH_CONFIG", config.join("config.toml"));
 }
 
-/// Called from `MainActivity.onCreate` once WebView is initialized.
+/// Called from `MainActivity.onCreate` once WebView is initialized; `sheet`
+/// for a share sheet (`ShareActivity`) over another app.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
     mut env: EnvUnowned<'local>,
     _this: JObject<'local>,
     activity: JObject<'local>,
     files_dir: JString<'local>,
+    sheet: jboolean,
 ) {
     android_logger::init_once(
         android_logger::Config::default()
@@ -448,7 +509,11 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInit<'local>(
         return;
     };
     let _ = JVM.set(vm.clone());
-    *ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(global_act);
+    if sheet {
+        SHEETS.lock().unwrap_or_else(|e| e.into_inner()).push(global_act);
+    } else {
+        *ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(global_act);
+    }
 
     static INIT_NDK: std::sync::Once = std::sync::Once::new();
     INIT_NDK.call_once(|| unsafe {
@@ -491,13 +556,26 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeDetach<'local>(
     activity: JObject<'local>,
 ) {
     let removed = env
-        .with_env(|env| -> jni::errors::Result<Option<Global<JObject<'static>>>> {
+        .with_env(|env| -> jni::errors::Result<Vec<Global<JObject<'static>>>> {
             let mut guard = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
             let same = match guard.as_ref() {
                 Some(g) => env.is_same_object(g.as_ref(), &activity)?,
                 None => false,
             };
-            Ok(if same { guard.take() } else { None })
+            if same {
+                return Ok(guard.take().into_iter().collect());
+            }
+            let mut sheets = SHEETS.lock().unwrap_or_else(|e| e.into_inner());
+            let mut gone = Vec::new();
+            let mut i = 0;
+            while i < sheets.len() {
+                if env.is_same_object(sheets[i].as_ref(), &activity)? {
+                    gone.push(sheets.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            Ok(gone)
         })
         .resolve::<LogErrorAndDefault>();
     drop(removed);
@@ -507,26 +585,29 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeDetach<'local>(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_glyph_MainActivity_nativeInvoke<'local>(
     mut env: EnvUnowned<'local>,
-    _this: JObject<'local>,
+    this: JObject<'local>,
     id: jlong,
     cmd: JString<'local>,
     args_json: JString<'local>,
 ) {
     let parsed = env
-        .with_env(|env| -> jni::errors::Result<(String, String)> {
+        .with_env(|env| -> jni::errors::Result<Option<(String, String, Global<JObject<'static>>)>> {
             let cmd = cmd.try_to_string(env)?;
             let args = args_json.try_to_string(env)?;
-            Ok((cmd, args))
+            let page = env.new_global_ref(&this)?;
+            Ok(Some((cmd, args, page)))
         })
         .resolve::<LogErrorAndDefault>();
-    let (cmd, args_json) = parsed;
+    let Some((cmd, args_json, page)) = parsed else {
+        return;
+    };
     if cmd.is_empty() {
         return;
     }
 
     let Some(state) = STATE.get().cloned() else {
         let err_json = serde_json::to_string("app not initialized").unwrap_or_else(|_| "\"init error\"".into());
-        call_complete_invoke(id as i64, false, &err_json);
+        call_complete_invoke(&page, id as i64, false, &err_json);
         return;
     };
 
@@ -560,7 +641,7 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeInvoke<'local>(
                 (false, serde_json::to_string(&msg).unwrap_or_else(|_| "\"panic\"".into()))
             }
         };
-        call_complete_invoke(id as i64, ok, &json);
+        call_complete_invoke(&page, id as i64, ok, &json);
     });
 }
 
@@ -650,6 +731,26 @@ pub extern "system" fn Java_app_glyph_MainActivity_nativeUrlWaiting<'local>(
         }
     } else {
         URL_WAITING.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The file chosen in the system picker (a copy in the cache), or null.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_MainActivity_nativeFilePicked<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) {
+    let path = env
+        .with_env(|env| -> jni::errors::Result<Option<String>> {
+            if path.is_null() {
+                return Ok(None);
+            }
+            Ok(Some(path.try_to_string(env)?))
+        })
+        .resolve::<LogErrorAndDefault>();
+    if let Some(tx) = PICK.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = tx.send(path);
     }
 }
 

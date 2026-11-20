@@ -17,6 +17,7 @@
   import IconButton from "../../components/IconButton.svelte";
   import Decode from "../../components/Decode.svelte";
   import { app } from "../../state.svelte";
+  import { saveMenu } from "../lists/actions";
   import { t } from "../../i18n.svelte";
   import { fmtMs } from "../../fmt";
   import { primaryArtist, rating, trackKey, type ListKey, type Track } from "../../api/types";
@@ -76,11 +77,11 @@
       <IconButton name="list-plus" size={15} onclick={(e) => { e.stopPropagation(); app.queueAdd([tr], false); }} />
       <IconButton name="link-2" size={15} onclick={(e) => { e.stopPropagation(); app.share({ track: tr }); }} />
     </div>
-    <ToggleButton name="heart" size={15} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(tr)} />
+    <ToggleButton name="heart" size={15} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(tr)} oncontextmenu={saveMenu(tr)} />
     <span class="du mono">{fmtMs(tr.duration_ms)}</span>
   {:else}
     <div class="m-acts">
-      <ToggleButton name="heart" size={18} on={liked} accent="var(--accent)" notip onclick={() => app.toggleLike(tr)} />
+      <ToggleButton name="heart" size={18} on={liked} accent="var(--accent)" notip onclick={() => app.toggleLike(tr)} oncontextmenu={saveMenu(tr)} />
       <button class="mb more" type="button" aria-label={t("tip.ellipsis-vertical")} onclick={menu}>
         <Icon name="ellipsis-vertical" size={18} color="var(--dim)" />
       </button>

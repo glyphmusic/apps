@@ -448,6 +448,130 @@ fn save_share(core: &Core, code: &str, origin: Option<String>, shared_by: Option
     }
 }
 
+// ---- the phone's share sheet ----
+
+/// The backend, waiting for it while the app starts (the share sheet can be
+/// what started it).
+async fn backend_soon(core: &Arc<Core>) -> Option<Arc<Backend>> {
+    for _ in 0..120 {
+        if let Some(b) = core.backend() {
+            return Some(b);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    None
+}
+
+fn sheet_error(core: &Core, e: &str) -> Value {
+    json!({ "kind": "none", "error": say(core, e) })
+}
+
+/// What text shared to Glyph holds, read for the phone's share sheet
+/// without saving anything: the sheet saves what is ticked.
+///
+/// `kind` is `songs` (`tracks`), `list` (`name`, `tracks`, `origin`; a
+/// glyph.my playlist also `code`, `link`, `author`), `app` (the app
+/// itself handles it: a jam, several links, a search) or `none` (`error`).
+/// While a list is read, `share_progress` events count its songs.
+pub async fn share_read(core: C<'_>, text: String) -> Res<Value> {
+    let core = core.clone();
+    let Some(q) = crate::links::shared_query(&text) else {
+        return Ok(sheet_error(&core, "import.unknown_link"));
+    };
+    let jam_like = q.contains("/jam/") || q.starts_with(glyph_protocol::jam::CODE_PREFIX);
+    if jam_like && glyph_protocol::jam::normalize_code(&q).is_some() {
+        return Ok(json!({ "kind": "app" }));
+    }
+    if glyph_core::share::is_code(&q) || glyph_core::share::link_id(&q).is_some() {
+        return Ok(read_share(&core, &q).await);
+    }
+    // Several links at once go to "move from another app" in the app.
+    if q.split_whitespace().count() > 1 {
+        let (songs, lists) = Backend::pasted_links(&q);
+        if songs + lists > 1 {
+            return Ok(json!({ "kind": "app" }));
+        }
+    }
+    use glyph_core::import::RemoteSource as R;
+    let song = Backend::is_song_link(&q);
+    let list = glyph_core::import::parse_url(&q).is_some_and(|s| !matches!(s, R::SpotifyTrack(_) | R::DeezerTrack(_)));
+    if !song && !list {
+        // Plain text or an unknown link: searched for in the app.
+        return Ok(json!({ "kind": "app" }));
+    }
+    let Some(b) = backend_soon(&core).await else {
+        return Ok(sheet_error(&core, "status.backend_offline"));
+    };
+    if song {
+        return Ok(match guard_async(b.songs_from_links(&q)).await {
+            Ok(tracks) if !tracks.is_empty() => json!({ "kind": "songs", "tracks": tracks }),
+            Ok(_) => sheet_error(&core, "import.song.unreadable"),
+            Err(e) => sheet_error(&core, &e),
+        });
+    }
+    let (tx, mut rx) = flume_like::channel::<ImportProgress>();
+    let c2 = core.clone();
+    let drain = crate::rt::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            c2.emit("share_progress", json!({ "done": p.done, "total": p.total }));
+        }
+    });
+    let r = guard_async(b.import(ImportInput::Url(q.clone()), tx)).await;
+    drain.abort();
+    Ok(match r {
+        Ok(res) if !res.ordered.is_empty() => {
+            json!({ "kind": "list", "name": res.name, "tracks": res.ordered, "origin": res.origin })
+        }
+        Ok(_) => sheet_error(&core, "import.empty"),
+        Err(e) => sheet_error(&core, &e),
+    })
+}
+
+/// A playlist code or glyph.my link, read for the share sheet.
+async fn read_share(core: &Arc<Core>, text: &str) -> Value {
+    let Some(id) = glyph_core::share::link_id(text) else {
+        return match glyph_core::share::decode(text) {
+            Ok((name, tracks)) => json!({ "kind": "list", "name": name, "tracks": tracks, "code": text }),
+            Err(_) => sheet_error(core, "toast.share_link_failed"),
+        };
+    };
+    let link = format!("https://glyph.my/p/{id}");
+    let Some(b) = backend_soon(core).await else {
+        return sheet_error(core, "status.backend_offline");
+    };
+    match guard_async(b.resolve_share_link(&link)).await {
+        Ok(p) if p.kind == "artist" => json!({ "kind": "app" }),
+        Ok(p) if glyph_core::share::is_code(&p.code) => match glyph_core::share::decode(&p.code) {
+            Ok((name, tracks)) => {
+                let author = p.author.filter(|_| p.kind != "album");
+                json!({ "kind": "list", "name": name, "tracks": tracks, "code": p.code, "link": link, "author": author })
+            }
+            Err(_) => json!({ "kind": "none", "error": crate::i18n::tr(core, "toast.share_link_failed") }),
+        },
+        Ok(_) => json!({ "kind": "none", "error": crate::i18n::tr(core, "toast.share_link_failed") }),
+        Err(e) => {
+            tracing::info!(error = %e, "playlist link failed");
+            json!({ "kind": "none", "error": crate::i18n::tr(core, "toast.share_link_failed") })
+        }
+    }
+}
+
+/// "Save as playlist" in the share sheet: a list read by [`share_read`]
+/// (a link imported before only gets its new songs).
+pub fn share_save_list(core: C<'_>, name: String, origin: Option<String>, tracks: Vec<glyph_protocol::Track>) -> Value {
+    let s = save_tracks(core, &name, origin.as_deref(), tracks, None, String::new());
+    json!({ "id": s.id, "name": s.name, "added": s.added })
+}
+
+/// Audio files opened with or shared to Glyph, read for the share sheet.
+pub async fn share_read_files(core: C<'_>, paths: Vec<String>) -> Value {
+    let paths = paths.into_iter().map(PathBuf::from).collect();
+    match crate::opened::read_files(core, paths).await {
+        Ok(tracks) => json!({ "kind": "songs", "tracks": tracks }),
+        Err(key) => json!({ "kind": "none", "error": crate::i18n::tr(core, key) }),
+    }
+}
+
 /// "Add to library" on a shared playlist preview: saves it, returns its id.
 pub fn share_save(core: C<'_>, code: String, link: Option<String>, author: Option<String>) -> Option<String> {
     save_share(&core, &code, link, author)

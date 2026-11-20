@@ -1,10 +1,11 @@
-# Glyph 0.12.10 - 2026-11-19
+# Glyph 0.12.11 - 2026-11-20
 
-- **Smoother scrolling on phones**: lists, playlists and artist pages scroll without stutter; the cover shrink and photo zoom follow your finger.
-- **Remove many songs at once**: select songs in Liked Songs or your playlists and remove them together, or clear Liked Songs in one go. Unliking lots of songs no longer leaves a black screen.
-- **No black background on some graphics cards**: Glyph checks the computer on first start and switches to the processor when the graphics card fails.
-- **Fixes**: search no longer crashes on phones, long album titles no longer run into each other, playlist covers update after removing songs, mini players stay on top.
-- **Looks**: no more outlines and [ BRACKETS ], the phone's top bar covers the status bar, calmer error screens and settings tabs on phones, a two-row mini player card.
-- **New settings**: turn off song suggestions, pick the colour of the solid background, update channel "Stable" or "Latest", and full effects or performance mode in the welcome tour.
+- **Crossfade and playback on phones fixed**: the next song fades in and plays on instead of starting over or staying silent while the time runs; a hanging sound output is opened again by itself, and a song whose stream breaks goes on from the same spot.
+- **"Choose picture" works on phones**: playlist picture, profile picture and playlist import open the phone's picker.
+- **Even volume like Spotify**: every song gets one fixed volume, measured once; loud parts no longer turn the rest down, and bass boost keeps the volume.
+- **Save to a playlist from the heart**: right-click (on phones: hold) a heart to add the song to Liked Songs or any playlist.
+- **Your own background picture**, with Darken and Blur.
+- **Plugins can restyle Glyph** with fonts, corners, icons and pictures; Settings > Plugins always stays plain (Ctrl+Alt+P).
+- **Android**: share links and music files to Glyph from any app, and a Glyph note in the status bar.
 
 See CHANGELOG.md for the complete changes.

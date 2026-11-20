@@ -1,7 +1,9 @@
 <script lang="ts">
   // The glow field behind everything (visuals/glow.rs): theme glow colours,
   // the playing song's palette (from its cover), a new shape per song unless
-  // one is fixed in Settings > Appearance.
+  // one is fixed in Settings > Appearance. A background picture (own or a
+  // plugin's, backgrounds.svelte.ts) replaces the glow: darkened and
+  // optionally blurred, text ink from its brightness.
   import { untrack } from "svelte";
   import { Glow, paletteFromImage, paletteFromSeed, presetFromSeed, hex, solidIsDarkInk, type GlowShape, type Palette, type RenderMode } from "../glow";
   import { app } from "../state.svelte";
@@ -10,6 +12,7 @@
   import { trackKey } from "../api/types";
   import { fx, setGlow } from "../ui.svelte";
   import { t } from "../i18n.svelte";
+  import { bgUrl, bgs, loadBackgrounds, pictureLuma } from "../backgrounds.svelte";
 
   let { blurred = false }: { blurred?: boolean } = $props();
 
@@ -17,7 +20,13 @@
   let asciiEl = $state<HTMLCanvasElement | undefined>();
   let glow = $state<Glow | null>(null);
 
-  const solid = $derived(!app.config || app.config.visuals.glow_shape === "solid");
+  // The picture picked in Settings > Appearance (null while unknown or gone).
+  const picId = $derived(app.config?.visuals.bg_image || "");
+  $effect(() => { if (picId && !bgs.loaded) void loadBackgrounds(); });
+  const picUrl = $derived(picId ? bgUrl(picId) : null);
+  const picDim = $derived(Math.min(0.9, Math.max(0, app.config?.visuals.bg_dim ?? 0.35)));
+  const picBlur = $derived(Math.min(1, Math.max(0, app.config?.visuals.bg_blur ?? 0)));
+  const solid = $derived(!app.config || app.config.visuals.glow_shape === "solid" || !!picUrl);
   // Settings > Appearance > Animations. A canvas keeps the kind of drawing it
   // started with, so a switch brings new canvases (the {#key} below). A
   // graphics card that failed here stays off (`gpu_blocked`).
@@ -48,13 +57,25 @@
     };
   });
 
+  // Text ink on a picture: dark only when it stays bright after darkening.
+  let picLuma = $state<number | null>(null);
   $effect(() => {
-    if (solid) setGlow(null, solidIsDarkInk(baseColor));
+    const u = picUrl;
+    picLuma = null;
+    if (!u) return;
+    let alive = true;
+    void pictureLuma(u).then((l) => { if (alive) picLuma = l; });
+    return () => { alive = false; };
+  });
+  const staticInk = $derived(picUrl ? (picLuma ?? 0) * (1 - picDim) > 0.62 : solidIsDarkInk(baseColor));
+
+  $effect(() => {
+    if (solid) setGlow(null, staticInk);
   });
 
   $effect(() => {
     if (solid) {
-      setGlow(null, solidIsDarkInk(baseColor));
+      setGlow(null, staticInk);
       return;
     }
     if (!glow) return;
@@ -94,7 +115,11 @@
   void THEMES;
 </script>
 
-{#if solid}
+{#if picUrl}
+  <div class="bg solid" style:background={baseCss}></div>
+  <div class="bg pic" class:blurred style:background-image={`url("${picUrl}")`} style:--pic-blur="{Math.round(picBlur * 40)}px" style:--pic-scale={picBlur > 0 ? 1 + picBlur * 0.08 : 1}></div>
+  <div class="bg pic-dim" style:opacity={picDim}></div>
+{:else if solid}
   <div class="bg solid" style:background={baseCss}></div>
 {:else}
   {#key renderMode}
@@ -106,6 +131,10 @@
 <style>
   .bg { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; contain: strict; transition: filter .18s ease-out; }
   .bg.solid { z-index: 0; transition: none; }
+  /* The picture fills the window; blur reaches past the edges so they stay sharp-free. */
+  .bg.pic { z-index: 0; background-size: cover; background-position: center; filter: blur(var(--pic-blur, 0px)); transform: scale(var(--pic-scale, 1)); }
+  .bg.pic.blurred { filter: blur(calc(var(--pic-blur, 0px) + 14px)) saturate(1.1); }
+  .bg.pic-dim { z-index: 0; background: #000; transition: opacity .18s ease-out; }
   .bg.blurred { filter: blur(14px) saturate(1.1); }
   .glow { z-index: 0; image-rendering: auto; }
   .ascii { z-index: 0; image-rendering: pixelated; }

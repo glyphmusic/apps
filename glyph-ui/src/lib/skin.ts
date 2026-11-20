@@ -1,0 +1,90 @@
+// Looks of enabled plugins (glyph_core::plugins::LookSpec): font, corner
+// roundness, replaced icons and a style sheet for the whole interface
+// (every window, menu, dialog, toast and the mini player). The backend has
+// checked the style sheet (only the look's own files in url(), sent here
+// inlined as data: addresses; no @import; balanced braces) and checks again
+// here before it goes in.
+//
+// App.svelte pauses every look while Settings › Plugins or a plugin's
+// install warning is open: there a look can always be turned off, and the
+// plugin warnings always look like Glyph.
+//
+// Hooks for plugin makers that stay stable: `[data-skin]` (the main window),
+// `[data-part="titlebar" | "sidebar" | "page" | "side-panel" | "player-bar" |
+// "settings" | "menu" | "dialog" | "toasts" | "tooltip" | "mini-player" |
+// "tab-bar" | "mini-bar" | "now-playing"]`.
+import { setIconOverrides } from "./icon-overrides.svelte";
+
+export interface PluginLook {
+  plugin: string; font: string; radius: number | null; css: string;
+  /** Replaced icons: name -> SVG text. */
+  icons?: Record<string, string>;
+  /** A theme plugin's look: only while its theme is picked. */
+  theme?: boolean;
+}
+
+/** The looks in use: extensions' always, a theme's only while it is the theme. */
+export function activeLooks(looks: PluginLook[], theme: string): PluginLook[] {
+  return looks.filter((l) => !l.theme || theme === `plugin:${l.plugin}`);
+}
+
+/** System font stacks; a style sheet can bring its own with @font-face. */
+const FONTS: Record<string, string> = {
+  inter: 'Inter, system-ui, -apple-system, "Segoe UI", sans-serif',
+  system: 'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, sans-serif',
+  rounded: 'ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", "Quicksand", system-ui, sans-serif',
+  serif: 'ui-serif, "New York", Georgia, Cambria, "Times New Roman", serif',
+  mono: '"JetBrains Mono", Consolas, "Cascadia Mono", Menlo, monospace',
+};
+const BASE_RADIUS = 10;
+
+let styleEl: HTMLStyleElement | null = null;
+
+/** Applies the looks (plugins sorted by name; the first font / radius / icon wins). */
+export function applyLooks(looks: PluginLook[]) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement.style;
+  const font = looks.find((l) => l.font && FONTS[l.font])?.font;
+  if (font) root.setProperty("--font", FONTS[font]);
+  else root.removeProperty("--font");
+  const radius = looks.find((l) => l.radius != null && Number.isFinite(l.radius))?.radius;
+  if (radius != null) {
+    const k = Math.min(2, Math.max(0, radius));
+    root.setProperty("--radius", `${Math.round(BASE_RADIUS * k * 10) / 10}px`);
+    root.setProperty("--radius-k", String(k));
+  } else {
+    root.removeProperty("--radius");
+    root.removeProperty("--radius-k");
+  }
+  const icons: Record<string, string> = {};
+  for (const l of [...looks].reverse()) Object.assign(icons, l.icons ?? {});
+  setIconOverrides(icons);
+  const sheets = looks.filter((l) => l.css.trim() && safe(l.css));
+  if (!sheets.length) {
+    styleEl?.remove();
+    styleEl = null;
+    return;
+  }
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = "glyph-plugin-looks";
+  }
+  // Last in <head>: after Glyph's own styles, so equal rules go to the look.
+  document.head.appendChild(styleEl);
+  styleEl.textContent = sheets.map((l) => `/* plugin: ${l.plugin} */\n${l.css}`).join("\n\n");
+}
+
+/** Last check before the sheet goes in: url() only with inlined data, nothing else that loads, balanced braces. */
+function safe(css: string): boolean {
+  const low = css.toLowerCase();
+  if (["@import", "image-set(", "image(", "src(", "element(", "expression(", "javascript:", "\\", "<"].some((b) => low.includes(b))) return false;
+  for (let i = low.indexOf("url("); i >= 0; i = low.indexOf("url(", i + 4)) {
+    if (!css.startsWith('url("data:', i)) return false;
+  }
+  let depth = 0;
+  for (const ch of css.replace(/\/\*[\s\S]*?\*\//g, "").replace(/"[^"\n]*"|'[^'\n]*'/g, "")) {
+    if (ch === "{") depth++;
+    else if (ch === "}" && --depth < 0) return false;
+  }
+  return depth === 0;
+}

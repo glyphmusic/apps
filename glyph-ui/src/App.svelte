@@ -9,6 +9,7 @@
   import { cubicOut } from "svelte/easing";
   import { app } from "./lib/state.svelte";
   import { applyTheme } from "./lib/theme";
+  import { activeLooks, applyLooks } from "./lib/skin";
   import { fx, setUiSuspended, startRevealClock, suspendBackground } from "./lib/ui.svelte";
   import { installKeys } from "./lib/keys";
   import Background from "./lib/shell/Background.svelte";
@@ -22,7 +23,7 @@
   import Overlays from "./lib/shell/Overlays.svelte";
   import SettingsModal from "./lib/settings/SettingsModal.svelte";
   import Compact from "./lib/compact/Compact.svelte";
-  import { loadPlugins } from "./lib/settings/plugins-state.svelte";
+  import { loadPlugins, pl } from "./lib/settings/plugins-state.svelte";
   import { installSettingsHash } from "./lib/settings/hash.svelte";
   import { installRoutes } from "./lib/routes.svelte";
   import { installAccountEvents } from "./lib/account-events.svelte";
@@ -30,7 +31,10 @@
   import ErrorCard from "./lib/components/ErrorCard.svelte";
   import Icon from "./lib/components/Icon.svelte";
   import { t } from "./lib/i18n.svelte";
-  import { isMac, minimize, close as closeWindow, titlebarDown, inMiniWindow } from "./lib/window";
+  import { isMac, minimize, close as closeWindow, titlebarDown, inMiniWindow, inShareSheet } from "./lib/window";
+  import AddShared from "./lib/overlays/AddShared.svelte";
+  import NameDialog from "./lib/overlays/NameDialog.svelte";
+  import { closeShareSheet, startShareSheet } from "./lib/share-sheet.svelte";
   import { isTauri, isWeb } from "./lib/api/backend";
   import { mcpq, type McpApproval } from "./lib/settings/plugin-events.svelte";
   import {
@@ -86,6 +90,15 @@
 
   // Tauri opens the mini player as a window of its own (`#mini`).
   const mini = inMiniWindow();
+  // Android: the share sheet over another app (`#share`) shows only the
+  // "Add to Glyph" sheet on a see-through page (share-sheet.svelte.ts).
+  const share = inShareSheet();
+  let shareStarted = $state(false);
+  if (share) document.documentElement.classList.add("share-sheet");
+  // Nothing left on the sheet page (closed, saved, Back): the window goes.
+  $effect(() => {
+    if (share && shareStarted && !app.pickSongs && !app.nameDialog) closeShareSheet();
+  });
   if (mini) {
     document.documentElement.classList.add("mini-window");
     if (isWeb()) {
@@ -104,6 +117,17 @@
   });
 
   onMount(() => {
+    if (share) {
+      // Only phones have it: always the phone layout.
+      narrow = true;
+      fx.reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      app.init().then(() => {
+        startShareSheet();
+        shareStarted = true;
+        void backend().call("ui_ready");
+      }).catch((e) => closeShareSheet(String(e)));
+      return;
+    }
     if (mini) {
       let offWebMini: (() => void) | undefined;
       if (isWeb()) offWebMini = setupWebMiniPopup(app);
@@ -202,6 +226,14 @@
     }
   });
 
+  // Plugins' looks: font, corners, icons, style sheet (skin.ts). Paused on
+  // Settings > Plugins and the install warning: there a look can always be
+  // turned off, and the plugin warnings always look like Glyph.
+  $effect(() => {
+    const paused = (app.settingsOpen && app.settingsPage === "plugins") || !!pl.confirm;
+    applyLooks(app.config && !paused ? activeLooks(pl.ui.looks ?? [], app.config.visuals.theme) : []);
+  });
+
   $effect(() => {
     if (!app.config) return;
     applyTheme(app.config.visuals.theme, app.config.ui.text_scale);
@@ -280,9 +312,12 @@
 
 <svelte:window bind:innerWidth={winW} />
 
-{#if !mini && (app.ready || error)}<Background blurred={app.settingsOpen || app.onboarding} />{/if}
+{#if !mini && !share && (app.ready || error)}<Background blurred={app.settingsOpen || app.onboarding} />{/if}
 
-{#if mini}
+{#if share}
+  {#if app.pickSongs}<AddShared />{/if}
+  {#if app.nameDialog}<NameDialog />{/if}
+{:else if mini}
   {#if app.ready}<MiniPlayer />{:else if error}<p class="mini-err">{error}</p>{/if}
 {:else if error}
   <div class="fatal">
@@ -302,7 +337,7 @@
   {#if app.compact}
     <Compact />
   {:else}
-    <div class="root" class:dim={app.settingsOpen || app.onboarding} class:resizing={resizing !== null}>
+    <div class="root" class:dim={app.settingsOpen || app.onboarding} class:resizing={resizing !== null} data-skin>
       {#if zen}<div class="tb-space"></div>{:else}<Titlebar bind:search />{/if}
       <div class="body" class:with-bar={showBar}>
         {#if !zen}
@@ -310,13 +345,13 @@
           <div class="sash" class:on={resizing === "left"} role="separator" aria-orientation="vertical" aria-label="Resize left sidebar"
             onpointerdown={(e) => startResize(e, "left")} ondblclick={() => app.setLeftSidebarW(app.leftSidebarW > 64 ? 64 : 210, true)}></div>
         {/if}
-        <main class="main" class:narrow={rightOpen}>
+        <main class="main" class:narrow={rightOpen} data-part="page">
           <Page />
         </main>
         {#if rightOpen}
           <div class="sash" class:on={resizing === "right"} role="separator" aria-orientation="vertical" aria-label="Resize right sidebar"
             onpointerdown={(e) => startResize(e, "right")} ondblclick={() => app.setRightSidebarW(320, true)}></div>
-          <aside class="right" style:width="{rightW}px" in:fly={{ x: 24, duration: 160, opacity: 0, easing: cubicOut }}><RightPanel /></aside>
+          <aside class="right" style:width="{rightW}px" data-part="side-panel" in:fly={{ x: 24, duration: 160, opacity: 0, easing: cubicOut }}><RightPanel /></aside>
         {/if}
       </div>
       {#if showBar}

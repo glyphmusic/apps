@@ -40,7 +40,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<header class="tb" class:mac onmousedown={titlebarDown}>
+<header class="tb" class:mac onmousedown={titlebarDown} data-part="titlebar">
   <div class="left">
     <span class="logo mono">glyph</span>
     {#if desktop}

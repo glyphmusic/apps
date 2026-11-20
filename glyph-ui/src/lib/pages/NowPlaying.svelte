@@ -25,6 +25,7 @@
   import ModeSwitch from "./nowplaying/ModeSwitch.svelte";
   import LyricsSource from "./nowplaying/LyricsSource.svelte";
   import { app, type ControlMenu } from "../state.svelte";
+  import { saveMenu } from "./lists/actions";
   import { t, tf } from "../i18n.svelte";
   import { fmtTime } from "../fmt";
   import { keyLabel, keyOf } from "../keys";
@@ -115,7 +116,7 @@
         <div class="vol">
           <IconButton name={app.volume <= 0.001 ? "volume-x" : "volume-2"} size={16} color={app.controlMenu?.menu === "volume" ? "var(--accent)" : undefined} onclick={() => app.toggleMute()} oncontextmenu={menu("volume")} />
           <ThinBar width={150} value={app.volume} onpick={(f) => app.setVolume(f)} label={(f) => `${Math.round(f * 100)}%`} onwheelstep={wheelVol} />
-          <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} />
+          <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
           <ToggleButton name="timer" size={16} on={app.sleep != null || app.controlMenu?.menu === "sleep"} accent="var(--accent)" onclick={menu("sleep")} oncontextmenu={menu("sleep")} />
           {#if app.config.ui.np_download}
             {#if dl !== "none"}

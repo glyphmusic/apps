@@ -151,6 +151,39 @@ export function kindFromCount(n: number): string {
 export function releaseKind(kind: string): string {
   return t(`album.kind.${kind}`);
 }
+// ---- "Save to" picker (right-click on a heart) ----
+
+/** `oncontextmenu` of a heart: opens the "Save to" picker for `tr` at the pointer. */
+export function saveMenu(tr: Track | null | undefined) {
+  return (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (tr) app.openCtx({ x: e.clientX, y: e.clientY, track: tr, save: true });
+  };
+}
+/** Where `tr` is in playlist `id` (-1 if not there). */
+export function indexInPlaylist(id: string, tr: Track): number {
+  const k = trackKey(tr);
+  return app.playlist(id)?.tracks.findIndex((x) => trackKey(x) === k) ?? -1;
+}
+/** Adds `tr` to playlist `id`, or takes it out when it is already there (with undo). */
+export function toggleInPlaylist(id: string, tr: Track) {
+  const p = app.playlist(id);
+  if (!p) return;
+  const i = indexInPlaylist(id, tr);
+  if (i < 0) {
+    p.tracks = [...p.tracks, tr];
+    app.addToPlaylist(id, [tr]);
+    return;
+  }
+  p.tracks = p.tracks.filter((_, j) => j !== i);
+  app.removeFromList({ kind: "playlist", id }, i);
+  app.toast(`${tf("toast.removed_from", { name: p.name })} · ${tr.title}`, "ok", {
+    label: t("toast.undo"),
+    run: () => backend().call("list_insert", { list: { kind: "playlist", id }, index: i, track: tr }),
+  });
+}
+
 export function openNameDialog(tracks: Track[] = [], rename: string | null = null) {
   app.ctx = null;
   app.nameDialog = { tracks, rename, initial: rename ? app.playlist(rename)?.name ?? "" : "" };

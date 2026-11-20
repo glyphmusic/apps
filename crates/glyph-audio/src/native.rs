@@ -120,6 +120,9 @@ pub struct TrackShared {
     pub finished: AtomicBool,
     /// Decoder starvation events; consumed and logged by the engine, never the callback.
     pub underruns: AtomicU64,
+    /// Goes up while the output pulls samples (silence included): the
+    /// engine sees from it that the output still runs.
+    pub beat: AtomicU64,
     pub loudness: crate::loudness::TrackLoudness,
 }
 
@@ -449,6 +452,8 @@ pub struct TrackSource {
     tap_acc: f32,
     tap_n: usize,
     counter: u32,
+    /// Samples handed out since the last `beat`.
+    pulled: u32,
     silence_remaining: usize,
     starving: bool,
     level: crate::loudness::Leveller,
@@ -489,6 +494,7 @@ impl TrackSource {
             tap_acc: 0.0,
             tap_n: 0,
             counter: 0,
+            pulled: 0,
             silence_remaining: 0,
             starving: false,
             level,
@@ -541,6 +547,11 @@ impl Iterator for TrackSource {
     /// Hands out the rendered frame sample by sample; decodes, filters and
     /// renders the next frame when it is used up.
     fn next(&mut self) -> Option<f32> {
+        self.pulled += 1;
+        if self.pulled >= 1024 {
+            self.pulled = 0;
+            self.shared.beat.fetch_add(1, Ordering::Relaxed);
+        }
         if self.out_idx < self.frame_out.len() {
             let s = self.frame_out[self.out_idx];
             self.out_idx += 1;
@@ -639,9 +650,76 @@ impl TrackSource {
         if self.counter % 1024 == 0 {
             self.publish_pos();
         }
+        // The song's one gain first (measured on the decoded sample, so the
+        // equalizer never changes it), then the equalizer, then the limiter
+        // that only catches peaks.
+        let s = self.level.gain(s, &self.shared.loudness);
         let s = self.eq.process(s);
-        Some(self.level.process(s, &self.shared.loudness))
+        Some(self.level.limit(s))
     }
+}
+
+/// Decodes `url` as fast as it goes and measures its loudness (at most
+/// `max_secs` of it). Stops with `Ok(None)` once `keep` says the song is no
+/// longer wanted.
+pub(crate) fn measure(
+    url: &str,
+    mime: Option<&str>,
+    max_secs: f64,
+    keep: &dyn Fn() -> bool,
+) -> Result<Option<crate::loudness::Analysis>, String> {
+    let mut format = open_format(url, mime)?;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or("no audio track")?
+        .clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("unsupported codec: {e}"))?;
+    let mut meter: Option<(crate::loudness::Meter, u64)> = None;
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut frames = 0u64;
+    let mut packets = 0u32;
+    loop {
+        packets = packets.wrapping_add(1);
+        if packets % 64 == 1 && !keep() {
+            return Ok(None);
+        }
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymError::ResetRequired) => break,
+            Err(e) => return Err(format!("read: {e}")),
+        };
+        if packet.track_id() != track.id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SymError::DecodeError(_) | SymError::IoError(_)) => continue,
+            Err(e) => return Err(format!("decode: {e}")),
+        };
+        let spec = *decoded.spec();
+        let ch = spec.channels.count().max(1);
+        let sb = sample_buf.get_or_insert_with(|| SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+        if sb.capacity() < decoded.frames() * ch {
+            *sb = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+        }
+        sb.copy_interleaved_ref(decoded);
+        let (m, limit) = meter.get_or_insert_with(|| {
+            (crate::loudness::Meter::new(spec.rate, ch as u16), (max_secs * spec.rate.max(1) as f64) as u64)
+        });
+        for s in sb.samples() {
+            m.push(*s);
+        }
+        frames += (sb.samples().len() / ch) as u64;
+        if frames >= *limit {
+            break;
+        }
+    }
+    Ok(meter.and_then(|(m, _)| m.result()))
 }
 
 impl Source for TrackSource {
@@ -681,6 +759,47 @@ mod tests {
         }
         println!("decoded {:.1} s at {rate} Hz", frames as f64 / rate);
         assert!(frames as f64 / rate > 60.0);
+    }
+
+    #[test]
+    fn measures_the_loudness_of_a_whole_file() {
+        // 4 s of a 1 kHz tone at half scale in both channels (16-bit WAV),
+        // with a loud bass hit in the middle: one number for the whole song.
+        let rate = 48_000u32;
+        let mut pcm: Vec<u8> = Vec::new();
+        for i in 0..rate * 4 {
+            let t = i as f32 / rate as f32;
+            let mut s = 0.5 * (std::f32::consts::TAU * 1000.0 * t).sin();
+            if (2.0..2.2).contains(&t) {
+                s = 0.95 * (std::f32::consts::TAU * 50.0 * t).sin();
+            }
+            let v = (s * 32767.0) as i16;
+            pcm.extend_from_slice(&v.to_le_bytes());
+            pcm.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        let path = std::env::temp_dir().join(format!("glyph-measure-{}.wav", std::process::id()));
+        std::fs::write(&path, &wav).unwrap();
+        let a = measure(path.to_str().unwrap(), Some("audio/wav"), 900.0, &|| true).unwrap().unwrap();
+        // Half scale at 1 kHz in both channels: about -6 LUFS.
+        assert!((a.lufs - -6.0).abs() < 0.3, "{a:?}");
+        assert!((a.peak_db - 20.0 * 0.95f32.log10()).abs() < 0.1, "{a:?}");
+        // A song no longer wanted stops early.
+        assert_eq!(measure(path.to_str().unwrap(), Some("audio/wav"), 900.0, &|| false).unwrap(), None);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

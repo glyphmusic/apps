@@ -1046,6 +1046,21 @@ pub fn plugins_folder() -> Res {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn backgrounds_list(core: C<'_>) -> Value {
+    glyph_app::backgrounds::backgrounds_list(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn background_add(data: String) -> Res<String> {
+    glyph_app::backgrounds::background_add(data).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn background_remove(id: String) -> Res {
+    glyph_app::backgrounds::background_remove(id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn plugin_set_value(core: C<'_>, plugin: String, item: String, value: Value) {
     plugins::plugin_set_value(&core, plugin, item, value)
 }

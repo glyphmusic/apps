@@ -160,7 +160,7 @@
   {/if}
 {/snippet}
 
-<div class="phone" class:under={phone.npOpen} class:fading={!phone.npOpen || phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
+<div class="phone" data-skin class:under={phone.npOpen} class:fading={!phone.npOpen || phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
   {#if app.view !== "artist" && !ownList}
   <div class="top" style:background="rgba(10, 10, 10, {topK})">
   {#if app.view === "home"}

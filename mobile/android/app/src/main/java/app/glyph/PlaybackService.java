@@ -432,7 +432,7 @@ public class PlaybackService extends Service {
         PendingIntent content = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         if (title.isEmpty()) {
             return new NotificationCompat.Builder(this, CHANNEL)
-                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setSmallIcon(R.drawable.ic_stat_glyph)
                     .setContentTitle("Glyph Jam")
                     .setContentText("Jam active")
                     .setContentIntent(content)
@@ -454,7 +454,7 @@ public class PlaybackService extends Service {
         NotificationCompat.Action next = new NotificationCompat.Action(android.R.drawable.ic_media_next, "Next",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_SKIP_TO_NEXT));
         return new NotificationCompat.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setSmallIcon(R.drawable.ic_stat_glyph)
                 .setContentTitle(title)
                 .setContentText(artist)
                 .setLargeIcon(artwork())

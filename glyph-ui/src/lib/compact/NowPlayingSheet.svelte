@@ -15,6 +15,7 @@
   import Skeleton from "../components/Skeleton.svelte";
   import IconAction from "./IconAction.svelte";
   import { app } from "../state.svelte";
+  import { saveMenu } from "../pages/lists/actions";
   import { jam } from "../jam.svelte";
   import { onWeb } from "../web";
   import { t } from "../i18n.svelte";
@@ -100,7 +101,7 @@
   }
 </script>
 
-<div class="sheet" style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${Math.min(22, 10 + pull * 0.3).toFixed(1)}px ${Math.min(22, 10 + pull * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={pull === 0}
+<div class="sheet" data-part="now-playing" style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${Math.min(22, 10 + pull * 0.3).toFixed(1)}px ${Math.min(22, 10 + pull * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={pull === 0}
   in:sheetIn|global={{ duration: 300 }} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hdr" style:background="rgba(15,15,15,{0.94 * sk})"
@@ -127,7 +128,7 @@
         <Cover track={cur} size={40} radius={4} />
         <span class="mt"><span class="t"><SongTitle rating={rating(cur)}>{cur.title}</SongTitle></span>
           {#if remote}<span class="dev"><Icon name="cast" size={12} color="var(--accent)" />{remote.name}</span>{:else}<span class="a trunc">{cur.artist}</span>{/if}</span>
-        <ToggleButton name="heart" size={20} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} />
+        <ToggleButton name="heart" size={20} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
         <span class="p34" onclick={(e) => { e.stopPropagation(); app.togglePlay(); }} onkeydown={() => {}} role="button" tabindex="-1"><PlayGlyph loading={app.loading} playing={app.playing} size={13} button={34} /></span>
         <span class="prog"><i style:width="{frac * 100}%"></i></span>
       </button>
@@ -154,7 +155,7 @@
             else { app.openArtistPage(cur.artist); close(); }
           }}>{cur.artist}</button>
         </span>
-        <ToggleButton name="heart" size={24} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} />
+        <ToggleButton name="heart" size={24} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
       </div>
       <div class="seek" style:margin-top="{seekMt}px">
         <ThinBar width="100%" value={frac} live={false} onpick={(f) => dur && app.seek(f * dur)} />

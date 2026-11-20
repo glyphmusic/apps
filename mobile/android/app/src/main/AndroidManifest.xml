@@ -39,6 +39,21 @@
                 <data android:scheme="glyph" android:host="p" />
                 <data android:scheme="glyph" android:host="plugin" />
             </intent-filter>
+        </activity>
+
+        <!-- Share sheet: "Share" / "Open with" Glyph opens the "Add to Glyph" sheet
+             over the app it came from, in a task of its own that leaves no trace
+             in Recents (ShareActivity). -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Glyph.Sheet"
+            android:taskAffinity="app.glyph.share"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:windowSoftInputMode="adjustNothing"
+            android:enableOnBackInvokedCallback="false">
             <!-- "Share" from Spotify, YouTube, the browser, ...: song and playlist links. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

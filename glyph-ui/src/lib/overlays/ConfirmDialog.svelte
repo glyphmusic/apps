@@ -27,7 +27,7 @@
 <div class="layer" transition:fade|global={{ duration: 160 }}>
   <div class="tdim"></div>
   <div class="bd" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
-    <div class="panel" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="alertdialog" tabindex="-1">
+    <div class="panel" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="alertdialog" tabindex="-1">
       <div class="tt">{c.title}</div>
       {#if c.body}<div class="body">{c.body}</div>{/if}
       <div class="foot">

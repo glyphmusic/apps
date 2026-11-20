@@ -209,7 +209,7 @@
 
 {#if !big}
   <!-- the slim bar -->
-  <div class="mini bar" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
+  <div class="mini bar" data-part="mini-player" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${MINI_W}px`}" style:height="{windowed ? '100%' : `${MINI_H}px`}">
     <div class="grp">
       <div class="art" onpointerdown={grab} role="presentation">
         {#if cur}<Cover track={cur} size={34} radius={6} />{:else}<span class="ph"><Icon name="music-2" size={16} color="var(--faint)" /></span>{/if}
@@ -230,7 +230,7 @@
   </div>
 {:else}
   <!-- the card -->
-  <div class="mini cardw" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{cardTop}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
+  <div class="mini cardw" data-part="mini-player" oncontextmenu={menu} role="presentation" class:pip={!!pipWindow} class:win={windowed} class:resizing style:left="{left}px" style:top="{top}px" style:width="{windowed ? '100%' : `${card.w}px`}" style:height="{windowed ? '100%' : `${card.h}px`}" style:padding="{cardTop}px {CARD_PAD}px {CARD_PAD}px" style:gap="{INFO_GAP}px">
     {#if showTopbar}
       <div class="topbar" style:height="{CARD_TOP}px" style:padding="{TOP_INSET}px">
         <button class="tbtn" aria-label={tipFor("minimize-2")} use:tip={tipFor("minimize-2")} onclick={() => setBig(false)}><Icon name="minimize-2" size={14} /></button>

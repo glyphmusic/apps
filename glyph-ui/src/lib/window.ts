@@ -59,6 +59,10 @@ export function titlebarDown(e: MouseEvent) {
 
 /** This webview or popup is the mini player window (Tauri opens `#mini`, Web opens `/web/#mini`). */
 export const inMiniWindow = () => (isTauri() || isWeb()) && typeof location !== "undefined" && location.hash === "#mini";
+/** Android: the share sheet over another app (ShareActivity loads `#share`). */
+export const inShareSheet = () => typeof location !== "undefined" && location.hash === "#share";
+/** A window that shows one thing only (mini player, share sheet): no Home, profile, plugins. */
+export const inSideWindow = () => inMiniWindow() || inShareSheet();
 /** Mini player window: new size in CSS pixels. */
 export async function setWindowSize(w: number, h: number) {
   if (isWeb() && typeof window !== "undefined") {

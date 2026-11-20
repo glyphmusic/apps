@@ -59,41 +59,50 @@ pub fn open_files(core: &Arc<Core>, paths: Vec<PathBuf>, then: Then) {
         if paths.is_empty() {
             return;
         }
-        // A file that started Glyph arrives before the backend is up.
-        let mut backend = core.backend();
-        for _ in 0..120 {
-            if backend.is_some() {
-                break;
+        let tracks = match read_files(&core, paths).await {
+            Ok(t) => t,
+            Err(key) => {
+                core.toast_key(key, "info");
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            backend = core.backend();
-        }
-        let Some(b) = backend else {
-            core.toast_key("status.backend_offline", "info");
-            return;
         };
-        let lib = b.local_library();
-        let tracks: Vec<Track> = crate::rt::spawn_blocking(move || {
-            paths
-                .iter()
-                .filter_map(|p| match lib.open_file(p) {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        tracing::info!(error = %e, "opened file not readable");
-                        None
-                    }
-                })
-                .collect()
-        })
-        .await
-        .unwrap_or_default();
-        if tracks.is_empty() {
-            core.toast_key("open.file_unreadable", "info");
-            return;
-        }
         match then {
             Then::Play => core.play_list_from(tracks, 0, None, PlayFrom::default()),
             Then::Ask => core.emit("pick_songs", json!({ "tracks": tracks, "file": true })),
         }
     });
+}
+
+/// Reads opened files into songs, once the backend is up (a file that
+/// started Glyph arrives before it). The error is an i18n key.
+pub async fn read_files(core: &Arc<Core>, paths: Vec<PathBuf>) -> Result<Vec<Track>, &'static str> {
+    let mut backend = core.backend();
+    for _ in 0..120 {
+        if backend.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        backend = core.backend();
+    }
+    let b = backend.ok_or("status.backend_offline")?;
+    let lib = b.local_library();
+    let tracks: Vec<Track> = crate::rt::spawn_blocking(move || {
+        paths
+            .iter()
+            .take(MAX_FILES)
+            .filter_map(|p| match lib.open_file(p) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::info!(error = %e, "opened file not readable");
+                    None
+                }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    if tracks.is_empty() {
+        return Err("open.file_unreadable");
+    }
+    Ok(tracks)
 }

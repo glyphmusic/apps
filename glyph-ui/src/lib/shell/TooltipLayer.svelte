@@ -19,7 +19,7 @@
   const arrowX = $derived(tipState.rect ? tipState.rect.left + tipState.rect.width / 2 - pos.x : 0);
 </script>
 
-<div class="tip {tipState.side}" class:show={tipState.shown} class:wrap={tipState.wrap} bind:this={el} style:left="{pos.x}px" style:top="{pos.y}px" role="tooltip">
+<div class="tip {tipState.side}" data-part="tooltip" class:show={tipState.shown} class:wrap={tipState.wrap} bind:this={el} style:left="{pos.x}px" style:top="{pos.y}px" role="tooltip">
   {#if tipState.side === "right"}
     <span class="arrow l">{#each steps as s}<i style:height="{s}px"></i>{/each}</span>
   {:else}

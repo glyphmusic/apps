@@ -53,6 +53,7 @@
   import PlayingBars from "./PlayingBars.svelte";
   import DownloadBadge from "./DownloadBadge.svelte";
   import { app } from "../state.svelte";
+  import { saveMenu } from "../pages/lists/actions";
   import { fmtMs } from "../fmt";
   import { rating, trackKey, type ListKey, type Track } from "../api/types";
   import { tip } from "../ui.svelte";
@@ -125,7 +126,7 @@
   {#if album}
     <span class="al trunc">{#if tr.album}<button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openAlbum(tr.album!, tr.artist, [], tr); }}>{tr.album}</button>{/if}</span>
   {/if}
-  <span class="like" class:keep={liked}><ToggleButton name="heart" size={15} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(tr)} /></span>
+  <span class="like" class:keep={liked}><ToggleButton name="heart" size={15} on={liked} accent="var(--accent)" onclick={() => app.toggleLike(tr)} oncontextmenu={saveMenu(tr)} /></span>
   <span class="du mono">{fmtMs(tr.duration_ms)}</span>
   <button class="more" aria-label={t("tip.ellipsis-vertical")} onclick={menu}><Icon name="ellipsis-vertical" size={16} color="var(--dim)" /></button>
 </div>

@@ -1,8 +1,8 @@
 //! Plugins people publish on GitHub. Two kinds share one manifest, catalog
 //! and install flow:
-//! - **theme**: colours only (pure data).
+//! - **theme**: colours and a look (pure data).
 //! - **extension**: anything else. Without code it can rename texts
-//!   (`strings`), hide settings rows (`hide`) and bring a theme. With code
+//!   (`strings`), hide settings rows (`hide`), bring a theme and a look. With code
 //!   (`main`, a WebAssembly module run in a sandbox by
 //!   [`crate::plugin_host`]) it can also add settings pages and sections,
 //!   song menu entries, and use Glyph's API (playback, library, search,
@@ -19,8 +19,16 @@
 //! The catalog is cached in `<data>/plugins/catalog.json` for an hour (the
 //! unauthenticated search API allows 10 calls a minute). Installed plugins
 //! live in `<data>/plugins/<id>/` (`glyph-plugin.json` + `origin.json`, the
-//! code as `code.wasm`, the plugin's settings in `values.json` and its own
-//! data in `storage.json`).
+//! code as `code.wasm`, the files of its look in `look/`, the plugin's
+//! settings in `values.json` and its own data in `storage.json`).
+//!
+//! A **look** (`look`, any kind, no code) can change the whole interface:
+//! the font, how round corners are, pictures for the background picker,
+//! Glyph's icons, and a style sheet for every window, menu and dialog. The
+//! style sheet only loads the look's own files (`url()` of a listed asset,
+//! sent to the UI as `data:` addresses), never anything from the network.
+//! The UI pauses every look while Settings › Plugins is open, so the plugin
+//! warnings and the switch to turn a look off always look like Glyph.
 
 use crate::paths;
 use anyhow::{anyhow, bail, Context, Result};
@@ -104,6 +112,279 @@ pub struct Manifest {
     /// Entries the plugin adds to menus (song menu).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub menus: Vec<MenuEntry>,
+    /// Font, corners, background pictures, icons and a style sheet (pure data).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<LookSpec>,
+}
+
+/// How a plugin changes Glyph's look beyond colours. Files are paths in the
+/// repo, next to the manifest.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LookSpec {
+    /// Text font: one of [`FONTS`]; empty = Glyph's (Inter). A style sheet
+    /// can bring its own font instead (`@font-face` with an asset).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub font: String,
+    /// Corner roundness: 0 square, 1 Glyph's, 2 very round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// Pictures (.png, .jpg, .webp) offered in Settings › Appearance ›
+    /// Background picture.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backgrounds: Vec<String>,
+    /// Style sheet (.css) for the whole interface (see [`check_css`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
+    /// Files the style sheet may use with `url(...)`: fonts (.woff2, .woff,
+    /// .ttf, .otf) and pictures (.png, .jpg, .webp, .gif, .svg).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<String>,
+    /// Glyph icons the look replaces: icon name (`heart`, `play`, ...) ->
+    /// .svg file. Drawn as a mask in the text colour, like Glyph's own.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub icons: BTreeMap<String, String>,
+}
+
+/// Fonts a look can pick (from the system, nothing is downloaded).
+pub const FONTS: &[&str] = &["inter", "system", "rounded", "serif", "mono"];
+/// Background pictures per plugin.
+pub const MAX_LOOK_BACKGROUNDS: usize = 8;
+/// One background picture at most this big.
+pub const MAX_LOOK_PICTURE: usize = 8 * 1024 * 1024;
+/// A look's style sheet at most this big.
+pub const MAX_CSS: usize = 128 * 1024;
+/// Files the style sheet may use, and the size of each.
+pub const MAX_LOOK_ASSETS: usize = 40;
+pub const MAX_LOOK_ASSET: usize = 2 * 1024 * 1024;
+/// Icons a look may replace, and the size of each .svg.
+pub const MAX_LOOK_ICONS: usize = 400;
+pub const MAX_ICON: usize = 32 * 1024;
+/// All files of one look together.
+pub const MAX_LOOK_TOTAL: usize = 32 * 1024 * 1024;
+
+/// File types of assets.
+const ASSET_TYPES: &[&str] = &["woff2", "woff", "ttf", "otf", "png", "jpg", "jpeg", "webp", "gif", "svg"];
+
+/// Things a look's style sheet may not use: anything that loads by itself
+/// (`url()` is checked apart: only the look's assets), old script hooks, and
+/// escapes that could hide them.
+const CSS_BANNED: &[&str] = &[
+    "@import", "@namespace", "@charset", "image-set(", "image(", "src(", "element(",
+    "expression(", "javascript:", "-moz-binding", "behavior:", "\\", "<",
+];
+
+/// Where a style sheet uses `url(...)`: (start, end, the address).
+fn css_urls(css: &str) -> Result<Vec<(usize, usize, String)>> {
+    let lower = css.to_ascii_lowercase();
+    let b = css.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = lower[from..].find("url(") {
+        let start = from + off;
+        let mut i = start + 4;
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let addr = if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
+            let q = b[i] as char;
+            let Some(end) = css[i + 1..].find(q) else { bail!("the style sheet has an unclosed url(") };
+            let a = css[i + 1..i + 1 + end].trim().to_string();
+            i += end + 2;
+            a
+        } else {
+            let Some(end) = css[i..].find(')') else { bail!("the style sheet has an unclosed url(") };
+            let a = css[i..i + end].trim().to_string();
+            i += end;
+            a
+        };
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if b.get(i) != Some(&b')') {
+            bail!("the style sheet has an unclosed url(");
+        }
+        out.push((start, i + 1, addr));
+        from = i + 1;
+    }
+    Ok(out)
+}
+
+/// Checks a look's style sheet: small, `url()` only for the look's `assets`,
+/// nothing else that loads, and its braces are balanced.
+pub fn check_css(css: &str, assets: &[String]) -> Result<()> {
+    if css.len() > MAX_CSS {
+        bail!("the style sheet is larger than {} KB", MAX_CSS / 1024);
+    }
+    let lower = css.to_ascii_lowercase();
+    if let Some(b) = CSS_BANNED.iter().find(|b| lower.contains(*b)) {
+        bail!("the style sheet may not use {b}");
+    }
+    for (_, _, addr) in css_urls(css)? {
+        if !assets.iter().any(|a| *a == addr) {
+            bail!("url({addr}) must be one of the look's assets");
+        }
+    }
+    let bytes = css.as_bytes();
+    let (mut depth, mut i) = (0i32, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'*') => match css[i + 2..].find("*/") {
+                Some(end) => i += end + 4,
+                None => bail!("the style sheet has an unclosed comment"),
+            },
+            q @ (b'"' | b'\'') => match css[i + 1..].find(q as char) {
+                Some(end) if !css[i + 1..i + 1 + end].contains('\n') => i += end + 2,
+                _ => bail!("the style sheet has an unclosed string"),
+            },
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    bail!("the style sheet has a }} without a {{");
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if depth != 0 {
+        bail!("the style sheet has a {{ without a }}");
+    }
+    Ok(())
+}
+
+/// Media type of a look file, by its extension.
+fn mime_of(name: &str) -> Option<&'static str> {
+    Some(match name.rsplit_once('.')?.1.to_ascii_lowercase().as_str() {
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => return None,
+    })
+}
+
+/// The style sheet with every `url(file)` replaced by the file as a `data:`
+/// address (`read` gives a file's checked bytes). `None` when a file is missing.
+pub fn inline_css(css: &str, read: impl Fn(&str) -> Option<Vec<u8>>) -> Option<String> {
+    use base64::Engine;
+    let mut done: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = String::with_capacity(css.len());
+    let mut last = 0;
+    for (start, end, addr) in css_urls(css).ok()? {
+        if !done.contains_key(&addr) {
+            let data = format!("data:{};base64,{}", mime_of(&addr)?, base64::engine::general_purpose::STANDARD.encode(read(&addr)?));
+            done.insert(addr.clone(), data);
+        }
+        out.push_str(&css[last..start]);
+        out.push_str("url(\"");
+        out.push_str(&done[&addr]);
+        out.push_str("\")");
+        last = end;
+    }
+    out.push_str(&css[last..]);
+    Some(out)
+}
+
+/// Icon names: Glyph's (`heart`, `skip-forward`, `heart-fill`).
+fn valid_icon_name(n: &str) -> bool {
+    (1..=40).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+impl LookSpec {
+    fn is_empty(&self) -> bool {
+        self.font.is_empty() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
+    }
+
+    /// Every file the look needs from the repo, each once.
+    pub fn files(&self) -> Vec<&String> {
+        let mut v: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).chain(self.icons.values()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Largest size file `name` may have, by what it is used for.
+    fn max_size(&self, name: &str) -> usize {
+        let mut max = 0;
+        if self.css.as_deref() == Some(name) {
+            max = max.max(MAX_CSS);
+        }
+        if self.backgrounds.iter().any(|b| b == name) {
+            max = max.max(MAX_LOOK_PICTURE);
+        }
+        if self.assets.iter().any(|b| b == name) {
+            max = max.max(MAX_LOOK_ASSET);
+        }
+        if self.icons.values().any(|b| b == name) {
+            max = max.max(MAX_ICON);
+        }
+        max
+    }
+
+    fn validate(&self) -> Result<(), Invalid> {
+        let bad = |s: &str| Err(Invalid::Bad(format!("look: {s}")));
+        if self.is_empty() {
+            return bad("needs a font, radius, backgrounds, css, assets or icons");
+        }
+        if !self.font.is_empty() && !FONTS.contains(&self.font.as_str()) {
+            // A font this build does not know comes from a newer Glyph.
+            return Err(Invalid::NeedsNewerApp);
+        }
+        if self.radius.is_some_and(|r| !(r.is_finite() && (0.0..=2.0).contains(&r))) {
+            return bad("radius must be between 0 and 2");
+        }
+        let ext = |f: &str| f.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
+        if self.backgrounds.len() > MAX_LOOK_BACKGROUNDS {
+            return bad("at most 8 backgrounds");
+        }
+        for b in &self.backgrounds {
+            if !valid_path(b) || b.is_empty() || !matches!(ext(b).as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                return bad("backgrounds are paths of .png, .jpg or .webp files in the repo");
+            }
+        }
+        if let Some(css) = &self.css {
+            if !valid_path(css) || !css.ends_with(".css") {
+                return bad("css must be the path of a .css file in the repo");
+            }
+        }
+        if self.assets.len() > MAX_LOOK_ASSETS {
+            return bad("at most 40 assets");
+        }
+        for a in &self.assets {
+            if !valid_path(a) || a.is_empty() || !ASSET_TYPES.contains(&ext(a).as_str()) {
+                return bad("assets are paths of font (.woff2, .woff, .ttf, .otf) or picture (.png, .jpg, .webp, .gif, .svg) files in the repo");
+            }
+        }
+        if self.icons.len() > MAX_LOOK_ICONS {
+            return bad("at most 400 icons");
+        }
+        for (name, file) in &self.icons {
+            if !valid_icon_name(name) {
+                return bad("icon names are 1-40 of a-z, 0-9 and -");
+            }
+            if !valid_path(file) || file.is_empty() || ext(file) != "svg" {
+                return bad("icons are paths of .svg files in the repo");
+            }
+        }
+        // Each file has one job among css, backgrounds and assets (icons may share files).
+        let mut files: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).collect();
+        let n = files.len();
+        files.sort();
+        files.dedup();
+        if files.len() != n {
+            return bad("each file only once");
+        }
+        Ok(())
+    }
 }
 
 fn schema_one() -> u32 {
@@ -445,13 +726,16 @@ impl Manifest {
         if let Some(t) = &self.theme {
             t.colors().map_err(|e| Invalid::Bad(e.to_string()))?;
         }
+        if let Some(l) = &self.look {
+            l.validate()?;
+        }
         match self.kind.as_str() {
             "theme" => {
                 if self.theme.is_none() {
                     return bad("a theme plugin needs a \"theme\" object");
                 }
                 if self.main.is_some() || !self.strings.is_empty() || !self.hide.is_empty() || !self.settings.is_empty() || !self.menus.is_empty() {
-                    return bad("a theme has colours only; use \"kind\": \"extension\" for more");
+                    return bad("a theme has colours and a look only; use \"kind\": \"extension\" for more");
                 }
                 Ok(())
             }
@@ -467,8 +751,8 @@ impl Manifest {
 
     fn validate_extension(&self) -> Result<(), Invalid> {
         let bad = |s: String| Err(Invalid::Bad(s));
-        if self.theme.is_none() && self.main.is_none() && self.strings.is_empty() && self.hide.is_empty() {
-            return bad("an extension needs code (\"main\"), \"strings\", \"hide\" or a \"theme\"".into());
+        if self.theme.is_none() && self.look.is_none() && self.main.is_none() && self.strings.is_empty() && self.hide.is_empty() {
+            return bad("an extension needs code (\"main\"), \"strings\", \"hide\", a \"theme\" or a \"look\"".into());
         }
         if let Some(main) = &self.main {
             if !valid_path(main) || main.is_empty() || !main.ends_with(".wasm") {
@@ -1132,7 +1416,65 @@ impl Installed {
     pub fn dir(&self) -> PathBuf {
         plugins_dir().join(&self.manifest.id)
     }
+
+    /// A file of the plugin's look on disk: in `look/` for installed
+    /// plugins, next to the manifest for local ones.
+    pub fn look_file(&self, name: &str) -> Option<PathBuf> {
+        let look = self.manifest.look.as_ref()?;
+        if !look.files().iter().any(|f| *f == name) || !valid_path(name) {
+            return None;
+        }
+        let dir = self.dir();
+        Some(if self.origin.is_local() { dir.join(name) } else { dir.join(LOOK_DIR).join(name) })
+    }
+
+    /// A look file's bytes when they pass [`check_look_file`].
+    fn look_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        let look = self.manifest.look.as_ref()?;
+        let bytes = std::fs::read(self.look_file(name)?).ok()?;
+        match check_look_file(look, name, &bytes) {
+            Ok(()) => Some(bytes),
+            Err(e) => {
+                tracing::warn!(plugin = %self.manifest.id, "look: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// The look's style sheet, checked, with its assets inlined as `data:`
+    /// addresses (so the UI loads nothing).
+    pub fn look_css(&self) -> Option<String> {
+        let name = self.manifest.look.as_ref()?.css.as_ref()?;
+        let css = String::from_utf8(self.look_bytes(name)?).ok()?;
+        let out = inline_css(&css, |a| self.look_bytes(a));
+        if out.is_none() {
+            tracing::warn!(plugin = %self.manifest.id, "look: a file the style sheet uses is missing");
+        }
+        out
+    }
+
+    /// The icons the look replaces: name -> SVG text.
+    pub fn look_icons(&self) -> BTreeMap<String, String> {
+        let Some(look) = &self.manifest.look else { return BTreeMap::new() };
+        look.icons
+            .iter()
+            .filter_map(|(name, file)| {
+                let svg = String::from_utf8(self.look_bytes(file)?).ok()?;
+                (svg.len() <= MAX_ICON).then(|| (name.clone(), svg))
+            })
+            .collect()
+    }
+
+    /// The look's background pictures that are on disk, in manifest order
+    /// (index, file).
+    pub fn look_backgrounds(&self) -> Vec<(usize, PathBuf)> {
+        let Some(look) = &self.manifest.look else { return Vec::new() };
+        look.backgrounds.iter().enumerate().filter_map(|(i, b)| self.look_file(b).filter(|p| p.is_file()).map(|p| (i, p))).collect()
+    }
 }
+
+/// Folder of an installed plugin's look files.
+pub const LOOK_DIR: &str = "look";
 
 /// Checks that `bytes` look like a WebAssembly module of acceptable size.
 pub fn check_code(bytes: &[u8]) -> Result<()> {
@@ -1170,9 +1512,80 @@ pub async fn fetch_code(http: &reqwest::Client, listing: &Listing) -> Result<Opt
     Ok(Some(bytes))
 }
 
+/// Checks one file of `look`: the style sheet with [`check_css`], fonts and
+/// pictures by size and type.
+pub fn check_look_file(look: &LookSpec, name: &str, bytes: &[u8]) -> Result<()> {
+    let max = look.max_size(name);
+    if bytes.len() > max {
+        bail!("{name}: at most {} KB", max / 1024);
+    }
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let ok = match ext.as_str() {
+        "css" => {
+            let css = std::str::from_utf8(bytes).map_err(|_| anyhow!("{name}: the style sheet is not UTF-8 text"))?;
+            return check_css(css, &look.assets).map_err(|e| anyhow!("{name}: {e}"));
+        }
+        "png" | "jpg" | "jpeg" | "webp" => crate::backgrounds::image_ext(bytes).is_some(),
+        "gif" => bytes.starts_with(b"GIF8"),
+        "svg" => std::str::from_utf8(bytes).is_ok_and(|s| s.contains("<svg")),
+        "woff2" => bytes.starts_with(b"wOF2"),
+        "woff" => bytes.starts_with(b"wOFF"),
+        "ttf" => bytes.starts_with(&[0, 1, 0, 0]) || bytes.starts_with(b"true"),
+        "otf" => bytes.starts_with(b"OTTO"),
+        _ => false,
+    };
+    if !ok {
+        bail!("{name}: not a {ext} file");
+    }
+    Ok(())
+}
+
+/// Downloads the files of `listing`'s look (style sheet, pictures, fonts,
+/// icons, at the listed commit), checked; empty without a look.
+pub async fn fetch_look(http: &reqwest::Client, listing: &Listing) -> Result<Vec<(String, Vec<u8>)>> {
+    let Some(look) = &listing.manifest.look else { return Ok(Vec::new()) };
+    if !valid_repo(&listing.repo) || !valid_path(&listing.path) || !listing.rev.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b)) {
+        bail!("invalid plugin location");
+    }
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for name in look.files() {
+        if !valid_path(name) {
+            bail!("invalid look file");
+        }
+        let file = if listing.path.is_empty() { name.clone() } else { format!("{}/{name}", listing.path) };
+        let url = format!("https://raw.githubusercontent.com/{}/{}/{file}", listing.repo, listing.rev);
+        let r = http.get(url).send().await?.error_for_status()?;
+        let max = look.max_size(name);
+        if r.content_length().is_some_and(|n| n as usize > max) {
+            bail!("{name} is too large");
+        }
+        let mut body = r.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(&chunk?);
+            if bytes.len() > max {
+                bail!("{name} is too large");
+            }
+        }
+        total += bytes.len();
+        if total > MAX_LOOK_TOTAL {
+            bail!("the look's files are larger than {} MB together", MAX_LOOK_TOTAL / (1024 * 1024));
+        }
+        check_look_file(look, name, &bytes)?;
+        out.push((name.clone(), bytes));
+    }
+    Ok(out)
+}
+
 /// Installs (or updates) `listing` with its `code` (from [`fetch_code`]).
 /// Another repo's plugin with the same id is refused rather than replaced.
 pub fn install(listing: &Listing, code: Option<&[u8]>) -> Result<Installed> {
+    install_with_look(listing, code, &[])
+}
+
+/// [`install`] with the files of the plugin's look (from [`fetch_look`]).
+pub fn install_with_look(listing: &Listing, code: Option<&[u8]>, look: &[(String, Vec<u8>)]) -> Result<Installed> {
     listing.installable().map_err(|e| anyhow!("{}: {e}", listing.manifest.id))?;
     let id = &listing.manifest.id;
     let dir = plugins_dir().join(id);
@@ -1185,6 +1598,16 @@ pub fn install(listing: &Listing, code: Option<&[u8]>) -> Result<Installed> {
         (Some(_), Some(code)) => check_code(code)?,
         (Some(_), None) => bail!("{id}: the plugin's code is missing"),
         (None, _) => {}
+    }
+    // Every file the look names, checked, and nothing else.
+    let spec = listing.manifest.look.as_ref();
+    let wanted: Vec<&String> = spec.map(|l| l.files()).unwrap_or_default();
+    if look.iter().map(|(_, b)| b.len()).sum::<usize>() > MAX_LOOK_TOTAL {
+        bail!("{id}: the look's files are too large together");
+    }
+    for name in &wanted {
+        let Some((_, bytes)) = look.iter().find(|(n, _)| n == *name) else { bail!("{id}: {name} of the look is missing") };
+        check_look_file(spec.expect("files come from the look"), name, bytes)?;
     }
     // An update cannot reuse a key under a changed destination declaration.
     if let Some(old) = paths::read_json::<Manifest>(&dir.join(MANIFEST_FILE)).filter(|m| m.id == *id) {
@@ -1212,6 +1635,28 @@ pub fn install(listing: &Listing, code: Option<&[u8]>) -> Result<Installed> {
         }
         None if code_file.exists() => std::fs::remove_file(&code_file)?,
         None => {}
+    }
+    // The look's files replace the old ones (written beside, then swapped).
+    let look_dir = dir.join(LOOK_DIR);
+    let fresh = dir.join("look.part");
+    if fresh.exists() {
+        std::fs::remove_dir_all(&fresh)?;
+    }
+    if !wanted.is_empty() {
+        for name in &wanted {
+            let (_, bytes) = look.iter().find(|(n, _)| n == *name).expect("checked above");
+            let to = fresh.join(name);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(to, bytes)?;
+        }
+    }
+    if look_dir.exists() {
+        std::fs::remove_dir_all(&look_dir)?;
+    }
+    if !wanted.is_empty() {
+        std::fs::rename(&fresh, &look_dir)?;
     }
     paths::write_json(&dir.join(MANIFEST_FILE), &listing.manifest)?;
     paths::write_json(&dir.join("origin.json"), &origin)?;
@@ -1327,6 +1772,7 @@ mod tests {
             hide: Vec::new(),
             settings: Vec::new(),
             menus: Vec::new(),
+            look: None,
         }
     }
 
@@ -1489,6 +1935,59 @@ mod tests {
     }
 
     #[test]
+    fn looks_validate() {
+        let base = r##"{"schema":2,"id":"neon","name":"Neon","version":"1.0.0","kind":"extension","look":LOOK}"##;
+        let parse = |look: &str| serde_json::from_str::<Manifest>(&base.replace("LOOK", look)).unwrap();
+        assert!(parse(r#"{"font":"serif","radius":1.5,"backgrounds":["bg/a.webp"],"css":"style.css"}"#).validate("1.0.0").is_ok());
+        assert_eq!(parse(r#"{"font":"comic"}"#).validate("1.0.0"), Err(Invalid::NeedsNewerApp));
+        assert!(matches!(parse(r#"{}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"radius":3}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"backgrounds":["../x.png"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"backgrounds":["x.gif"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"css":"x.js"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"css":"a.css","backgrounds":["a.css"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(parse(r#"{"assets":["fonts/a.woff2","img/b.svg"],"icons":{"heart":"icons/heart.svg","heart-fill":"icons/heart.svg"}}"#).validate("1.0.0").is_ok());
+        assert!(matches!(parse(r#"{"assets":["x.exe"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"icons":{"Heart":"h.svg"}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        assert!(matches!(parse(r#"{"icons":{"heart":"h.png"}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+        // A theme may bring a look; a look alone makes a valid extension.
+        let mut t = theme("sunset", "1.0.0");
+        t.look = Some(LookSpec { font: "rounded".into(), ..Default::default() });
+        assert!(t.validate("1.0.0").is_ok());
+    }
+
+    #[test]
+    fn css_is_checked() {
+        assert!(check_css("[data-part=\"sidebar\"] { opacity: .8 } /* } */ .a::after { content: \"}\" }", &[]).is_ok());
+        assert!(check_css("@media (max-width: 900px) { .a { color: red } }", &[]).is_ok());
+        // url() only for the look's own files.
+        let assets = vec![String::from("img/a.png"), String::from("fonts/x.woff2")];
+        assert!(check_css(".a { background: url(img/a.png) }", &assets).is_ok());
+        assert!(check_css("@font-face { font-family: X; src: url( \"fonts/x.woff2\" ) format(\"woff2\") }", &assets).is_ok());
+        assert!(check_css(".a { background: url(img/b.png) }", &assets).is_err());
+        assert!(check_css(".a { background: url('https://x.example/a.png') }", &assets).is_err());
+        assert!(check_css(".a { background: url(data:image/png;base64,AA) }", &assets).is_err());
+        assert!(check_css(".a { background: url(img/a.png }", &assets).is_err());
+        let inlined = inline_css(".a { background: url(img/a.png) } .b { background: url('img/a.png') }", |_| Some(vec![1, 2, 3])).unwrap();
+        assert_eq!(inlined, ".a { background: url(\"data:image/png;base64,AQID\") } .b { background: url(\"data:image/png;base64,AQID\") }");
+        assert!(inline_css(".a { background: url(img/a.png) }", |_| None).is_none());
+        for bad in [
+            "} * { display: none }",
+            ".a { color: red",
+            ".a { background: url(https://x.example/p.png) }",
+            ".a { background: URL(x) }",
+            "@import 'x.css';",
+            ".a { content: '\\75 rl(' }",
+            ".a { content: \"unclosed }",
+            "/* open",
+            "</style><script>",
+        ] {
+            assert!(check_css(bad, &[]).is_err(), "{bad}");
+        }
+        assert!(check_css(&"a{}".repeat(50_000), &[]).is_err());
+    }
+
+    #[test]
     fn hosts_and_permissions() {
         assert!(valid_host("api.example.com"));
         assert!(valid_host("*.example.com"));
@@ -1622,6 +2121,24 @@ mod tests {
         assert_eq!(installed().len(), 1);
         uninstall("sunset").unwrap();
         assert!(uninstall("../etc").is_err());
+        // A look: its files land in look/, all of them checked.
+        let mut m = theme("neon", "1.0.0");
+        let mut icons = BTreeMap::new();
+        icons.insert(String::from("heart"), String::from("icons/heart.svg"));
+        m.look = Some(LookSpec { css: Some("style.css".into()), backgrounds: vec!["bg/a.png".into()], icons, ..Default::default() });
+        let l = listing(m, "e/f", false);
+        let css = (String::from("style.css"), b".a { color: red }".to_vec());
+        let svg = (String::from("icons/heart.svg"), b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec());
+        let png = (String::from("bg/a.png"), b"\x89PNG\r\n\x1a\n....".to_vec());
+        assert!(install_with_look(&l, None, &[css.clone(), svg.clone()]).is_err());
+        assert!(install_with_look(&l, None, &[css.clone(), svg.clone(), (png.0.clone(), b"GIF89a".to_vec())]).is_err());
+        assert!(install_with_look(&l, None, &[(css.0.clone(), b"} * { display: none }".to_vec()), svg.clone(), png.clone()]).is_err());
+        let inst = install_with_look(&l, None, &[css, svg, png]).unwrap();
+        assert_eq!(inst.look_css().as_deref(), Some(".a { color: red }"));
+        assert_eq!(inst.look_backgrounds().len(), 1);
+        assert!(inst.look_icons()["heart"].starts_with("<svg"));
+        assert!(inst.look_file("../origin.json").is_none());
+        uninstall("neon").unwrap();
         std::env::remove_var("GLYPH_DATA_DIR");
     }
 }

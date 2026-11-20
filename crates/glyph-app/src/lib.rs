@@ -1,4 +1,5 @@
 pub mod account;
+pub mod backgrounds;
 pub mod commands;
 pub mod controller;
 pub mod devices;

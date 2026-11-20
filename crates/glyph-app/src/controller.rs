@@ -267,6 +267,7 @@ impl Core {
                     glyph_audio::http::set_account_access_provider(Arc::new(glyph_core::account::media_access));
                     glyph_audio::http::set_local_access_provider(Arc::new(glyph_core::ytdlp::local_stream_access));
                     glyph_audio::http::set_cache_dir(glyph_core::paths::cache_dir().join("audio-ranges"));
+                    glyph_audio::loudness::set_store(glyph_core::paths::cache_dir().join("loudness-v1.tsv"));
                     glyph_core::set_stream_warmer(Arc::new(glyph_audio::http::prewarm));
                     glyph_core::cover::set_data_saver(core.st().config.storage.data_saver);
                     *core.backend.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(b));
@@ -1030,6 +1031,17 @@ impl Core {
         true
     }
 
+    /// Where the current song stands while the player still plays it, so a
+    /// fresh source goes on from there instead of starting it over. Not
+    /// under `st` (lock order jam -> out -> st).
+    fn playing_position(&self) -> Option<Duration> {
+        let ps = self.player_state()?;
+        let cur = self.st().current.clone()?;
+        let same = ps.track.as_ref().is_some_and(|t| t.id == cur.id && t.source == cur.source);
+        let live = !matches!(ps.status, glyph_audio::Status::Ended | glyph_audio::Status::Idle);
+        (same && live && ps.position >= Duration::from_secs(2)).then_some(ps.position)
+    }
+
     /// The local player holds no song right now (it refused to start one).
     fn player_idle(&self) -> bool {
         self.player.as_ref().map(|p| p.state().status) == Some(glyph_audio::Status::Idle)
@@ -1076,6 +1088,7 @@ impl Core {
             return false;
         }
         let Some(backend) = self.backend() else { return false };
+        let at = self.playing_position();
         let (current, key) = {
             let mut st = self.st();
             let Some(cur) = st.current.clone() else { return false };
@@ -1084,6 +1097,8 @@ impl Core {
                 return false;
             }
             st.retried_expired = Some(key.clone());
+            // Expired midway: the new link goes on from here.
+            st.resume_at = at;
             (cur, key)
         };
         // Local YouTube URLs expire too (after hours): fetch fresh ones
@@ -1125,10 +1140,13 @@ impl Core {
             }
             (cur, key)
         };
+        let at = self.playing_position();
         let Some(kind) = backend.forget_broken_file(&current) else { return false };
         let again = {
             let mut st = self.st();
             st.repaired_file = Some(key.clone());
+            // Broken midway: online it goes on from here.
+            st.resume_at = at;
             kind == glyph_core::BrokenFile::Download && st.redownloaded_broken.insert(key.clone())
         };
         tracing::warn!(track = %key, ?kind, "playback: local file broken, dropped it");

@@ -4,6 +4,7 @@
 import type { Backend } from "./backend";
 import type { BackendEvents, Config, HomeFeeds, Library, ListKey, PlayerState, QueueState, RecentItem, SearchResults, Snapshot, Track } from "./types";
 import { sameList, trackKey } from "./types";
+import { bgAdd, bgList, bgRemove } from "./bg-store";
 import { ARTIST_META, ARTISTS, DEMO_NEW_RELEASES, TRACKS, byArtist, demoCover, demoLyrics, findAlbumDef, hash } from "./demo-data";
 
 export interface DemoCtx {
@@ -85,7 +86,12 @@ export class DemoBackend implements Backend, DemoCtx {
   private timer = 0;
 
   constructor() {
-    this.handlers = { ...this.core() };
+    this.handlers = {
+      ...this.core(),
+      backgrounds_list: () => bgList(),
+      background_add: (_, a) => bgAdd(a.data as string),
+      background_remove: (_, a) => bgRemove(a.id as string),
+    };
     for (const m of Object.values(extra)) Object.assign(this.handlers, m.handlers ?? {});
     // A song is loaded (paused), like a restored session.
     this.queue = { items: [...this.library.liked], index: 0, user: 0, context: "Liked Songs" };

@@ -115,7 +115,7 @@
   <div class="tdim" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})"></div>
   <div class="bd" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
     {#if editId}
-      <div class="panel edit" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
+      <div class="panel edit" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
         <div class="eh">
           <span class="et">{t("dialog.playlist.rename")}</span>
           <IconButton name="x" size={18} color="rgba(255,255,255,.6)" onclick={close} />
@@ -146,7 +146,7 @@
         </div>
       </div>
     {:else}
-      <div class="panel" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
+      <div class="panel" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
         <div class="tt">{t(eq ? "dialog.eq.title" : "dialog.playlist.title")}</div>
         <div class="field"><input bind:this={input} bind:value={name} placeholder={eq ? "" : t("dialog.playlist.placeholder")} onkeydown={key} spellcheck="false" /></div>
         <div class="foot">

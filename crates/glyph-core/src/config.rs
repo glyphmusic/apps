@@ -379,6 +379,21 @@ pub struct VisualsConfig {
     /// Appearance > Animations. Stays on this device (not synced).
     #[serde(default)]
     pub gpu_blocked: bool,
+    /// Picture behind everything instead of the glow: "" = none,
+    /// `own:<name>` (one the user added, see `backgrounds.rs`) or
+    /// `plugin:<id>/<n>` (the n-th picture of a plugin's `look`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bg_image: String,
+    /// How much the picture is darkened so text stays readable, 0..=0.9.
+    #[serde(default = "default_bg_dim")]
+    pub bg_dim: f32,
+    /// Blur of the picture, 0..=1 (1 = very soft).
+    #[serde(default)]
+    pub bg_blur: f32,
+}
+
+fn default_bg_dim() -> f32 {
+    0.35
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -641,7 +656,7 @@ impl Default for ProvidersConfig {
 
 impl Default for VisualsConfig {
     fn default() -> Self {
-        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), solid_color: String::new(), performance_mode: false, render_mode: String::new(), gpu_blocked: false }
+        Self { intensity: 0.8, music_reactivity: 1.0, ascii_covers: false, startup_animation: true, ascii_effects: true, theme: "glyph".into(), throttle_unfocused: true, glow_shape: String::new(), solid_color: String::new(), performance_mode: false, render_mode: String::new(), gpu_blocked: false, bg_image: String::new(), bg_dim: default_bg_dim(), bg_blur: 0.0 }
     }
 }
 

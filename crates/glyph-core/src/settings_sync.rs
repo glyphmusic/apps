@@ -230,15 +230,18 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
             }
             (kind::SETTING, "visuals") => {
                 let Some(x) = parse::<VisualsConfig>(v) else { continue };
-                // Performance mode, who draws the background and a locked
-                // graphics card belong to this device.
+                // Performance mode, who draws the background, a locked
+                // graphics card and the background picture (its file is
+                // on this device only) belong to this device.
                 let perf = cfg.visuals.performance_mode;
                 let render = std::mem::take(&mut cfg.visuals.render_mode);
                 let gpu_blocked = cfg.visuals.gpu_blocked;
+                let bg = (std::mem::take(&mut cfg.visuals.bg_image), cfg.visuals.bg_dim, cfg.visuals.bg_blur);
                 cfg.visuals = x;
                 cfg.visuals.performance_mode = perf;
                 cfg.visuals.render_mode = render;
                 cfg.visuals.gpu_blocked = gpu_blocked;
+                (cfg.visuals.bg_image, cfg.visuals.bg_dim, cfg.visuals.bg_blur) = bg;
             }
             (kind::SETTING, "updates") => {
                 let Some(x) = parse::<UpdatesConfig>(v) else { continue };

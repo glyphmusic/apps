@@ -10,7 +10,7 @@ import type {
 import { listId, primaryArtist, sameList, trackKey } from "./api/types";
 import { setLang, t, tf } from "./i18n.svelte";
 import { trimReveals } from "./ui.svelte";
-import { inMiniWindow } from "./window";
+import { inMiniWindow, inSideWindow } from "./window";
 import { applyTheme } from "./theme";
 import { gpuProbe, recommendVisuals } from "./glow";
 
@@ -39,6 +39,8 @@ export interface CtxMenu {
   sidebar?: string | null;
   /** Queue row. */
   queueIndex?: number | null;
+  /** Right-click on a heart: only the "Save to" picker (Liked Songs and playlists). */
+  save?: boolean;
 }
 
 /** app.rs Toast: "Title · Sub" (sub shown in caps), check or info icon, optional undo. */
@@ -83,6 +85,21 @@ function sameTrackData(a: Track | null | undefined, b: Track | null | undefined)
   const ak = Object.keys(ae), bk = Object.keys(be);
   return ak.length === bk.length && ak.every((k) => (ae as Record<string, string | undefined>)[k] === (be as Record<string, string | undefined>)[k]);
 }
+
+/** Songs or a playlist shared or opened with Glyph (overlays/AddShared.svelte). */
+export type PickSongs = {
+  tracks: Track[];
+  file?: boolean;
+  /** A shared playlist: offered as "Save as playlist". `code` for a glyph.my playlist. */
+  list?: { name: string; origin?: string | null; code?: string; link?: string; author?: string | null } | null;
+  /** Android share sheet over another app (share-sheet.svelte.ts). */
+  sheet?: boolean;
+  /** Still reading the link / files: what was shared, shown meanwhile. */
+  loading?: boolean;
+  files?: boolean;
+  label?: string;
+  error?: string;
+};
 
 /** How long hearts wait to be sent together (see App.flushLikes). */
 const LIKE_BATCH_MS = 700;
@@ -141,7 +158,7 @@ class App {
   /** Phone share menu (compact/ShareSheet.svelte): what is being shared. */
   shareSheet = $state<ShareTarget | null>(null);
   /** Songs shared or opened with Glyph: where they go (overlays/AddShared.svelte). */
-  pickSongs = $state<{ tracks: Track[]; file?: boolean } | null>(null);
+  pickSongs = $state<PickSongs | null>(null);
   onboarding = $state(false);
   splash = $state(false);
   jamOpen = $state(false);
@@ -186,7 +203,7 @@ class App {
     this.setPlayer(snap.player);
     this.backendState = snap.backend;
     this.account = snap.account;
-    if (this.account && !inMiniWindow()) this.ensureOwnProfile();
+    if (this.account && !inSideWindow()) this.ensureOwnProfile();
     this.version = snap.version;
     this.platform = snap.platform;
     this.outputDevices = snap.output_devices;
@@ -195,8 +212,8 @@ class App {
     this.showQueue = snap.config.player.show_queue;
     setLang(snap.config.language || navigator.language);
     this.splash = snap.config.visuals.startup_animation;
-    this.onboarding = snap.first_run;
-    if (snap.first_run && !inMiniWindow()) this.tuneVisuals();
+    this.onboarding = snap.first_run && !inSideWindow();
+    if (snap.first_run && !inSideWindow()) this.tuneVisuals();
 
     api.on("player", (p) => this.setPlayer({ ...this.player, ...p }));
     api.on("queue", (q) => (this.queue = q));
@@ -213,7 +230,7 @@ class App {
     api.on("backend", (b) => {
       const was = this.backendState.kind;
       this.backendState = b;
-      if (b.kind === "ready" && was !== "ready" && !inMiniWindow()) this.onBackendReady();
+      if (b.kind === "ready" && was !== "ready" && !inSideWindow()) this.onBackendReady();
     });
     api.on("search", (s) => {
       if (this.view === "search" && s.query === this.search.query) {
@@ -243,7 +260,7 @@ class App {
         this.ownProfileHandle = null;
       } else if (a.handle !== prev || !this.ownAvatarUrl) {
         this.ownProfileHandle = null;
-        if (!inMiniWindow()) this.ensureOwnProfile();
+        if (!inSideWindow()) this.ensureOwnProfile();
       }
     });
     api.on("update", (u) => (this.update = u));
@@ -251,13 +268,13 @@ class App {
     api.on("memory_pressure", ({ level }) => this.trimMemory(level === "hard"));
     if (inMiniWindow()) this.miniShown = true;
     // Plugins, MCP access questions, finished imports (settings/plugin-events.svelte.ts).
-    if (!inMiniWindow()) import("./settings/plugin-events.svelte").then((m) => m.initPluginEvents());
+    if (!inSideWindow()) import("./settings/plugin-events.svelte").then((m) => m.initPluginEvents());
     // The mini player window only mirrors the player.
     // Shared to Glyph (share sheet, "Send to", `glyph <link>`): one song asks where it goes.
-    if (!inMiniWindow()) api.on("shared", (text) => this.importText(text, true));
-    if (!inMiniWindow()) api.on("pick_songs", (p) => { if (p.tracks?.length) { this.ctx = null; this.pickSongs = p; } });
+    if (!inSideWindow()) api.on("shared", (text) => this.importText(text, true));
+    if (!inSideWindow()) api.on("pick_songs", (p) => { if (p.tracks?.length) { this.ctx = null; this.pickSongs = p; } });
     // A music link copied in another app: a toast offers to add it.
-    if (!inMiniWindow()) api.on("clipboard_link", (link) => {
+    if (!inSideWindow()) api.on("clipboard_link", (link) => {
       this.toast(`${t("share_in.copied")} · ${link}`, "info", { label: t("share_in.add"), run: () => { void this.importText(link, true); } });
     });
 
@@ -282,7 +299,7 @@ class App {
     this.clock = performance.now();
     this.scheduleClock();
     this.ready = true;
-    if (!inMiniWindow()) this.loadHome();
+    if (!inSideWindow()) this.loadHome();
   }
 
   /** Keeps reactive `clock` ticking only when active UI needs smooth updates. */

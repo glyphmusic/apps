@@ -23,6 +23,17 @@ const LOOP_DECLICK: Duration = Duration::from_millis(40);
 /// A `load()` of the track that just started gaplessly is the UI reacting to
 /// our `Ended`; ignore it for this long.
 const PROMOTE_GRACE: Duration = Duration::from_millis(3000);
+/// The output must take samples of the playing song: none for this long
+/// after play (it never started) or while playing (the stream died without
+/// an error, as Android's sometimes does) and the output is opened again.
+const STALL_START: Duration = Duration::from_secs(5);
+const STALL_PLAYING: Duration = Duration::from_secs(3);
+/// Reopens in a row without any sound in between before giving up.
+const STALL_RETRIES: u32 = 3;
+/// A song whose stream broke midway goes on from there this often.
+const RECOVER_TRIES: u32 = 2;
+/// ... unless less than this is left of it.
+const RECOVER_MIN_LEFT: Duration = Duration::from_secs(8);
 
 // ------------------------------------------------------------------ pure parts
 
@@ -64,6 +75,32 @@ pub fn embed_fade(pos: Duration, duration: Option<Duration>, cf: Duration) -> f3
 
 fn same_track(a: &Track, b: &Track) -> bool {
     a.id == b.id && a.source == b.source
+}
+
+/// Watches whether the output takes samples of the current song.
+/// `watch` is (song id, beat, since when that beat stands). Returns the new
+/// watch, whether the output moved on since the last look and whether it
+/// stands still for too long.
+pub fn watch_output(
+    watch: Option<(u64, u64, Instant)>,
+    id: u64,
+    beat: u64,
+    started: bool,
+    now: Instant,
+) -> (Option<(u64, u64, Instant)>, bool, bool) {
+    match watch {
+        Some((wid, b, since)) if wid == id && b == beat => {
+            let limit = if started { STALL_PLAYING } else { STALL_START };
+            (watch, false, now.saturating_duration_since(since) >= limit)
+        }
+        Some((wid, _, _)) if wid == id => (Some((id, beat, now)), true, false),
+        _ => (Some((id, beat, now)), false, false),
+    }
+}
+
+/// A stream link that expired or is refused: the app has to fetch a new one.
+fn link_refused(message: &str) -> bool {
+    ["HTTP 403", "HTTP 401", "403 Forbidden", "401 Unauthorized"].iter().any(|s| message.contains(s))
 }
 
 /// Apply a page event to the player state. Returns the events to publish.
@@ -115,13 +152,18 @@ struct Slot {
     rate: u32,
     duration: Option<Duration>,
     near_end_sent: bool,
-    queued_at: Instant,
+    /// The stream failed midway: (message, already reported to the app).
+    /// What was buffered plays on; then the song goes on from there.
+    broken: Option<(String, bool)>,
 }
 
 struct Pending {
     id: u64,
     track: Track,
     is_preview: bool,
+    /// Where it plays from: its loudness is measured from there too.
+    url: String,
+    mime: Option<String>,
 }
 
 pub(crate) struct Engine {
@@ -161,9 +203,6 @@ pub(crate) struct Engine {
     next_player: Option<rodio::Player>,
     /// The previous track while it fades out: (player, slot, fade start).
     fading: Option<(rodio::Player, Slot, Instant)>,
-    /// Measured loudness per song this session (LUFS), so replays start
-    /// at the right gain.
-    loud_cache: std::collections::HashMap<String, f32>,
     /// Embed volume factor of the current fade (1 = none).
     embed_gain: f32,
     /// Native volume factor of the pause / resume fade (1 = none).
@@ -175,6 +214,13 @@ pub(crate) struct Engine {
     ab_loop: Option<(Duration, Duration)>,
     loop_gain: f32,
     loop_jump: Option<Instant>,
+    /// Output watchdog (see `watch_output`), its reopens in a row and the
+    /// last tick (a long gap means this thread was asleep, not the output).
+    watch: Option<(u64, u64, Instant)>,
+    stall_tries: u32,
+    last_tick_at: Instant,
+    /// Resumes of the current song after its stream broke.
+    recover_tries: u32,
 }
 
 impl Engine {
@@ -211,13 +257,16 @@ impl Engine {
             crossfade: Duration::ZERO,
             next_player: None,
             fading: None,
-            loud_cache: std::collections::HashMap::new(),
             embed_gain: 1.0,
             pause_gain: 1.0,
             pause_fade: None,
             ab_loop: None,
             loop_gain: 1.0,
             loop_jump: None,
+            watch: None,
+            stall_tries: 0,
+            last_tick_at: Instant::now(),
+            recover_tries: 0,
         }
     }
 
@@ -281,7 +330,7 @@ impl Engine {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Load(track, source) => self.load(track, source),
+            Cmd::Load(track, source) => self.load_cmd(track, source),
             Cmd::Preload(track, source) => self.preload(track, source),
             Cmd::DropNext => self.drop_next(),
             Cmd::Play => self.play(),
@@ -331,13 +380,18 @@ impl Engine {
 
     // ---- load / stop
 
-    fn load(&mut self, track: Track, source: PlaybackSource) {
+    /// A song from the app. Only here: the player's own reloads (output
+    /// reopened, a broken stream resumed, a seek after the end) must never
+    /// be taken for the app's answer to `Ended`, or they are dropped and
+    /// nothing plays while the time runs on.
+    fn load_cmd(&mut self, track: Track, source: PlaybackSource) {
         if let Some((at, t)) = &self.promoted {
             if at.elapsed() < PROMOTE_GRACE && same_track(t, &track) {
                 self.promoted = None;
                 return;
             }
         }
+        self.recover_tries = 0;
         // Next track was preloaded and queued behind the current one: switch gaplessly.
         if matches!(source, PlaybackSource::Stream { .. } | PlaybackSource::Preview { .. }) {
             if self.next.as_ref().is_some_and(|n| same_track(&n.track, &track)) && self.player.is_some() && self.next_player.is_none() {
@@ -357,6 +411,11 @@ impl Engine {
                 return;
             }
         }
+        self.load(track, source);
+    }
+
+    /// Starts `track` afresh (stops everything else first).
+    fn load(&mut self, track: Track, source: PlaybackSource) {
         self.stop_all();
         self.pause_fade = None;
         self.pause_gain = 1.0;
@@ -376,7 +435,8 @@ impl Engine {
         }
         let id = self.alloc_id();
         self.set_track_state(&track, BackendKind::Native, is_preview, None);
-        self.pending_cur = Some(Pending { id, track, is_preview });
+        self.pending_cur = Some(Pending { id, track, is_preview, url: url.clone(), mime: mime.clone() });
+        self.want_loudness();
         self.set_status(Status::Loading);
         native::spawn_decoder(id, url, mime, self.tx.clone());
     }
@@ -402,16 +462,30 @@ impl Engine {
         }
         let resume = self.last_load.clone().filter(|_| self.backend() == Some(BackendKind::Native));
         let pos = self.shared.state.lock().unwrap().position;
-        let was_playing = self.want_play;
+        let had_next = self.next.is_some() || self.pending_next.is_some();
         self.stop_native();
         self.device = None;
         self.opened_device = None;
         if let Some((t, s)) = resume {
-            self.load(t, s);
-            self.pending_seek = Some(pos);
-            if !was_playing {
-                self.want_play = false;
-            }
+            self.resume_at(t, s, pos, had_next);
+        }
+    }
+
+    /// Opens `track` again and goes on at `pos` (playing or paused as
+    /// before). A preloaded next song is gone then: the app is told, so it
+    /// hands it over again.
+    fn resume_at(&mut self, track: Track, source: PlaybackSource, pos: Duration, had_next: bool) {
+        let had_next = had_next || self.next.is_some() || self.pending_next.is_some();
+        let was_playing = self.want_play;
+        self.load(track, source);
+        self.pending_seek = Some(pos);
+        if !was_playing {
+            self.want_play = false;
+        }
+        // The time stays where it is while the song opens again.
+        self.shared.state.lock().unwrap().position = pos;
+        if had_next {
+            self.emit(PlayerEvent::PreloadFailed);
         }
     }
 
@@ -547,6 +621,8 @@ impl Engine {
         tracing::debug!(track_id = id, "decoder ready for audio output");
         if self.pending_cur.as_ref().is_some_and(|p| p.id == id) {
             let p = self.pending_cur.take().unwrap();
+            // Measured once the decoder runs (not competing for the first bytes).
+            crate::loudness::analyze(loud_key(&p.track), p.url.clone(), p.mime.clone());
             if self.new_player().is_none() {
                 opened.ctl.stop.store(true, Ordering::SeqCst);
                 self.fail("audio output not available");
@@ -578,6 +654,7 @@ impl Engine {
                 opened.ctl.stop.store(true, Ordering::SeqCst);
                 return;
             }
+            crate::loudness::analyze(loud_key(&p.track), p.url.clone(), p.mime.clone());
             let slot = self.make_slot(id, p.track, p.is_preview, &opened);
             let src = TrackSource::new(opened, slot.shared.clone(), self.tap.clone());
             if self.crossfade.is_zero() {
@@ -596,13 +673,24 @@ impl Engine {
         }
     }
 
+    /// Only the current and the next song are worth measuring.
+    fn want_loudness(&self) {
+        let keys = [self.pending_cur.as_ref().map(|p| &p.track), self.cur.as_ref().map(|c| &c.track),
+            self.pending_next.as_ref().map(|p| &p.track), self.next.as_ref().map(|n| &n.track)]
+            .into_iter()
+            .flatten()
+            .map(loud_key)
+            .collect();
+        crate::loudness::set_wanted(keys);
+    }
+
     fn make_slot(&self, id: u64, track: Track, is_preview: bool, o: &Opened) -> Slot {
         let duration = o
             .duration
             .or_else(|| track.duration_ms.map(Duration::from_millis));
         let shared = Arc::new(TrackShared::default());
-        if let Some(l) = self.loud_cache.get(&loud_key(&track)) {
-            shared.loudness.set_known(*l);
+        if let Some(a) = crate::loudness::lookup(&loud_key(&track)) {
+            shared.loudness.set_known(a);
         }
         Slot {
             id,
@@ -613,7 +701,7 @@ impl Engine {
             rate: o.rate.get(),
             duration,
             near_end_sent: false,
-            queued_at: Instant::now(),
+            broken: None,
         }
     }
 
@@ -622,8 +710,18 @@ impl Engine {
             self.pending_cur = None;
             self.fail(message);
         } else if self.cur.as_ref().is_some_and(|c| c.id == id) {
-            // Mid-stream failure: the source drains and ends; the UI gets Error then Ended.
-            self.emit(PlayerEvent::Error(message));
+            // Mid-stream failure (network gone, link expired): what was
+            // buffered plays on, then the song goes on from there
+            // (`on_current_finished`) instead of ending early. An expired
+            // link is reported at once, so the app fetches a new one meanwhile.
+            let refused = link_refused(&message);
+            tracing::warn!(track_id = id, refused, "stream failed midway: {message}");
+            if refused {
+                self.emit(PlayerEvent::Error(message.clone()));
+            }
+            if let Some(c) = self.cur.as_mut() {
+                c.broken = Some((message, refused));
+            }
         } else if self.pending_next.as_ref().is_some_and(|p| p.id == id) {
             tracing::warn!("preload failed: {message}");
             self.drop_next();
@@ -657,7 +755,8 @@ impl Engine {
         }
         let id = self.alloc_id();
         self.next_load = Some((track.clone(), next_source));
-        self.pending_next = Some(Pending { id, track, is_preview });
+        self.pending_next = Some(Pending { id, track, is_preview, url: url.clone(), mime: mime.clone() });
+        self.want_loudness();
         native::spawn_decoder(id, url, mime, self.tx.clone());
     }
 
@@ -695,6 +794,7 @@ impl Engine {
             st.duration = n.duration;
         }
         self.promoted = Some((Instant::now(), n.track.clone()));
+        self.recover_tries = 0;
         self.cur = Some(n);
     }
 
@@ -984,6 +1084,50 @@ impl Engine {
         self.variant_changed = Instant::now();
     }
 
+    /// While a song should play, the output must take its samples. If it
+    /// does not (a driver that accepts the stream and never asks for audio,
+    /// an Android stream that died without an error) the output is opened
+    /// again and the song goes on where it was. `true` if it acted.
+    fn check_output(&mut self) -> bool {
+        let now = Instant::now();
+        // A long gap between ticks means this thread was asleep (phone
+        // suspended), not that the output hangs: look afresh.
+        let asleep = now.saturating_duration_since(self.last_tick_at) >= Duration::from_secs(1);
+        self.last_tick_at = now;
+        let Some(c) = self.cur.as_ref().filter(|_| self.want_play && !asleep) else {
+            self.watch = None;
+            return false;
+        };
+        let started = c.shared.started.load(Ordering::Relaxed);
+        let (watch, moved, stalled) =
+            watch_output(self.watch, c.id, c.shared.beat.load(Ordering::Relaxed), started, now);
+        self.watch = watch;
+        if moved {
+            self.stall_tries = 0;
+        }
+        if !stalled {
+            return false;
+        }
+        self.watch = None;
+        self.stall_tries += 1;
+        if self.stall_tries > STALL_RETRIES {
+            self.stall_tries = 0;
+            self.stop_native();
+            self.fail("The selected audio output is not responding. Choose another output in Settings > Playback.");
+            return true;
+        }
+        if !started && !self.use_default_buffer {
+            // A driver can accept a fixed buffer and then never request
+            // samples: retry the same device with its own settings.
+            tracing::warn!(device = ?self.opened_device, "audio output did not start; retrying device defaults");
+            self.use_default_buffer = true;
+        } else {
+            tracing::warn!(device = ?self.opened_device, started, tries = self.stall_tries, "audio output stopped taking samples; reopening it");
+        }
+        self.reopen_device();
+        true
+    }
+
     fn tick(&mut self) {
         // At most once a second: an output that fails again right away must
         // not turn into a reopen loop.
@@ -993,20 +1137,7 @@ impl Engine {
             self.reopen_device();
         }
         self.check_default_device();
-        // A driver can accept a fixed buffer and then never request samples.
-        // Retrying the same device with its negotiated settings avoids an
-        // endless spinner without unexpectedly switching to other speakers.
-        let stalled = self.want_play && self.cur.as_ref().is_some_and(|c|
-            !c.shared.started.load(Ordering::Relaxed) && c.queued_at.elapsed() >= Duration::from_secs(5));
-        if stalled {
-            if !self.use_default_buffer {
-                tracing::warn!(device = ?self.opened_device, "audio output did not start; retrying device defaults");
-                self.use_default_buffer = true;
-                self.reopen_device();
-            } else {
-                self.stop_native();
-                self.fail("The selected audio output is not responding. Choose another output in Settings > Playback.");
-            }
+        if self.check_output() {
             return;
         }
         self.stream_quality(None);
@@ -1074,10 +1205,12 @@ impl Engine {
         self.step_fade();
         self.step_pause_fade();
         self.step_loop();
-        // Remember what was measured (replays start at the right gain).
-        if let Some(cur) = &self.cur {
-            if let Some(l) = cur.shared.loudness.measured() {
-                self.loud_cache.insert(loud_key(&cur.track), l);
+        // A song's loudness measured meanwhile: it moves to its gain once.
+        for slot in [self.cur.as_ref(), self.next.as_ref()].into_iter().flatten() {
+            if !slot.shared.loudness.has_known() {
+                if let Some(a) = crate::loudness::lookup(&loud_key(&slot.track)) {
+                    slot.shared.loudness.set_known(a);
+                }
             }
         }
         // Embedded players: volume fades at song changes.
@@ -1193,6 +1326,25 @@ impl Engine {
     }
 
     fn on_current_finished(&mut self) {
+        // The stream broke midway and the buffered part has played: go on
+        // from there instead of skipping the rest of the song.
+        if let Some(cur) = &self.cur {
+            if let Some((message, reported)) = cur.broken.clone() {
+                let pos = Duration::from_secs_f64(cur.shared.pos_frames.load(Ordering::Relaxed) as f64 / cur.rate.max(1) as f64);
+                let left = cur.duration.map_or(Duration::MAX, |d| d.saturating_sub(pos));
+                let resume = self.last_load.clone().filter(|(t, _)| same_track(t, &cur.track));
+                match resume {
+                    Some((t, s)) if self.recover_tries < RECOVER_TRIES && left > RECOVER_MIN_LEFT => {
+                        self.recover_tries += 1;
+                        tracing::warn!(at = ?pos, tries = self.recover_tries, "stream broke midway, going on from there");
+                        self.resume_at(t, s, pos, false);
+                        return;
+                    }
+                    _ if !reported => self.emit(PlayerEvent::Error(message)),
+                    _ => {}
+                }
+            }
+        }
         if let Some(cur) = &self.cur {
             if let Some(d) = cur.duration {
                 self.shared.state.lock().unwrap().position = d;
@@ -1333,9 +1485,9 @@ mod tests {
             rate: 48_000,
             duration: Some(Duration::from_secs(120)),
             near_end_sent: true,
-            queued_at: Instant::now(),
+            broken: None,
         });
-        engine.pending_next = Some(Pending { id: 42, track: mk_track("next1"), is_preview: false });
+        engine.pending_next = Some(Pending { id: 42, track: mk_track("next1"), is_preview: false, url: String::new(), mime: None });
         engine.on_decode_error(42, "network reset".into());
         assert!(engine.pending_next.is_none());
         assert!(!engine.cur.as_ref().unwrap().near_end_sent);
@@ -1353,12 +1505,51 @@ mod tests {
             rate: 48_000,
             duration: Some(Duration::from_secs(120)),
             near_end_sent: false,
-            queued_at: Instant::now(),
+            broken: None,
         });
         engine.on_decode_error(43, "403 Forbidden".into());
         assert!(engine.next.is_none());
         assert!(ctl.stop.load(Ordering::SeqCst));
         assert!(!engine.cur.as_ref().unwrap().near_end_sent);
         assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::PreloadFailed));
+
+        // The current song's stream breaks midway: a network error is kept
+        // quiet (the song goes on from there later), an expired link is
+        // reported at once so the app fetches a new one.
+        engine.on_decode_error(1, "stream error: connection reset".into());
+        assert!(engine.cur.as_ref().unwrap().broken.as_ref().is_some_and(|(_, reported)| !reported));
+        assert!(events_rx.try_recv().is_err());
+        engine.on_decode_error(1, "stream error: HTTP 403".into());
+        assert!(matches!(events_rx.try_recv(), Ok(PlayerEvent::Error(_))));
+
+        // Nothing left to resume from (no source known): it ends as before.
+        engine.cur.as_mut().unwrap().broken = Some(("stream error: reset".into(), false));
+        engine.on_current_finished();
+        assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::Error("stream error: reset".into())));
+        assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::StatusChanged(Status::Ended)));
+        assert_eq!(events_rx.try_recv().ok(), Some(PlayerEvent::Ended));
+    }
+
+    #[test]
+    fn output_watch_needs_samples_while_playing() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        // First look: nothing to compare with yet.
+        let (w, moved, stalled) = watch_output(None, 7, 0, false, at(0));
+        assert!(!moved && !stalled);
+        // Not started: five seconds to start.
+        assert!(!watch_output(w, 7, 0, false, at(4_900)).2);
+        assert!(watch_output(w, 7, 0, false, at(5_000)).2);
+        // Samples flow: it moved and the clock starts again.
+        let (w, moved, stalled) = watch_output(w, 7, 3, true, at(5_000));
+        assert!(moved && !stalled);
+        // Playing and then no more samples: three seconds.
+        assert!(!watch_output(w, 7, 3, true, at(7_900)).2);
+        assert!(watch_output(w, 7, 3, true, at(8_000)).2);
+        // A new song (crossfade, next song) starts its own clock, however
+        // long ago it was preloaded.
+        let (w, moved, stalled) = watch_output(w, 8, 0, false, at(9_000));
+        assert!(!moved && !stalled);
+        assert!(!watch_output(w, 8, 0, false, at(9_016)).2);
     }
 }

@@ -108,7 +108,7 @@ public class MainActivity extends AppCompatActivity {
             0xff5fd2, 0xff8a3d, 0x4da3ff, 0x3ddc84, 0xb07cff, 0xff4d5e, 0xe8e8e8
     };
 
-    private native void nativeInit(MainActivity activity, String filesDir);
+    private native void nativeInit(MainActivity activity, String filesDir, boolean sheet);
     private native void nativeDetach(MainActivity activity);
     private native void nativeInvoke(long id, String cmd, String argsJson);
     private native void nativeInsets(int top, int right, int bottom, int left,
@@ -121,6 +121,8 @@ public class MainActivity extends AppCompatActivity {
     private native void nativePaused();
     /** Library patches were dropped: Rust sends the whole library again. */
     private native void nativeLibraryResend();
+    /** The file chosen in gpuiPickFile (a copy in the cache), or null. */
+    private static native void nativeFilePicked(String path);
 
     private volatile boolean activityPaused;
     /** The page has been in the background (onStop): check it is still alive on return. */
@@ -193,12 +195,32 @@ public class MainActivity extends AppCompatActivity {
         nativeConnectivity(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
     }
 
+    /**
+     * The share sheet over another app ({@link ShareActivity}): the same
+     * page, see-through, showing only the "Add to Glyph" sheet.
+     */
+    protected boolean isSheet() {
+        return false;
+    }
+
+    /** Back with nothing left to close: the app goes to the background, a sheet ends. */
+    private void leave() {
+        if (isSheet()) {
+            closeSheetNow("");
+        } else {
+            moveTaskToBack(true);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         super.onCreate(savedInstanceState);
+        if (isSheet()) {
+            overridePendingTransition(android.R.anim.fade_in, 0);
+        }
 
-        nativeInit(this, getFilesDir().getAbsolutePath());
+        nativeInit(this, getFilesDir().getAbsolutePath(), isSheet());
 
         connectivity = getSystemService(ConnectivityManager.class);
         if (connectivity != null) {
@@ -217,19 +239,23 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void handleOnBackPressed() {
                 if (webView == null || !pageReady) {
-                    moveTaskToBack(true);
+                    leave();
                     return;
                 }
                 webView.evaluateJavascript(
                         "(function(){return !!(window.__glyphBack&&window.__glyphBack());})()",
                         value -> {
                             if (!"true".equals(value)) {
-                                moveTaskToBack(true);
+                                leave();
                             }
                         });
             }
         });
 
+        if (isSheet()) {
+            takeShare(getIntent());
+            return;
+        }
         takeLink(getIntent());
 
         // The playback notification needs this on Android 13+.
@@ -241,7 +267,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupWebView() {
         WebView view = new WebView(this);
-        view.setBackgroundColor(Color.BLACK);
+        view.setBackgroundColor(isSheet() ? Color.TRANSPARENT : Color.BLACK);
         view.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -391,7 +417,7 @@ public class MainActivity extends AppCompatActivity {
         showingFallbackError = false;
         mainFrameErrorThisLoad = false;
         pageReady = false;
-        webView.loadUrl(APP_ORIGIN + "/index.html");
+        webView.loadUrl(APP_ORIGIN + "/index.html" + (isSheet() ? "#share" : ""));
     }
 
     /**
@@ -549,6 +575,24 @@ public class MainActivity extends AppCompatActivity {
         @JavascriptInterface
         public void invoke(long id, String cmd, String argsJson) {
             nativeInvoke(id, cmd == null ? "" : cmd, argsJson == null ? "{}" : argsJson);
+        }
+
+        /** Share sheet: what was shared (JSON), or null. */
+        @JavascriptInterface
+        public String sharePayload() {
+            return sharePayload;
+        }
+
+        /** Share sheet: done or closed; Android says `message` once it is gone. */
+        @JavascriptInterface
+        public void closeSheet(String message) {
+            runOnUiThread(() -> closeSheetNow(message));
+        }
+
+        /** Share sheet: only the app can do this (a jam, a search): open it with what was shared. */
+        @JavascriptInterface
+        public void openInApp() {
+            runOnUiThread(MainActivity.this::openShareInApp);
         }
     }
 
@@ -844,7 +888,107 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         setIntent(intent);
+        if (isSheet()) {
+            takeShare(intent);
+            return;
+        }
         takeLink(intent);
+    }
+
+    // ------------------------------------------------------------ share sheet
+
+    /** What was shared to the sheet: {"text":..}, {"files":[..]} or {"loading":"files"}. */
+    private volatile String sharePayload;
+    private Intent shareIntent;
+    private boolean sheetClosing;
+
+    /** Share sheet: reads the intent and hands it to the page. */
+    private void takeShare(Intent intent) {
+        if (intent == null) {
+            closeSheetNow("");
+            return;
+        }
+        shareIntent = intent;
+        List<Uri> audio = audioUris(intent);
+        try {
+            if (!audio.isEmpty()) {
+                sharePayload = new JSONObject().put("loading", "files").toString();
+                pushShare();
+                new Thread(() -> {
+                    org.json.JSONArray paths = new org.json.JSONArray();
+                    for (String path : copyAudioFiles(audio)) {
+                        paths.put(path);
+                    }
+                    String json;
+                    try {
+                        // None could be read: the sheet says so instead of waiting.
+                        json = paths.length() == 0
+                                ? new JSONObject().put("error", "files").toString()
+                                : new JSONObject().put("files", paths).toString();
+                    } catch (org.json.JSONException e) {
+                        return;
+                    }
+                    runOnUiThread(() -> {
+                        sharePayload = json;
+                        pushShare();
+                    });
+                }, "glyph-share-files").start();
+                return;
+            }
+            CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            if (text == null || text.length() == 0) {
+                closeSheetNow("");
+                return;
+            }
+            sharePayload = new JSONObject().put("text", text.toString()).toString();
+        } catch (org.json.JSONException e) {
+            closeSheetNow("");
+            return;
+        }
+        pushShare();
+    }
+
+    /** A page that already runs gets a new share right away. */
+    private void pushShare() {
+        if (webView != null && pageReady && sharePayload != null) {
+            webView.evaluateJavascript("window.__glyphShare&&window.__glyphShare("
+                    + toSafeJsLiteral(sharePayload) + ");", null);
+        }
+    }
+
+    private void closeSheetNow(String message) {
+        if (sheetClosing || isFinishing()) {
+            return;
+        }
+        sheetClosing = true;
+        if (message != null && !message.isEmpty()) {
+            android.widget.Toast.makeText(getApplicationContext(), message, android.widget.Toast.LENGTH_SHORT).show();
+        }
+        finish();
+        overridePendingTransition(0, android.R.anim.fade_out);
+    }
+
+    /** Hands what was shared to the app itself and ends the sheet. */
+    private void openShareInApp() {
+        Intent i = new Intent(this, MainActivity.class);
+        Intent from = shareIntent;
+        if (from != null) {
+            i.setAction(from.getAction());
+            if (from.getData() != null || from.getType() != null) {
+                i.setDataAndType(from.getData(), from.getType());
+            }
+            if (from.getExtras() != null) {
+                i.putExtras(from.getExtras());
+            }
+            i.setClipData(from.getClipData());
+        }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            Log.w("glyph", "opening the app failed", e);
+        }
+        closeSheetNow("");
     }
 
     /** Back from the permission screen: go on with the update once allowed. */
@@ -888,6 +1032,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onStop() {
         activityPaused = true;
         nativePaused();
+        if (isSheet() && !isChangingConfigurations()) {
+            // The sheet belongs to the moment of sharing: once it is out of
+            // sight it is done.
+            closeSheetNow("");
+        }
         checkOnResume = true;
         if (webView != null) {
             webView.onPause();
@@ -1046,16 +1195,9 @@ public class MainActivity extends AppCompatActivity {
      */
     private void takeAudioFiles(List<Uri> uris) {
         new Thread(() -> {
-            File dir = new File(getFilesDir(), "opened");
-            if (!dir.isDirectory() && !dir.mkdirs()) {
-                return;
-            }
             StringBuilder paths = new StringBuilder();
-            for (Uri uri : uris) {
-                File f = copyOpened(uri, dir);
-                if (f != null) {
-                    paths.append(f.getAbsolutePath()).append('\n');
-                }
+            for (String path : copyAudioFiles(uris)) {
+                paths.append(path).append('\n');
             }
             if (paths.length() == 0) {
                 return;
@@ -1065,6 +1207,22 @@ public class MainActivity extends AppCompatActivity {
             }
             runOnUiThread(this::nativeUrlWaiting);
         }, "glyph-open-files").start();
+    }
+
+    /** Copies the files into `files/opened` (off the main thread); their paths. */
+    private List<String> copyAudioFiles(List<Uri> uris) {
+        List<String> out = new ArrayList<>();
+        File dir = new File(getFilesDir(), "opened");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return out;
+        }
+        for (Uri uri : uris) {
+            File f = copyOpened(uri, dir);
+            if (f != null) {
+                out.add(f.getAbsolutePath());
+            }
+        }
+        return out;
     }
 
     private File copyOpened(Uri uri, File dir) {
@@ -1248,6 +1406,81 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    /**
+     * Opens the system picker for one file (playlist picture, profile
+     * picture, playlist import). The chosen file is copied into the cache,
+     * because Rust reads a path; the answer goes to nativeFilePicked (null
+     * when cancelled).
+     */
+    public void gpuiPickFile(String mimeTypes) {
+        runOnUiThread(() -> {
+            String[] mimes = mimeTypes == null || mimeTypes.isEmpty() ? new String[] {"*/*"} : mimeTypes.split(",");
+            Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+            pick.addCategory(Intent.CATEGORY_OPENABLE);
+            pick.setType(mimes.length == 1 ? mimes[0] : "*/*");
+            if (mimes.length > 1) {
+                pick.putExtra(Intent.EXTRA_MIME_TYPES, mimes);
+            }
+            try {
+                filePickLauncher.launch(Intent.createChooser(pick, null));
+            } catch (Exception e) {
+                Log.w("glyph", "file picker unavailable", e);
+                nativeFilePicked(null);
+            }
+        });
+    }
+
+    private final ActivityResultLauncher<Intent> filePickLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                Uri uri = result.getResultCode() == RESULT_OK && result.getData() != null ? result.getData().getData() : null;
+                if (uri == null) {
+                    nativeFilePicked(null);
+                    return;
+                }
+                new Thread(() -> nativeFilePicked(copyPicked(uri)), "glyph-pick").start();
+            });
+
+    /** Copies a picked document into the cache, keeping its name (its extension tells the type). */
+    private String copyPicked(Uri uri) {
+        String name = null;
+        try (android.database.Cursor c = getContentResolver().query(uri,
+                new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                name = c.getString(0);
+            }
+        } catch (Exception ignored) {
+        }
+        if (name == null || name.isEmpty()) {
+            String ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(getContentResolver().getType(uri));
+            name = "picked" + (ext == null ? "" : "." + ext);
+        }
+        name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        File dir = new File(getCacheDir(), "picked");
+        File[] old = dir.listFiles();
+        if (old != null) {
+            for (File f : old) {
+                f.delete();
+            }
+        }
+        dir.mkdirs();
+        File out = new File(dir, name);
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream os = new java.io.FileOutputStream(out)) {
+            if (in == null) {
+                return null;
+            }
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                os.write(buf, 0, n);
+            }
+            return out.getAbsolutePath();
+        } catch (Exception e) {
+            Log.w("glyph", "cannot read the picked file", e);
+            return null;
+        }
+    }
+
     /** Opens the Android share sheet with a link or text (phone share menu, "More"). */
     public void gpuiShareText(String text, String title) {
         runOnUiThread(() -> {
@@ -1342,6 +1575,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** Updates Android Recents icon immediately and schedules launcher alias switch. */
     public void gpuiSetThemeIcon(String themeId, int accentRgb) {
+        if (isSheet()) {
+            return;
+        }
         int rgb = accentRgb & 0x00ffffff;
         runOnUiThread(() -> {
             updateTaskDescription(rgb);

@@ -8,6 +8,7 @@
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import ToggleButton from "../components/ToggleButton.svelte";
   import { app } from "../state.svelte";
+  import { saveMenu } from "../pages/lists/actions";
   import { press } from "../ui.svelte";
   import { rating, trackKey, type Track } from "../api/types";
   import { phone, drag, SWIPE_ACT } from "./cstate.svelte";
@@ -86,7 +87,7 @@
   </span>
 {/snippet}
 
-<div class="mini" role="group" use:drag={{ axis: "any", move, end }}
+<div class="mini" data-part="mini-bar" role="group" use:drag={{ axis: "any", move, end }}
   oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: cur }); }}>
   <button class="open" bind:clientWidth={ow} onclick={() => (phone.npOpen = true)}>
     <span class="strip" class:settling style:transform="translateX({sx}px)">
@@ -96,7 +97,7 @@
     </span>
   </button>
   <div class="acts">
-    <ToggleButton name="heart" size={20} on={app.isLiked(cur)} accent="var(--accent)" notip onclick={() => app.toggleLike(cur)} />
+    <ToggleButton name="heart" size={20} on={app.isLiked(cur)} accent="var(--accent)" notip onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
     <button class="play" use:press onclick={() => app.togglePlay()} aria-label="Play">
       <i><PlayGlyph loading={app.loading} playing={app.playing} size={20} button={34} color="var(--text)" /></i>
     </button>

@@ -9,10 +9,14 @@
   import Icon from "../components/Icon.svelte";
   import ThinBar from "../components/ThinBar.svelte";
   import VisualCard from "./VisualCard.svelte";
+  import { bgUrl } from "../backgrounds.svelte";
 
   const SHAPES: GlowShape[] = ["", "strahl", "band", "sonnenaufgang", "horizont", "solid"];
 
   const v = $derived(app.config.visuals);
+  // A background picture is shown instead of the glow: no shape is picked
+  // then, and picking one brings the glow back.
+  const picOn = $derived(!!bgUrl(v.bg_image));
   const themes = $derived((void pl.installed, allThemes()));
   const curTheme = $derived(themes.some((th) => th.id === v.theme) ? v.theme : "glyph");
   const curThemeObj = $derived(themes.find((th) => th.id === curTheme) ?? themes[0]);
@@ -62,14 +66,14 @@
 
   <div class="shapes" role="radiogroup" aria-label={t("sp.appearance.shape")}>
     {#each SHAPES as sh (sh)}
-      {@const on = v.glow_shape === sh}
+      {@const on = v.glow_shape === sh && !picOn}
       <button
         class="scard"
         class:on
         role="radio"
         aria-checked={on}
         use:tip={shapeFullLabel(sh)}
-        onclick={() => app.setConfig((c) => { c.visuals.glow_shape = sh; })}
+        onclick={() => app.setConfig((c) => { c.visuals.glow_shape = sh; c.visuals.bg_image = ""; })}
       >
         <div class="prev">
           <canvas bind:this={canvases[sh]}></canvas>
@@ -84,7 +88,7 @@
   </div>
 
   <div class="sub-rows">
-    {#if v.glow_shape === "solid"}
+    {#if v.glow_shape === "solid" && !picOn}
       <div class="srow-inline">
         <div class="s-lab"><span>{t("sp.appearance.solid_color")}</span></div>
         <div class="sw">

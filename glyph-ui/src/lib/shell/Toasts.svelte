@@ -177,6 +177,7 @@
 
 <div
   class="deck"
+  data-part="toasts"
   style:height="{height}px"
   role="status"
   onpointerenter={() => { open = true; app.pauseToasts(true); }}

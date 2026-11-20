@@ -13,7 +13,7 @@
   function go(v: View) { app.settingsOpen = false; if (app.view === v) { document.getElementById("main-scroll")?.scrollTo({ top: 0, behavior: "smooth" }); return; } app.navigate(v); }
 </script>
 
-<nav class="tabs" data-no-longpress>
+<nav class="tabs" data-no-longpress data-part="tab-bar">
   {#each tabs as tb}
     {@const on = app.view === tb.view && !app.settingsOpen}
     <button class="tab" class:on use:press onclick={() => go(tb.view)}>

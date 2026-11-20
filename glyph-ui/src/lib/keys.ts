@@ -28,6 +28,9 @@ export const SHORTCUTS: Shortcut[] = [
   s("zen", "sp.keys.zen", "z", "main", "navigation"),
   s("queue", "sp.keys.queue", "secondary-j", "window", "navigation"),
   s("settings", "sp.keys.settings", "secondary-0", "global", "navigation"),
+  // Always reaches Settings > Plugins, where plugin looks are paused (a look
+  // that hides the interface can be turned off from there).
+  s("plugins", "sp.keys.plugins", "secondary-alt-p", "global", "app"),
   s("quit", "sp.keys.quit", "secondary-q", "global", "app"),
 ];
 /** Keys that stay fixed (lists, sidebar, closing). */
@@ -84,6 +87,7 @@ function run(id: string, focusSearch: () => void) {
     case "zen": app.zen = !app.zen; if (app.zen && app.view !== "now_playing") app.navigate("now_playing"); return;
     case "queue": app.showQueue = !app.showQueue; if (app.showQueue) app.showDevices = false; return;
     case "settings": return app.navigate("settings");
+    case "plugins": return app.openSettings("plugins");
     case "quit": return close();
   }
 }

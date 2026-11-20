@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.11 - 2026-11-20
+
+### Added
+
+- **Save to a playlist from the heart**: right-click a heart (on phones: press and hold) to pick where the song goes: Liked Songs and every playlist show a round tick, filled when the song is in it. Click to add or take it out; the menu stays open so you can pick several, and "New playlist" makes one with the song.
+- **Your own background picture**: Settings > Appearance > Background picture shows a picture of yours behind Glyph instead of the glow, with Darken and Blur. Big pictures are made smaller, copies stay on this device (up to 40), and text switches to dark ink on bright pictures.
+- **Plugins can restyle the whole interface**: themes and extensions can bring a "look": a font (also their own), rounder or squarer corners, their own icons, background pictures and a style sheet for every part of Glyph (main window, settings, menus, dialogs, toasts, mini player). A look only uses its own files and loads nothing from the internet. A theme's look shows while the theme is used.
+- **Settings > Plugins always looks like Glyph**: every look pauses while it is open, so a look can always be turned off there. The new shortcut Ctrl+Alt+P (Cmd+Option+P on a Mac) opens it from anywhere.
+- **Hold a heart on phones**: pressing and holding a heart (and the other buttons with a right-click menu) opens its menu, also in the full-screen player and the mini bar.
+- **Share to Glyph without leaving the app (Android)**: sharing a song or playlist link, or a music file, to Glyph now opens the "Add to Glyph" sheet right over the app you are in. It shows at once while the link is read, then offers Liked Songs, your playlists, "Save as playlist" for a shared playlist and Play. Done or closing takes you back where you were; nothing is added in the background without asking.
+
+### Changed
+
+- **Volume levelling like Spotify**: "Even out volume" now gives every song one fixed volume for its whole length, measured the way streaming services do (bass counts less, quiet parts and silence are left out). A scream, a loud chorus or a bass drop no longer turns the rest of the song down. Each song is measured once in the background and remembered.
+- **Bass boost keeps the volume**: the equalizer no longer changes how loud a song is levelled. Peaks it pushes over the top are caught for a moment only: a bass peak turns only the bass down, everything else stays as it is.
+- **Glyph icon in the status bar (Android)**: while music plays, the status bar and the media notification show the Glyph note instead of a play triangle.
+
+### Fixed
+
+- **Crossfade on phones**: at a crossfade the next song often started over, or nothing played while the time ran on, and after that playback could stop with "audio output is not responding". The next song now fades in and plays on. Pressing play after a long pause no longer trips the same check.
+- **Songs no longer stop or skip when the sound output hangs**: if the phone's sound output stops taking audio, Glyph opens it again and goes on where the song was.
+- **A song whose stream breaks midway goes on from there**: after a network drop the song continues at the same spot instead of ending early and jumping to the next one. An expired link is fetched again and also continues at the same spot instead of starting the song over.
+- **"Choose picture" on phones (Android)**: the button for a playlist picture (and the profile picture and playlist import) opened nothing; it now opens the phone's photo or file picker.
+
 ## 0.12.10 - 2026-11-19
 
 ### Added

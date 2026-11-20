@@ -59,6 +59,8 @@ html.compact { --page-x: 16px; --page-top: 8px; }
 html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
 /* The mini player window (Tauri): only the card / bar shows, its corners round. */
 html.mini-window, html.mini-window body { background: transparent; }
+/* Android share sheet over another app (App.svelte, #share). */
+html.share-sheet, html.share-sheet body { background: transparent; }
 body { color: var(--text); font: var(--md)/1.35 var(--font); -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: default; }
 #app { height: 100%; }
 /* align-items: older WebViews (Android System WebView, some WebView2) line a

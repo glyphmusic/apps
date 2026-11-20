@@ -6,6 +6,8 @@
   import Cover from "../components/Cover.svelte";
   import SongTitle from "../components/SongTitle.svelte";
   import { app } from "../state.svelte";
+  import { saveMenu } from "../pages/lists/actions";
+  import { holdMenu } from "../ui.svelte";
   import { rating, type ListKey, type Track } from "../api/types";
   import { t } from "../i18n.svelte";
   import { drag, SWIPE_ACT } from "./cstate.svelte";
@@ -41,7 +43,7 @@
       </span>
     </span>
     {#if app.isLiked(tr) && !picking}
-      <button class="b" aria-label={t("tip.heart")} onpointerdown={(e) => e.stopPropagation()} onclick={(e) => { e.stopPropagation(); app.toggleLike(tr); }}><Icon name="heart-fill" size={18} color="var(--accent)" /></button>
+      <button class="b" aria-label={t("tip.heart")} onpointerdown={(e) => e.stopPropagation()} onclick={(e) => { e.stopPropagation(); app.toggleLike(tr); }} oncontextmenu={saveMenu(tr)} use:holdMenu={saveMenu(tr)}><Icon name="heart-fill" size={18} color="var(--accent)" /></button>
     {/if}
     {#if !picking}<button class="b more" aria-label={t("tip.ellipsis-vertical")} onpointerdown={(e) => e.stopPropagation()} onclick={menu}><Icon name="ellipsis-vertical" size={18} color="var(--dim)" /></button>{/if}
   </div>

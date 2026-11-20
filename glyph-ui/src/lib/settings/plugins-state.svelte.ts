@@ -6,13 +6,14 @@ import { backend } from "../api/backend";
 import { app } from "../state.svelte";
 import { setOverrides, t, tf } from "../i18n.svelte";
 import { setPluginThemes, type Theme } from "../theme";
+import { loadBackgrounds } from "../backgrounds.svelte";
 import { errText } from "./util";
 import type { PluginCatalog, PluginInstalled, PluginListing, PluginUiState } from "./types";
 
 export const THEME_PREFIX = "plugin:";
 export const themeId = (id: string) => `${THEME_PREFIX}${id}`;
 
-const emptyUi = (): PluginUiState => ({ hidden: [], sections: [], pages: [], strings: {} });
+const emptyUi = (): PluginUiState => ({ hidden: [], sections: [], pages: [], strings: {}, looks: [] });
 
 export const pl = $state({
   loaded: false,
@@ -44,6 +45,8 @@ export async function loadPlugins() {
   const texts: Record<string, Record<string, string>> = JSON.parse(JSON.stringify(st.ui.strings));
   for (const p of st.ui.pages) (texts.en ??= {})[`plugin-page.${p.id}`] = p.name;
   setOverrides(texts);
+  // Their pictures join the background picker (App.svelte applies the looks).
+  void loadBackgrounds();
 }
 
 /** Loads the catalog (the backend caches it for an hour unless `force`). */
@@ -146,6 +149,7 @@ async function removePlugin(id: string, name: string) {
   if (pl.busy[id]) return;
   pl.busy[id] = true;
   if (app.config.visuals.theme === themeId(id)) app.setConfig((c) => { c.visuals.theme = "glyph"; });
+  if (app.config.visuals.bg_image?.startsWith(`plugin:${id}/`)) app.setConfig((c) => { c.visuals.bg_image = ""; });
   try {
     await backend().call("plugin_uninstall", { id });
     await loadPlugins();

@@ -480,28 +480,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("glyph-audio-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tone.wav");
-        let rate = 44_100u32;
-        let n = rate / 2;
-        let mut data = Vec::new();
-        for i in 0..n {
-            let s = ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.3 * i16::MAX as f32) as i16;
-            data.extend_from_slice(&s.to_le_bytes());
-        }
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&rate.to_le_bytes());
-        wav.extend_from_slice(&(rate * 2).to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        wav.extend_from_slice(&data);
-        std::fs::write(&path, wav).unwrap();
+        write_tone(&path, 0.5, 440.0);
 
         let p = PlayerController::new().unwrap();
         p.set_volume(0.0);
@@ -524,6 +503,99 @@ mod tests {
             Some(PlayerEvent::Error(m)) => eprintln!("no audio device in this environment: {m}"),
             other => panic!("unexpected: {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Mono 16-bit WAV with a sine tone.
+    fn write_tone(path: &std::path::Path, secs: f32, freq: f32) {
+        let rate = 44_100u32;
+        let n = (rate as f32 * secs) as u32;
+        let mut data = Vec::new();
+        for i in 0..n {
+            let s = ((i as f32 * freq * std::f32::consts::TAU / rate as f32).sin() * 0.3 * i16::MAX as f32) as i16;
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(path, wav).unwrap();
+    }
+
+    /// Crossfades through several songs the way the app drives the player:
+    /// preload on `NearEnd`, and on `Ended` either follow the new song
+    /// (the usual case) or load it once more (the app's lookup was slow).
+    /// After every fade the new song must really play on.
+    #[test]
+    #[ignore = "needs an audio output device"]
+    fn crossfade_plays_on_into_the_next_song() {
+        let dir = std::env::temp_dir().join(format!("glyph-xfade-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let songs: Vec<(Track, PlaybackSource)> = (0..4)
+            .map(|i| {
+                let path = dir.join(format!("song{i}.wav"));
+                write_tone(&path, 8.0, 330.0 + 110.0 * i as f32);
+                let source = PlaybackSource::Stream {
+                    provider: ProviderId::Archive,
+                    url: path.to_string_lossy().to_string(),
+                    mime: Some("audio/wav".into()),
+                };
+                (track(&format!("song{i}"), ProviderId::Archive), source)
+            })
+            .collect();
+        let p = PlayerController::new().unwrap();
+        p.set_volume(0.0);
+        p.set_crossfade(Duration::from_millis(1500));
+        let rx = p.events();
+        p.load(songs[0].0.clone(), songs[0].1.clone());
+        p.play();
+        for i in 1..songs.len() {
+            // NearEnd asks for the next song; Ended means the fade started.
+            loop {
+                match rx.recv_timeout(Duration::from_secs(15)) {
+                    Ok(PlayerEvent::NearEnd) => p.preload_next(songs[i].0.clone(), songs[i].1.clone()),
+                    Ok(PlayerEvent::Ended) => break,
+                    Ok(PlayerEvent::Error(m)) => panic!("song {i}: player error: {m}"),
+                    Ok(_) => {}
+                    Err(e) => panic!("song {i}: no end of the song: {e:?}"),
+                }
+            }
+            if i % 2 == 0 {
+                p.load(songs[i].0.clone(), songs[i].1.clone());
+                p.play();
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            let a = p.state();
+            std::thread::sleep(Duration::from_millis(1000));
+            let b = p.state();
+            assert_eq!(b.track.as_ref().map(|t| t.id.as_str()), Some(songs[i].0.id.as_str()), "song {i}");
+            assert_eq!(b.status, Status::Playing, "song {i}: {b:?}");
+            assert!(
+                b.position >= a.position + Duration::from_millis(700),
+                "song {i} is silent: position {:?} -> {:?}",
+                a.position,
+                b.position
+            );
+            while let Ok(e) = rx.try_recv() {
+                assert!(!matches!(e, PlayerEvent::Error(_)), "song {i}: {e:?}");
+                if e == PlayerEvent::NearEnd {
+                    if let Some((t, s)) = songs.get(i + 1) {
+                        p.preload_next(t.clone(), s.clone());
+                    }
+                }
+            }
+        }
+        p.stop();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

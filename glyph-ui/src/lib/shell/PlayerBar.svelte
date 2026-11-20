@@ -14,6 +14,7 @@
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import StatusStrip from "./StatusStrip.svelte";
   import { app, type ControlMenu } from "../state.svelte";
+  import { saveMenu } from "../pages/lists/actions";
   import { jam } from "../jam.svelte";
   import { onWeb } from "../web";
   import { toggleWebMini } from "../web-mini.svelte";
@@ -63,7 +64,7 @@
   const lb = $derived(dur && app.player.loop_b != null ? (app.player.loop_b / dur) * SEEK_W : null);
 </script>
 
-<div class="bar" bind:clientWidth={barW}>
+<div class="bar" bind:clientWidth={barW} data-part="player-bar">
   {#if jam.bursts.length}
     <div class="bursts" aria-hidden="true">
       {#each jam.bursts as b (b.id)}
@@ -90,7 +91,7 @@
             </span>
           </span>
         </button>
-        <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} />
+        <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
       </div>
     {:else}
       <div class="now">

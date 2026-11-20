@@ -315,8 +315,29 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
         "permissions": permission_list(m), "theme": theme_json(m),
         "sections": sections, "menus": menus,
         "strings": m.strings.values().map(|s| s.len()).max().unwrap_or(0),
-        "hide": m.hide, "setup": setup,
+        "hide": m.hide, "setup": setup, "look": look_json(m),
     })
+}
+
+/// What a plugin's look changes (for its card), or null.
+fn look_json(m: &plugins::Manifest) -> Value {
+    match &m.look {
+        Some(l) => json!({ "font": l.font, "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len() }),
+        None => Value::Null,
+    }
+}
+
+/// Background pictures of the enabled plugins' looks: (id for
+/// `visuals.bg_image`, file, plugin name).
+pub fn look_backgrounds(core: &Core) -> Vec<(String, std::path::PathBuf, String)> {
+    let Some(st) = core.plugins() else { return Vec::new() };
+    let dis = core.st().config.plugins.disabled.clone();
+    let rt = st.lock();
+    rt.installed
+        .iter()
+        .filter(|p| !dis.contains(&p.manifest.id))
+        .flat_map(|p| p.look_backgrounds().into_iter().map(move |(i, f)| (format!("plugin:{}/{i}", p.manifest.id), f, p.manifest.name.clone())))
+        .collect()
 }
 
 fn installable_of(l: &Listing) -> &'static str {
@@ -433,7 +454,19 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
             }));
         }
     }
-    json!({ "hidden": plugins::hidden_rows(&manifests), "sections": sections, "pages": pages, "strings": strings })
+    // Looks of the enabled plugins (font, corners, icons, style sheet for the whole interface).
+    let looks: Vec<Value> = enabled
+        .iter()
+        .filter_map(|p| {
+            let l = p.manifest.look.as_ref()?;
+            // A theme's look goes with its colours (the UI shows it while the theme is picked).
+            Some(json!({
+                "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": l.font, "radius": l.radius,
+                "css": p.look_css().unwrap_or_default(), "icons": p.look_icons(),
+            }))
+        })
+        .collect();
+    json!({ "hidden": plugins::hidden_rows(&manifests), "sections": sections, "pages": pages, "strings": strings, "looks": looks })
 }
 
 // ---- commands ----
@@ -479,10 +512,11 @@ pub async fn plugin_install(core: C<'_>, id: String, repo: String, path: Option<
             l.ok_or_else(|| crate::i18n::tr(&core, "plugins.err.not_found"))?
         }
     };
-    // Code comes from GitHub first (the same commit as the manifest).
+    // Code and the look's files come from GitHub first (the same commit as the manifest).
     let code = crate::guard::guard_async(b.plugin_code(listing.clone())).await?;
+    let look = crate::guard::guard_async(b.plugin_look(listing.clone())).await?;
     let l2 = listing.clone();
-    tokio::task::spawn_blocking(move || plugins::install(&l2, code.as_deref()).map(|_| ()).map_err(|e| format!("{e:#}")))
+    tokio::task::spawn_blocking(move || plugins::install_with_look(&l2, code.as_deref(), &look).map(|_| ()).map_err(|e| format!("{e:#}")))
         .await
         .map_err(|e| e.to_string())??;
     load(&st);

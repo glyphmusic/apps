@@ -346,7 +346,7 @@ export interface Config {
   language: string;
   keys: Record<string, string | null>;
   providers: { local_search: boolean; youtube_mode: string; youtube_only: boolean; enabled: ProviderId[]; priority: ProviderId[]; extractor: string; ytdlp_path?: string | null; rdlp_path?: string | null };
-  visuals: { intensity: number; music_reactivity: number; ascii_covers: boolean; startup_animation: boolean; ascii_effects: boolean; theme: string; throttle_unfocused: boolean; glow_shape: string; solid_color?: string; performance_mode?: boolean; render_mode?: string; gpu_blocked?: boolean };
+  visuals: { intensity: number; music_reactivity: number; ascii_covers: boolean; startup_animation: boolean; ascii_effects: boolean; theme: string; throttle_unfocused: boolean; glow_shape: string; solid_color?: string; performance_mode?: boolean; render_mode?: string; gpu_blocked?: boolean; bg_image?: string; bg_dim?: number; bg_blur?: number };
   updates: { repo: string; check_on_start: boolean; auto_install: boolean; channel: string };
   audio: {
     crossfade_s: number; quality: string; download_quality: string; download_parallelism: number; download_adaptive: boolean; level: string; normalize: boolean;
@@ -417,6 +417,8 @@ export interface BackendEvents {
   shared: string;
   /** Songs shared or opened with Glyph (an audio file on the phone): ask where they go. */
   pick_songs: { tracks: Track[]; file?: boolean };
+  /** The share sheet reads a shared playlist: songs found so far. */
+  share_progress: { done: number; total: number };
   /** A music link was copied in another app (desktop, window focused): offer to add it. */
   clipboard_link: string;
   /** The mini player window was opened or closed (Tauri). */

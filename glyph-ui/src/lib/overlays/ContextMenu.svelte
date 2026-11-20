@@ -12,6 +12,9 @@
   // copy link, more (download, artist, album). Sidebar entries add "Hide from sidebar".
   // Flyouts (add to playlist, recommendations, storage, versions) open on
   // hover, right of the menu or left when they would not fit.
+  // "Save to" (right-click on a heart): song header, then Liked Songs and
+  // every playlist with a round check (filled = the song is in it); a click
+  // adds or removes and the menu stays open; "New playlist" at the end.
   import { tick } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -31,7 +34,7 @@
   import {
     artistPage, artistRadio, contextOf, copyArtistLink, deletePlaylist, hideSidebar, isDownloading, isHiddenArtist, lib, listRadio,
     openNameDialog, playNextAll, playShuffled, queueAll, recommendFeedback, removeDownloads, removeShown, restoreVersion,
-    setPlaylistStorage, shareList, shownTracks, songRadio, toggleHiddenArtist,
+    setPlaylistStorage, shareList, shownTracks, songRadio, toggleHiddenArtist, indexInPlaylist, toggleInPlaylist,
   } from "../pages/lists/actions";
 
   const MENU_W = 244, SUB_W = 228, SUB_GAP = 5;
@@ -187,6 +190,38 @@
   {/each}
 {/snippet}
 
+{#snippet saveMark(on: boolean)}
+  <span class="mark" class:on aria-hidden="true">{#if on}<Icon name="check" size={compact ? 14 : 12} />{/if}</span>
+{/snippet}
+
+{#snippet saveBody(song: Track)}
+  {@const liked = app.isLiked(song)}
+  <div class="save-lbl">{t("ctx.save_to")}</div>
+  <div class="save-list" class:save-scroll={!compact} use:fadeEdges={{ top: 10, bottom: 10, minOverflow: 8 }}>
+  <button class="pl-row" role="menuitemcheckbox" aria-checked={liked} onclick={() => app.toggleLike(song)}>
+    <ListCover list={{ kind: "liked" }} size={compact ? 38 : 28} />
+    <span class="pl-tx">
+      <span class="pl-nm trunc">{t("library.liked")}</span>
+      <span class="pl-ct trunc">{tf("common.n_songs", { n: app.library.liked.length })}</span>
+    </span>
+    {@render saveMark(liked)}
+  </button>
+  {#each app.library.playlists as p (p.id)}
+    {@const inside = indexInPlaylist(p.id, song) >= 0}
+    <button class="pl-row" role="menuitemcheckbox" aria-checked={inside} onclick={() => toggleInPlaylist(p.id, song)}>
+      <ListCover list={{ kind: "playlist", id: p.id }} size={compact ? 38 : 28} />
+      <span class="pl-tx">
+        <span class="pl-nm trunc">{p.name}</span>
+        <span class="pl-ct trunc">{tf("common.n_songs", { n: p.tracks.length })}</span>
+      </span>
+      {@render saveMark(inside)}
+    </button>
+  {/each}
+  </div>
+  <Sep />
+  <MenuItem icon="plus" label={t("library.playlist.new")} onclick={newPlaylist} />
+{/snippet}
+
 {#snippet recommendBody(song: Track)}
   {#each [["recommend.more", 1, "thumbs-up"], ["recommend.less", -1, "thumbs-down"], ["recommend.block", -2, "ban"], ["recommend.reset", null, "rotate-ccw"]] as const as [key, pref, icon]}
     <MenuItem {icon} label={t(key)} onclick={run(() => recommendFeedback(song.artist, pref))} />
@@ -327,7 +362,9 @@
 {/snippet}
 
 {#snippet rootItems()}
-  {#if artist}
+  {#if m.save && tr}
+    {@render saveBody(tr)}
+  {:else if artist}
     {#if aSongs.length}
       <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => queueAll(aSongs))} />
       <MenuItem icon="list-start" label={t("ctx.play_next")} onenter={closesSub} onclick={run(() => playNextAll(aSongs))} />
@@ -417,7 +454,7 @@
     </MenuItem>
   {/if}
 
-  {#if m.sidebar}
+  {#if m.sidebar && !m.save}
     {@const sid = m.sidebar}
     {#if artist || list || tr}<Sep />{/if}
     <MenuItem icon="eye-off" label={t("ctx.hide_sidebar")} onenter={closesSub} onclick={run(() => hideSidebar(sid))} />
@@ -428,7 +465,7 @@
 
 {#if compact}
   <div class="bs-dim" transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} oncontextmenu={(e) => e.preventDefault()} role="presentation">
-    <div class="bs-panel" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="bs-grab" bind:this={grabEl} use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
         <span class="hdl"></span>
         <div class="bs-stage">
@@ -485,7 +522,7 @@
     </div>
   </div>
 {:else}
-  <div class="ctx" bind:this={el} bind:clientWidth={w} bind:clientHeight={h} style:left="{left}px" style:top="{top}px" use:outside={close}
+  <div class="ctx" data-part="menu" bind:this={el} bind:clientWidth={w} bind:clientHeight={h} style:left="{left}px" style:top="{top}px" use:outside={close}
     oncontextmenu={(e) => e.preventDefault()} role="menu" tabindex="-1"
     in:fly|global={{ y: -6, duration: 140, easing: cubicOut }} out:fly|global={{ y: -6, duration: 110, easing: cubicOut }}>
     {#if artist || list || tr}{@render header()}<Sep />{/if}
@@ -500,6 +537,15 @@
   .ht { min-width: 0; display: flex; flex-direction: column; }
   .t1 { font-size: 13px; font-weight: 500; color: rgba(255, 255, 255, .95); }
   .t2 { font-size: 12px; color: rgba(255, 255, 255, .55); }
+  .save-lbl { padding: 6px 10px 4px; font-size: 11.5px; font-weight: 600; color: rgba(255, 255, 255, .5); }
+  .bs-list .save-lbl { padding: 6px 16px 6px; font-size: 12.5px; }
+  .save-list { display: flex; flex-direction: column; }
+  .save-scroll { max-height: min(60vh, 420px); overflow-y: auto; }
+  .mark { flex: none; width: 18px; height: 18px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .35); display: grid; place-items: center; color: #0d0d0d; transition: background-color .14s ease-out, box-shadow .14s ease-out, transform .16s var(--ease); }
+  .mark.on { background: var(--accent); box-shadow: none; animation: mark-pop .24s var(--ease); }
+  .bs-list .mark { width: 22px; height: 22px; }
+  .pl-row:hover .mark:not(.on) { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .6); }
+  @keyframes mark-pop { 0% { transform: scale(.7); } 60% { transform: scale(1.15); } 100% { transform: scale(1); } }
   .none { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; cursor: default; }
   .n1 { font-size: 13px; color: rgba(255, 255, 255, .75); }
   .n2 { font-size: 12px; color: rgba(255, 255, 255, .45); }

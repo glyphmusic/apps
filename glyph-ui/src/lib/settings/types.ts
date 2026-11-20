@@ -26,6 +26,8 @@ export interface PluginListing {
   sections: string[]; menus: string[]; strings: number; hide: string[];
   /** Credentials it needs, as readable lines. */
   setup: string[];
+  /** What its look changes (font, corners, pictures, style sheet), if it has one. */
+  look?: { font: string; radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number } | null;
 }
 
 export interface PluginInstalled extends PluginListing {
@@ -77,6 +79,8 @@ export interface PluginUiState {
   pages: { id: string; name: string }[];
   /** Texts plugins bring, by language. */
   strings: Record<string, Record<string, string>>;
+  /** Looks of the enabled plugins (skin.ts). */
+  looks?: import("../skin").PluginLook[];
 }
 
 // ---- account (glyph_core::account, glyph_protocol) -------------------

@@ -303,6 +303,9 @@ fn main() {
             tauri_commands::plugins_folder,
             tauri_commands::plugins_reload,
             tauri_commands::plugins_state,
+            tauri_commands::backgrounds_list,
+            tauri_commands::background_add,
+            tauri_commands::background_remove,
         ])
         .build(tauri::generate_context!())
         .expect("error while starting Glyph")

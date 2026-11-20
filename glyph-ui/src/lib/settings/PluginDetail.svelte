@@ -7,6 +7,7 @@
   // at the user's own risk (the plugin own-risk disclaimer always shows).
   import { app } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
+  import { keyLabel, keyOf } from "../keys";
   import { css } from "../theme";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
@@ -142,7 +143,7 @@
       {#if listing?.updated}<div class="srow"><RowBase label={t("plugins.updated")}><span class="v">{listing.updated.slice(0, 10)}</span></RowBase></div>{/if}
     </Rows>
 
-    {#if allPermissions(m).length || m.sections.length || m.menus.length || m.strings || m.hide.length}
+    {#if allPermissions(m).length || m.sections.length || m.menus.length || m.strings || m.hide.length || m.look}
       <SectionLabel text={t("plugins.does")} />
       <Rows>
         {#each allPermissions(m) as p (p)}<div class="srow"><RowBase label={permLabel(p)} /></div>{/each}
@@ -150,6 +151,11 @@
         {#if m.menus.length}<div class="srow"><RowBase label={t("plugins.does.menus")}><span class="v">{m.menus.join(", ")}</span></RowBase></div>{/if}
         {#if m.strings}<div class="srow"><RowBase label={t("plugins.does.strings")}><span class="v">{m.strings}</span></RowBase></div>{/if}
         {#if m.hide.length}<div class="srow"><RowBase label={t("plugins.does.hide")}><span class="v">{m.hide.map((k) => t(k)).join(", ")}</span></RowBase></div>{/if}
+        {#if m.look?.font}<div class="srow"><RowBase label={t("plugins.does.font")}><span class="v">{t(`plugins.font.${m.look.font}`)}</span></RowBase></div>{/if}
+        {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{Math.round(m.look.radius * 100)}%</span></RowBase></div>{/if}
+        {#if m.look?.backgrounds}<div class="srow"><RowBase label={t("plugins.does.backgrounds")}><span class="v">{m.look.backgrounds}</span></RowBase></div>{/if}
+        {#if m.look?.icons}<div class="srow"><RowBase label={t("plugins.does.icons")}><span class="v">{m.look.icons}</span></RowBase></div>{/if}
+        {#if m.look?.css}<div class="srow"><RowBase label={t("plugins.does.css")} info={tf("plugins.does.css.desc", { key: keyLabel(keyOf("plugins")) })} /></div>{/if}
       </Rows>
     {/if}
 

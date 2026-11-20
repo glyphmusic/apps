@@ -21,6 +21,7 @@ import { ApiError, server, type PlaybackCommandWire, type PlaybackSource, type S
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
 import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
+import { bgAdd, bgList, bgRemove } from "./bg-store";
 import { filterTrackByEnabled } from "../settings/sources";
 
 interface WebPlaybackSession {
@@ -1327,6 +1328,10 @@ export class WebBackend implements Backend {
     const playlist = (id: string) => lib().playlists.find((x) => x.id === id);
     const enc = encodeURIComponent;
     return {
+      // ---- background pictures (kept in this browser) ----
+      backgrounds_list: () => bgList(),
+      background_add: (a) => bgAdd(a.data),
+      background_remove: (a) => bgRemove(a.id),
       // ---- player ----
       play: (a) => {
         if ("from" in a && a.from !== undefined) this.playingFrom = a.from?.list ?? null;

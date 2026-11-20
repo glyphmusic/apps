@@ -388,6 +388,9 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             Ok(Value::Null)
         }
         "plugins_folder" => res(plugins::plugins_folder()),
+        "backgrounds_list" => Ok(crate::backgrounds::backgrounds_list(core)),
+        "background_add" => res(crate::backgrounds::background_add(req(&args, "data")?).await),
+        "background_remove" => res(crate::backgrounds::background_remove(req(&args, "id")?)),
         "plugin_set_value" => {
             plugins::plugin_set_value(core, req(&args, "plugin")?, req(&args, "item")?, req(&args, "value")?);
             Ok(Value::Null)
@@ -500,6 +503,9 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
         "import_playlist_file" => res(transfer::import_playlist_file(core, opt(&args, "playlist_id")?).await),
         "import_text" => res(transfer::import_text(core, req(&args, "text")?, opt(&args, "ask")?).await),
         "share_save" => ok(transfer::share_save(core, req(&args, "code")?, opt(&args, "link")?, opt(&args, "author")?)),
+        "share_read" => res(transfer::share_read(core, req(&args, "text")?).await),
+        "share_read_files" => ok(transfer::share_read_files(core, req(&args, "paths")?).await),
+        "share_save_list" => ok(transfer::share_save_list(core, req(&args, "name")?, opt(&args, "origin")?, req(&args, "tracks")?)),
         "migrate_resume_state" => Ok(ok(transfer::migrate_resume_state())?),
         "migrate_discard" => {
             transfer::migrate_discard(core);

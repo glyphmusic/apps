@@ -221,6 +221,50 @@ export function press(el: HTMLElement, cls = "pressing") {
   return { destroy() { el.removeEventListener("pointerdown", run); el.removeEventListener("animationend", end); } };
 }
 
+/** Press and hold (touch, pen) runs `fn` like a right-click, for buttons the
+ *  phone's own hold handler (compact/cstate) leaves out. Mouse right-clicks
+ *  keep going through `oncontextmenu`. No `fn`: does nothing. */
+export function holdMenu(el: HTMLElement, fn: ((e: MouseEvent) => void) | undefined) {
+  let handler = fn;
+  let timer = 0, sx = 0, sy = 0, firedAt = -1e9;
+  const mark = () => { if (handler) el.setAttribute("data-no-longpress", ""); else el.removeAttribute("data-no-longpress"); };
+  const clear = () => { clearTimeout(timer); timer = 0; };
+  const down = (e: PointerEvent) => {
+    if (!handler || e.pointerType === "mouse") return;
+    clear();
+    sx = e.clientX; sy = e.clientY;
+    timer = window.setTimeout(() => {
+      timer = 0;
+      firedAt = performance.now();
+      handler?.(new MouseEvent("contextmenu", { cancelable: true, clientX: sx, clientY: sy }));
+    }, 420);
+  };
+  const move = (e: PointerEvent) => { if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) clear(); };
+  // The tap that ends the hold, and the system's own long-press menu, are swallowed.
+  const recent = () => performance.now() - firedAt < 800;
+  const click = (e: MouseEvent) => { if (recent()) { e.preventDefault(); e.stopImmediatePropagation(); firedAt = -1e9; } };
+  const ctx = (e: MouseEvent) => { if (e.isTrusted && recent()) { e.preventDefault(); e.stopImmediatePropagation(); } };
+  mark();
+  el.addEventListener("pointerdown", down);
+  el.addEventListener("pointermove", move);
+  el.addEventListener("pointerup", clear);
+  el.addEventListener("pointercancel", clear);
+  el.addEventListener("click", click, true);
+  el.addEventListener("contextmenu", ctx, true);
+  return {
+    update(f: ((e: MouseEvent) => void) | undefined) { handler = f; mark(); },
+    destroy() {
+      clear();
+      el.removeEventListener("pointerdown", down);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", clear);
+      el.removeEventListener("pointercancel", clear);
+      el.removeEventListener("click", click, true);
+      el.removeEventListener("contextmenu", ctx, true);
+    },
+  };
+}
+
 /** Closes on a click outside `el` or on Escape. */
 export function outside(el: HTMLElement, close: () => void) {
   const down = (e: PointerEvent) => { if (!el.contains(e.target as Node)) close(); };

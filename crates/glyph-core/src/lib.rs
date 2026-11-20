@@ -20,6 +20,7 @@ pub mod account;
 pub mod config;
 pub mod connectivity;
 pub mod artist;
+pub mod backgrounds;
 pub mod catalog;
 pub mod cover;
 pub mod dedupe;
@@ -1496,6 +1497,13 @@ impl Backend {
     pub async fn plugin_code(&self, listing: plugins::Listing) -> anyhow::Result<Option<Vec<u8>>> {
         let inner = self.cur();
         self.spawn(async move { plugins::fetch_code(&inner.http, &listing).await }).await?
+    }
+
+    /// Files of a plugin's look (style sheet and pictures from GitHub);
+    /// empty when it has none.
+    pub async fn plugin_look(&self, listing: plugins::Listing) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let inner = self.cur();
+        self.spawn(async move { plugins::fetch_look(&inner.http, &listing).await }).await?
     }
 
     /// Downloads, verifies (SHA-256) and installs the update. Restart is up to the UI.

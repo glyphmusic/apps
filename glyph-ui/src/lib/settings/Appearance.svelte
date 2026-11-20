@@ -1,6 +1,7 @@
 <script lang="ts">
   // settings/appearance.rs appearance + theme_swatches: language, visual text
-  // size card, background shape + theme + glow intensity & reactivity, mini
+  // size card, background shape + theme + glow intensity & reactivity,
+  // background picture (own or from plugins), mini
   // player style, ASCII covers & effects, throttle, startup animation.
   import { onMount } from "svelte";
   import { app } from "../state.svelte";
@@ -13,6 +14,7 @@
   import PluginHost from "./PluginHost.svelte";
   import TextScaleVisual from "./TextScaleVisual.svelte";
   import GlowVisual from "./GlowVisual.svelte";
+  import BackgroundVisual from "./BackgroundVisual.svelte";
   import MiniPlayerVisual from "./MiniPlayerVisual.svelte";
   import AsciiVisual from "./AsciiVisual.svelte";
   import PerformanceVisual from "./PerformanceVisual.svelte";
@@ -41,6 +43,8 @@
     <TextScaleVisual />
 
     <GlowVisual />
+
+    <BackgroundVisual />
 
     {#if !onWeb() && !mobile}
       <MiniPlayerVisual />
