@@ -8,7 +8,13 @@ export function setIconOverrides(svgs: Record<string, string>) {
   const masks: Record<string, string> = {};
   for (const [name, svg] of Object.entries(svgs)) {
     if (!/^[a-z0-9-]{1,40}$/.test(name) || !svg.includes("<svg")) continue;
-    const solid = svg.replace(/<!--[\s\S]*?-->/g, "").replace(/currentColor/g, "#fff").replace(/\s+/g, " ").trim();
+    // Comments out until none is left (a removed one can join a new "<!--").
+    let plain = svg;
+    for (let before = ""; before !== plain; ) {
+      before = plain;
+      plain = plain.replace(/<!--[\s\S]*?-->/g, "").replace(/<!--/g, "");
+    }
+    const solid = plain.replace(/currentColor/g, "#fff").replace(/\s+/g, " ").trim();
     masks[name] = `url("data:image/svg+xml,${encodeURIComponent(solid)}")`;
   }
   iconOv.masks = masks;
