@@ -741,7 +741,7 @@ fn is_forbidden(e: &anyhow::Error) -> bool {
     })
 }
 
-async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64) -> Result<(Option<u64>, Vec<u8>)> {
+async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64, report_progress: bool) -> Result<(Option<u64>, Vec<u8>)> {
     let started = std::time::Instant::now();
     let transfer = glyph_protocol::network::Transfer::start();
     let mut req = http.get(&a.url).header(reqwest::header::RANGE, format!("bytes={from}-{to}")).timeout(Duration::from_secs(30));
@@ -758,13 +758,22 @@ async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64) -
         .get(reqwest::header::CONTENT_RANGE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.rsplit('/').next())
-        .and_then(|v| v.trim().parse::<u64>().ok());
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| (status == 200).then(|| resp.content_length()).flatten());
+    if report_progress && from == 0 {
+        if let Some(t) = total.filter(|&n| n > 0 && n <= MAX_AUDIO_BYTES) {
+            crate::downloads::report(|p| p.set_total(t));
+        }
+    }
     let mut chunks = resp.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk?;
         transfer.progress();
         body.extend_from_slice(&chunk);
+        if report_progress {
+            crate::downloads::report(|p| p.add(chunk.len() as u64));
+        }
     }
     glyph_protocol::network::observe(body.len() as u64, started.elapsed());
     if status == 200 && from > 0 {
@@ -776,7 +785,7 @@ async fn get_range(http: &reqwest::Client, a: &LocalAudio, from: u64, to: u64) -
 /// Downloads the whole stream of `a` into `dir` (parallel ranges) and
 /// returns the file.
 pub async fn download_audio(http: &reqwest::Client, a: &LocalAudio, dir: &Path) -> Result<PathBuf> {
-    let (total, first) = get_range(http, a, 0, PART - 1).await?;
+    let (total, first) = get_range(http, a, 0, PART - 1, true).await?;
     let total = total.ok_or_else(|| anyhow!("stream size unknown"))?;
     if total > MAX_AUDIO_BYTES {
         bail!("audio stream too large");
@@ -784,13 +793,11 @@ pub async fn download_audio(http: &reqwest::Client, a: &LocalAudio, dir: &Path) 
     let mut data = vec![0u8; total as usize];
     let n = first.len().min(data.len());
     data[..n].copy_from_slice(&first[..n]);
-    crate::downloads::report(|p| {
-        p.set_total(total);
-        p.add(n as u64);
-    });
+    // Ensure total is set even if a 200 response omitted Content-Length.
+    crate::downloads::report(|p| p.set_total(total));
     let ranges: Vec<(u64, u64)> = (n as u64..total).step_by(PART as usize).map(|s| (s, (s + PART).min(total) - 1)).collect();
     let mut parts = futures::stream::iter(ranges)
-        .map(|(from, to)| async move { get_range(http, a, from, to).await.map(|(_, b)| (from, to, b)) })
+        .map(|(from, to)| async move { get_range(http, a, from, to, true).await.map(|(_, b)| (from, to, b)) })
         .buffer_unordered(PARALLEL);
     while let Some(part) = parts.next().await {
         let (from, to, body) = part?;
@@ -798,7 +805,6 @@ pub async fn download_audio(http: &reqwest::Client, a: &LocalAudio, dir: &Path) 
             bail!("short read from the stream");
         }
         data[from as usize..=to as usize].copy_from_slice(&body);
-        crate::downloads::report(|p| p.add(body.len() as u64));
     }
     let path = dir.join(format!("{}.{}", a.video_id, ext_for(a.mime.as_deref())));
     let dest = path.clone();
@@ -835,6 +841,7 @@ impl YtDlp {
             Ok(p) => p,
             Err(e) if is_forbidden(&e) => {
                 tracing::info!(video_id, "stream URL refused, resolving again");
+                crate::downloads::report(|p| p.reset());
                 forget_url(video_id);
                 let a = self.resolve(video_id).await?;
                 download_audio(http, &a, &dir).await?

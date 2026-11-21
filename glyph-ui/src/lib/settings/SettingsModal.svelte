@@ -12,6 +12,7 @@
   import { cubicOut } from "svelte/easing";
   import { app } from "../state.svelte";
   import Icon from "../components/Icon.svelte";
+  import OverlayScrollbar from "../shell/OverlayScrollbar.svelte";
   import { t } from "../i18n.svelte";
   import { fx, tip, fadeEdges } from "../ui.svelte";
   import Nav from "./Nav.svelte";
@@ -56,8 +57,14 @@
       if (mg.service) {
         const svcName = serviceOf(mg.service).name;
         const acc = mg.overview?.account.trim() ?? "";
-        if (mg.step === "choose" && acc && acc.toLowerCase() !== svcName.toLowerCase()) {
-          return [root, { label: svcName, onclick: () => { mg.error = null; mg.step = "connect"; } }, { label: acc }];
+        if (mg.step === "choose") {
+          const backToConnect = mg.returnStep === "connect" ? () => { mg.error = null; mg.step = "connect"; } : undefined;
+          if (acc && acc.toLowerCase() !== svcName.toLowerCase()) {
+            return [root, { label: svcName, onclick: backToConnect }, { label: acc }];
+          }
+          if (backToConnect) {
+            return [root, { label: svcName, onclick: backToConnect }];
+          }
         }
         return [root, { label: svcName }];
       }
@@ -133,6 +140,7 @@
           {/key}
         </div>
       </div>
+      {#if !app.compact}<OverlayScrollbar el={scroller} top={14} bottom={14} />{/if}
       <button class="x" onclick={close} use:tip={t("tip.x")} aria-label={t("tip.x")}><Icon name="x" size={16} color="rgba(255,255,255,.7)" /></button>
     </div>
   </div>
@@ -143,7 +151,8 @@
   .back.closing { pointer-events: none; }
   .panel { position: relative; display: flex; gap: 4px; padding: 8px; width: 920px; max-width: 94%; height: 660px; max-height: 90%; border-radius: 16px; overflow: hidden; background: #141414; }
   .content { position: relative; flex: 1; min-width: 0; height: 100%; border-radius: 12px; overflow: hidden; background: #0c0c0c; }
-  .page { height: 100%; padding: 22px 28px; }
+  .page { height: 100%; padding: 22px 28px; scrollbar-width: none; -ms-overflow-style: none; }
+  .page::-webkit-scrollbar { display: none; width: 0; height: 0; }
   .inner { display: flex; flex-direction: column; gap: 4px; padding-right: 36px; }
   .title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 17px; font-weight: 600; color: #fff; }
   .crumb { font: inherit; color: #fff; border-radius: 5px; transition: color .12s; }

@@ -66,6 +66,13 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Stable short hex hash (SHA-256 prefix) for cache file names.
 pub fn hash_hex(s: &str) -> String {
     use sha2::{Digest, Sha256};

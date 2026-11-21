@@ -93,25 +93,184 @@ pub fn parse_spotify_entity(e: &Value) -> Option<(String, Vec<Track>)> {
     Some((name, tracks))
 }
 
-/// Reads `open.spotify.com/embed/<kind>/<id>`.
-pub async fn spotify_embed(http: &reqwest::Client, kind: &str, id: &str) -> Result<(String, Vec<Track>)> {
-    let resp = http
+/// Outcome of fetching a single Spotify embed page.
+enum EmbedFetch {
+    Ok(String, Vec<Track>),
+    RateLimited(Option<u64>),
+    Transient(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
+async fn fetch_spotify_embed_once(http: &reqwest::Client, kind: &str, id: &str) -> EmbedFetch {
+    let resp = match http
         .get(format!("https://open.spotify.com/embed/{kind}/{id}"))
         .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (compatible; Glyph music app)")
+        .timeout(std::time::Duration::from_secs(10))
         .send()
-        .await?;
-    match resp.status().as_u16() {
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return EmbedFetch::Transient(e.into()),
+    };
+    let status = resp.status().as_u16();
+    match status {
         200..=299 => {}
-        404 => bail!("this Spotify list does not exist or is private"),
-        s => bail!("Spotify answered HTTP {s}"),
+        429 => {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            return EmbedFetch::RateLimited(retry_after);
+        }
+        404 => return EmbedFetch::Fatal(anyhow!("this Spotify list does not exist or is private")),
+        500..=599 => return EmbedFetch::Transient(anyhow!("Spotify answered HTTP {status}")),
+        s => return EmbedFetch::Fatal(anyhow!("Spotify answered HTTP {s}")),
     }
-    let html = resp.text().await?;
-    let e = spotify_embed_entity(&html).ok_or_else(|| anyhow!("Spotify page without a song list"))?;
-    let list = parse_spotify_entity(&e).ok_or_else(|| anyhow!("Spotify page without a song list"))?;
+    let html = match resp.text().await {
+        Ok(h) => h,
+        Err(e) => return EmbedFetch::Transient(e.into()),
+    };
+    let Some(e) = spotify_embed_entity(&html) else {
+        return EmbedFetch::Fatal(anyhow!("Spotify page without a song list"));
+    };
+    let Some(list) = parse_spotify_entity(&e) else {
+        return EmbedFetch::Fatal(anyhow!("Spotify page without a song list"));
+    };
     if kind == "playlist" && list.1.len() >= SPOTIFY_EMBED_LIMIT {
-        bail!("Spotify only exposes the first 100 songs here. Use Spotify access authorized to read this playlist, or import a complete playlist file / copied song links.");
+        return EmbedFetch::Fatal(anyhow!(
+            "Spotify only exposes the first 100 songs here. Use Spotify access authorized to read this playlist, or import a complete playlist file / copied song links."
+        ));
     }
-    Ok(list)
+    EmbedFetch::Ok(list.0, list.1)
+}
+
+/// Reads `open.spotify.com/embed/<kind>/<id>`.
+pub async fn spotify_embed(http: &reqwest::Client, kind: &str, id: &str) -> Result<(String, Vec<Track>)> {
+    match fetch_spotify_embed_once(http, kind, id).await {
+        EmbedFetch::Ok(name, tracks) => Ok((name, tracks)),
+        EmbedFetch::RateLimited(_) => bail!("Spotify answered HTTP 429"),
+        EmbedFetch::Transient(e) | EmbedFetch::Fatal(e) => Err(e),
+    }
+}
+
+/// Coordinated adaptive concurrency + shared 429 cooldown for bulk Spotify
+/// embed fetches so 1,500+ pasted links run fast without losing tracks when
+/// Spotify's edge rate limit triggers.
+struct SpotifyGate {
+    in_flight: std::sync::atomic::AtomicUsize,
+    limit: std::sync::atomic::AtomicUsize,
+    ok_streak: std::sync::atomic::AtomicUsize,
+    backoff_ms: std::sync::atomic::AtomicU64,
+    paused_until: std::sync::Mutex<Option<std::time::Instant>>,
+    notify: tokio::sync::Notify,
+}
+
+struct SpotifyPermit<'a>(&'a SpotifyGate);
+impl Drop for SpotifyPermit<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.notify.notify_waiters();
+    }
+}
+
+impl SpotifyGate {
+    fn new() -> Self {
+        Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            limit: std::sync::atomic::AtomicUsize::new(20),
+            ok_streak: std::sync::atomic::AtomicUsize::new(0),
+            backoff_ms: std::sync::atomic::AtomicU64::new(2_000),
+            paused_until: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn acquire<'a>(&'a self, cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Option<SpotifyPermit<'a>> {
+        use std::sync::atomic::Ordering;
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return None;
+            }
+            let wait = {
+                let g = self.paused_until.lock().unwrap_or_else(|e| e.into_inner());
+                g.and_then(|until| until.checked_duration_since(std::time::Instant::now()))
+            };
+            if let Some(d) = wait {
+                tokio::time::sleep(d.min(std::time::Duration::from_millis(200))).await;
+                continue;
+            }
+            let notified = self.notify.notified();
+            let cap = self.limit.load(Ordering::SeqCst);
+            if self.in_flight.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < cap).then_some(n + 1)).is_ok() {
+                return Some(SpotifyPermit(self));
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+            }
+        }
+    }
+
+    fn on_ok(&self) {
+        use std::sync::atomic::Ordering;
+        let streak = self.ok_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak >= 30 {
+            self.ok_streak.store(0, Ordering::Relaxed);
+            self.backoff_ms.store(2_000, Ordering::Relaxed);
+            let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 20).then_some((n + 2).min(20)));
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn on_rate_limited(&self, retry_after_secs: Option<u64>) {
+        use std::sync::atomic::Ordering;
+        self.ok_streak.store(0, Ordering::Relaxed);
+        let prev = self.backoff_ms.load(Ordering::Relaxed);
+        let wait_ms = match retry_after_secs.filter(|&s| s > 0) {
+            Some(s) => (s.min(15)) * 1_000,
+            None => prev,
+        };
+        self.backoff_ms.store((prev * 2).min(15_000), Ordering::Relaxed);
+        let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some((n / 2).max(6)));
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let mut g = self.paused_until.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none_or(|cur| until > cur) {
+            *g = Some(until);
+        }
+    }
+}
+
+async fn fetch_spotify_track_with_retry(
+    http: &reqwest::Client,
+    id: &str,
+    gate: &SpotifyGate,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<Track> {
+    use std::sync::atomic::Ordering;
+    for attempt in 0..5u32 {
+        let Some(_permit) = gate.acquire(cancel).await else { return None };
+        match fetch_spotify_embed_once(http, "track", id).await {
+            EmbedFetch::Ok(_, tracks) => {
+                gate.on_ok();
+                return tracks.into_iter().next();
+            }
+            EmbedFetch::RateLimited(retry_after) => {
+                gate.on_rate_limited(retry_after);
+                drop(_permit);
+                continue;
+            }
+            EmbedFetch::Transient(_) if attempt < 2 => {
+                drop(_permit);
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(400 * u64::from(attempt + 1))).await;
+            }
+            EmbedFetch::Transient(_) | EmbedFetch::Fatal(_) => return None,
+        }
+    }
+    None
 }
 
 // ------------------------------------------------------------ YouTube
@@ -225,12 +384,27 @@ fn youtube_title(v: &Value) -> Option<String> {
 
 /// A public (or unlisted) YouTube / YouTube Music playlist, all pages.
 pub async fn youtube_playlist(http: &reqwest::Client, list_id: &str) -> Result<(String, Vec<Track>)> {
+    youtube_playlist_with_progress(http, list_id, None, None).await
+}
+
+/// Same as [`youtube_playlist`], reporting tracks read per page and stopping early when cancelled.
+pub async fn youtube_playlist_with_progress(
+    http: &reqwest::Client,
+    list_id: &str,
+    progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(String, Vec<Track>)> {
+    use std::sync::atomic::Ordering;
     let context = serde_json::json!({"client": {"clientName": "WEB", "clientVersion": YT_CLIENT_VERSION, "hl": "en", "gl": "US"}});
     let mut body = serde_json::json!({"context": context, "browseId": format!("VL{list_id}")});
     let (mut name, mut tracks) = (None, Vec::new());
+    let mut seen_ids = std::collections::HashSet::new();
     let max_tracks = crate::library::playlist_track_limit();
     let max_pages = max_tracks.div_ceil(50);
     for page_index in 0..=max_pages {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            bail!("cancelled");
+        }
         let v: Value = http
             .post(YT_BROWSE)
             .header("X-Youtube-Client-Name", "1")
@@ -248,11 +422,15 @@ pub async fn youtube_playlist(http: &reqwest::Client, list_id: &str) -> Result<(
         let (page, cont) = parse_youtube_playlist(&v);
         let before = tracks.len();
         for t in page {
-            if !tracks.iter().any(|x: &Track| x.id == t.id) {
+            if seen_ids.insert(t.id.clone()) {
                 tracks.push(t);
             }
         }
         if tracks.len() > max_tracks { bail!("Playlist exceeds this server's limit of {max_tracks} songs"); }
+        if let Some(tx) = progress {
+            let total = if cont.is_none() { tracks.len() } else { 0 };
+            let _ = tx.send(crate::ImportProgress { label: "IMPORT youtube/playlist".into(), done: tracks.len(), total });
+        }
         match cont {
             Some(token) => {
                 if tracks.len() == before || page_index == max_pages { bail!("YouTube did not complete the playlist; retry the import"); }
@@ -267,6 +445,91 @@ pub async fn youtube_playlist(http: &reqwest::Client, list_id: &str) -> Result<(
     Ok((name.unwrap_or_else(|| "YouTube playlist".into()), tracks))
 }
 
+/// Fast, bounded metadata preview for a pasted list link (title, optional cover, optional count).
+/// Used to show real names and artwork in the transfer chooser without reading every track page.
+pub async fn peek_link_meta(
+    http: &reqwest::Client,
+    url: &str,
+    src: &super::RemoteSource,
+) -> Option<(String, Option<String>, Option<usize>)> {
+    use super::RemoteSource as R;
+    let fut = async {
+        match src {
+            R::SpotifyPlaylist(_) | R::SpotifyAlbum(_) | R::SpotifyArtist(_) => {
+                let v: Value = http
+                    .get("https://open.spotify.com/oembed")
+                    .query(&[("url", url)])
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .await
+                    .ok()?;
+                let title = v["title"].as_str()?.trim().to_string();
+                if title.is_empty() { return None; }
+                let cover = v["thumbnail_url"].as_str().map(str::to_string);
+                Some((title, cover, None))
+            }
+            R::YouTubePlaylist(id) => {
+                let canon = format!("https://www.youtube.com/playlist?list={id}");
+                let v: Value = http
+                    .get("https://www.youtube.com/oembed")
+                    .query(&[("url", canon.as_str()), ("format", "json")])
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .await
+                    .ok()?;
+                let title = v["title"].as_str()?.trim().to_string();
+                if title.is_empty() { return None; }
+                let cover = v["thumbnail_url"].as_str().map(str::to_string);
+                Some((title, cover, None))
+            }
+            R::DeezerPlaylist(id) => {
+                let v: Value = http
+                    .get(format!("https://api.deezer.com/playlist/{id}"))
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .await
+                    .ok()?;
+                let title = v["title"].as_str()?.trim().to_string();
+                if title.is_empty() { return None; }
+                let cover = v["picture_big"].as_str().or(v["picture_medium"].as_str()).map(str::to_string);
+                let count = v["nb_tracks"].as_u64().map(|n| n as usize);
+                Some((title, cover, count))
+            }
+            R::DeezerAlbum(id) => {
+                let v: Value = http
+                    .get(format!("https://api.deezer.com/album/{id}"))
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json()
+                    .await
+                    .ok()?;
+                let title = v["title"].as_str()?.trim().to_string();
+                if title.is_empty() { return None; }
+                let cover = v["cover_big"].as_str().or(v["cover_medium"].as_str()).map(str::to_string);
+                let count = v["nb_tracks"].as_u64().map(|n| n as usize);
+                Some((title, cover, count))
+            }
+            _ => None,
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(2500), fut).await.ok().flatten()
+}
+
 /// Title and channel of one video (oEmbed, no key).
 pub async fn youtube_video(http: &reqwest::Client, id: &str) -> Result<Track> {
     let url = format!("https://www.youtube.com/watch?v={id}");
@@ -279,11 +542,21 @@ pub async fn youtube_video(http: &reqwest::Client, id: &str) -> Result<Track> {
 // ------------------------------------------------------------ pasted text
 
 /// One song link of a pasted text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SongLink {
     Spotify(String),
     YouTube(String),
     Deezer(String),
+}
+
+impl SongLink {
+    fn cache_key(&self) -> String {
+        match self {
+            Self::Spotify(id) => format!("sp:{id}"),
+            Self::YouTube(id) => format!("yt:{id}"),
+            Self::Deezer(id) => format!("dz:{id}"),
+        }
+    }
 }
 
 /// What a pasted text holds: single songs (in order) and whole lists.
@@ -318,6 +591,7 @@ fn youtube_video_id(url: &reqwest::Url) -> Option<String> {
 /// commas), deduplicated, in order. `spotify:track:` URIs work too.
 pub fn parse_pasted(text: &str) -> Pasted {
     let mut out = Pasted::default();
+    let mut seen_songs: std::collections::HashSet<SongLink> = std::collections::HashSet::new();
     for word in text.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
         let word = word.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
         if word.is_empty() {
@@ -339,7 +613,7 @@ pub fn parse_pasted(text: &str) -> Pasted {
         };
         match song {
             Some(s) => {
-                if !out.songs.contains(&s) {
+                if seen_songs.insert(s.clone()) {
                     out.songs.push(s);
                 }
             }
@@ -355,52 +629,216 @@ pub fn parse_pasted(text: &str) -> Pasted {
     out
 }
 
+const IMPORT_CACHE_MAX: usize = 25_000;
+
+fn import_track_cache_path() -> std::path::PathBuf {
+    crate::paths::cache_dir().join("import-tracks.json")
+}
+
+fn load_import_track_cache(path: &std::path::Path) -> std::collections::HashMap<String, Track> {
+    crate::paths::read_json(path).unwrap_or_default()
+}
+
+fn save_import_track_cache(path: &std::path::Path, mut map: std::collections::HashMap<String, Track>) {
+    if map.len() > IMPORT_CACHE_MAX {
+        let drop_n = map.len() - IMPORT_CACHE_MAX + 500;
+        let keys: Vec<String> = map.keys().take(drop_n).cloned().collect();
+        for k in keys {
+            map.remove(&k);
+        }
+    }
+    let _ = crate::paths::write_json(path, &map);
+}
+
 /// Metadata of pasted song links, in order (songs that cannot be read are
-/// left out). Spotify songs use the app's Spotify key when there is one,
-/// else their embed pages; 4 requests at a time.
+/// left out). Reuses cached metadata from earlier imports, batches Spotify API
+/// lookups (50 per call, 6 in parallel) when a key is present, and otherwise
+/// reads embed/oEmbed pages up to 24 in parallel with coordinated 429 retry.
 pub async fn read_songs(
     songs: &[SongLink],
     spotify: Option<&std::sync::Arc<crate::providers::spotify::Spotify>>,
     deezer: &crate::providers::deezer::Deezer,
     http: &reqwest::Client,
 ) -> Vec<Track> {
-    // Spotify with a key: 50 per request.
+    read_songs_with_progress(songs, spotify, deezer, http, None, None).await
+}
+
+/// Same as [`read_songs`], emitting live progress and honoring `cancel`.
+pub async fn read_songs_with_progress(
+    songs: &[SongLink],
+    spotify: Option<&std::sync::Arc<crate::providers::spotify::Spotify>>,
+    deezer: &crate::providers::deezer::Deezer,
+    http: &reqwest::Client,
+    progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Vec<Track> {
+    use std::sync::atomic::Ordering;
+    let total = songs.len();
+    if let Some(tx) = progress {
+        let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done: 0, total });
+    }
+    if total == 0 {
+        return Vec::new();
+    }
+    let cache_path = import_track_cache_path();
+    let cache_load_path = cache_path.clone();
+    let mut disk_cache = tokio::task::spawn_blocking(move || load_import_track_cache(&cache_load_path))
+        .await
+        .unwrap_or_default();
+
+    let mut slots: Vec<Option<Track>> = vec![None; total];
+    let mut missing: Vec<(usize, SongLink)> = Vec::new();
+    let mut done = 0usize;
+    for (idx, s) in songs.iter().enumerate() {
+        if let Some(t) = disk_cache.get(&s.cache_key()) {
+            slots[idx] = Some(t.clone());
+            done += 1;
+        } else {
+            missing.push((idx, s.clone()));
+        }
+    }
+    if done > 0 {
+        if let Some(tx) = progress {
+            let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done, total });
+        }
+    }
+    if missing.is_empty() {
+        return slots.into_iter().flatten().collect();
+    }
+
+    // Spotify with a key: 50 per request, 6 batches in parallel.
     let mut known: std::collections::HashMap<String, Track> = Default::default();
     if let Some(sp) = spotify {
-        let ids: Vec<&str> = songs.iter().filter_map(|s| if let SongLink::Spotify(id) = s { Some(id.as_str()) } else { None }).collect();
-        for chunk in ids.chunks(50) {
-            match sp.tracks_by_ids(chunk).await {
-                Ok(list) => known.extend(list.into_iter().map(|t| (t.id.clone(), t))),
-                Err(e) => {
-                    tracing::info!("Spotify batch lookup failed, using embed pages: {e:#}");
-                    break;
+        let sp_ids: Vec<String> = missing
+            .iter()
+            .filter_map(|(_, s)| if let SongLink::Spotify(id) = s { Some(id.clone()) } else { None })
+            .collect();
+        let chunks: Vec<Vec<String>> = sp_ids.chunks(50).map(|c| c.to_vec()).collect();
+        let mut batch_stream = futures::stream::iter(chunks)
+            .map(|chunk| async move {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                match sp.tracks_by_ids(&refs).await {
+                    Ok(list) => Some(list),
+                    Err(e) => {
+                        tracing::info!("Spotify batch lookup failed, using embed pages: {e:#}");
+                        None
+                    }
+                }
+            })
+            .buffer_unordered(6);
+        while let Some(batch) = batch_stream.next().await {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Vec::new();
+            }
+            if let Some(list) = batch {
+                for t in list {
+                    known.insert(t.id.clone(), t);
                 }
             }
         }
     }
-    let known = &known;
-    futures::stream::iter(songs.iter().cloned())
-        .map(|s| async move {
-            match s {
-                SongLink::Spotify(id) => match known.get(&id) {
-                    Some(t) => Some(t.clone()),
-                    None => spotify_embed(http, "track", &id).await.ok().and_then(|(_, t)| t.into_iter().next()),
-                },
-                SongLink::YouTube(id) => youtube_video(http, &id).await.ok(),
-                SongLink::Deezer(id) => deezer.track_by_id(&id).await.ok(),
+
+    let mut newly_cached = 0usize;
+    let mut remaining: Vec<(usize, SongLink)> = Vec::new();
+    for (idx, s) in missing {
+        if let SongLink::Spotify(ref id) = s {
+            if let Some(t) = known.get(id) {
+                disk_cache.insert(s.cache_key(), t.clone());
+                newly_cached += 1;
+                slots[idx] = Some(t.clone());
+                done += 1;
+                continue;
+            }
+        }
+        remaining.push((idx, s));
+    }
+    if newly_cached > 0 {
+        if let Some(tx) = progress {
+            let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done, total });
+        }
+    }
+
+    let gate = std::sync::Arc::new(SpotifyGate::new());
+    let mut stream = futures::stream::iter(remaining)
+        .map(|(idx, s)| {
+            let gate = gate.clone();
+            async move {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return (idx, s, None);
+                }
+                let track = match &s {
+                    SongLink::Spotify(id) => fetch_spotify_track_with_retry(http, id, &gate, cancel).await,
+                    SongLink::YouTube(id) => {
+                        let mut found = None;
+                        for attempt in 0..2u32 {
+                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) { break; }
+                            if let Ok(Ok(t)) = tokio::time::timeout(std::time::Duration::from_secs(10), youtube_video(http, id)).await {
+                                found = Some(t);
+                                break;
+                            }
+                            if attempt == 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            }
+                        }
+                        found
+                    }
+                    SongLink::Deezer(id) => {
+                        let mut found = None;
+                        for attempt in 0..2u32 {
+                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) { break; }
+                            if let Ok(Ok(t)) = tokio::time::timeout(std::time::Duration::from_secs(10), deezer.track_by_id(id)).await {
+                                found = Some(t);
+                                break;
+                            }
+                            if attempt == 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                            }
+                        }
+                        found
+                    }
+                };
+                (idx, s, track)
             }
         })
-        .buffered(4)
-        .filter_map(futures::future::ready)
-        .collect()
-        .await
+        .buffer_unordered(24);
+    while let Some((idx, link, track)) = stream.next().await {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
+        if let Some(ref t) = track {
+            disk_cache.insert(link.cache_key(), t.clone());
+            newly_cached += 1;
+        }
+        slots[idx] = track;
+        done += 1;
+        if let Some(tx) = progress {
+            let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done, total });
+        }
+    }
+    if newly_cached > 0 {
+        let _ = tokio::task::spawn_blocking(move || save_import_track_cache(&cache_path, disk_cache)).await;
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// Fills in YouTube songs of a Google Takeout CSV (ids only) through oEmbed.
 pub async fn fill_takeout(http: &reqwest::Client, tracks: Vec<Track>) -> Vec<Track> {
+    fill_takeout_with_progress(http, tracks, None, None).await
+}
+
+/// Same as [`fill_takeout`], emitting live progress and honoring `cancel`.
+pub async fn fill_takeout_with_progress(
+    http: &reqwest::Client,
+    tracks: Vec<Track>,
+    progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Vec<Track> {
     let songs: Vec<SongLink> = tracks.iter().map(|t| SongLink::YouTube(t.id.clone())).collect();
     let dz = crate::providers::deezer::Deezer::new(http.clone());
-    let found = read_songs(&songs, None, &dz, http).await;
+    let found = read_songs_with_progress(&songs, None, &dz, http, progress, cancel).await;
     let found: std::collections::HashMap<_, _> = found.into_iter().map(|t| (t.id.clone(), t)).collect();
     // A temporary oEmbed failure must not remove a row from the user's export.
     tracks.into_iter().map(|t| found.get(&t.id).cloned().unwrap_or(t)).collect()
@@ -485,5 +923,66 @@ mod tests {
         );
         assert_eq!(p.lists.len(), 2);
         assert!(parse_pasted("just words").is_empty());
+    }
+
+    #[test]
+    fn parse_pasted_1500_spotify_links_is_fast_and_preserves_order() {
+        let mut text = String::new();
+        for i in 0..1500 {
+            text.push_str(&format!("https://open.spotify.com/track/trackid{i:015}\n"));
+        }
+        // Duplicate the first 200 to verify O(N) dedup preserves first occurrence order.
+        for i in 0..200 {
+            text.push_str(&format!("spotify:track:trackid{i:015}\n"));
+        }
+        let started = std::time::Instant::now();
+        let parsed = parse_pasted(&text);
+        let elapsed = started.elapsed();
+        assert_eq!(parsed.songs.len(), 1500);
+        assert_eq!(parsed.songs[0], SongLink::Spotify("trackid000000000000000".into()));
+        assert_eq!(parsed.songs[1499], SongLink::Spotify("trackid000000000001499".into()));
+        assert!(elapsed < std::time::Duration::from_millis(500), "parse_pasted took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn read_songs_reuses_persistent_cache_for_1500_tracks() {
+        let _g = crate::paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("GLYPH_CACHE_DIR", dir.path());
+        let mut seeded = std::collections::HashMap::new();
+        let mut links = Vec::with_capacity(1500);
+        for i in 0..1500 {
+            let id = format!("id{i:020}");
+            let link = SongLink::Spotify(id.clone());
+            seeded.insert(link.cache_key(), spotify_track(&id, &format!("Song {i}"), "Artist", None, Some(180_000), None, false));
+            links.push(link);
+        }
+        save_import_track_cache(&import_track_cache_path(), seeded);
+        let http = reqwest::Client::new();
+        let dz = crate::providers::deezer::Deezer::new(http.clone());
+        let started = std::time::Instant::now();
+        let tracks = read_songs(&links, None, &dz, &http).await;
+        let elapsed = started.elapsed();
+        assert_eq!(tracks.len(), 1500);
+        assert_eq!(tracks[0].title, "Song 0");
+        assert_eq!(tracks[1499].title, "Song 1499");
+        assert!(elapsed < std::time::Duration::from_secs(1), "cached 1500 read took {elapsed:?}");
+        std::env::remove_var("GLYPH_CACHE_DIR");
+    }
+
+    #[test]
+    fn spotify_gate_backs_off_on_429_and_recovers() {
+        use std::sync::atomic::Ordering;
+        let gate = SpotifyGate::new();
+        assert_eq!(gate.limit.load(Ordering::SeqCst), 20);
+        gate.on_rate_limited(Some(1));
+        assert_eq!(gate.limit.load(Ordering::SeqCst), 10);
+        assert!(gate.paused_until.lock().unwrap().is_some());
+        gate.on_rate_limited(None);
+        assert_eq!(gate.limit.load(Ordering::SeqCst), 6);
+        for _ in 0..30 {
+            gate.on_ok();
+        }
+        assert_eq!(gate.limit.load(Ordering::SeqCst), 8);
     }
 }

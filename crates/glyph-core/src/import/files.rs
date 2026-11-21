@@ -36,7 +36,7 @@ fn mk(source: ProviderId, idx: usize, title: &str, artist: &str, album: Option<&
     })
 }
 
-/// Parses a dropped file by extension.
+/// Parses a dropped file by extension (merging multi-playlist JSON into one list).
 pub fn parse_file(path: &Path) -> anyhow::Result<ParsedList> {
     let bytes = std::fs::read(path)?;
     let text = String::from_utf8_lossy(&bytes);
@@ -48,8 +48,55 @@ pub fn parse_file(path: &Path) -> anyhow::Result<ParsedList> {
         "json" => parse_spotify_json(text, &stem),
         "m3u" | "m3u8" => Ok(parse_m3u(text, &stem)),
         "xspf" => Ok(parse_xspf(text, &stem)),
-        _ => Err(anyhow::anyhow!("unsupported playlist file: .{ext} (CSV, JSON, M3U, M3U8, XSPF)")),
+        "txt" => parse_txt(text, &stem),
+        _ => Err(anyhow::anyhow!("unsupported playlist file: .{ext} (CSV, JSON, M3U, M3U8, XSPF, TXT)")),
     }
+}
+
+/// Parses a playlist file into one or more lists. A Spotify `Playlist1.json`
+/// export with several playlists becomes one [`ParsedList`] per playlist; all
+/// other formats return a single-element vector.
+pub fn parse_file_lists(path: &Path) -> anyhow::Result<Vec<ParsedList>> {
+    let bytes = std::fs::read(path)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim_start_matches('\u{feff}');
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Imported playlist").to_string();
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "json" => parse_spotify_json_lists(text, &stem),
+        "csv" | "tsv" => Ok(vec![parse_csv(text, &stem)?]),
+        "m3u" | "m3u8" => Ok(vec![parse_m3u(text, &stem)]),
+        "xspf" => Ok(vec![parse_xspf(text, &stem)]),
+        "txt" => Ok(vec![parse_txt(text, &stem)?]),
+        _ => Err(anyhow::anyhow!("unsupported playlist file: .{ext} (CSV, JSON, M3U, M3U8, XSPF, TXT)")),
+    }
+}
+
+/// Plain text playlist: tries CSV if a header is present, otherwise parses
+/// one song per line (`Artist - Title`, or bare title).
+pub fn parse_txt(text: &str, name: &str) -> anyhow::Result<ParsedList> {
+    if let Ok(csv) = parse_csv(text, name) {
+        if !csv.tracks.is_empty() {
+            return Ok(csv);
+        }
+    }
+    let mut tracks = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        // Strip leading numbering like "1. " or "01) ".
+        let stripped = line
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .strip_prefix(". ")
+            .or_else(|| line.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix(") "))
+            .unwrap_or(line);
+        let (artist, title) = split_artist_title(stripped);
+        if let Some(t) = mk(ProviderId::MusicBrainz, tracks.len(), &title, &artist, None, None) {
+            tracks.push(t);
+        }
+    }
+    if tracks.is_empty() {
+        return Err(anyhow::anyhow!("no songs found in text file"));
+    }
+    Ok(ParsedList { name: name.to_string(), label: "file/txt".into(), tracks })
 }
 
 // --------------------------------------------------------------------- CSV
@@ -209,6 +256,37 @@ fn spotify_entry(v: &Value, idx: usize) -> Option<Track> {
         }
     }
     Some(t)
+}
+
+/// Same as [`parse_spotify_json`], but preserves each playlist in a
+/// `{"playlists":[...]}` export as its own [`ParsedList`].
+pub fn parse_spotify_json_lists(text: &str, name: &str) -> anyhow::Result<Vec<ParsedList>> {
+    let v: Value = serde_json::from_str(text)?;
+    if let Some(pls) = v.get("playlists").and_then(Value::as_array) {
+        let mut out = Vec::new();
+        for (pi, pl) in pls.iter().enumerate() {
+            let list_name = s(pl, &["name"])
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| if pls.len() == 1 { name.to_string() } else { format!("{name} #{}", pi + 1) });
+            let mut tracks = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for (i, it) in pl.get("items").and_then(Value::as_array).into_iter().flatten().enumerate() {
+                if let Some(t) = spotify_entry(it, i) {
+                    if seen.insert(crate::dedupe::track_key(&t)) {
+                        tracks.push(t);
+                    }
+                }
+            }
+            if !tracks.is_empty() {
+                out.push(ParsedList { name: list_name, label: "spotify/export".into(), tracks });
+            }
+        }
+        if !out.is_empty() {
+            return Ok(out);
+        }
+        return Ok(vec![ParsedList { name: name.to_string(), label: "spotify/export".into(), tracks: Vec::new() }]);
+    }
+    Ok(vec![parse_spotify_json(text, name)?])
 }
 
 pub fn parse_spotify_json(text: &str, name: &str) -> anyhow::Result<ParsedList> {
@@ -409,5 +487,28 @@ mod tests {
         assert_eq!(l.tracks.len(), 2);
         assert_eq!(l.tracks[0].duration_ms, Some(180_000));
         assert_eq!(l.tracks[1].title, "Two <3");
+    }
+
+    #[test]
+    fn spotify_json_splits_multiple_playlists() {
+        let pl = r#"{"playlists":[
+            {"name":"Chill","items":[{"track":{"trackName":"A","artistName":"X","trackUri":"spotify:track:1"}}]},
+            {"name":"Gym","items":[{"track":{"trackName":"B","artistName":"Y","trackUri":"spotify:track:2"}},{"track":{"trackName":"C","artistName":"Z","trackUri":"spotify:track:3"}}]}
+        ]}"#;
+        let lists = parse_spotify_json_lists(pl, "Playlist1").unwrap();
+        assert_eq!(lists.len(), 2);
+        assert_eq!((lists[0].name.as_str(), lists[0].tracks.len()), ("Chill", 1));
+        assert_eq!((lists[1].name.as_str(), lists[1].tracks.len()), ("Gym", 2));
+    }
+
+    #[test]
+    fn txt_playlist_parses_numbered_and_plain_lines() {
+        let txt = "# comment\n1. Daft Punk - Get Lucky\n02) Justice - D.A.N.C.E.\nSolo Title\n";
+        let l = parse_txt(txt, "My Mix").unwrap();
+        assert_eq!(l.name, "My Mix");
+        assert_eq!(l.tracks.len(), 3);
+        assert_eq!((l.tracks[0].artist.as_str(), l.tracks[0].title.as_str()), ("Daft Punk", "Get Lucky"));
+        assert_eq!((l.tracks[1].artist.as_str(), l.tracks[1].title.as_str()), ("Justice", "D.A.N.C.E."));
+        assert_eq!(l.tracks[2].title, "Solo Title");
     }
 }

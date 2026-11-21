@@ -66,12 +66,14 @@
   import { t, tf } from "../i18n.svelte";
   import { backend } from "../api/backend";
   let {
-    tracks, index, fromIndex, from = null, album = true, context, selected = false, draggable = false, ondragstart, number, picking = false, picked = false,
+    tracks, index, fromIndex, from = null, album = true, context, selected = false, draggable = false, ondragstart, number, picking = false, picked = false, onpick, lifted = false,
   }: {
     tracks: Track[]; index: number; fromIndex?: number; from?: ListKey | null; album?: boolean; context?: string; selected?: boolean;
     draggable?: boolean; ondragstart?: (e: PointerEvent) => void; number?: number;
     /** Select mode: a click picks the row instead of playing it. */
-    picking?: boolean; picked?: boolean;
+    picking?: boolean; picked?: boolean; onpick?: (e: MouseEvent) => void;
+    /** Lifted drag preview: flat lighter surface, grip handle in place of the number. */
+    lifted?: boolean;
   } = $props();
   const tr = $derived(tracks[index]);
   const playing = $derived(app.isCurrent(tr));
@@ -88,19 +90,23 @@
   // ui/ytdlp.rs prefetch_on_hover: after a short rest on a row the song is looked up, so a click plays at once.
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   function hoverIn() {
-    if (blocked || playing || app.platform === "android" || app.platform === "ios") return;
+    if (lifted || blocked || playing || app.platform === "android" || app.platform === "ios") return;
     clearTimeout(hoverTimer);
     hoverTimer = setTimeout(() => { void backend().call("prefetch_hover", { track: tr }); }, 250);
   }
   function hoverOut() { clearTimeout(hoverTimer); }
   $effect(() => {
-    if (!album || tr.album?.trim()) return;
+    if (lifted || !album || tr.album?.trim()) return;
     const ac = new AbortController();
     const timer = setTimeout(() => scheduleAlbumBackfill(tr, ac.signal), 120);
     return () => { clearTimeout(timer); ac.abort(); };
   });
-  function play() {
-    if (picking) { app.togglePicked(tr); return; }
+  function play(e?: MouseEvent) {
+    if (picking) {
+      if (onpick && e) onpick(e);
+      else app.togglePicked(tr);
+      return;
+    }
     app.selectedRow = index;
     if (!blocked) app.play(tracks, index, context);
   }
@@ -110,11 +116,13 @@
   }
 </script>
 
-<div class="row" class:off={blocked && !picking} class:sel={selected && !picking} class:picking class:picked class:menu={app.ctx?.track === tr} onclick={play} oncontextmenu={menu}
+<div class="row" class:lifted class:off={blocked && !picking} class:sel={selected && !picking && !lifted} class:picking class:picked class:menu={!lifted && app.ctx?.track === tr} data-nav-row={index} onclick={play} oncontextmenu={menu}
   onpointerenter={hoverIn} onpointerleave={hoverOut}
   onpointerdown={(e) => draggable && !picking && e.button === 0 && ondragstart?.(e)} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1" aria-selected={picking ? picked : undefined}>
   <span class="num">
-    {#if picking}
+    {#if lifted}
+      <span class="grip"><Icon name="grip-vertical" size={14} color="var(--text)" /></span>
+    {:else if picking}
       <span class="ck"><Icon name={picked ? "circle-check" : "circle"} size={18} color={picked ? "var(--accent)" : "var(--faint)"} /></span>
     {:else}
       <span class="n">{#if playing}<PlayingBars size={14} />{:else}<span class="mono">{number ?? index + 1}</span>{/if}</span>
@@ -139,12 +147,13 @@
 
 <style>
   .row { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; min-width: 0; }
-  .row:hover, .row.menu { background: rgba(255, 255, 255, .05); transition-duration: .12s; }
+  .row:not(.lifted):hover, .row.menu { background: rgba(255, 255, 255, .05); transition-duration: .12s; }
   .row:not(:hover) { transition-duration: .24s; }
-  .row.sel { background: rgba(255, 255, 255, .1); }
+  .row.lifted { background: hsl(0 0% 18%); cursor: grabbing; }
+  .row.sel { background: rgba(255, 255, 255, .1); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14); }
   .row.off { opacity: .4; }
   .row.picked { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .ck { position: absolute; inset: 0; display: grid; place-items: center; }
+  .ck, .grip { position: absolute; inset: 0; display: grid; place-items: center; }
   .num { position: relative; flex: none; width: 26px; height: 20px; }
   .n, .p { position: absolute; inset: 0; display: grid; place-items: center; transition: opacity .12s; }
   .n .mono { font-size: var(--sm); color: var(--faint); }

@@ -191,12 +191,24 @@ pub async fn fetch_list_with_progress(
     keys: &crate::config::ApiKeys,
     progress: Option<&flume_like::Sender<ImportProgress>>,
 ) -> Result<(ParsedList, Option<String>)> {
+    fetch_list_with_options(input, providers, server, http, keys, progress, None).await
+}
+
+pub async fn fetch_list_with_options(
+    input: &crate::ImportInput,
+    providers: &Providers,
+    server: Option<&ServerClient>,
+    http: &reqwest::Client,
+    keys: &crate::config::ApiKeys,
+    progress: Option<&flume_like::Sender<ImportProgress>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(ParsedList, Option<String>)> {
     match input {
         crate::ImportInput::File(path) => {
             let path = path.clone();
             let mut list = tokio::task::spawn_blocking(move || files::parse_file(&path)).await??;
             if list.label == files::TAKEOUT_LABEL {
-                list.tracks = keyless::fill_takeout(http, list.tracks).await;
+                list.tracks = keyless::fill_takeout_with_progress(http, list.tracks, progress, cancel).await;
             }
             Ok((list, None))
         }
@@ -219,7 +231,7 @@ pub async fn fetch_list_with_progress(
             let sc_on_server = matches!(src, RemoteSource::SoundCloud(_));
             let mut first_err = None;
             if let (Some(server), true) = (server, src.server_capable() || sc_on_server) {
-                match server.import_with_progress(&url, progress).await {
+                match server.import_with_options(&url, progress, cancel).await {
                     Ok(r) if !r.tracks.is_empty() => return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url))),
                     Ok(_) => {}
                     Err(e) => first_err = Some(e),
@@ -230,7 +242,7 @@ pub async fn fetch_list_with_progress(
             }
             match fetch_direct(&src, providers).await {
                 Ok(list) if !list.tracks.is_empty() => Ok((list, Some(url))),
-                direct => match keyless_list(&src, http).await {
+                direct => match keyless_list(&src, http, progress, cancel).await {
                     Some(Ok((name, tracks))) => Ok((ParsedList { name, label, tracks }, Some(url))),
                     Some(Err(e)) => Err(first_err.unwrap_or(e)),
                     None => match direct {
@@ -244,10 +256,15 @@ pub async fn fetch_list_with_progress(
 }
 
 /// Playlists read without any key (Spotify embed page, YouTube web page).
-async fn keyless_list(src: &RemoteSource, http: &reqwest::Client) -> Option<Result<(String, Vec<Track>)>> {
+async fn keyless_list(
+    src: &RemoteSource,
+    http: &reqwest::Client,
+    progress: Option<&flume_like::Sender<ImportProgress>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<Result<(String, Vec<Track>)>> {
     Some(match src {
         RemoteSource::SpotifyPlaylist(id) => keyless::spotify_embed(http, "playlist", id).await,
-        RemoteSource::YouTubePlaylist(id) => keyless::youtube_playlist(http, id).await,
+        RemoteSource::YouTubePlaylist(id) => keyless::youtube_playlist_with_progress(http, id, progress, cancel).await,
         _ => return None,
     })
 }
@@ -257,7 +274,8 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
     let (name, tracks) = match src {
         RemoteSource::SpotifyPlaylist(id) => {
             let sp = p.spotify.as_ref().ok_or_else(|| anyhow!("Spotify client id/secret missing (config.toml or GLYPH_SPOTIFY_*)"))?;
-            (sp.playlist_name(id).await.unwrap_or_else(|_| "Spotify playlist".into()), sp.playlist_tracks(id).await?)
+            let (name, tracks) = tokio::join!(sp.playlist_name(id), sp.playlist_tracks(id));
+            (name.unwrap_or_else(|_| "Spotify playlist".into()), tracks?)
         }
         RemoteSource::DeezerPlaylist(id) => {
             let dz = p.deezer.as_ref().ok_or_else(|| anyhow!("Deezer is disabled"))?;
@@ -269,7 +287,8 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
         }
         RemoteSource::YouTubePlaylist(id) => {
             let yt = p.youtube.as_ref().ok_or_else(|| anyhow!("YouTube API key missing (config.toml or GLYPH_YOUTUBE_KEY)"))?;
-            (yt.playlist_title(id).await.unwrap_or_else(|_| "YouTube playlist".into()), yt.playlist_items(id).await?)
+            let (title, items) = tokio::join!(yt.playlist_title(id), yt.playlist_items(id));
+            (title.unwrap_or_else(|_| "YouTube playlist".into()), items?)
         }
         RemoteSource::LastFmLoved(user) => {
             let lf = p.lastfm.as_ref().ok_or_else(|| anyhow!("Last.fm API key missing (config.toml or GLYPH_LASTFM_KEY)"))?;
@@ -280,9 +299,9 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
     Ok(ParsedList { name, label, tracks })
 }
 
-/// Small imports match with `resolve` (4 in parallel, order preserved).
-/// Large imports keep metadata and defer matching until playback,
-/// reporting progress as `IMPORT <label> ██████░░ done/total`.
+/// Small imports match with `resolve` (8 in parallel without head-of-line blocking,
+/// order preserved). Large imports (>100 songs) keep metadata and defer matching
+/// until playback, reporting progress as `IMPORT <label> ██████░░ done/total`.
 pub async fn match_all<F, Fut>(
     list: ParsedList,
     origin: Option<String>,
@@ -293,6 +312,22 @@ where
     F: Fn(Track) -> Fut,
     Fut: Future<Output = Option<Resolved>>,
 {
+    match_all_cancellable(list, origin, progress, None, resolve).await
+}
+
+/// Same as [`match_all`], stopping immediately when `cancel` becomes `true`.
+pub async fn match_all_cancellable<F, Fut>(
+    list: ParsedList,
+    origin: Option<String>,
+    progress: flume_like::Sender<ImportProgress>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    resolve: F,
+) -> ImportResult
+where
+    F: Fn(Track) -> Fut,
+    Fut: Future<Output = Option<Resolved>>,
+{
+    use std::sync::atomic::Ordering;
     let total = list.tracks.len();
     let label = format!("IMPORT {}", list.label);
     let _ = progress.send(ImportProgress { label: label.clone(), done: 0, total });
@@ -302,6 +337,28 @@ where
         return ImportResult { name: list.name, origin, ordered: list.tracks,
             sure: vec![], unsure: vec![], not_found: vec![] };
     }
+    let mut slots: Vec<Option<ImportMatch>> = vec![None; total];
+    let cancel_ref = cancel.as_ref();
+    let mut stream = futures::stream::iter(list.tracks.into_iter().enumerate().map(|(idx, t)| {
+        let fut = resolve(t.clone());
+        async move {
+            if cancel_ref.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return (idx, t, None);
+            }
+            let r = tokio::time::timeout(std::time::Duration::from_secs(8), fut).await.ok().flatten();
+            (idx, t, r)
+        }
+    }))
+    .buffer_unordered(16);
+    let mut done = 0;
+    while let Some((idx, original, resolved)) = stream.next().await {
+        if cancel_ref.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
+        slots[idx] = Some(ImportMatch { original, resolved });
+        done += 1;
+        let _ = progress.send(ImportProgress { label: label.clone(), done, total });
+    }
     let mut result = ImportResult {
         name: list.name,
         sure: vec![],
@@ -310,22 +367,13 @@ where
         origin,
         ordered: Vec::with_capacity(total),
     };
-    let mut stream = futures::stream::iter(list.tracks.into_iter().map(|t| {
-        let fut = resolve(t.clone());
-        async move { (t, tokio::time::timeout(std::time::Duration::from_secs(20), fut).await.ok().flatten()) }
-    }))
-    .buffered(4);
-    let mut done = 0;
-    while let Some((original, resolved)) = stream.next().await {
-        done += 1;
-        let m = ImportMatch { original, resolved };
+    for m in slots.into_iter().flatten() {
         result.ordered.push(m.to_track());
         match bucket_of(&m.resolved) {
             Bucket::Sure => result.sure.push(m),
             Bucket::Unsure => result.unsure.push(m),
             Bucket::NotFound => result.not_found.push(m),
         }
-        let _ = progress.send(ImportProgress { label: label.clone(), done, total });
     }
     result
 }
@@ -496,5 +544,40 @@ mod tests {
         }
         assert_eq!(n, 7);
         assert_eq!(last.unwrap().done, 6);
+    }
+
+    #[tokio::test]
+    async fn match_all_preserves_order_out_of_order_and_cancels_early() {
+        let list = ParsedList {
+            name: "Ord".into(),
+            label: "file/csv".into(),
+            tracks: (0..12).map(|i| test_track(ProviderId::Spotify, &i.to_string(), &format!("t{i}"), "a", None)).collect(),
+        };
+        let (tx, _) = flume_like::channel();
+        let res = match_all(list.clone(), None, tx, |t: Track| async move {
+            let idx: u64 = t.id.parse().unwrap();
+            // Earlier indices sleep longer so futures finish out of order.
+            tokio::time::sleep(std::time::Duration::from_millis((12 - idx) * 2)).await;
+            resolved(0.95, false)
+        })
+        .await;
+        let ids: Vec<&str> = res.ordered.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"]);
+
+        // Immediate cancellation stops before processing the whole list.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (tx2, _) = flume_like::channel();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let res2 = match_all_cancellable(list, None, tx2, Some(cancel), move |_| {
+            let c = calls2.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                resolved(0.95, false)
+            }
+        })
+        .await;
+        assert!(res2.ordered.is_empty());
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) < 12);
     }
 }

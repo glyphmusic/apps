@@ -16,11 +16,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 type Res<T = ()> = Result<T, String>;
 type C<'a> = &'a Arc<Core>;
 
+/// Minimum gap between pushed `migrate_progress` events during per-song progress.
+const PROGRESS_EMIT_MIN: Duration = Duration::from_millis(65);
+
 /// What a move needs between "overview" and "start".
+#[derive(Clone)]
 struct Choice {
     service: Service,
     source: Arc<dyn LibrarySource>,
@@ -38,23 +43,92 @@ pub enum MigrateTarget {
     NewPlaylist { name: Option<String> },
 }
 
+/// Per-collection live status inside a running or finished migration.
+#[derive(Clone)]
+struct RunItem {
+    id: String,
+    name: String,
+    kind: &'static str,
+    cover: Option<String>,
+    status: &'static str,
+    count: Option<usize>,
+    added: usize,
+    matched: usize,
+    total_songs: usize,
+    deferred: usize,
+    playlist_id: Option<String>,
+    error: Option<String>,
+}
+
+impl RunItem {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "cover": self.cover,
+            "status": self.status,
+            "count": self.count,
+            "added": self.added,
+            "matched": self.matched,
+            "total_songs": self.total_songs,
+            "deferred": self.deferred,
+            "playlist_id": self.playlist_id,
+            "error": self.error,
+        })
+    }
+}
+
 /// The move that runs (or ran last).
 struct Run {
-    #[allow(dead_code)]
     service: Service,
     index: usize,
     lists: usize,
     current: String,
+    phase: &'static str,
     done: usize,
     total: usize,
     totals: Totals,
     targets: HashMap<String, MigrateTarget>,
+    items: Vec<RunItem>,
     failed: Vec<(String, String)>,
     notes: Vec<String>,
     cancel: Arc<AtomicBool>,
     state: MigrationState,
+    started_at: Instant,
+    finished_elapsed_ms: Option<u64>,
+    last_emit: Instant,
     finished: bool,
     cancelled: bool,
+}
+
+impl Run {
+    fn elapsed_ms(&self) -> u64 {
+        self.finished_elapsed_ms.unwrap_or_else(|| self.started_at.elapsed().as_millis() as u64)
+    }
+
+    fn to_json(&self) -> Value {
+        let filled = if self.total == 0 { 0 } else { (self.done * 10 / self.total).min(10) };
+        let bar = format!("[{}{}] {}/{}", "#".repeat(filled), "-".repeat(10 - filled), self.done, self.total);
+        json!({
+            "state": if self.finished { "finished" } else { "running" },
+            "service": self.service.key(),
+            "phase": self.phase,
+            "index": self.index,
+            "lists": self.lists,
+            "current": self.current,
+            "done": self.done,
+            "total": self.total,
+            "elapsed_ms": self.elapsed_ms(),
+            "totals": totals_json(&self.totals, self.failed.len()),
+            "items": self.items.iter().map(RunItem::to_json).collect::<Vec<_>>(),
+            "failed": self.failed,
+            "notes": self.notes,
+            "cancelled": self.cancelled,
+            "stopping": !self.finished && self.cancel.load(Ordering::Relaxed),
+            "bar": bar,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -154,11 +228,20 @@ async fn import_and_save(
     }
     let _busy = Busy(&tr.importing);
     let (tx, mut rx) = flume_like::channel::<ImportProgress>();
-    // The dialog shows "done / total" while the list is read.
+    // The dialog shows "done / total" while the list is read (throttled so
+    // 1,500-song imports don't flood the WebView with one IPC event per song).
     let c2 = core.clone();
     let drain = crate::rt::spawn(async move {
+        let mut last = Instant::now() - PROGRESS_EMIT_MIN;
+        let mut last_phase = "";
         while let Some(p) = rx.recv().await {
-            c2.emit("import_progress", json!({ "done": p.done, "total": p.total }));
+            let phase = if p.label.contains("reading") { "reading" } else { "matching" };
+            let boundary = phase != last_phase || p.done == 0 || (p.total > 0 && p.done >= p.total);
+            if boundary || last.elapsed() >= PROGRESS_EMIT_MIN {
+                last = Instant::now();
+                last_phase = phase;
+                c2.emit("import_progress", json!({ "done": p.done, "total": p.total, "phase": phase }));
+            }
         }
     });
     let r = guard_async(b.import(input, tx)).await;
@@ -187,7 +270,22 @@ async fn import_song_links(
         return Err("import.busy".into());
     }
     let _busy = Busy(&tr.importing);
-    let tracks = guard_async(b.songs_from_links(text)).await?;
+    let (tx, mut rx) = flume_like::channel::<ImportProgress>();
+    let c2 = core.clone();
+    let drain = crate::rt::spawn(async move {
+        let mut last = Instant::now() - PROGRESS_EMIT_MIN;
+        while let Some(p) = rx.recv().await {
+            let boundary = p.done == 0 || (p.total > 0 && p.done >= p.total);
+            if boundary || last.elapsed() >= PROGRESS_EMIT_MIN {
+                last = Instant::now();
+                c2.emit("import_progress", json!({ "done": p.done, "total": p.total, "phase": "reading" }));
+            }
+        }
+    });
+    let tracks = guard_async(b.songs_from_links_with_progress(text, Some(tx))).await;
+    drain.abort();
+    core.emit("import_progress", json!({ "done": 0, "total": 0 }));
+    let tracks = tracks?;
     if tracks.is_empty() {
         return Err("import.empty".into());
     }
@@ -606,7 +704,7 @@ fn collection_name(core: &Core, c: &Collection) -> String {
 fn collection_json(c: &Collection) -> Value {
     json!({
         "id": c.id, "kind": kind_name(c.kind), "name": c.name, "hint": c.hint,
-        "count": c.count, "followed": c.followed, "default_on": c.default_on,
+        "count": c.count, "cover": c.cover, "followed": c.followed, "default_on": c.default_on,
     })
 }
 
@@ -718,11 +816,10 @@ pub async fn migrate_start(
         return Err(crate::i18n::tr(&core, "migrate.error.busy"));
     }
     let choice = {
-        let mut g = tr.lock();
-        match g.choice.take() {
-            Some(c) if c.service == service => c,
-            other => {
-                g.choice = other;
+        let g = tr.lock();
+        match g.choice.as_ref() {
+            Some(c) if c.service == service => c.clone(),
+            _ => {
                 return Err(crate::i18n::tr(&core, "migrate.error.choose"));
             }
         }
@@ -736,7 +833,6 @@ pub async fn migrate_start(
         Kind::Artists => 3,
     });
     if picked.is_empty() {
-        tr.lock().choice = Some(choice);
         return Err(crate::i18n::tr(&core, "migrate.error.pick"));
     }
     let (profile, pasted, files) = match &choice.login {
@@ -756,23 +852,65 @@ pub async fn migrate_start(
     if let Err(e) = state.save() {
         tracing::warn!(error = %e, "migration state");
     }
+    let targets = targets.unwrap_or_default();
+    let items: Vec<RunItem> = picked
+        .iter()
+        .map(|c| {
+            let eff_kind = match targets.get(&c.id) {
+                Some(MigrateTarget::Liked) => "liked",
+                Some(MigrateTarget::Playlist { .. } | MigrateTarget::NewPlaylist { .. }) => "playlist",
+                None => kind_name(c.kind),
+            };
+            let display = match targets.get(&c.id) {
+                Some(MigrateTarget::NewPlaylist { name: Some(custom) }) if !custom.trim().is_empty() => custom.trim().to_string(),
+                _ => collection_name(&core, c),
+            };
+            RunItem {
+                id: c.id.clone(),
+                name: display,
+                kind: eff_kind,
+                cover: c.cover.clone(),
+                status: "queued",
+                count: c.count,
+                added: 0,
+                matched: 0,
+                total_songs: 0,
+                deferred: 0,
+                playlist_id: None,
+                error: None,
+            }
+        })
+        .collect();
+    let now = Instant::now();
     let cancel = Arc::new(AtomicBool::new(false));
-    tr.lock().run = Some(Run {
-        service,
-        index: 0,
-        lists: picked.len(),
-        current: String::new(),
-        done: 0,
-        total: 0,
-        totals: Totals::default(),
-        targets: targets.unwrap_or_default(),
-        failed: Vec::new(),
-        notes: choice.overview.notes.clone(),
-        cancel: cancel.clone(),
-        state,
-        finished: false,
-        cancelled: false,
-    });
+    let initial = {
+        let mut g = tr.lock();
+        g.run = Some(Run {
+            service,
+            index: 0,
+            lists: picked.len(),
+            current: items.first().map(|i| i.name.clone()).unwrap_or_default(),
+            phase: "reading",
+            done: 0,
+            total: 0,
+            totals: Totals::default(),
+            targets,
+            items,
+            failed: Vec::new(),
+            notes: choice.overview.notes.clone(),
+            cancel: cancel.clone(),
+            state,
+            started_at: now,
+            finished_elapsed_ms: None,
+            last_emit: now,
+            finished: false,
+            cancelled: false,
+        });
+        g.run.as_ref().map(Run::to_json)
+    };
+    if let Some(snap) = initial {
+        core.emit("migrate_progress", snap);
+    }
 
     let (tx, mut rx) = flume_like::channel::<MigrationEvent>();
     {
@@ -788,10 +926,19 @@ pub async fn migrate_start(
         if let Err(e) = guard_async(b.migrate(source, picked, tx, cancel)).await {
             // The run ended without a "finished" event: say why, keep the
             // saved state so it can continue.
-            let mut g = tr.lock();
-            if let Some(r) = g.run.as_mut().filter(|r| !r.finished) {
-                r.failed.push((String::new(), e));
-                r.finished = true;
+            let snap = {
+                let mut g = tr.lock();
+                if let Some(r) = g.run.as_mut().filter(|r| !r.finished) {
+                    r.failed.push((String::new(), e));
+                    r.finished = true;
+                    r.finished_elapsed_ms = Some(r.started_at.elapsed().as_millis() as u64);
+                    Some(r.to_json())
+                } else {
+                    None
+                }
+            };
+            if let Some(snap) = snap {
+                core.emit("migrate_progress", snap);
             }
         }
     });
@@ -799,47 +946,146 @@ pub async fn migrate_start(
 }
 
 fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
-    let mut g = tr.lock();
-    let Some(run) = g.run.as_mut().filter(|r| !r.finished) else { return };
-    match ev {
-        MigrationEvent::Collection { index, total, collection } => {
-            run.index = index;
-            run.lists = total;
-            run.current = collection_name(core, &collection);
-            run.done = 0;
-            run.total = 0;
-        }
-        MigrationEvent::Progress { done, total } => {
-            run.done = done;
-            run.total = total;
-        }
-        MigrationEvent::Failed { collection, error } => {
-            run.failed.push((collection_name(core, &collection), error));
-            run.state.mark_done(&collection.id);
-            let _ = run.state.save();
-        }
-        MigrationEvent::Done { collection, result } => {
-            let target = run.targets.get(&collection.id).cloned();
-            let mut stats_col = collection.clone();
-            if let Some(ref tgt) = target {
-                stats_col.kind = match tgt {
-                    MigrateTarget::Liked => Kind::Liked,
-                    MigrateTarget::Playlist { .. } | MigrateTarget::NewPlaylist { .. } => Kind::Playlist,
-                };
+    let mut emit_snap: Option<Value> = None;
+    let mut apply_args: Option<(Collection, Migrated, Option<MigrateTarget>)> = None;
+    {
+        let mut g = tr.lock();
+        let Some(run) = g.run.as_mut().filter(|r| !r.finished) else { return };
+        match ev {
+            MigrationEvent::Collection { index, total, collection } => {
+                run.index = index;
+                run.lists = total;
+                run.current = run
+                    .items
+                    .iter()
+                    .find(|it| it.id == collection.id)
+                    .map(|it| it.name.clone())
+                    .unwrap_or_else(|| collection_name(core, &collection));
+                run.phase = "reading";
+                run.done = 0;
+                run.total = 0;
+                if let Some(it) = run.items.iter_mut().find(|it| it.id == collection.id) {
+                    it.status = "reading";
+                }
+                run.last_emit = Instant::now();
+                emit_snap = Some(run.to_json());
             }
-            run.totals.add(&stats_col, &result);
-            run.state.mark_done(&collection.id);
-            let _ = run.state.save();
-            apply_migrated(core, &collection, result, target.as_ref());
-        }
-        MigrationEvent::Finished { cancelled } => {
-            run.finished = true;
-            run.cancelled = cancelled;
-            if !cancelled {
-                MigrationState::clear();
-                let _ = std::fs::remove_dir_all(files_dir());
+            MigrationEvent::Progress { phase, done, total } => {
+                let phase_str = phase.as_str();
+                let phase_changed = run.phase != phase_str;
+                run.phase = phase_str;
+                run.done = done;
+                run.total = total;
+                if let Some(it) = run.items.get_mut(run.index) {
+                    it.status = phase_str;
+                    if total > 0 {
+                        it.count = Some(total);
+                    }
+                }
+                let boundary = phase_changed || done == 0 || (total > 0 && done >= total);
+                if boundary || run.last_emit.elapsed() >= PROGRESS_EMIT_MIN {
+                    run.last_emit = Instant::now();
+                    emit_snap = Some(run.to_json());
+                }
+            }
+            MigrationEvent::Failed { collection, error } => {
+                let name = run
+                    .items
+                    .iter()
+                    .find(|it| it.id == collection.id)
+                    .map(|it| it.name.clone())
+                    .unwrap_or_else(|| collection_name(core, &collection));
+                run.failed.push((name, error.clone()));
+                if let Some(it) = run.items.iter_mut().find(|it| it.id == collection.id) {
+                    it.status = "failed";
+                    it.error = Some(error);
+                }
+                run.state.mark_done(&collection.id);
+                let _ = run.state.save();
+                run.last_emit = Instant::now();
+                emit_snap = Some(run.to_json());
+            }
+            MigrationEvent::Done { collection, result } => {
+                let target = run.targets.get(&collection.id).cloned();
+                let mut stats_col = collection.clone();
+                if let Some(ref tgt) = target {
+                    stats_col.kind = match tgt {
+                        MigrateTarget::Liked => Kind::Liked,
+                        MigrateTarget::Playlist { .. } | MigrateTarget::NewPlaylist { .. } => Kind::Playlist,
+                    };
+                }
+                run.totals.add(&stats_col, &result);
+                run.state.mark_done(&collection.id);
+                let _ = run.state.save();
+                if let Some(it) = run.items.iter_mut().find(|it| it.id == collection.id) {
+                    it.status = "done";
+                    match &result {
+                        Migrated::Tracks(res) => {
+                            let checked = res.sure.len() + res.unsure.len() + res.not_found.len();
+                            it.total_songs = res.ordered.len();
+                            it.count = Some(res.ordered.len());
+                            if checked == 0 && !res.ordered.is_empty() {
+                                it.deferred = res.ordered.len();
+                            } else {
+                                it.matched = res.sure.len() + res.unsure.len();
+                            }
+                        }
+                        Migrated::Albums(a) => {
+                            it.total_songs = a.len();
+                            it.count = Some(a.len());
+                        }
+                        Migrated::Artists(a) => {
+                            it.total_songs = a.len();
+                            it.count = Some(a.len());
+                        }
+                    }
+                }
+                apply_args = Some((collection, result, target));
+            }
+            MigrationEvent::Finished { cancelled } => {
+                run.finished = true;
+                run.cancelled = cancelled;
+                run.finished_elapsed_ms = Some(run.started_at.elapsed().as_millis() as u64);
+                if cancelled {
+                    for it in &mut run.items {
+                        if matches!(it.status, "queued" | "reading" | "matching") {
+                            it.status = "skipped";
+                        }
+                    }
+                } else {
+                    MigrationState::clear();
+                    if run.failed.is_empty() {
+                        let _ = std::fs::remove_dir_all(files_dir());
+                    }
+                }
+                run.last_emit = Instant::now();
+                emit_snap = Some(run.to_json());
             }
         }
+    }
+    if let Some((collection, result, target)) = apply_args {
+        let applied = apply_migrated(core, &collection, result, target.as_ref());
+        let snap = {
+            let mut g = tr.lock();
+            if let Some(run) = g.run.as_mut() {
+                if let Some(it) = run.items.iter_mut().find(|it| it.id == collection.id) {
+                    it.added = applied.added;
+                    it.playlist_id = applied.playlist_id;
+                    if let Some(name) = applied.final_name {
+                        it.name = name;
+                    }
+                }
+                run.last_emit = Instant::now();
+                Some(run.to_json())
+            } else {
+                None
+            }
+        };
+        if let Some(snap) = snap {
+            core.emit("migrate_progress", snap);
+        }
+    } else if let Some(snap) = emit_snap {
+        core.emit("migrate_progress", snap);
     }
 }
 
@@ -853,88 +1099,102 @@ fn fallback_list_name(core: &Core, c: &Collection, parsed_name: &str) -> String 
     }
 }
 
+struct AppliedOutcome {
+    added: usize,
+    playlist_id: Option<String>,
+    final_name: Option<String>,
+}
+
 /// Saves one moved collection into the library.
-fn apply_migrated(core: &Core, c: &Collection, result: Migrated, target: Option<&MigrateTarget>) {
-    {
+fn apply_migrated(core: &Core, c: &Collection, result: Migrated, target: Option<&MigrateTarget>) -> AppliedOutcome {
+    let outcome = {
         let mut st = core.st();
         match result {
             Migrated::Tracks(res) => match target {
                 Some(MigrateTarget::Liked) => {
-                    st.library.like_all(res.ordered);
+                    let added = st.library.like_all(res.ordered);
+                    AppliedOutcome { added, playlist_id: None, final_name: None }
                 }
                 Some(MigrateTarget::Playlist { id }) => {
-                    if st.library.add_imported_to_playlist(id, res.ordered.clone()).is_none() {
+                    if let Some((p, added)) = st.library.add_imported_to_playlist(id, res.ordered.clone()) {
+                        AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
+                    } else {
                         let name = fallback_list_name(core, c, &res.name);
-                        st.library.save_import(&name, c.origin.as_deref(), res.ordered);
+                        let (p, added) = st.library.save_import(&name, c.origin.as_deref(), res.ordered);
+                        AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
                     }
                 }
                 Some(MigrateTarget::NewPlaylist { name }) => {
                     let custom = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
                     let list_name = custom.map(str::to_string).unwrap_or_else(|| fallback_list_name(core, c, &res.name));
-                    st.library.save_import(&list_name, c.origin.as_deref(), res.ordered);
+                    let (p, added) = st.library.save_import(&list_name, c.origin.as_deref(), res.ordered);
+                    AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
                 }
                 None => match c.kind {
                     Kind::Liked => {
-                        st.library.like_all(res.ordered);
+                        let added = st.library.like_all(res.ordered);
+                        AppliedOutcome { added, playlist_id: None, final_name: None }
                     }
                     _ => {
                         let name = fallback_list_name(core, c, &res.name);
-                        st.library.save_import(&name, c.origin.as_deref(), res.ordered);
+                        let (p, added) = st.library.save_import(&name, c.origin.as_deref(), res.ordered);
+                        AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
                     }
                 },
             },
             Migrated::Albums(albums) => {
-                st.library.save_albums(albums.into_iter().map(|a| (a.title, a.artist, a.tracks)));
+                let added = st.library.save_albums(albums.into_iter().map(|a| (a.title, a.artist, a.tracks)));
+                AppliedOutcome { added, playlist_id: None, final_name: None }
             }
             Migrated::Artists(names) => {
-                st.library.follow_all(names);
+                let added = st.library.follow_all(names);
+                AppliedOutcome { added, playlist_id: None, final_name: None }
             }
         }
-    }
+    };
     core.library_changed();
+    outcome
 }
 
-/// Where the move is (the UI asks twice a second while one runs).
+fn idle_progress() -> Value {
+    json!({
+        "state": "idle", "service": null, "phase": "reading",
+        "index": 0, "lists": 0, "current": "", "done": 0, "total": 0, "elapsed_ms": 0,
+        "totals": totals_json(&Totals::default(), 0), "items": [], "failed": [], "notes": [],
+        "cancelled": false, "stopping": false, "bar": "",
+    })
+}
+
+/// Current migration progress snapshot (also pushed live via the `migrate_progress` event).
 pub fn migrate_progress(core: C<'_>) -> Value {
     let Some(tr) = core.transfer() else {
-        return json!({
-            "state": "idle", "index": 0, "lists": 0, "current": "", "done": 0, "total": 0,
-            "totals": totals_json(&Totals::default(), 0), "failed": [], "notes": [],
-            "cancelled": false, "stopping": false, "bar": "",
-        });
+        return idle_progress();
     };
     let g = tr.lock();
-    let Some(r) = g.run.as_ref() else {
-        return json!({
-            "state": "idle", "index": 0, "lists": 0, "current": "", "done": 0, "total": 0,
-            "totals": totals_json(&Totals::default(), 0), "failed": [], "notes": [],
-            "cancelled": false, "stopping": false, "bar": "",
-        });
-    };
-    let filled = if r.total == 0 { 0 } else { (r.done * 10 / r.total).min(10) };
-    let bar = format!("[{}{}] {}/{}", "#".repeat(filled), "-".repeat(10 - filled), r.done, r.total);
-    json!({
-        "state": if r.finished { "finished" } else { "running" },
-        "index": r.index, "lists": r.lists, "current": r.current, "done": r.done, "total": r.total,
-        "totals": totals_json(&r.totals, r.failed.len()),
-        "failed": r.failed, "notes": r.notes,
-        "cancelled": r.cancelled, "stopping": !r.finished && r.cancel.load(Ordering::Relaxed),
-        "bar": bar,
-    })
+    g.run.as_ref().map_or_else(idle_progress, Run::to_json)
 }
 
 fn totals_json(t: &Totals, failed: usize) -> Value {
     json!({
-        "songs": t.songs, "matched": t.matched, "unsure": t.unsure, "liked": t.liked,
-        "playlists": t.playlists, "albums": t.albums, "artists": t.artists, "failed": failed,
+        "songs": t.songs, "matched": t.matched, "unsure": t.unsure, "deferred": t.deferred,
+        "liked": t.liked, "playlists": t.playlists, "albums": t.albums, "artists": t.artists, "failed": failed,
     })
 }
 
-/// Stops after the song being matched; what is saved stays.
+/// Stops immediately; what is already saved stays.
 pub fn migrate_cancel(core: C<'_>) {
     if let Some(tr) = core.transfer() {
-        if let Some(r) = tr.lock().run.as_ref().filter(|r| !r.finished) {
-            r.cancel.store(true, Ordering::Relaxed);
+        let snap = {
+            let g = tr.lock();
+            if let Some(r) = g.run.as_ref().filter(|r| !r.finished) {
+                r.cancel.store(true, Ordering::Relaxed);
+                Some(r.to_json())
+            } else {
+                None
+            }
+        };
+        if let Some(snap) = snap {
+            core.emit("migrate_progress", snap);
         }
     }
 }

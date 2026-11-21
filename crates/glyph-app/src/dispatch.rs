@@ -198,6 +198,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             commands::like_many(core, req(&args, "tracks")?, req(&args, "on")?);
             Ok(Value::Null)
         }
+        "clear_liked" => {
+            commands::clear_liked(core);
+            Ok(Value::Null)
+        }
         "playlist_create" => ok(commands::playlist_create(core, req(&args, "name")?, req(&args, "tracks")?)),
         "playlist_rename" => {
             commands::playlist_rename(core, req(&args, "id")?, req(&args, "name")?);

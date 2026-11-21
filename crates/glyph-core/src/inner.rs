@@ -137,7 +137,7 @@ impl Inner {
             return None;
         }
         let id = match self.resolver.cached_at(t, ProviderId::YouTube) {
-            Some((m, c)) if c >= resolver::SURE_CONFIDENCE => m.id,
+            Some((m, c)) if c >= 0.7 && ytdlp::valid_video_id(&m.id) => m.id,
             _ => {
                 let q = format!("{} - {}", t.artist, t.title);
                 let cands = tokio::time::timeout(std::time::Duration::from_millis(2500), ytnative::search(&self.http, &q, ytdlp::SEARCH_RESULTS))
@@ -295,6 +295,68 @@ impl Inner {
         }
     }
 
+    /// Fast metadata-only matching for playlist imports and library transfers.
+    ///
+    /// `ImportMatch::to_track()` only keeps the matched source's ID and metadata
+    /// (audio stream URLs expire and are discarded), so running `yt-dlp`/`r-dlp`
+    /// stream extraction or fetching stream URLs during import wastes seconds per
+    /// song. Instead:
+    /// 1. 0 ms if the track already has an enabled full-source ID (e.g. YouTube/SoundCloud).
+    /// 2. 0 ms if already in the local persistent mapping cache.
+    /// 3. Lightweight metadata search (native YouTube search or enabled local providers)
+    ///    without extracting audio streams.
+    /// 4. Server fallback only if local providers couldn't match and server mode is active.
+    pub(super) async fn match_for_import(&self, t: &Track) -> Option<Resolved> {
+        let enabled = &self.config.providers.enabled;
+        let yt_only = self.config.providers.youtube_only;
+        let wrap = |(matched, confidence): (Track, f32)| Resolved {
+            source: PlaybackSource::Stream {
+                provider: matched.source,
+                url: String::new(),
+                mime: None,
+            },
+            track: matched,
+            confidence,
+        };
+        if let Some(hit) = self.resolver.known_match(t, enabled, yt_only) {
+            return Some(wrap(hit));
+        }
+        if let Some(hit) = self.resolver.cached_match(t, enabled, yt_only) {
+            return Some(wrap(hit));
+        }
+        let yt_enabled = enabled.contains(&ProviderId::YouTube);
+        let yt_first = yt_enabled
+            && (yt_only
+                || self.config.providers.youtube_mode == config::YouTubeMode::Local
+                || self.resolver.priority().first() == Some(&ProviderId::YouTube));
+        if yt_first {
+            if let Some(hit) = self.local_youtube_match_here(t, None).await {
+                if hit.1 >= resolver::SURE_CONFIDENCE || yt_only {
+                    return Some(wrap(hit));
+                }
+                // Try other local providers too in case one has a higher-confidence match.
+                if let Some(other) = self.resolver.match_by_search(t, enabled, false).await {
+                    if other.1 > hit.1 {
+                        return Some(wrap(other));
+                    }
+                }
+                return Some(wrap(hit));
+            }
+            if yt_only {
+                return None;
+            }
+        }
+        if let Some(hit) = self.resolver.match_by_search(t, enabled, yt_only).await {
+            return Some(wrap(hit));
+        }
+        // Only fall back to full server resolve when local providers could not match
+        // (e.g. a server-only provider key like Jamendo/SoundCloud).
+        if self.live_server().is_some() && !self.local_youtube_on() {
+            return self.resolve(t).await.ok().flatten();
+        }
+        None
+    }
+
     pub(super) async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
         if self.config.providers.youtube_mode == config::YouTubeMode::Local
             && self.config.providers.enabled.contains(&ProviderId::YouTube)
@@ -409,7 +471,50 @@ impl Inner {
         'server: { if let Some(server) = self.live_server() {
             let enabled = &self.config.providers.enabled;
             let priority: Vec<ProviderId> = self.resolver.priority().into_iter().filter(|p| enabled.contains(p)).collect();
-            let lookup = match server.download_url_with_priority(t, &priority, self.config.providers.youtube_only).await {
+            let yt_enabled = enabled.contains(&ProviderId::YouTube);
+            let youtube_wanted = yt_enabled
+                && (self.config.providers.youtube_only
+                    || t.source == ProviderId::YouTube
+                    || priority.first() == Some(&ProviderId::YouTube));
+            let server_has_youtube = self.server_providers.as_ref().is_some_and(|ps| ps.contains(&ProviderId::YouTube));
+            let quality = match downloads::job_quality() {
+                config::AudioQuality::Low => "low",
+                config::AudioQuality::High => "high",
+                _ => "standard",
+            };
+            // Fast path: when YouTube is wanted and the server serves YouTube,
+            // reuse an already-known/cached video id or resolve a sure match
+            // locally in a few hundred ms — skipping the slow `POST /v1/download`
+            // Worker + companion search round-trip altogether.
+            let mut hinted: Option<Track> = None;
+            if youtube_wanted {
+                let known_id = provider::id_at(ProviderId::YouTube, t)
+                    .filter(|id| ytdlp::valid_video_id(id))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        self.resolver
+                            .cached_at(t, ProviderId::YouTube)
+                            .filter(|(m, c)| *c >= 0.7 && ytdlp::valid_video_id(&m.id))
+                            .map(|(m, _)| m.id)
+                    });
+                let id = match known_id {
+                    Some(id) => Some(id),
+                    None if self.config.providers.youtube_only || priority.first() == Some(&ProviderId::YouTube) => {
+                        hinted = self.youtube_id_hint(t).await;
+                        hinted
+                            .as_ref()
+                            .and_then(|h| provider::id_at(ProviderId::YouTube, h))
+                            .filter(|id| ytdlp::valid_video_id(id))
+                            .map(str::to_string)
+                    }
+                    None => None,
+                };
+                if let Some(id) = id.filter(|_| server_has_youtube) {
+                    return Ok(Some((ProviderId::YouTube, server.download_youtube_url(&id, quality))));
+                }
+            }
+            let lookup_track = hinted.as_ref().unwrap_or(t);
+            let lookup = match server.download_url_with_priority(lookup_track, &priority, self.config.providers.youtube_only).await {
                 Ok(hit) => hit,
                 Err(e) => {
                     if crate::outage::note(server.base_url(), &e).await.is_some() { tracing::info!("official server out, downloading locally"); break 'server; }
@@ -430,7 +535,12 @@ impl Inner {
                     }
                 }
                 if hit.0 == ProviderId::YouTube {
-                    let quality = match downloads::job_quality() { config::AudioQuality::Low => "low", config::AudioQuality::High => "high", _ => "standard" };
+                    if let Some(id) = hit.1.rsplit("/v1/download/youtube/").next().map(|s| s.split('?').next().unwrap_or(s)).filter(|id| ytdlp::valid_video_id(id)) {
+                        let mut matched = t.clone();
+                        matched.source = ProviderId::YouTube;
+                        matched.id = id.to_string();
+                        self.resolver.remember(t, &matched, resolver::SURE_CONFIDENCE);
+                    }
                     return Ok(Some((hit.0, format!("{}?quality={quality}", hit.1))));
                 }
                 return Ok(Some(hit));

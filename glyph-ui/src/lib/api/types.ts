@@ -152,6 +152,8 @@ export type SearchItem =
 
 export interface Library {
   liked: Track[];
+  /** Unix ms of the last "Clear Liked Songs" action (0 / unset = never). */
+  liked_cleared_at?: number;
   recent: RecentItem[];
   playlists: Playlist[];
   saved_albums: ListKey[];
@@ -445,8 +447,10 @@ export interface BackendEvents {
   plugin_lyrics_reset: null;
   /** An import saved a playlist: open it. */
   open_playlist: string;
-  /** Reading a link / file: songs matched so far (0/0 when done). */
-  import_progress: { done: number; total: number };
+  /** Reading a link / file: songs read or matched so far (0/0 when done). */
+  import_progress: { done: number; total: number; phase?: "reading" | "matching" };
+  /** Real-time progress snapshot of a running/finished library transfer. */
+  migrate_progress: import("../settings/types").MigrateProgress;
   /** AI assistants waiting for the user's yes or no (relay mode). */
   mcp_approvals: { id: string; client: string; code: string }[];
   /** Emitted by the desktop memory guard when the process tree approaches its RAM cap. */

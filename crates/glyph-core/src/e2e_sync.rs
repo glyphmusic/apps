@@ -277,7 +277,15 @@ pub fn accepted(st: &mut SyncState, wires: &[Wire]) {
     for w in wires {
         for e in &w.effects {
             match e {
-                Effect::Plain(i) => plain_items.push(i.clone()),
+                Effect::Plain(i) => {
+                    if i.kind == kind::LIKED_CLEAR && !i.deleted {
+                        let is_liked = |j: &String| split(j).is_some_and(|(k, _)| k == kind::LIKED);
+                        st.e2e.plain.retain(|j| !is_liked(j));
+                        st.e2e.sealed.retain(|j| !is_liked(j));
+                        st.e2e.reseal.retain(|j| !is_liked(j));
+                    }
+                    plain_items.push(i.clone());
+                }
                 Effect::PlainUp(j) => {
                     st.e2e.plain.insert(j.clone());
                 }
@@ -686,5 +694,37 @@ mod tests {
         // A server swapping in a key of its own, in the clear.
         let forged = with_main(&DataKey::generate(), None, true);
         assert_eq!(choose(&forged, &c(Some(&old))), Chosen::Refused);
+    }
+
+    #[test]
+    fn clear_liked_sends_single_sealed_item_and_clears_e2e_liked_tracking() {
+        let k = DataKey::generate();
+        let mut lib = crate::library::Library::default();
+        for name in ["a", "b", "c"] {
+            lib.toggle_like(&crate::dedupe::test_track(glyph_protocol::ProviderId::Audius, name, name, "Artist", Some(100)));
+        }
+        let mut st = SyncState::default();
+        let initial = st.enqueue(&crate::sync::snapshot(&lib, &[]), 10);
+        let wires = outgoing(initial, &[k.clone()], &st.e2e);
+        accepted(&mut st, &wires);
+        // Simulate an old plain copy too.
+        st.e2e.plain.insert(j("liked", "audius:a"));
+        assert_eq!(st.e2e.sealed.len(), 3);
+
+        lib.clear_liked(50);
+        let snap = crate::sync::snapshot(&lib, &[]);
+        let changes = st.enqueue(&snap, 50);
+        let mut items = changes;
+        items.extend(repush(&st, &snap, 50));
+        let wires = outgoing(items, &[k.clone()], &st.e2e);
+        // Exactly ONE wire item for the entire clear!
+        assert_eq!(wires.len(), 1);
+        assert_eq!(wires[0].item.kind, kind::E2E);
+        assert!(!wires[0].item.deleted);
+        accepted(&mut st, &wires);
+        assert!(st.e2e.plain.is_empty());
+        assert_eq!(st.e2e.sealed, BTreeSet::from([j(kind::LIKED_CLEAR, crate::sync::LIKED_CLEAR_KEY)]));
+        assert!(st.changes(&snap, 60).is_empty());
+        assert!(repush(&st, &snap, 60).is_empty());
     }
 }

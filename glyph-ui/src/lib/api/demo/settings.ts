@@ -209,25 +209,42 @@ const COLS = (service: string): MigrateCollection[] => [
   { id: "pl:c", kind: "playlist", name: "Road Trip", hint: `${service}/playlist`, count: 77, followed: true, default_on: false },
   { id: "pl:d", kind: "playlist", name: "", hint: `${service}/playlist · 37xDemoId`, count: null, followed: false, default_on: false },
 ];
-const LIST_MS = 1600;
+const LIST_MS = 1400;
 function migrateProgress(): MigrateProgress {
-  const empty: MigrateProgress = { state: "idle", index: 0, lists: 0, current: "", done: 0, total: 0, totals: { songs: 0, matched: 0, unsure: 0, liked: 0, playlists: 0, albums: 0, artists: 0, failed: 0 }, failed: [], notes: [], cancelled: false, stopping: false, bar: "" };
+  const empty: MigrateProgress = {
+    state: "idle", service: null, phase: "reading", index: 0, lists: 0, current: "", done: 0, total: 0, elapsed_ms: 0,
+    totals: { songs: 0, matched: 0, unsure: 0, deferred: 0, liked: 0, playlists: 0, albums: 0, artists: 0, failed: 0 },
+    items: [], failed: [], notes: [], cancelled: false, stopping: false, bar: "",
+  };
   const r = st.run;
   if (!r) return empty;
   const n = r.selected.length, e = Date.now() - r.start;
   const idx = Math.min(n - 1, Math.floor(e / LIST_MS));
   const finished = r.cancelled || e >= n * LIST_MS;
   const upto = finished ? (r.cancelled ? idx : n) : idx;
-  const totals = { songs: 0, matched: 0, unsure: 0, liked: 0, playlists: 0, albums: 0, artists: 0, failed: 0 };
-  for (const c of r.selected.slice(0, upto)) {
+  const totals = { songs: 0, matched: 0, unsure: 0, deferred: 0, liked: 0, playlists: 0, albums: 0, artists: 0, failed: 0 };
+  const items = r.selected.map((c, i) => {
     const k = c.count ?? 10;
-    totals.songs += k; totals.matched += Math.round(k * 0.92); totals.unsure += Math.round(k * 0.03);
-    if (c.kind === "liked") totals.liked += k; else if (c.kind === "playlist") totals.playlists++; else if (c.kind === "albums") totals.albums += k; else totals.artists += k;
-  }
+    const isDone = i < upto;
+    const isCur = !finished && i === idx;
+    const phase = ((e % LIST_MS) / LIST_MS) < 0.3 ? "reading" as const : "matching" as const;
+    if (isDone) {
+      totals.songs += k; totals.matched += Math.round(k * 0.94); totals.unsure += Math.round(k * 0.03);
+      if (c.kind === "liked") totals.liked += k; else if (c.kind === "playlist") totals.playlists++; else if (c.kind === "albums") totals.albums += k; else totals.artists += k;
+    }
+    return {
+      id: c.id, name: c.name || c.hint || c.kind, kind: c.kind, cover: c.cover ?? null,
+      status: isDone ? "done" as const : isCur ? phase : finished && r.cancelled ? "skipped" as const : "queued" as const,
+      count: k, added: isDone ? k : 0, matched: isDone ? Math.round(k * 0.94) : 0, total_songs: isDone ? k : 0, deferred: 0,
+      playlist_id: null, error: null,
+    };
+  });
   const total = 24, done = Math.round(((e % LIST_MS) / LIST_MS) * total);
+  const phase = ((e % LIST_MS) / LIST_MS) < 0.3 ? "reading" as const : "matching" as const;
   const bar = `[${"#".repeat(Math.round((done / total) * 10)).padEnd(10, "-")}] ${done}/${total}`;
   return {
-    state: finished ? "finished" : "running", index: idx, lists: n, current: r.selected[idx]?.name || r.selected[idx]?.hint || "", done, total, totals,
+    state: finished ? "finished" : "running", service: r.service as any, phase, index: idx, lists: n,
+    current: r.selected[idx]?.name || r.selected[idx]?.hint || r.selected[idx]?.kind || "", done, total, elapsed_ms: e, totals, items,
     failed: finished ? [["Mix of the week", "This list is private."]] : [], notes: r.service === "spotify" ? ["spotify_mixes"] : [], cancelled: r.cancelled, stopping: false, bar,
   };
 }

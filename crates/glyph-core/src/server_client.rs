@@ -182,6 +182,18 @@ impl ServerClient {
             }
         } else { fallback }
     }
+    /// Same as [`Self::authorize_url`], refreshing an expired account token first
+    /// so direct downloads work without a preceding API round-trip.
+    pub async fn authorize_url_async(&self, fallback: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        if crate::server_access::same_server(&self.base, url) {
+            self.member_request(self.authorize(fallback)).await
+        } else {
+            fallback
+        }
+    }
+    pub fn download_youtube_url(&self, video_id: &str, quality: &str) -> String {
+        self.url(&format!("/v1/download/youtube/{video_id}?quality={quality}"))
+    }
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Lets the server's operator ban this device (see `hardware`).
         let request = match crate::hardware::id() {
@@ -426,43 +438,121 @@ impl ServerClient {
     }
 
     pub async fn import_with_progress(&self, url: &str, progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>) -> Result<ImportResponse> {
+        self.import_with_options(url, progress, None).await
+    }
+
+    pub async fn import_with_options(
+        &self,
+        url: &str,
+        progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<ImportResponse> {
+        use futures::stream::StreamExt;
+        use std::sync::atomic::Ordering;
         #[derive(serde::Deserialize)]
         struct Page {
             #[serde(flatten)]
             list: ImportResponse,
             #[serde(default)]
             next_offset: Option<usize>,
+            #[serde(default)]
+            total: Option<usize>,
         }
-        let max_tracks = self.health().await?.playlist_max_tracks.clamp(1, 50_000);
-        crate::library::set_playlist_track_limit(max_tracks);
-        let mut offset = 0usize;
-        let mut result: Option<ImportResponse> = None;
-        loop {
+        let max_tracks = crate::library::playlist_track_limit().clamp(1, 50_000);
+        let fetch_page = |offset: usize| async move {
             let request = self.member_request(self.post("/v1/import/spotify")).await
                 .timeout(Duration::from_secs(60)).json(&serde_json::json!({"url": url, "offset": offset}));
             let value: serde_json::Value = Self::read_json_with_retry(request).await?;
             let paginated = value.get("next_offset").is_some();
             let page: Page = serde_json::from_value(value)?;
+            Ok::<_, anyhow::Error>((paginated, page))
+        };
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            anyhow::bail!("cancelled");
+        }
+        let (paginated, first) = fetch_page(0).await?;
+        if !paginated && first.list.tracks.len() >= 100 {
+            return Err(anyhow!("Update the Glyph server and Companion, or import locally, to avoid an incomplete playlist"));
+        }
+        if first.list.tracks.len() > max_tracks {
+            return Err(anyhow!("Playlists may contain at most {max_tracks} songs"));
+        }
+        let known_total = first.total;
+        if let Some(t) = known_total {
+            if t > max_tracks {
+                return Err(anyhow!("Playlists may contain at most {max_tracks} songs"));
+            }
+        }
+        let mut result = first.list;
+        if let Some(progress) = progress {
+            let done = result.tracks.len();
+            let total = if first.next_offset.is_none() { done } else { known_total.unwrap_or(0) };
+            let _ = progress.send(crate::ImportProgress { label: "IMPORT reading playlist".into(), done, total });
+        }
+        let Some(first_next) = first.next_offset else {
+            return Ok(result);
+        };
+        if first_next != 100 || first_next >= max_tracks {
+            return Err(anyhow!("invalid import pagination; no playlist was saved"));
+        }
+        // Fast path: when the server reports `total`, fetch remaining 100-track
+        // pages in parallel (4 concurrent) while preserving exact track order.
+        if let Some(total) = known_total.filter(|&t| t > 100) {
+            let offsets: Vec<usize> = (100..total).step_by(100).collect();
+            let mut slots: Vec<Vec<Track>> = vec![Vec::new(); offsets.len()];
+            let mut done = result.tracks.len();
+            let mut stream = futures::stream::iter(offsets.into_iter().enumerate())
+                .map(|(slot, off)| async move {
+                    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        return Err(anyhow!("cancelled"));
+                    }
+                    let (_, page) = fetch_page(off).await?;
+                    Ok::<_, anyhow::Error>((slot, page.list.tracks))
+                })
+                .buffer_unordered(4);
+            while let Some(res) = stream.next().await {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    anyhow::bail!("cancelled");
+                }
+                let (slot, tracks) = res?;
+                done += tracks.len();
+                if done > max_tracks {
+                    return Err(anyhow!("Playlists may contain at most {max_tracks} songs"));
+                }
+                slots[slot] = tracks;
+                if let Some(progress) = progress {
+                    let _ = progress.send(crate::ImportProgress { label: "IMPORT reading playlist".into(), done, total });
+                }
+            }
+            for tracks in slots {
+                result.tracks.extend(tracks);
+            }
+            return Ok(result);
+        }
+        // Fallback for older servers that do not include `total`: sequential pages.
+        let mut offset = first_next;
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                anyhow::bail!("cancelled");
+            }
+            let (paginated, page) = fetch_page(offset).await?;
             if !paginated && page.list.tracks.len() >= 100 {
                 return Err(anyhow!("Update the Glyph server and Companion, or import locally, to avoid an incomplete playlist"));
             }
             let count = page.list.tracks.len();
-            if count > max_tracks || result.as_ref().map_or(0, |r| r.tracks.len()) + count > max_tracks {
+            if count > max_tracks || result.tracks.len() + count > max_tracks {
                 return Err(anyhow!("Playlists may contain at most {max_tracks} songs"));
             }
-            match result.as_mut() {
-                Some(r) => r.tracks.extend(page.list.tracks),
-                None => result = Some(page.list),
-            }
+            result.tracks.extend(page.list.tracks);
             if let Some(progress) = progress {
-                let done = result.as_ref().map_or(0, |r| r.tracks.len());
+                let done = result.tracks.len();
                 let total = if page.next_offset.is_none() { done } else { 0 };
                 let _ = progress.send(crate::ImportProgress { label: "IMPORT reading playlist".into(), done, total });
             }
             match page.next_offset {
                 Some(next) if count <= 100 && next == offset + 100 && next < max_tracks => offset = next,
                 Some(_) => return Err(anyhow!("invalid import pagination; no playlist was saved")),
-                None => return result.ok_or_else(|| anyhow!("empty import response")),
+                None => return Ok(result),
             }
         }
     }
@@ -498,6 +588,90 @@ mod tests {
         assert_eq!(normalize_base_url(" https://glyph.example/ "), "https://glyph.example");
         let c = ServerClient::new("https://a.b/", reqwest::Client::new(), "id".into());
         assert_eq!(c.url("/v1/health"), "https://a.b/v1/health");
+    }
+
+    #[tokio::test]
+    async fn parallel_server_import_reads_1500_tracks_in_order() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let max_in_flight = std::sync::Arc::new(AtomicUsize::new(0));
+        let in_flight_srv = in_flight.clone();
+        let max_srv = max_in_flight.clone();
+        let server = std::thread::spawn(move || {
+            let mut handles = Vec::new();
+            for _ in 0..15 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let cur = in_flight_srv.clone();
+                let max = max_srv.clone();
+                handles.push(std::thread::spawn(move || {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = stream.read(&mut buf).unwrap();
+                        if n == 0 { break; }
+                        req.extend_from_slice(&buf[..n]);
+                        if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let hdr = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+                            let len = hdr.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+                            if req.len() >= end + 4 + len { break; }
+                        }
+                    }
+                    let active = cur.fetch_add(1, Ordering::SeqCst) + 1;
+                    max.fetch_max(active, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(30));
+                    let body_start = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                    let v: serde_json::Value = serde_json::from_slice(&req[body_start..]).unwrap();
+                    let offset = v["offset"].as_u64().unwrap() as usize;
+                    let tracks: Vec<serde_json::Value> = (offset..offset + 100)
+                        .map(|i| serde_json::json!({
+                            "id": format!("sp{i}"),
+                            "source": "spotify",
+                            "title": format!("Song {i}"),
+                            "artist": "Artist"
+                        }))
+                        .collect();
+                    let next = (offset + 100 < 1500).then_some(offset + 100);
+                    let resp_body = serde_json::json!({
+                        "name": "Big 1500",
+                        "source": "spotify",
+                        "tracks": tracks,
+                        "next_offset": next,
+                        "total": 1500
+                    }).to_string();
+                    cur.fetch_sub(1, Ordering::SeqCst);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        resp_body.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(resp_body.as_bytes()).unwrap();
+                }));
+            }
+            for h in handles { h.join().unwrap(); }
+        });
+
+        let client = ServerClient::new(&format!("http://{addr}"), reqwest::Client::new(), "test-install".into());
+        let (tx, mut rx) = crate::flume_like::channel();
+        let started = std::time::Instant::now();
+        let imported = client.import_with_progress("https://open.spotify.com/playlist/big1500", Some(&tx)).await.unwrap();
+        let elapsed = started.elapsed();
+        drop(tx);
+        let mut last_prog = None;
+        while let Some(p) = rx.recv().await {
+            last_prog = Some(p);
+        }
+        server.join().unwrap();
+        assert_eq!(imported.name, "Big 1500");
+        assert_eq!(imported.tracks.len(), 1500);
+        assert_eq!(imported.tracks[0].title, "Song 0");
+        assert_eq!(imported.tracks[750].title, "Song 750");
+        assert_eq!(imported.tracks[1499].title, "Song 1499");
+        assert!(max_in_flight.load(Ordering::SeqCst) >= 2, "pages 1..14 must run in parallel");
+        assert_eq!(last_prog.map(|p| (p.done, p.total)), Some((1500, 1500)));
+        eprintln!("Parallel 1500-track server import (15 pages @ 30ms): {elapsed:?}, peak concurrency={}", max_in_flight.load(Ordering::SeqCst));
     }
 
     #[test]

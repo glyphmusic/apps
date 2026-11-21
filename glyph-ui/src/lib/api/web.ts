@@ -1444,6 +1444,13 @@ export class WebBackend implements Backend {
         lib().liked = a.on ? [...(a.tracks as Track[]), ...rest] : rest;
         this.saveLibrary();
       },
+      clear_liked: () => {
+        const l = lib();
+        if (!l.liked.length) return;
+        l.liked = [];
+        l.liked_cleared_at = Math.max(Date.now(), (l.liked_cleared_at ?? 0) + 1);
+        this.saveLibrary();
+      },
       playlist_create: (a) => {
         const id = `pl-${Date.now().toString(36)}`;
         lib().playlists.unshift({ id, name: a.name, tracks: a.tracks ?? [], created_at: Date.now(), local_only: !this.account.isSignedIn() });

@@ -186,11 +186,12 @@ pub fn parse_apple_server_data(html: &str) -> Vec<Track> {
     let Some(close) = body.find("</script>") else { return Vec::new() };
     let Ok(v) = serde_json::from_str::<Value>(&body[..close]) else { return Vec::new() };
     let mut out = Vec::new();
-    collect_apple_songs(&v, &mut out);
+    let mut seen = std::collections::HashSet::new();
+    collect_apple_songs(&v, &mut out, &mut seen);
     out
 }
 
-fn collect_apple_songs(v: &Value, out: &mut Vec<Track>) {
+fn collect_apple_songs(v: &Value, out: &mut Vec<Track>, seen: &mut std::collections::HashSet<String>) {
     match v {
         Value::Object(o) => {
             if o.get("contentDescriptor").and_then(|c| c["kind"].as_str()) == Some("song") && o.get("title").is_some_and(|t| t.is_string()) {
@@ -200,17 +201,17 @@ fn collect_apple_songs(v: &Value, out: &mut Vec<Track>) {
                 let id = o["contentDescriptor"]["identifiers"]["storeAdamID"].as_str().unwrap_or("").to_string();
                 let link = o["contentDescriptor"]["url"].as_str().map(str::to_string);
                 if let Some(t) = meta_track(ProviderId::MusicBrainz, format!("apple:{id}"), o["title"].as_str().unwrap_or(""), &artist, album, o.get("duration").and_then(|d| d.as_u64()), cover, link) {
-                    if !out.iter().any(|x: &Track| x.id == t.id) {
+                    if seen.insert(t.id.clone()) {
                         out.push(t);
                     }
                 }
                 return;
             }
             for x in o.values() {
-                collect_apple_songs(x, out);
+                collect_apple_songs(x, out, seen);
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| collect_apple_songs(x, out)),
+        Value::Array(a) => a.iter().for_each(|x| collect_apple_songs(x, out, seen)),
         _ => {}
     }
 }

@@ -139,6 +139,13 @@
 
   function jump(abs: number) { if (!didDrag) app.queueJump(abs); didDrag = false; }
   function setRadio(v: boolean) { ui.radio = v; backend().call("set_radio", { on: v }); }
+  function saveQueueAsPlaylist() {
+    const tracks: Track[] = [];
+    if (cur) tracks.push(cur);
+    for (const item of up) tracks.push(item.track);
+    if (!tracks.length) return;
+    app.nameDialog = { tracks, rename: null, initial: app.queue.context ?? "" };
+  }
   // The switch shows what Rust has (radio is on by default there).
   $effect(() => { backend().call<{ on: boolean } | undefined>("radio_state").then((r) => { if (r) ui.radio = r.on; }); });
 </script>
@@ -146,6 +153,9 @@
 <div class="qp" bind:this={panelEl}>
   <div class="head">
     <div class="ttl">{t("queue.title")}</div>
+    {#if cur || n > 0}
+      <IconButton name="list-plus" size={15} label={t("queue.save_playlist")} onclick={saveQueueAsPlaylist} />
+    {/if}
     <ToggleButton name="shuffle" size={15} on={app.player.shuffle} accent="var(--accent)" onclick={() => app.toggleShuffle()} />
     <IconButton name="x" size={16} onclick={() => (app.showQueue = false)} />
   </div>

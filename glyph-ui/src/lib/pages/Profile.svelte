@@ -247,8 +247,8 @@
   .load { display: flex; flex-direction: column; gap: 16px; }
   .body { display: flex; flex-direction: column; gap: 22px; }
 
-  /* hero: mx -24, mt -12, h 260, rounded top 14 */
-  .hero { position: relative; margin: -12px -24px 0; height: 260px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
+  /* hero: full frame bleed, mt -12, h 260, rounded top 14 */
+  .hero { position: relative; margin: -12px calc(-1 * var(--page-x)) 0; height: 260px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
   .grad { position: absolute; inset: 0; border-radius: 14px 14px 0 0; }
   /* photo_fade: dimmed to 80 %, alpha smoothstep over the lower 40 % */
   .ban { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 30%; opacity: 0; filter: brightness(.8); transition: opacity .5s ease-out;

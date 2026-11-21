@@ -19,8 +19,10 @@
   import { isMobile } from "./util";
   import Tog from "./Tog.svelte";
   import { adv, ADVANCED_ROWS, ADVANCED_SUBTABS, pageAdvanced, setAdvanced, subHidden } from "./advanced.svelte";
+  import { migrateRunning } from "./migrate-state.svelte";
 
   const q = $derived(sui.query.trim().toLowerCase());
+  const transferActive = $derived(migrateRunning() !== null);
   const hit = (text: string) => !q || text.toLowerCase().includes(q);
   const signedIn = $derived(app.account != null);
   const mobile = $derived(isMobile());
@@ -113,6 +115,7 @@
         <button class="pg" class:on onclick={() => clickPage(p, hasSubs)}>
           <Icon name={info.icon} size={16} color={on ? "#fff" : "rgba(255,255,255,.7)"} />
           <span class="nm">{info.name}</span>
+          {#if p === "migrate" && transferActive}<span class="trdot" aria-hidden="true"></span>{/if}
           {#if hasSubs}<span class="chev" class:open><Icon name="chevron-right" size={14} color="rgba(255,255,255,.45)" /></span>{/if}
         </button>
         {#if open}
@@ -155,6 +158,8 @@
   .pg:hover { background: rgba(255, 255, 255, .04); color: #fff; }
   .pg.on { background: rgba(255, 255, 255, .08); color: #fff; }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  .trdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: trpulse 1.6s ease-in-out infinite; }
+  @keyframes trpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
   .chev { display: flex; transition: transform .18s var(--ease); }
   .chev.open { transform: rotate(90deg); }
   .subs { flex: none; margin: 2px 0 2px 18px; padding-left: 8px; border-left: 1px solid rgba(255, 255, 255, .10); display: flex; flex-direction: column; gap: 2px; overflow: hidden; }

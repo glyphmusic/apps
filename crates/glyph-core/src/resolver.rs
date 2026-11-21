@@ -397,6 +397,80 @@ impl Resolver {
         (m.provider == provider).then_some((m.track, m.confidence))
     }
 
+    /// True if `p` can play full songs on its own (not metadata- or preview-only).
+    fn is_full_source_id(p: ProviderId) -> bool {
+        matches!(
+            p,
+            ProviderId::YouTube
+                | ProviderId::SoundCloud
+                | ProviderId::Audius
+                | ProviderId::Jamendo
+                | ProviderId::Archive
+        )
+    }
+
+    /// Pure metadata check: the track already carries an id for an enabled full source.
+    pub fn known_match(&self, track: &Track, enabled: &[ProviderId], youtube_only: bool) -> Option<(Track, f32)> {
+        let mut order: Vec<ProviderId> = self
+            .priority()
+            .into_iter()
+            .filter(|p| Self::is_full_source_id(*p) && enabled.contains(p) && (!youtube_only || *p == ProviderId::YouTube))
+            .collect();
+        for &p in enabled {
+            if Self::is_full_source_id(p) && (!youtube_only || p == ProviderId::YouTube) && !order.contains(&p) {
+                order.push(p);
+            }
+        }
+        for p in order {
+            if self.cooldowns.is_cooling(p) {
+                continue;
+            }
+            if id_at(p, track).is_some() {
+                return Some((track.clone(), 1.0));
+            }
+        }
+        None
+    }
+
+    /// Pure cache check: returns a previously remembered full-source mapping without
+    /// fetching an audio stream URL.
+    pub fn cached_match(&self, track: &Track, enabled: &[ProviderId], youtube_only: bool) -> Option<(Track, f32)> {
+        let (_, m) = self.cache.get(&mapping_keys(track))?;
+        if !Self::is_full_source_id(m.provider)
+            || !enabled.contains(&m.provider)
+            || (youtube_only && m.provider != ProviderId::YouTube)
+            || self.cooldowns.is_cooling(m.provider)
+        {
+            return None;
+        }
+        Some((m.track, m.confidence))
+    }
+
+    /// Metadata-only search across enabled full sources (used during playlist import /
+    /// transfer): finds and caches the best matching source ID without extracting
+    /// expiring audio stream URLs or wasting calls on 30 s previews.
+    pub async fn match_by_search(&self, track: &Track, enabled: &[ProviderId], youtube_only: bool) -> Option<(Track, f32)> {
+        let order: Vec<ProviderId> = self
+            .full_order()
+            .into_iter()
+            .filter(|p| enabled.contains(p) && (!youtube_only || *p == ProviderId::YouTube))
+            .collect();
+        if order.is_empty() {
+            return None;
+        }
+        let query = format!("{} - {}", track.artist, track.title);
+        let (cheap, expensive): (Vec<_>, Vec<_>) = order.iter().copied().partition(|p| *p != ProviderId::YouTube);
+        let mut cands = if cheap.is_empty() { Vec::new() } else { self.search_many(cheap, &query).await };
+        let mut ranked = rank(track, cands.clone(), &order);
+        if ranked.first().map(|r| r.2).unwrap_or(0.0) < SURE_CONFIDENCE && !expensive.is_empty() {
+            cands.extend(self.search_many(expensive, &query).await);
+            ranked = rank(track, cands, &order);
+        }
+        let (_, cand, confidence) = ranked.into_iter().next()?;
+        self.remember(track, &cand.track, confidence);
+        Some((cand.track, confidence))
+    }
+
     /// Records a mapping obtained elsewhere (e.g. from the server).
     pub fn remember(&self, wanted: &Track, matched: &Track, confidence: f32) {
         self.cache.insert(
@@ -772,5 +846,37 @@ mod tests {
         let c2 = MappingCache::load(Some(path));
         assert_eq!(c2.get(&["k1".into()]).unwrap().1.track.id, "a");
         assert!(!c2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn import_matching_uses_known_and_cached_without_stream_lookup() {
+        let audius = Mock::new(
+            ProviderId::Audius,
+            Capabilities::FullPlayback,
+            vec![t(ProviderId::Audius, "au1", "Song", "Band", Some(200_000))],
+        );
+        let calls = audius.calls.clone();
+        let r = resolver(vec![audius]);
+        let enabled = vec![ProviderId::YouTube, ProviderId::Audius];
+
+        // 1. Track already has a full-source id: instant 0-call match.
+        let yt_track = t(ProviderId::YouTube, "yt1", "Song", "Band", Some(200_000));
+        assert_eq!(r.known_match(&yt_track, &enabled, false).unwrap().1, 1.0);
+        assert_eq!(r.known_match(&yt_track, &enabled, true).unwrap().1, 1.0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // 2. Metadata-only track searches once, remembers in cache, then hits cache with 0 calls.
+        let want = t(ProviderId::Spotify, "sp1", "Song", "Band", Some(200_000));
+        assert!(r.known_match(&want, &enabled, false).is_none());
+        let (matched, conf) = r.match_by_search(&want, &enabled, false).await.unwrap();
+        assert_eq!(matched.id, "au1");
+        assert!(conf >= SURE_CONFIDENCE);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let (cached, _) = r.cached_match(&want, &enabled, false).unwrap();
+        assert_eq!(cached.id, "au1");
+        // youtube_only ignores non-YouTube cached mappings.
+        assert!(r.cached_match(&want, &enabled, true).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

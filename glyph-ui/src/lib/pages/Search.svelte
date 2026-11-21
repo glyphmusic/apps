@@ -8,6 +8,7 @@
   // to search, skeleton rows while loading, nothing found. Footer: spinner
   // line while more sources answer and a retry for failing sources. Near the
   // end of the page the next page is requested (app.searchMore).
+  import { fade } from "svelte/transition";
   import SectionTitle from "../components/SectionTitle.svelte";
   import Chip from "../components/Chip.svelte";
   import Icon from "../components/Icon.svelte";
@@ -21,7 +22,9 @@
   import FollowButton from "./search/FollowButton.svelte";
   import ArtistName from "./search/ArtistName.svelte";
   import Skeletons from "./search/Skeletons.svelte";
+  import { filterSearchHistory } from "./search/history-filter";
   import { app, type SearchFilter } from "../state.svelte";
+  import { registerListNav, scrollVirtualRowIntoView } from "../state/list-nav.svelte";
   import { t, tf } from "../i18n.svelte";
   import { uniqBy } from "../fmt";
   import { PROVIDER_NAME, primaryArtist, type Release, type SearchItem, type Track } from "../api/types";
@@ -125,6 +128,7 @@
 
   // Near the end of the list: ask for the next page.
   let scroller: HTMLElement | null = null;
+  let trackListEl: HTMLDivElement | undefined = $state();
   function near() {
     if (!scroller || !s.tracks.length || (filter !== "all" && filter !== "tracks")) return;
     if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 900) app.searchMore();
@@ -135,6 +139,23 @@
     return () => scroller?.removeEventListener("scroll", near);
   });
   $effect(() => { void s.tracks.length; void s.loading; void filter; queueMicrotask(near); });
+
+  $effect(() => {
+    if (filter !== "all" && filter !== "tracks") return;
+    return registerListNav({
+      count: () => s.tracks.length,
+      play: (i) => {
+        const tr = s.tracks[i];
+        if (!tr) return;
+        if (!app.allowed(tr)) { app.toast(t("toast.explicit_blocked"), "info"); return; }
+        app.play(s.tracks, i);
+      },
+      scrollTo: (i) => scrollVirtualRowIntoView(trackListEl, i, 58, 48, 32),
+    });
+  });
+
+  const filteredHistory = $derived(filterSearchHistory(app.library.search_history, app.library.recent_lists, filter));
+  const hasAnyHistory = $derived(app.library.search_history.length > 0 || app.library.recent_lists.some((l) => l.kind === "album"));
 
   const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
   const spin = $derived(SPIN[Math.floor(app.clock / 80) % SPIN.length]);
@@ -183,43 +204,79 @@
   {:else if !query.trim() && app.compact}
     <!-- phone: compact.rs search_recent is drawn by the phone layout -->
   {:else if !query.trim()}
-    {#if app.library.search_history.length > 0}
+    {#if hasAnyHistory}
       <div class="hist">
         <div class="lh"><Icon name="clock" size={15} color="var(--dim)" /><span>{t("search.history")}</span></div>
-        <div class="list">
-          {#each app.library.search_history as it, i}
+        <div class="stage">
+          {#key filter}
             <div
-              class="grow"
-              onclick={() => pickHistory(it)}
-              oncontextmenu={(e) => historyMenu(e, it)}
-              onkeydown={(e) => e.key === "Enter" && pickHistory(it)}
-              role="button"
-              tabindex="-1"
+              class="slot"
+              in:fade={{ duration: 150, delay: 95 }}
+              out:fade={{ duration: 95 }}
+              onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}
             >
-              {#if it.kind === "song"}
-                <Cover track={it.track} size={44} radius={6} />
-              {:else if it.kind === "artist"}
-                {#if it.track}
-                  <Cover track={it.track} size={44} round />
-                {:else}
-                  <span class="ph r"><Icon name="user-round" size={20} color="rgba(255,255,255,.6)" /></span>
-                {/if}
+              {#if filteredHistory.length > 0}
+                <div class="list">
+                  {#each filteredHistory as entry}
+                    {#if entry.kind === "album"}
+                      {@const al = entry.list}
+                      <div
+                        class="grow"
+                        onclick={() => app.openAlbum(al.title, al.artist, al.tracks, entry.coverTrack ?? undefined)}
+                        oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: entry.coverTrack, list: al }); }}
+                        onkeydown={(e) => e.key === "Enter" && app.openAlbum(al.title, al.artist, al.tracks, entry.coverTrack ?? undefined)}
+                        role="button"
+                        tabindex="-1"
+                      >
+                        <Cover track={entry.coverTrack} size={44} radius={6} />
+                        <div class="gt">
+                          <div class="g1 trunc">{al.title}</div>
+                          <div class="g2 trunc">{t("list.kind.album")} • {al.artist}</div>
+                        </div>
+                      </div>
+                    {:else}
+                      {@const it = entry.item}
+                      <div
+                        class="grow"
+                        onclick={() => pickHistory(it)}
+                        oncontextmenu={(e) => historyMenu(e, it)}
+                        onkeydown={(e) => e.key === "Enter" && pickHistory(it)}
+                        role="button"
+                        tabindex="-1"
+                      >
+                        {#if it.kind === "song"}
+                          <Cover track={it.track} size={44} radius={6} />
+                        {:else if it.kind === "artist"}
+                          {#if it.track}
+                            <Cover track={it.track} size={44} round />
+                          {:else}
+                            <span class="ph r"><Icon name="user-round" size={20} color="rgba(255,255,255,.6)" /></span>
+                          {/if}
+                        {:else}
+                          <span class="ph"><Icon name="search" size={20} color="rgba(255,255,255,.6)" /></span>
+                        {/if}
+                        <div class="gt">
+                          <div class="g1 trunc">{it.kind === "song" ? it.track.title : it.kind === "artist" ? it.name : it.text}</div>
+                          <div class="g2 trunc">{it.kind === "song" ? `${t("search.kind.song")} • ${it.track.artist}` : it.kind === "artist" ? t("search.kind.artist") : t("search.kind.query")}</div>
+                        </div>
+                        <button
+                          class="x"
+                          aria-label={t("tip.x")}
+                          onclick={(e) => { e.stopPropagation(); app.removeSearchHistory(entry.origIndex); }}
+                        >
+                          <Icon name="x" size={16} color="var(--dim)" />
+                        </button>
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
               {:else}
-                <span class="ph"><Icon name="search" size={20} color="rgba(255,255,255,.6)" /></span>
+                <EmptyState icon="search" title={t("search.none.title")}>
+                  <Button onclick={() => (app.searchFilter = "all")}>{t("search.filter.all")}</Button>
+                </EmptyState>
               {/if}
-              <div class="gt">
-                <div class="g1 trunc">{it.kind === "song" ? it.track.title : it.kind === "artist" ? it.name : it.text}</div>
-                <div class="g2 trunc">{it.kind === "song" ? `${t("search.kind.song")} • ${it.track.artist}` : it.kind === "artist" ? t("search.kind.artist") : t("search.kind.query")}</div>
-              </div>
-              <button
-                class="x"
-                aria-label={t("tip.x")}
-                onclick={(e) => { e.stopPropagation(); app.removeSearchHistory(i); }}
-              >
-                <Icon name="x" size={16} color="var(--dim)" />
-              </button>
             </div>
-          {/each}
+          {/key}
         </div>
       </div>
     {:else}
@@ -265,9 +322,11 @@
             </div>
           {/if}
 
-          <VirtualRows count={s.tracks.length} pitch={58}>
-            {#snippet row(i)}<TrackRow tracks={s.tracks} index={i} kind="search" />{/snippet}
-          </VirtualRows>
+          <div bind:this={trackListEl}>
+            <VirtualRows count={s.tracks.length} pitch={58}>
+              {#snippet row(i)}<TrackRow tracks={s.tracks} index={i} kind="search" />{/snippet}
+            </VirtualRows>
+          </div>
         </div>
       {:else if filter === "albums"}
         <div class="list">
@@ -346,6 +405,8 @@
   .lyr { display: flex; flex-direction: column; gap: 2px; padding-bottom: 10px; }
   .lh { display: flex; align-items: center; gap: 8px; padding: 2px 10px 6px; font-size: var(--md); font-weight: 600; }
   .hist { display: flex; flex-direction: column; gap: 4px; }
+  .stage { display: grid; }
+  .slot { grid-area: 1 / 1; min-width: 0; }
   .ph { flex: none; width: 44px; height: 44px; border-radius: 6px; background: rgba(255, 255, 255, .08); display: grid; place-items: center; }
   .ph.r { border-radius: 50%; }
   .x { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; transition: background-color .12s; }

@@ -143,6 +143,16 @@ pub fn like_many(core: C, tracks: Vec<Track>, on: bool) {
     });
 }
 
+/// Clears all Liked Songs at once so sync sends a single `liked_clear` signal
+/// instead of one deletion per song.
+pub fn clear_liked(core: C) {
+    lib(&core, |l| {
+        if !l.liked.is_empty() {
+            l.clear_liked(glyph_core::paths::now_ms());
+        }
+    });
+}
+
 pub fn playlist_create(core: C, name: String, tracks: Vec<Track>) -> String {
     let limit = glyph_core::library::playlist_track_limit();
     let over = tracks.len() > limit;

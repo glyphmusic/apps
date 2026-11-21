@@ -1329,67 +1329,10 @@ impl Backend {
             let mut keys = tokio::task::spawn_blocking(move || load_keys(&owned)).await?;
             let mut notices = Vec::new();
 
-            // Pictures first, so other devices can fetch them once the playlist arrives.
-            for (sha, path) in &snap.cover_files {
-                if st.uploaded_covers.contains(sha) {
-                    continue;
-                }
-                let Ok(bytes) = std::fs::read(path) else { continue };
-                if bytes.len() > 512 * 1024 {
-                    continue;
-                }
-                let (sha2, cc) = (sha.clone(), c.clone());
-                match with_auth(&c, move |t| {
-                    let (c, s, b) = (cc.clone(), sha2.clone(), bytes.clone());
-                    async move { c.upload_cover(&t, &s, b).await }
-                })
-                .await
-                {
-                    Ok(()) => {
-                        st.uploaded_covers.insert(sha.clone());
-                    }
-                    Err(e) if is_signed_out(&e) => return Err(e),
-                    Err(e) if crate::server_client::server_error(&e).is_some_and(|(_, c)| c == "account_full") => {
-                        round.account_full = true;
-                        tracing::info!("cover upload skipped (account full): {e:#}");
-                    }
-                    Err(e) => tracing::info!("cover upload skipped: {e:#}"),
-                }
-            }
-
-            // Read the account before uploading guest/default values on a new
-            // device. The following round pushes the remaining local additions.
-            let changes = if st.pulled_once { st.enqueue(&snap, now) } else { Vec::new() };
-            let wires = match push_mode(&st, &keys) {
-                PushMode::Encrypt => {
-                    let mut items = changes;
-                    items.extend(crate::e2e_sync::repush(&st, &snap, now));
-                    crate::e2e_sync::outgoing(items, &keys.keys, &st.e2e)
-                }
-                PushMode::Hold => Vec::new(),
-                PushMode::Plain => crate::e2e_sync::plain_wires(changes),
-            };
-            require_session(&acc)?;
-            st.save().context("persist sync outbox before sending")?;
-            *sync_state().lock().unwrap() = Some(st.clone());
-            for batch in crate::e2e_sync::batches(wires, 200, 512 * 1024) {
-                let items: Vec<SyncItem> = batch.iter().map(|w| w.item.clone()).collect();
-                let r = with_auth(&c, |t| {
-                    let (c, items, acc) = (c.clone(), items.clone(), acc.clone());
-                    async move { require_session(&acc)?; c.sync_push(&t, items).await }
-                })
-                .await?;
-                round.pushed += r.accepted as usize;
-                let stale: std::collections::BTreeSet<(String, String)> = r.stale.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
-                let accepted: Vec<_> = batch.into_iter().filter(|w| !stale.contains(&(w.item.kind.clone(), w.item.key.clone()))).collect();
-                crate::e2e_sync::accepted(&mut st, &accepted);
-                round.items.extend(crate::e2e_sync::incoming(r.stale, &keys.keys, &mut st, &mut notices));
-                require_session(&acc)?;
-                st.save().context("persist sync acknowledgement")?;
-                *sync_state().lock().unwrap() = Some(st.clone());
-            }
-
+            // Pull remote changes first so a remote `liked_clear` or edit is
+            // applied before pushing this device's snapshot or E2E repushes.
             let mut pulled = Vec::new();
+            let mut did_reset = false;
             loop {
                 let since = st.last_rev;
                 let r = with_auth(&c, |t| {
@@ -1401,6 +1344,7 @@ impl Backend {
                     // The server forgot old deletions: agree on everything again.
                     st.reset();
                     pulled.clear();
+                    did_reset = true;
                     continue;
                 }
                 pulled.extend(r.items);
@@ -1408,6 +1352,9 @@ impl Backend {
                 if !r.more {
                     break;
                 }
+            }
+            if did_reset {
+                round.bootstrap = true;
             }
             st.pulled_once = true;
             st.e2e.absorb_keyring(&pulled);
@@ -1435,6 +1382,71 @@ impl Backend {
             round.items.extend(crate::e2e_sync::incoming(items, &keys.keys, &mut st, &mut notices));
             if notices.contains(&crate::e2e_sync::Notice::Tampered) {
                 crate::privacy::record(c.base_url(), &acc.account.id, true, "tampered", "");
+            }
+
+            // Push only when this round is not bootstrapping/resetting and no
+            // remote items are waiting to be applied to the local library first.
+            // Otherwise `sync_apply` runs first and any remaining local changes
+            // push on the immediate follow-up round (and `st.last_rev` is never
+            // saved ahead of an unapplied pull if a push fails).
+            if !round.bootstrap && round.items.is_empty() {
+                // Pictures first, so other devices can fetch them once the playlist arrives.
+                for (sha, path) in &snap.cover_files {
+                    if st.uploaded_covers.contains(sha) {
+                        continue;
+                    }
+                    let Ok(bytes) = std::fs::read(path) else { continue };
+                    if bytes.len() > 512 * 1024 {
+                        continue;
+                    }
+                    let (sha2, cc) = (sha.clone(), c.clone());
+                    match with_auth(&c, move |t| {
+                        let (c, s, b) = (cc.clone(), sha2.clone(), bytes.clone());
+                        async move { c.upload_cover(&t, &s, b).await }
+                    })
+                    .await
+                    {
+                        Ok(()) => {
+                            st.uploaded_covers.insert(sha.clone());
+                        }
+                        Err(e) if is_signed_out(&e) => return Err(e),
+                        Err(e) if crate::server_client::server_error(&e).is_some_and(|(_, c)| c == "account_full") => {
+                            round.account_full = true;
+                            tracing::info!("cover upload skipped (account full): {e:#}");
+                        }
+                        Err(e) => tracing::info!("cover upload skipped: {e:#}"),
+                    }
+                }
+
+                let changes = st.enqueue(&snap, now);
+                let wires = match push_mode(&st, &keys) {
+                    PushMode::Encrypt => {
+                        let mut items = changes;
+                        items.extend(crate::e2e_sync::repush(&st, &snap, now));
+                        crate::e2e_sync::outgoing(items, &keys.keys, &st.e2e)
+                    }
+                    PushMode::Hold => Vec::new(),
+                    PushMode::Plain => crate::e2e_sync::plain_wires(changes),
+                };
+                require_session(&acc)?;
+                st.save().context("persist sync outbox before sending")?;
+                *sync_state().lock().unwrap() = Some(st.clone());
+                for batch in crate::e2e_sync::batches(wires, 200, 512 * 1024) {
+                    let items: Vec<SyncItem> = batch.iter().map(|w| w.item.clone()).collect();
+                    let r = with_auth(&c, |t| {
+                        let (c, items, acc) = (c.clone(), items.clone(), acc.clone());
+                        async move { require_session(&acc)?; c.sync_push(&t, items).await }
+                    })
+                    .await?;
+                    round.pushed += r.accepted as usize;
+                    let stale: std::collections::BTreeSet<(String, String)> = r.stale.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
+                    let accepted: Vec<_> = batch.into_iter().filter(|w| !stale.contains(&(w.item.kind.clone(), w.item.key.clone()))).collect();
+                    crate::e2e_sync::accepted(&mut st, &accepted);
+                    round.items.extend(crate::e2e_sync::incoming(r.stale, &keys.keys, &mut st, &mut notices));
+                    require_session(&acc)?;
+                    st.save().context("persist sync acknowledgement")?;
+                    *sync_state().lock().unwrap() = Some(st.clone());
+                }
             }
 
             // Pictures of playlists from other devices.

@@ -12,6 +12,14 @@
   import { tip } from "../ui.svelte";
   import { sameList } from "../api/types";
   import { admin } from "../admin/admin.svelte";
+  import { mg, migrateRunning, serviceOf } from "../settings/migrate-state.svelte";
+
+  const trRun = $derived(migrateRunning());
+  const trTip = $derived(
+    trRun && mg.service
+      ? `${serviceOf(mg.service).name} · ${trRun.index + 1}/${Math.max(1, trRun.lists)}${trRun.total > 0 ? ` · ${Math.min(100, Math.round((trRun.done * 100) / trRun.total))}%` : ""}`
+      : "",
+  );
 
   let { width = app.leftSidebarW }: { width?: number } = $props();
   const expanded = $derived(width >= 112);
@@ -65,6 +73,12 @@
       {#if expanded}<span class="lab trunc">{t("admin.title")}</span>{/if}
     </button>
   {/if}
+  {#if trRun && !app.settingsOpen}
+    <button class="it trbtn" onclick={() => app.openSettings("migrate")} use:tip={{ label: expanded ? "" : trTip, side: "right" }} aria-label={t("sp.migrate")}>
+      <span class="ico trico"><Icon name="arrow-right-left" size={18} color="var(--accent)" /><span class="trbadge"></span></span>
+      {#if expanded}<span class="lab trunc trlab">{trTip}</span>{/if}
+    </button>
+  {/if}
   <button class="it turn" class:on={app.settingsOpen} onclick={() => app.navigate("settings")} use:tip={{ label: expanded ? "" : t("nav.settings"), side: "right" }} aria-label={t("nav.settings")}>
     <span class="ico"><Icon name="settings" size={20} color={app.settingsOpen ? "var(--text)" : "var(--dim)"} /></span>
     {#if expanded}<span class="lab trunc">{t("nav.settings")}</span>{/if}
@@ -95,4 +109,10 @@
   .sb.wide .rule { width: calc(100% - 12px); align-self: center; }
   .art { flex: none; width: 36px; height: 36px; border-radius: 50%; background: var(--card); display: grid; place-items: center; }
   .art.sm { width: 32px; height: 32px; }
+  .trbtn { background: rgba(var(--accent-rgb, 255, 95, 210), .09); }
+  .trbtn:hover { background: rgba(var(--accent-rgb, 255, 95, 210), .16); }
+  .trico { position: relative; }
+  .trbadge { position: absolute; top: 0; right: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: sbtrpulse 1.5s ease-in-out infinite; }
+  .trlab { color: var(--text); }
+  @keyframes sbtrpulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 </style>

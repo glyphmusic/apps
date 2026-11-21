@@ -16,6 +16,11 @@ import { trimReveals } from "./ui.svelte";
 import { inMiniWindow, inSideWindow } from "./window";
 import { applyTheme } from "./theme";
 import { gpuProbe, recommendVisuals } from "./glow";
+import {
+  albumCacheGet, albumCachePut, fetchInitialSnapshot, homeCacheLoad, homeCacheSave,
+  loadArtistPhotos, loadWidth, pruneTrackedKeys, sameTrackKeys, saveArtistPhotos, saveWidth,
+} from "./state/cache";
+import { pickRangeKeys, selectedTracksOf, toggleAllKeys, togglePickedKey } from "./state/pick";
 
 export type View =
   | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local" | "server";
@@ -254,7 +259,7 @@ class App {
     });
     api.on("home", (h) => {
       this.home = h;
-      if (!h.loading && (h.recs.length || h.trending.length)) homeCacheSave(h);
+      if (!h.loading && (h.recs.length || h.trending.length)) homeCacheSave($state.snapshot(h) as HomeFeeds);
     });
     api.on("artist", (a) => this.cacheArtist(a));
     api.on("lyrics", (l) => { if (l.key === this.lyrics.key || l.key === this.currentKey) this.lyrics = l; });
@@ -549,28 +554,40 @@ class App {
     this.library.liked = on ? [...tracks.filter((x) => !this.likedKeys.has(trackKey(x))), ...this.library.liked] : rest;
     return backend().call("like_many", { tracks, on });
   }
-  // ---- select mode (Liked Songs, own playlists) ----
-  /** The list in select mode and the keys of the picked songs. */
-  picking = $state<{ list: string; keys: string[] } | null>(null);
+  // ---- select mode (multi-select in track lists) ----
+  /** The list in select mode, picked song keys, and last clicked index for Shift+Click ranges. */
+  picking = $state<{ list: string; keys: string[]; anchor?: number } | null>(null);
   private pickedSet = $derived(new Set(this.picking?.keys ?? []));
   /** Only Liked Songs (also per artist) and own playlists can drop songs in bulk. */
   canPick(l: ListKey | null | undefined) { return !!l && (l.kind === "liked" || l.kind === "artist_liked" || (l.kind === "playlist" && !!this.playlist(l.id))); }
   isPicking(l: ListKey | null | undefined) { return !!l && this.picking?.list === listId(l); }
   isPicked(t: Track) { return this.pickedSet.has(trackKey(t)); }
-  startPicking(l: ListKey, first?: Track) { this.picking = { list: listId(l), keys: first ? [trackKey(first)] : [] }; }
+  startPicking(l: ListKey, first?: Track, anchor?: number) { this.picking = { list: listId(l), keys: first ? [trackKey(first)] : [], anchor }; }
   stopPicking() { this.picking = null; }
   togglePicked(t: Track) {
     const p = this.picking;
     if (!p) return;
-    const k = trackKey(t);
-    this.picking = { ...p, keys: this.pickedSet.has(k) ? p.keys.filter((x) => x !== k) : [...p.keys, k] };
+    this.picking = { ...p, keys: togglePickedKey(p.keys, trackKey(t)) };
+  }
+  /** Toggles row `index` (or selects the inclusive range from `anchor` when `shift` is held). */
+  togglePickedAt(tracks: readonly Track[], index: number, shift = false) {
+    const p = this.picking;
+    const tr = tracks[index];
+    if (!p || !tr) return;
+    if (shift && p.anchor != null) {
+      this.picking = { ...p, keys: pickRangeKeys(tracks, p.keys, p.anchor, index, true), anchor: index };
+      return;
+    }
+    this.picking = { ...p, keys: togglePickedKey(p.keys, trackKey(tr)), anchor: index };
   }
   /** Picks all `tracks`, or none when all are picked already. */
   pickAll(tracks: Track[]) {
     const p = this.picking;
     if (!p) return;
-    const all = tracks.length > 0 && tracks.every((x) => this.pickedSet.has(trackKey(x)));
-    this.picking = { ...p, keys: all ? [] : [...new Set(tracks.map(trackKey))] };
+    this.picking = { ...p, keys: toggleAllKeys(tracks, p.keys), anchor: undefined };
+  }
+  pickedTracksOf(tracks: readonly Track[]): Track[] {
+    return selectedTracksOf(tracks, this.picking?.keys ?? []);
   }
   /** Removes the picked songs of `l` in one go and leaves select mode. */
   removePicked(l: ListKey) {
@@ -585,7 +602,17 @@ class App {
     if (!tracks.length) return;
     const n = tracks.length;
     if (l.kind === "liked" || l.kind === "artist_liked") {
-      void this.setLiked(tracks, false);
+      const ks = new Set(tracks.map(trackKey));
+      const clearingAll = l.kind === "liked" && this.library.liked.length > 0 && this.library.liked.every((x) => ks.has(trackKey(x)));
+      if (clearingAll) {
+        this.likeBatch.clear();
+        clearTimeout(this.likeTimer);
+        this.likeTimer = 0;
+        this.library.liked = [];
+        void backend().call("clear_liked", {});
+      } else {
+        void this.setLiked(tracks, false);
+      }
       this.toast(tf("toast.removed_n_liked", { n }), "ok", { label: t("toast.undo"), run: () => { void this.setLiked(tracks, true); } });
     } else if (l.kind === "playlist") {
       const ks = new Set(tracks.map(trackKey));
@@ -841,7 +868,7 @@ class App {
       this.openList = { ...this.openList, tracks: cached, cover: this.openList.cover ?? cached[0] ?? null, loading: false };
     }
     backend().call<Track[]>("album", { title: l.title, artist: l.artist }).then((full) => {
-      if (full?.length) albumCachePut(l.title, l.artist, full);
+      if (full?.length) albumCachePut(l.title, l.artist, $state.snapshot(full) as Track[]);
       if (this.view === "list" && this.openList?.kind === "album" && sameList(this.openList, l)) {
         // A failed refresh never empties a list that already shows songs.
         const tracks = full?.length ? full : this.openList.tracks;
@@ -1090,7 +1117,7 @@ class App {
       // A failed refresh (offline, server busy) keeps the cached feeds.
       if (empty && (this.home.recs.length || this.home.trending.length)) { this.home = { ...this.home, loading: false }; return; }
       this.home = h;
-      if (!empty) homeCacheSave(h);
+      if (!empty) homeCacheSave($state.snapshot(h) as HomeFeeds);
     }).catch(() => { this.home = { ...this.home, loading: false }; });
   }
   /** Code pasted into the search field, waiting for its settings page. */
@@ -1108,7 +1135,7 @@ class App {
     if (!this.artistPhotos[k]) return;
     delete this.artistPhotos[k];
     this.photoAsked.delete(k);
-    saveArtistPhotos(this.artistPhotos);
+    saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>);
   }
   artistPhoto(name: string): string | null {
     const k = primaryArtist(name).toLowerCase();
@@ -1119,7 +1146,7 @@ class App {
     if (this.backendState.kind === "ready" && (at === undefined || performance.now() - at > 30_000)) {
       pruneTrackedKeys(this.photoAsked, this.artistPhotos, 299);
       this.photoAsked.set(k, performance.now());
-      backend().call<string | null>("artist_photo", { name: k }).then((p) => { if (p) { this.artistPhotos[k] = p; saveArtistPhotos(this.artistPhotos); } }).catch(() => {});
+      backend().call<string | null>("artist_photo", { name: k }).then((p) => { if (p) { this.artistPhotos[k] = p; saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>); } }).catch(() => {});
     }
     return null;
   }
@@ -1262,174 +1289,6 @@ class App {
     this.rightSidebarW = next;
     if (commit) saveWidth("glyph.sidebar.right", next);
   }
-}
-
-function pruneTrackedKeys(
-  asked: { size: number; keys(): IterableIterator<string>; delete(key: string): boolean },
-  dict: Record<string, unknown>,
-  limit: number,
-) {
-  while (asked.size > limit) {
-    const oldest = asked.keys().next().value;
-    if (oldest === undefined) break;
-    asked.delete(oldest);
-    delete dict[oldest];
-  }
-}
-
-function loadWidth(key: string, def: number, min: number, max: number): number {
-  try {
-    const raw = localStorage.getItem(key);
-    const n = raw == null ? NaN : Number(raw);
-    return Number.isFinite(n) ? Math.round(Math.max(min, Math.min(max, n))) : def;
-  } catch {
-    return def;
-  }
-}
-function saveWidth(key: string, w: number) {
-  try { localStorage.setItem(key, String(w)); } catch { /* ignore */ }
-}
-
-async function fetchInitialSnapshot(api: Backend): Promise<Snapshot> {
-  if (api.kind !== "tauri") return api.snapshot();
-  return new Promise<Snapshot>((resolve, reject) => {
-    let settled = false;
-    let activeMs = 0;
-    let retried = false;
-    let inFlight = 0;
-    let lastTick = performance.now();
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearInterval(timer);
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", syncClock);
-      }
-      fn();
-    };
-    const launch = () => {
-      inFlight++;
-      api.snapshot().then(
-        (snap) => {
-          inFlight--;
-          finish(() => resolve(snap));
-        },
-        (err) => {
-          inFlight--;
-          if (settled) return;
-          if (!retried) {
-            retried = true;
-            launch();
-            return;
-          }
-          if (inFlight === 0) finish(() => reject(err));
-        },
-      );
-    };
-    const syncClock = () => {
-      const now = performance.now();
-      if (typeof document === "undefined" || !document.hidden) {
-        activeMs += Math.min(500, Math.max(0, now - lastTick));
-      }
-      lastTick = now;
-      if (activeMs >= 3500 && !retried) {
-        retried = true;
-        launch();
-      }
-      if (activeMs >= 10000) {
-        finish(() => reject(new Error("Timed out waiting for app snapshot")));
-      }
-    };
-    const timer = setInterval(syncClock, 250);
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", syncClock);
-    }
-    launch();
-  });
-}
-
-// ---- artist photos (sidebar, tiles), kept across restarts ----
-const PHOTO_CACHE_KEY = "glyph.artist-photos.v1";
-function loadArtistPhotos(): Record<string, string | null> {
-  try {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(PHOTO_CACHE_KEY) : null;
-    const v = raw ? JSON.parse(raw) : null;
-    return v && typeof v === "object" ? (v as Record<string, string | null>) : {};
-  } catch {
-    return {};
-  }
-}
-let photoTimer: ReturnType<typeof setTimeout> | undefined;
-function saveArtistPhotos(m: Record<string, string | null>) {
-  clearTimeout(photoTimer);
-  photoTimer = setTimeout(() => {
-    try {
-      const entries = Object.entries($state.snapshot(m) as Record<string, string | null>).filter(([, u]) => !!u).slice(-300);
-      localStorage.setItem(PHOTO_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
-    } catch { /* ignore */ }
-  }, 1500);
-}
-
-// ---- Home feeds cache ----
-const HOME_CACHE_KEY = "glyph.home-cache.v1";
-function homeCacheLoad(): HomeFeeds | null {
-  try {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(HOME_CACHE_KEY) : null;
-    const h = raw ? (JSON.parse(raw) as HomeFeeds) : null;
-    return h && Array.isArray(h.recs) && Array.isArray(h.trending) ? { ...h, new_releases: h.new_releases ?? [] } : null;
-  } catch {
-    return null;
-  }
-}
-let homeCacheTimer: ReturnType<typeof setTimeout> | undefined;
-function homeCacheSave(h: HomeFeeds) {
-  clearTimeout(homeCacheTimer);
-  const snap = $state.snapshot(h) as HomeFeeds;
-  homeCacheTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(HOME_CACHE_KEY, JSON.stringify({ recs: snap.recs.slice(0, 60), trending: snap.trending.slice(0, 60), new_releases: snap.new_releases.slice(0, 40), loading: false }));
-    } catch { /* ignore */ }
-  }, 1000);
-}
-
-// ---- album page cache (songs of albums opened before, kept across restarts) ----
-const ALBUM_CACHE_KEY = "glyph.album-cache.v1";
-const ALBUM_CACHE_MAX = 80;
-let albumCache: Map<string, Track[]> | null = null;
-const albumCacheKey = (title: string, artist: string) => `${title.trim().toLowerCase()}|${artist.trim().toLowerCase()}`;
-function albumCacheMap(): Map<string, Track[]> {
-  if (albumCache) return albumCache;
-  albumCache = new Map();
-  try {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(ALBUM_CACHE_KEY) : null;
-    const arr = raw ? (JSON.parse(raw) as [string, Track[]][]) : [];
-    for (const [k, v] of arr) if (Array.isArray(v)) albumCache.set(k, v);
-  } catch { /* ignore */ }
-  return albumCache;
-}
-function albumCacheGet(title: string, artist: string): Track[] | null {
-  const m = albumCacheMap();
-  const k = albumCacheKey(title, artist);
-  const v = m.get(k);
-  if (!v) return null;
-  m.delete(k);
-  m.set(k, v);
-  return v;
-}
-let albumCacheTimer: ReturnType<typeof setTimeout> | undefined;
-function albumCachePut(title: string, artist: string, tracks: Track[]) {
-  const m = albumCacheMap();
-  const k = albumCacheKey(title, artist);
-  m.delete(k);
-  m.set(k, $state.snapshot(tracks) as Track[]);
-  while (m.size > ALBUM_CACHE_MAX) m.delete(m.keys().next().value as string);
-  clearTimeout(albumCacheTimer);
-  albumCacheTimer = setTimeout(() => {
-    try { localStorage.setItem(ALBUM_CACHE_KEY, JSON.stringify([...m.entries()])); } catch { /* full: memory only */ }
-  }, 800);
-}
-function sameTrackKeys(a: Track[], b: Track[]) {
-  return a.length === b.length && a.every((x, i) => trackKey(x) === trackKey(b[i]));
 }
 
 export const app = new App();

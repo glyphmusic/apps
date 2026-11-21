@@ -154,24 +154,38 @@ impl LastFm {
         Ok(artist_names(&v["similarartists"]["artist"]))
     }
 
-    /// Loved tracks of a public profile (up to 2000).
+    /// Loved tracks of a public profile (up to 2000; pages 2..N fetched in parallel).
     pub async fn loved_tracks(&self, user: &str) -> Result<Vec<Track>> {
-        let mut out = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let p = page.to_string();
-            let v = self
-                .call("user.getlovedtracks", &[("user", user), ("limit", "200"), ("page", p.as_str())])
-                .await?;
-            let total = v["lovedtracks"]["@attr"]["totalPages"]
-                .as_str()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            out.extend(track_list(&v["lovedtracks"]["track"]).iter().filter_map(convert));
-            if page >= total || page >= 10 {
-                break;
-            }
-            page += 1;
+        use futures::stream::StreamExt;
+        let first = self
+            .call("user.getlovedtracks", &[("user", user), ("limit", "200"), ("page", "1")])
+            .await?;
+        let total = first["lovedtracks"]["@attr"]["totalPages"]
+            .as_str()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1)
+            .min(10);
+        let mut out: Vec<Track> = track_list(&first["lovedtracks"]["track"]).iter().filter_map(convert).collect();
+        if total <= 1 {
+            return Ok(out);
+        }
+        let mut pages: Vec<Vec<Track>> = vec![Vec::new(); (total - 1) as usize];
+        let mut stream = futures::stream::iter(2..=total)
+            .map(|page| async move {
+                let p = page.to_string();
+                let v = self
+                    .call("user.getlovedtracks", &[("user", user), ("limit", "200"), ("page", p.as_str())])
+                    .await?;
+                let tracks: Vec<Track> = track_list(&v["lovedtracks"]["track"]).iter().filter_map(convert).collect();
+                Ok::<_, anyhow::Error>((page, tracks))
+            })
+            .buffer_unordered(5);
+        while let Some(res) = stream.next().await {
+            let (page, tracks) = res?;
+            pages[(page - 2) as usize] = tracks;
+        }
+        for tracks in pages {
+            out.extend(tracks);
         }
         Ok(out)
     }

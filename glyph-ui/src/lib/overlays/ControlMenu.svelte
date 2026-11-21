@@ -16,6 +16,7 @@
   import Avatar from "../pages/profile/Avatar.svelte";
   import { app } from "../state.svelte";
   import { fadeEdges } from "../ui.svelte";
+  import { drag, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
   import { t, tf } from "../i18n.svelte";
   import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "./sleep.svelte";
   import { setTab } from "../settings/settings.svelte";
@@ -33,6 +34,20 @@
   const pick = (f: () => void) => () => { close(); f(); };
 
   let vw = $state(1200), vh = $state(800);
+  let pull = $state(0);
+  let sheetListEl: HTMLDivElement | undefined = $state();
+  const compact = $derived(app.compact);
+  $effect(() => { void app.controlMenu; pull = 0; });
+  const sheetTitle = $derived.by(() => {
+    switch (m?.menu) {
+      case "sort": return t("sort.title");
+      case "sleep": return t("sleep.title");
+      case "repeat": return t("tip.repeat");
+      case "shuffle": return t("tip.shuffle");
+      case "volume": return t("tip.volume-2");
+      default: return "";
+    }
+  });
   const W = 236;
   const up = $derived(!!m && m.menu !== "account" && m.y > 260);
   const left = $derived(m ? Math.max(8, Math.min(m.menu === "account" ? m.x - W : m.x, vw - W - 8)) : 0);
@@ -162,34 +177,94 @@
 
 <svelte:window bind:innerWidth={vw} bind:innerHeight={vh} />
 
+{#snippet rowItems(mobile: boolean)}
+  {#each list as r}
+    {#if r.kind === "account_head"}
+      <div class="ahead">
+        <Avatar src={r.avatar} size={mobile ? 28 : 24} flat />
+        <span class="ahandle trunc">@{r.handle}</span>
+      </div>
+    {:else if r.kind === "caption"}
+      <div class="cap">{r.text}</div>
+    {:else if r.kind === "sep"}
+      <div class="sep"></div>
+    {:else}
+      <button class="item" class:mob={mobile} class:on={r.on} class:danger={r.danger} role="menuitem" onclick={r.run}>
+        <Icon name={r.icon} size={mobile ? 18 : 15} />
+        <span class="lb trunc">{r.label}</span>
+        {#if r.on}<Icon name="check" size={mobile ? 16 : 14} color="var(--accent)" />{/if}
+      </button>
+    {/if}
+  {/each}
+{/snippet}
+
 {#if m}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="bd" onpointerdown={close} oncontextmenu={(e) => { e.preventDefault(); close(); }} onwheel={close} transition:fade|global={{ duration: 110 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
-    <div class="menu" role="menu" tabindex="-1" in:fly|global={{ y: 6, duration: 140, easing: cubicOut }} out:fly|global={{ y: 6, duration: 110, easing: cubicOut }}
-      style:left="{left}px" style:bottom={up ? `${vh - m.y}px` : undefined} style:top={up ? undefined : `${m.y}px`}
-      onpointerdown={(e) => e.stopPropagation()} oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-      <div class="menu-in scroll" use:fadeEdges={{ top: 10, bottom: 10, minOverflow: 8 }} style:max-height="{Math.min(420, up ? m.y - 8 : vh - m.y - 8)}px">
-        {#each list as r}
-          {#if r.kind === "account_head"}
-            <div class="ahead">
-              <Avatar src={r.avatar} size={24} flat />
-              <span class="ahandle trunc">@{r.handle}</span>
-            </div>
-          {:else if r.kind === "caption"}
-            <div class="cap">{r.text}</div>
-          {:else if r.kind === "sep"}
-            <div class="sep"></div>
-          {:else}
-            <button class="item" class:on={r.on} class:danger={r.danger} role="menuitem" onclick={r.run}>
-              <Icon name={r.icon} size={15} />
-              <span class="lb trunc">{r.label}</span>
-              {#if r.on}<Icon name="check" size={14} color="var(--accent)" />{/if}
-            </button>
-          {/if}
-        {/each}
+  {#if compact}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div
+      class="bs-dim"
+      transition:fade|global={{ duration: 180 }}
+      onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}
+      onpointerdown={close}
+      oncontextmenu={(e) => { e.preventDefault(); close(); }}
+      role="presentation"
+    >
+      <div
+        class="bs-panel"
+        data-part="menu"
+        style:transform="translateY({pull}px)"
+        class:settle={pull === 0}
+        in:sheetIn|global={{ duration: 260 }}
+        out:sheetOut|global={{ duration: 210 }}
+        onpointerdown={(e) => e.stopPropagation()}
+        oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        role="dialog"
+        tabindex="-1"
+      >
+        <div
+          class="bs-grab"
+          use:drag={{
+            axis: "y",
+            move: (_, dy) => (pull = Math.max(0, dy)),
+            end: (_, dy, _vx, vy) => {
+              if (shouldClose(dy, vy)) { close(); return; }
+              pull = 0;
+            },
+          }}
+        >
+          <span class="hdl"></span>
+          {#if sheetTitle}<div class="bs-title">{sheetTitle}</div>{/if}
+        </div>
+        <div
+          class="bs-list scroll"
+          bind:this={sheetListEl}
+          use:fadeEdges={{ top: 10, bottom: 10, minOverflow: 8 }}
+          use:drag={{
+            axis: "y",
+            onlyAtTop: () => (sheetListEl?.scrollTop ?? 0) <= 0,
+            move: (_, dy) => (pull = Math.max(0, dy)),
+            end: (_, dy, _vx, vy) => {
+              if (shouldClose(dy, vy)) { close(); return; }
+              pull = 0;
+            },
+          }}
+        >
+          {@render rowItems(true)}
+        </div>
       </div>
     </div>
-  </div>
+  {:else}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="bd" onpointerdown={close} oncontextmenu={(e) => { e.preventDefault(); close(); }} onwheel={close} transition:fade|global={{ duration: 110 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
+      <div class="menu" role="menu" tabindex="-1" in:fly|global={{ y: 6, duration: 140, easing: cubicOut }} out:fly|global={{ y: 6, duration: 110, easing: cubicOut }}
+        style:left="{left}px" style:bottom={up ? `${vh - m.y}px` : undefined} style:top={up ? undefined : `${m.y}px`}
+        onpointerdown={(e) => e.stopPropagation()} oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+        <div class="menu-in scroll" use:fadeEdges={{ top: 10, bottom: 10, minOverflow: 8 }} style:max-height="{Math.min(420, up ? m.y - 8 : vh - m.y - 8)}px">
+          {@render rowItems(false)}
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -207,4 +282,26 @@
   .item.danger { color: var(--danger); }
   .item.danger :global(.ic) { color: var(--danger); }
   .lb { flex: 1; text-align: left; }
+
+  .bs-dim { position: fixed; inset: 0; z-index: 90; background: rgba(0, 0, 0, .55); }
+  .bs-panel {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    max-height: min(76vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 16px));
+    border-radius: 16px 16px 0 0;
+    border-top: 1px solid rgba(255, 255, 255, .08);
+    background: hsl(0 0% 8%);
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, .6);
+    padding-bottom: max(10px, var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px));
+    display: flex; flex-direction: column; overflow: hidden; font-family: var(--font);
+  }
+  .bs-panel.settle { transition: transform .24s var(--ease); }
+  .bs-grab { flex: none; touch-action: none; }
+  .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 6px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
+  .bs-title { padding: 4px 16px 10px; font-size: 15px; font-weight: 600; color: rgba(255, 255, 255, .95); border-bottom: 1px solid rgba(255, 255, 255, .07); }
+  .bs-list { flex: 1; min-height: 0; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .bs-list .cap { padding: 8px 12px 4px; font-size: 12px; }
+  .bs-list .sep { margin: 6px 8px; }
+  .item.mob { height: 48px; padding: 0 12px; gap: 14px; border-radius: 10px; font-size: 15px; }
+  .item.mob:active { background: rgba(255, 255, 255, .09); }
+  .item.mob.on { color: #fff; font-weight: 500; }
 </style>

@@ -25,6 +25,15 @@ const DELETED: &str = "-";
 const RECENT: &str = "recent";
 const ACTIVITY: &str = "song_activity";
 const PREFERENCE: &str = "library_pref";
+pub const LIKED_CLEAR_KEY: &str = "all";
+
+fn liked_clear_at(v: Option<&Value>, fallback: u64) -> u64 {
+    v.and_then(|v| v["at"].as_u64()).unwrap_or(fallback)
+}
+
+fn is_liked_joined(j: &str) -> bool {
+    split(j).is_some_and(|(k, _)| k == kind::LIKED)
+}
 
 fn provider_str(p: ProviderId) -> String {
     serde_json::to_value(p).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
@@ -171,6 +180,9 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     }
     for (artist, feedback) in &lib.recommendation_feedback {
         push(k("recommend_feedback", artist), serde_json::json!(feedback));
+    }
+    if lib.liked_cleared_at > 0 {
+        push(k(kind::LIKED_CLEAR, LIKED_CLEAR_KEY), serde_json::json!({ "at": lib.liked_cleared_at }));
     }
     for t in lib.liked.iter().rev() {
         push(k(kind::LIKED, track_id(t)), serde_json::to_value(t).unwrap_or_default());
@@ -324,8 +336,17 @@ impl SyncState {
     pub fn changes(&self, snap: &Snapshot, now: u64) -> Vec<SyncItem> {
         let mut out = Vec::new();
         let map = snap.map();
+        let clear_key = k(kind::LIKED_CLEAR, LIKED_CLEAR_KEY);
+        let cleared_at = map.get(&clear_key).and_then(|v| v["at"].as_u64()).unwrap_or(0);
+        let liked_cleared = map.get(&clear_key).is_some_and(|v| {
+            self.known.get(&joined(&clear_key)).map(String::as_str) != Some(hash(v).as_str())
+        });
         for (key, v) in &snap.items {
-            if self.known.get(&joined(key)).map(String::as_str) != Some(hash(v).as_str()) {
+            // If Liked Songs was cleared since the last agreement, any liked
+            // song still present in `snap` was liked (or undone) after the
+            // clear and must be pushed after `liked_clear` with a newer time.
+            let force_liked = liked_cleared && key.0 == kind::LIKED;
+            if force_liked || self.known.get(&joined(key)).map(String::as_str) != Some(hash(v).as_str()) {
                 let mut value = v.clone();
                 if key.0 == kind::PLAYLIST {
                     if let Some(base) = self.known_playlists.get(&key.1) {
@@ -334,11 +355,30 @@ impl SyncState {
                         }
                     }
                 }
-                out.push(SyncItem { kind: key.0.clone(), key: key.1.clone(), value: Some(value), updated_at: now, deleted: false, rev: if key.0 == kind::PLAYLIST { self.known_playlist_revs.get(&key.1).copied().unwrap_or(0) } else { 0 } });
+                let updated_at = if key.0 == kind::LIKED_CLEAR {
+                    cleared_at
+                } else if key.0 == kind::LIKED && cleared_at > 0 {
+                    now.max(cleared_at.saturating_add(1))
+                } else {
+                    now
+                };
+                out.push(SyncItem {
+                    kind: key.0.clone(),
+                    key: key.1.clone(),
+                    value: Some(value),
+                    updated_at,
+                    deleted: false,
+                    rev: if key.0 == kind::PLAYLIST { self.known_playlist_revs.get(&key.1).copied().unwrap_or(0) } else { 0 },
+                });
             }
         }
         for (j, h) in &self.known {
             let Some(key) = split(j) else { continue };
+            // A new `liked_clear` replaces all previously liked songs with one
+            // signal; do not emit individual tombstones for them.
+            if liked_cleared && key.0 == kind::LIKED {
+                continue;
+            }
             if h != DELETED && !map.contains_key(&key) {
                 let rev = if key.0 == kind::PLAYLIST { self.known_playlist_revs.get(&key.1).copied().unwrap_or(0) } else { 0 };
                 out.push(SyncItem { kind: key.0, key: key.1, value: None, updated_at: now, deleted: true, rev });
@@ -367,6 +407,11 @@ impl SyncState {
     /// The server accepted these pushed items.
     pub fn mark_pushed(&mut self, items: &[SyncItem]) {
         for i in items {
+            if i.kind == kind::LIKED_CLEAR && !i.deleted {
+                let at = liked_clear_at(i.value.as_ref(), i.updated_at);
+                self.known.retain(|j, _| !is_liked_joined(j));
+                self.outbox.retain(|j, it| !is_liked_joined(j) || (!it.deleted && it.updated_at > at));
+            }
             self.outbox.remove(&joined(&(i.kind.clone(), i.key.clone())));
             let h = match (&i.value, i.deleted) {
                 (Some(v), false) => hash(v),
@@ -448,6 +493,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
     let mut out = Applied::default();
     let mut touched: Vec<Key> = Vec::new();
     let mut unpushed_playlists: BTreeMap<Key, (String, Vec<String>)> = BTreeMap::new();
+    let mut added_liked_in_batch: BTreeSet<String> = BTreeSet::new();
     // Auto-download switches go last: their playlist may arrive in the
     // same batch.
     let (switches, items): (Vec<&SyncItem>, Vec<&SyncItem>) = items.iter().partition(|i| i.kind == kind::AUTO_DOWNLOAD);
@@ -513,15 +559,67 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                     _ => continue,
                 }
             }
+            kind::LIKED_CLEAR => {
+                if gone {
+                    continue;
+                }
+                let at = liked_clear_at(i.value.as_ref(), i.updated_at);
+                if at > lib.liked_cleared_at {
+                    lib.liked_cleared_at = at;
+                    lib.liked.clear();
+                    lib.invalidate_liked_index();
+                    state.known.retain(|j, _| !is_liked_joined(j));
+                    state.outbox.retain(|j, it| !is_liked_joined(j) || (!it.deleted && it.updated_at > at));
+                    state.e2e.plain.retain(|j| !is_liked_joined(j));
+                    state.e2e.sealed.retain(|j| !is_liked_joined(j));
+                    state.e2e.reseal.retain(|j| !is_liked_joined(j));
+                    touched.retain(|key| key.0 != kind::LIKED);
+                    added_liked_in_batch.clear();
+                } else if at == lib.liked_cleared_at {
+                    if !added_liked_in_batch.is_empty() {
+                        lib.liked.retain(|t| !added_liked_in_batch.contains(&track_id(t)));
+                        lib.invalidate_liked_index();
+                        for id in &added_liked_in_batch {
+                            let j = joined(&(kind::LIKED.to_string(), id.clone()));
+                            state.known.remove(&j);
+                            state.e2e.plain.remove(&j);
+                            state.e2e.sealed.remove(&j);
+                            state.e2e.reseal.remove(&j);
+                        }
+                        touched.retain(|key| !(key.0 == kind::LIKED && added_liked_in_batch.contains(&key.1)));
+                        added_liked_in_batch.clear();
+                    } else {
+                        touched.push((i.kind.clone(), i.key.clone()));
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
             kind::LIKED => {
+                if !gone && lib.liked_cleared_at > 0 && i.updated_at <= lib.liked_cleared_at {
+                    let j = joined(&(kind::LIKED.to_string(), i.key.clone()));
+                    state.known.remove(&j);
+                    state.e2e.plain.remove(&j);
+                    state.e2e.sealed.remove(&j);
+                    state.e2e.reseal.remove(&j);
+                    continue;
+                }
                 lib.invalidate_liked_index();
                 let pos = lib.liked.iter().position(|t| track_id(t) == i.key);
                 match (gone, pos, from::<Track>(&i.value)) {
                     (true, Some(p), _) => {
                         lib.liked.remove(p);
+                        added_liked_in_batch.remove(&i.key);
                     }
-                    (false, Some(p), Some(t)) => lib.liked[p] = t,
-                    (false, None, Some(t)) => lib.liked.insert(0, t),
+                    (false, Some(p), Some(t)) => {
+                        lib.liked[p] = t;
+                        added_liked_in_batch.insert(i.key.clone());
+                    }
+                    (false, None, Some(t)) => {
+                        lib.liked.insert(0, t);
+                        added_liked_in_batch.insert(i.key.clone());
+                    }
                     _ => continue,
                 }
             }
@@ -707,7 +805,11 @@ pub fn merge_guest(target: &mut Library, guest: &Library) {
     if target.guest_imports.contains(&fingerprint) { return; }
     let previous = target.clone();
     let snap = snapshot(guest, &[]);
-    let items: Vec<_> = SyncState::default().changes(&snap, 0);
+    let items: Vec<_> = SyncState::default()
+        .changes(&snap, target.liked_cleared_at.saturating_add(1))
+        .into_iter()
+        .filter(|i| i.kind != kind::LIKED_CLEAR)
+        .collect();
     apply(target, &mut SyncState::default(), &items, &[]);
     // A merge keeps both sets of personal list choices.
     for item in previous.pinned { if !target.pinned.contains(&item) { target.pinned.push(item); } }
@@ -1086,5 +1188,141 @@ mod tests {
         assert_eq!(b_titles, vec!["Base", "TrackY", "TrackX"]);
         assert!(sa.changes(&snapshot(&a, &[]), 25).is_empty());
         assert!(sb.changes(&snapshot(&b, &[]), 25).is_empty());
+    }
+
+    #[test]
+    fn clear_liked_sends_one_signal_and_prevents_resurrection() {
+        let mut srv = Server::default();
+        let (mut a, mut sa) = (lib_with(&["One", "Two", "Three", "Four"]), SyncState::default());
+        let (mut b, mut sb) = (Library::default(), SyncState::default());
+
+        // Sync initial liked songs to B.
+        round(&mut srv, &mut a, &mut sa, 100);
+        round(&mut srv, &mut b, &mut sb, 110);
+        assert_eq!(b.liked.len(), 4);
+
+        // A clears Liked Songs: only ONE sync item (`liked_clear`), zero per-song tombstones.
+        a.clear_liked(200);
+        let ch = sa.changes(&snapshot(&a, &[]), 205);
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].kind, kind::LIKED_CLEAR);
+        assert!(!ch[0].deleted);
+        let ok = srv.push(&ch);
+        sa.mark_pushed(&ok);
+        assert!(sa.changes(&snapshot(&a, &[]), 206).is_empty());
+
+        // B pulls the single signal: its liked songs vanish and it echoes nothing back.
+        let applied = round(&mut srv, &mut b, &mut sb, 210);
+        assert!(applied.library_changed);
+        assert!(b.liked.is_empty());
+        assert_eq!(b.liked_cleared_at, 200);
+        assert!(sb.changes(&snapshot(&b, &[]), 215).is_empty());
+
+        // An offline/stale device pushes an old liked song from before the clear: ignored!
+        let stale_like = SyncItem {
+            kind: kind::LIKED.into(),
+            key: track_id(&test_track("One", "Artist")),
+            value: Some(serde_json::to_value(test_track("One", "Artist")).unwrap()),
+            updated_at: 150,
+            deleted: false,
+            rev: 0,
+        };
+        srv.push(&[stale_like]);
+        round(&mut srv, &mut a, &mut sa, 220);
+        round(&mut srv, &mut b, &mut sb, 221);
+        assert!(a.liked.is_empty());
+        assert!(b.liked.is_empty());
+
+        // Re-liking a previously cleared song ("Two") works and syncs to B and to a fresh device C.
+        a.toggle_like(&test_track("Two", "Artist"));
+        round(&mut srv, &mut a, &mut sa, 300);
+        round(&mut srv, &mut b, &mut sb, 310);
+        assert_eq!(b.liked.len(), 1);
+        assert_eq!(b.liked[0].title, "Two");
+
+        // Fresh device C pulls from rev 0: sees old songs, then liked_clear, then "Two".
+        let (mut c, mut sc) = (Library::default(), SyncState::default());
+        round(&mut srv, &mut c, &mut sc, 320);
+        assert_eq!(c.liked.len(), 1);
+        assert_eq!(c.liked[0].title, "Two");
+        assert_eq!(c.liked_cleared_at, 200);
+        assert!(sc.changes(&snapshot(&c, &[]), 325).is_empty());
+
+        // Individual unlike after a clear still sends a normal tombstone.
+        let two = a.liked[0].clone();
+        a.toggle_like(&two);
+        let ch = sa.changes(&snapshot(&a, &[]), 400);
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0].kind, kind::LIKED);
+        assert!(ch[0].deleted);
+        round(&mut srv, &mut a, &mut sa, 400);
+        round(&mut srv, &mut b, &mut sb, 410);
+        assert!(b.liked.is_empty());
+    }
+
+    #[test]
+    fn clear_liked_then_undo_before_sync_restores_on_all_devices() {
+        let mut srv = Server::default();
+        let (mut a, mut sa) = (lib_with(&["One", "Two"]), SyncState::default());
+        let (mut b, mut sb) = (Library::default(), SyncState::default());
+        round(&mut srv, &mut a, &mut sa, 100);
+        round(&mut srv, &mut b, &mut sb, 110);
+
+        // Clear, then immediately undo (re-like "One") BEFORE syncing.
+        let saved = a.liked.clone();
+        a.clear_liked(200);
+        a.toggle_like(&saved[0]);
+        let ch = sa.changes(&snapshot(&a, &[]), 200);
+        // Must push liked_clear FIRST, then the re-liked song with updated_at > 200.
+        assert_eq!(ch.len(), 2);
+        assert_eq!(ch[0].kind, kind::LIKED_CLEAR);
+        assert_eq!(ch[1].kind, kind::LIKED);
+        assert!(ch[1].updated_at > 200);
+        round(&mut srv, &mut a, &mut sa, 200);
+        round(&mut srv, &mut b, &mut sb, 210);
+        assert_eq!(b.liked.len(), 1);
+        assert_eq!(b.liked[0].title, saved[0].title);
+    }
+
+    #[test]
+    fn clear_liked_handles_clock_skew_reset_and_guest_merge() {
+        let mut srv = Server::default();
+        // Skewed device liked a song with timestamp 500 before another device cleared at 400.
+        let skewed = SyncItem {
+            kind: kind::LIKED.into(),
+            key: track_id(&test_track("Skewed", "Artist")),
+            value: Some(serde_json::to_value(test_track("Skewed", "Artist")).unwrap()),
+            updated_at: 500,
+            deleted: false,
+            rev: 0,
+        };
+        srv.push(&[skewed]);
+
+        let (mut a, mut sa) = (Library::default(), SyncState::default());
+        round(&mut srv, &mut a, &mut sa, 390);
+        assert_eq!(a.liked.len(), 1);
+
+        a.clear_liked(400);
+        round(&mut srv, &mut a, &mut sa, 400);
+
+        // Fresh device C pulling from rev 0 sees Skewed (rev 1) then liked_clear (rev 2) -> empty!
+        let (mut c, mut sc) = (Library::default(), SyncState::default());
+        round(&mut srv, &mut c, &mut sc, 410);
+        assert!(c.liked.is_empty());
+
+        // Reset on A while A has a brand-new local song: Skewed is dropped, local song stays.
+        a.toggle_like(&test_track("LocalNew", "Artist"));
+        sa.reset();
+        let pulled = srv.pull(0);
+        apply(&mut a, &mut sa, &pulled, &[]);
+        assert_eq!(a.liked.len(), 1);
+        assert_eq!(a.liked[0].title, "LocalNew");
+
+        // Guest merge into a cleared library still merges guest's current liked songs.
+        let mut guest = Library::default();
+        guest.toggle_like(&test_track("GuestSong", "Artist"));
+        merge_guest(&mut c, &guest);
+        assert_eq!(c.liked.len(), 1);
+        assert_eq!(c.liked[0].title, "GuestSong");
     }
 }

@@ -9,10 +9,11 @@
   import Icon from "../../components/Icon.svelte";
   import RoundPlay from "./RoundPlay.svelte";
   import { app } from "../../state.svelte";
+  import { registerListNav, scrollDomRowIntoView } from "../../state/list-nav.svelte";
   import { t, tf } from "../../i18n.svelte";
   import { listMeta } from "../../fmt";
   import { tip } from "../../ui.svelte";
-  import { listSort, listSortDir, playingFrom, setListSort, shownTracks } from "./actions";
+  import { listSort, listSortDir, playingFrom, removeShown, setListSort, shownTracks } from "./actions";
   import type { ListKey } from "../../api/types";
   let { artist }: { artist: string } = $props();
   const l = $derived<ListKey>({ kind: "artist_liked", artist });
@@ -43,6 +44,19 @@
     else if (dir === "asc") setListSort(l, "artist", "desc");
     else setListSort(l, "custom", "asc");
   }
+  let rowsEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    return registerListNav({
+      count: () => tracks.length,
+      play: (i) => {
+        const tr = tracks[i];
+        if (tr && app.allowed(tr)) app.play(tracks, i, app.listTitle(l));
+      },
+      remove: (i) => removeShown(l, i),
+      scrollTo: (i) => scrollDomRowIntoView(rowsEl, i),
+    });
+  });
+
   function toggleColSort(next: "album" | "duration") {
     if (sort !== next) setListSort(l, next, "asc");
     else if (dir === "asc") setListSort(l, next, "desc");
@@ -98,7 +112,7 @@
       </button>
       <span class="ch-more"></span>
     </div>
-    <div class="rows">
+    <div class="rows" bind:this={rowsEl}>
       {#each tracks as _, i (i)}<SongRow {tracks} index={i} from={l} context={app.listTitle(l)} selected={app.selectedRow === i} />{/each}
     </div>
   {/if}

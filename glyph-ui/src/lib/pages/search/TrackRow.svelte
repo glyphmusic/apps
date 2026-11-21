@@ -49,7 +49,7 @@
   const stop = (f: () => void) => (e: MouseEvent) => { e.stopPropagation(); f(); };
 </script>
 
-<div class="row" class:lyrics={!!lyric} class:off={blocked} class:sel={selected} class:menu={app.ctx?.track === tr} onclick={play} oncontextmenu={menu} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1">
+<div class="row" class:lyrics={!!lyric} class:off={blocked} class:sel={selected} class:menu={app.ctx?.track === tr} data-nav-row={selId} onclick={play} oncontextmenu={menu} onkeydown={(e) => e.key === "Enter" && play()} role="row" tabindex="-1">
   <Cover track={tr} size={44} radius={6} />
   <div class="tx">
     <div class="tl" class:on={playing}>
@@ -93,7 +93,7 @@
   .row { position: relative; display: flex; align-items: center; gap: 14px; padding: 6px 10px; border-radius: 8px; cursor: pointer; transition: background-color .24s ease-out; }
   .row.lyrics { padding: 8px 10px; }
   .row:hover, .row.menu { background: var(--card); transition-duration: .12s; }
-  .row.sel { background: rgba(255, 255, 255, .1); }
+  .row.sel { background: rgba(255, 255, 255, .1); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14); }
   .row.off { opacity: .4; }
   .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .tl { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--md); color: var(--text); }

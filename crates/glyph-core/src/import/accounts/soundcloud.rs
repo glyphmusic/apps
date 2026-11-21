@@ -12,6 +12,8 @@ pub struct SoundCloudLibrary {
     sc: Option<SoundCloud>,
     profile: String,
     user: tokio::sync::OnceCell<String>,
+    /// Server-read likes cached from `overview()` so `fetch()` avoids a duplicate roundtrip.
+    cached_likes: tokio::sync::OnceCell<Vec<Track>>,
     reader: Arc<dyn LinkReader>,
 }
 
@@ -39,7 +41,7 @@ fn id_of(v: &serde_json::Value) -> Option<String> {
 
 impl SoundCloudLibrary {
     pub fn new(sc: Option<SoundCloud>, profile: String, reader: Arc<dyn LinkReader>) -> Self {
-        Self { sc, profile, user: tokio::sync::OnceCell::new(), reader }
+        Self { sc, profile, user: tokio::sync::OnceCell::new(), cached_likes: tokio::sync::OnceCell::new(), reader }
     }
 
     async fn user(&self, sc: &SoundCloud) -> Result<&String> {
@@ -77,10 +79,14 @@ impl LibrarySource for SoundCloudLibrary {
 
     async fn overview(&self) -> Result<Overview> {
         let Some(sc) = &self.sc else {
-            // Through the server: reading the likes tells whether the profile exists.
-            let likes = self.reader.list(ImportInput::Url(format!("{}/likes", self.profile))).await?;
+            // Through the server: reading the likes tells whether the profile exists;
+            // keep them cached so `fetch()` finishes immediately.
+            let likes = self
+                .cached_likes
+                .get_or_try_init(|| async { Ok::<_, anyhow::Error>(self.reader.list(ImportInput::Url(format!("{}/likes", self.profile))).await?.tracks) })
+                .await?;
             let account = self.profile.trim_start_matches("https://soundcloud.com/").to_string();
-            return Ok(Overview { account, collections: vec![Collection::liked(Some(likes.tracks.len()))], notes: vec!["soundcloud_sets".into()] });
+            return Ok(Overview { account, collections: vec![Collection::liked(Some(likes.len()))], notes: vec!["soundcloud_sets".into()] });
         };
         let me = sc.resolve_url(&self.profile).await.map_err(|_| anyhow!("no public SoundCloud profile at {}", self.profile))?;
         if me["kind"].as_str() != Some("user") {
@@ -90,8 +96,11 @@ impl LibrarySource for SoundCloudLibrary {
         let _ = self.user.set(id.clone());
         let account = me["username"].as_str().unwrap_or("SoundCloud").to_string();
         let count = |k: &str| me[k].as_u64().map(|n| n as usize);
-        let own = sc.paged(&format!("/users/{id}/playlists"), 500).await.unwrap_or_default();
-        let liked = sc.paged(&format!("/users/{id}/likes/playlists"), 500).await.unwrap_or_default();
+        let own_path = format!("/users/{id}/playlists");
+        let liked_path = format!("/users/{id}/likes/playlists");
+        let (own, liked) = tokio::join!(sc.paged(&own_path, 500), sc.paged(&liked_path, 500));
+        let own = own.unwrap_or_default();
+        let liked = liked.unwrap_or_default();
         let mut collections = vec![Collection::liked(count("public_favorites_count").or(count("likes_count"))), Collection::artists(count("followings_count"))];
         collections.extend(playlists_to_collections(&own, false));
         collections.extend(playlists_to_collections(&liked, true));
@@ -99,9 +108,29 @@ impl LibrarySource for SoundCloudLibrary {
     }
 
     async fn fetch(&self, c: &Collection) -> Result<Fetched> {
+        self.fetch_with_progress(c, None, None).await
+    }
+
+    async fn fetch_with_progress(
+        &self,
+        c: &Collection,
+        progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Fetched> {
         let Some(sc) = &self.sc else {
             return match c.kind {
-                Kind::Liked => Ok(Fetched::Tracks(self.reader.list(ImportInput::Url(format!("{}/likes", self.profile))).await?.tracks)),
+                Kind::Liked => {
+                    if let Some(cached) = self.cached_likes.get() {
+                        return Ok(Fetched::Tracks(cached.clone()));
+                    }
+                    let tracks = self
+                        .reader
+                        .list_with_progress(ImportInput::Url(format!("{}/likes", self.profile)), progress, cancel)
+                        .await?
+                        .tracks;
+                    let _ = self.cached_likes.set(tracks.clone());
+                    Ok(Fetched::Tracks(tracks))
+                }
                 _ => Ok(Fetched::Tracks(Vec::new())),
             };
         };

@@ -9,6 +9,7 @@ const dec = new TextDecoder();
 
 export const SYNC_KIND = {
   LIKED: "liked",
+  LIKED_CLEAR: "liked_clear",
   PLAYLIST: "playlist",
   ALBUM: "album",
   FOLLOWED: "followed",

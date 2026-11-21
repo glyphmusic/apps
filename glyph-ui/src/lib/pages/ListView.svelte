@@ -29,8 +29,6 @@
   import Button from "../components/Button.svelte";
   import ListCover from "../components/ListCover.svelte";
   import SongRow from "../components/SongRow.svelte";
-  import Cover from "../components/Cover.svelte";
-  import SongTitle from "../components/SongTitle.svelte";
   import DownloadBadge from "../components/DownloadBadge.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -39,18 +37,22 @@
   import LikedByArtist from "./lists/LikedByArtist.svelte";
   import RecentArtistRow from "./lists/RecentArtistRow.svelte";
   import RoundPlay from "./lists/RoundPlay.svelte";
+  import ListRecs from "./lists/ListRecs.svelte";
+  import ListPickBar from "./lists/ListPickBar.svelte";
   import { cachedAlbumKind } from "./lists/albumMeta.svelte";
+  import { clampDragSlot, dragShift } from "./lists/list-drag";
   import { app } from "../state.svelte";
+  import { registerListNav, scrollVirtualRowIntoView } from "../state/list-nav.svelte";
   import { onWeb } from "../web";
   import { backend } from "../api/backend";
   import { paletteFromImage } from "../glow";
   import { t, tf } from "../i18n.svelte";
   import { fx, ink, pageChrome, tip } from "../ui.svelte";
   import { listMeta } from "../fmt";
-  import { listId, rating, trackKey, type ListKey, type Track } from "../api/types";
+  import { listId, trackKey, type ListKey, type Track } from "../api/types";
   import {
     albumSkeletonCount, downloadTip, downloadsView, listSort, listSortDir, playShuffled, playingFrom, playlistX,
-    removeDownloads, scopeKey, setListSort, shownTracks, sortId, openNameDialog,
+    removeDownloads, removeShown, scopeKey, setListSort, shownTracks, sortId, openNameDialog,
   } from "./lists/actions";
 
   const PITCH = 56;
@@ -59,11 +61,10 @@
   const tracks = $derived(l ? shownTracks(l) : []);
   const title = $derived(l ? app.listTitle(l) : "");
   const has = $derived(tracks.length > 0);
-  // Select mode (Liked Songs, own playlists): rows are picked, then removed together.
-  const pickable = $derived(app.canPick(l) && l?.kind !== "artist_liked");
+  // Select mode: multi-select on any track list (queue, playlist, download, and bulk remove where editable).
+  const canRemovePicked = $derived(app.canPick(l));
+  const pickable = $derived(!!l && l.kind !== "artist_liked" && l.kind !== "recent");
   const pickMode = $derived(app.isPicking(l));
-  const pickedN = $derived(pickMode ? tracks.filter((x) => app.isPicked(x)).length : 0);
-  const allPicked = $derived(pickMode && pickedN === tracks.length && tracks.length > 0);
   // Another list, or leaving it: select mode ends.
   $effect(() => { void (l && listId(l)); return () => app.stopPicking(); });
   const own = $derived(l?.kind === "playlist" ? playlistX(l.id) : undefined);
@@ -72,31 +73,6 @@
   const dir = $derived(l ? listSortDir(l) : "asc");
   const total = $derived(tracks.reduce((s, x) => s + (x.duration_ms ?? 0), 0));
   const noCover = $derived(l?.kind === "liked" || l?.kind === "recent" || l?.kind === "downloads");
-
-  // Bottom recommended songs for own playlists (same suggestion engine as AddSongsPanel).
-  let rawRecs = $state<Track[]>([]);
-  let recsLoading = $state(false);
-  let recEpoch = $state(0);
-  // Settings > Playback > Content "Song suggestions" off: no recommendations at all.
-  const ownId = $derived(app.config.ui.recommendations !== false ? (own?.id ?? "") : "");
-  const haveKeys = $derived(new Set((own?.tracks ?? []).map(trackKey)));
-  $effect(() => {
-    const pid = ownId;
-    void recEpoch;
-    rawRecs = [];
-    if (!pid) { recsLoading = false; return; }
-    let alive = true;
-    recsLoading = true;
-    backend().call<Track[]>("add_suggestions", { id: pid }).then((v) => {
-      if (!alive) return;
-      rawRecs = (v ?? []).filter((x) => app.allowed(x));
-      recsLoading = false;
-    }).catch(() => { if (alive) recsLoading = false; });
-    return () => { alive = false; };
-  });
-  const recTracks = $derived(rawRecs.filter((x) => !haveKeys.has(trackKey(x))).slice(0, 6));
-  function addRec(tr: Track) { if (own) app.addToPlaylist(own.id, [tr]); }
-  function refreshRecs() { recEpoch++; }
 
   let lvW = $state(900);
   const narrow = $derived(lvW < 540);
@@ -369,28 +345,51 @@
   // ---- drag to reorder (own playlists, own order, unfiltered) ----
   const reorder = $derived(l?.kind === "playlist" && sort === "custom" && !q ? l.id : null);
   let listEl: HTMLDivElement | undefined = $state();
-  let drag = $state<{ from: number; slot: number; x: number; y: number; dy: number; track: Track } | null>(null);
+  let drag = $state<{ from: number; slot: number; left: number; width: number; y: number; dy: number; track: Track } | null>(null);
   let settle = $state(false);
-  function shift(i: number): number {
-    if (!drag || i === drag.from) return 0;
-    const { from, slot } = drag;
-    if (from < slot && i > from && i <= slot) return -PITCH;
-    if (slot < from && i >= slot && i < from) return PITCH;
-    return 0;
-  }
+  const shift = (i: number) => dragShift(i, drag, PITCH);
   function slotAt(y: number): number {
-    const top = listEl?.getBoundingClientRect().top ?? 0;
-    return Math.max(0, Math.min(tracks.length - 1, Math.floor((y - top) / PITCH)));
+    const top = listEl?.firstElementChild?.getBoundingClientRect().top ?? listEl?.getBoundingClientRect().top ?? 0;
+    return clampDragSlot(y, top, tracks.length, PITCH);
   }
+
+  // ---- keyboard navigation (↑ / ↓ / Enter / Delete) ----
+  $effect(() => {
+    if (!l || l.kind === "artist_liked") return;
+    return registerListNav({
+      count: () => visibleTracks.length,
+      play: (i) => {
+        const tr = visibleTracks[i];
+        if (tr && app.allowed(tr)) app.play(visibleTracks, i, title);
+      },
+      remove: l.kind === "album" ? undefined : (i) => {
+        if (recent) {
+          const r = recentFiltered?.rows.find((x) => x.kind === "song" && x.at === i);
+          if (r && r.kind === "song") removeShown(l, r.origAt);
+          return;
+        }
+        const entry = filteredTracks[i];
+        if (entry) removeShown(l, entry.idx);
+      },
+      togglePick: (i, shiftKey) => {
+        if (!pickMode || recent) return;
+        app.togglePickedAt(visibleTracks, i, shiftKey);
+      },
+      isPicking: () => pickMode,
+      scrollTo: (i) => scrollVirtualRowIntoView(listEl, i, PITCH),
+    });
+  });
   function startDrag(i: number, e: PointerEvent) {
     if (!reorder) return;
+    const track = tracks[i];
+    if (!track) return;
     const x0 = e.clientX, y0 = e.clientY;
-    const rowTop = (e.currentTarget as HTMLElement).getBoundingClientRect().top;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     let live = false;
     const move = (ev: PointerEvent) => {
       if (!live && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
       if (!live) { live = true; app.ctx = null; }
-      drag = { from: i, slot: slotAt(ev.clientY), x: ev.clientX, y: ev.clientY, dy: y0 - rowTop, track: tracks[i] };
+      drag = { from: i, slot: slotAt(ev.clientY), left: rect.left, width: rect.width, y: ev.clientY, dy: y0 - rect.top, track };
     };
     const up = (ev: PointerEvent) => {
       removeEventListener("pointermove", move);
@@ -404,10 +403,14 @@
       const r = listEl?.getBoundingClientRect();
       const inside = ev.type === "pointerup" && !!r && ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top - PITCH && ev.clientY <= r.bottom + PITCH;
       const { from, slot } = drag;
-      settle = true;
-      drag = null;
-      if (inside && from !== slot && reorder) app.movePlaylistItem(reorder, from, slot);
-      requestAnimationFrame(() => requestAnimationFrame(() => (settle = false)));
+      if (inside && from !== slot && reorder) {
+        settle = true;
+        drag = null;
+        app.movePlaylistItem(reorder, from, slot);
+        requestAnimationFrame(() => requestAnimationFrame(() => (settle = false)));
+      } else {
+        drag = null;
+      }
     };
     addEventListener("pointermove", move);
     addEventListener("pointerup", up);
@@ -455,58 +458,7 @@
 
 {#snippet recsSection()}
   {#if own && !q && app.config.ui.recommendations !== false}
-    <section class="recs" aria-label={t("playlist.recs.title")}>
-      <div class="recs-head">
-        <div class="recs-ht">
-          <h2 class="recs-title">{t("playlist.recs.title")}</h2>
-          <p class="recs-sub">{t("playlist.recs.sub")}</p>
-        </div>
-        <div class="recs-acts">
-          <Button kind={adding ? "primary" : "default"} icon="circle-plus" onclick={addSongs}>{t("add.title")}</Button>
-          <IconButton name="refresh-cw" size={15} box={32} label={t("plugins.refresh")} onclick={refreshRecs} />
-        </div>
-      </div>
-      <SkeletonSwap loading={recsLoading && !recTracks.length}>
-        {#snippet skeleton()}
-          <div class="recs-sk" aria-busy="true">
-            {#each Array(4) as _, i}
-              <div class="rec-row sk-rec">
-                <Skeleton w={40} h={40} radius={6} id="recs-sk-c{i}" />
-                <span class="rec-tx sk-tx">
-                  <span style:width="{SK_TW[i % 6] * 100}%"><Skeleton w="100%" h={12} radius={4} id="recs-sk-t{i}" /></span>
-                  <span style:width="{SK_AW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="recs-sk-a{i}" /></span>
-                </span>
-                {#if showAlbumCol}
-                  <span class="rec-al"><span style:width="{SK_ALW[i % 6] * 100}%"><Skeleton w="100%" h={10} radius={4} id="recs-sk-al{i}" /></span></span>
-                {/if}
-                <Skeleton w={56} h={28} radius={99} id="recs-sk-b{i}" />
-              </div>
-            {/each}
-          </div>
-        {/snippet}
-        {#if recTracks.length}
-          <div class="recs-list">
-            {#each recTracks as tr, i (`${trackKey(tr)}:${i}`)}
-              <div class="rec-row" role="row" tabindex="-1" onclick={() => app.play(recTracks, i)} onkeydown={(e) => e.key === "Enter" && app.play(recTracks, i)}>
-                <Cover track={tr} size={40} radius={6} />
-                <span class="rec-tx">
-                  <span class="rec-tl"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
-                  <span class="rec-ar">
-                    <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }}>{tr.artist}</button>
-                  </span>
-                </span>
-                {#if showAlbumCol}
-                  <span class="rec-al trunc">
-                    {#if tr.album}<button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openAlbum(tr.album!, tr.artist, [], tr); }}>{tr.album}</button>{/if}
-                  </span>
-                {/if}
-                <button type="button" class="rec-add" onclick={(e) => { e.stopPropagation(); addRec(tr); }}>{t("playlist.recs.add")}</button>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </SkeletonSwap>
-    </section>
+    <ListRecs {own} {showAlbumCol} {adding} onaddsongs={addSongs} />
   {/if}
 {/snippet}
 
@@ -534,14 +486,7 @@
 {#snippet listBody()}
   {#if !recent && !empty && !filterEmpty}
     {#if pickMode && l && !albumLoading}
-      <div class="pickbar" role="toolbar">
-        <Button icon="x" onclick={() => app.stopPicking()}>{t("pick.done")}</Button>
-        <span class="pick-n">{tf("pick.n", { n: pickedN })}</span>
-        <Button kind="text" onclick={() => app.pickAll(tracks)}>{t(allPicked ? "pick.none" : "pick.all")}</Button>
-        <span class="flex1"></span>
-        {#if l.kind === "liked"}<Button kind="text" icon="trash-2" onclick={() => app.clearLiked()}>{t("liked.clear")}</Button>{/if}
-        <Button kind="danger" icon="trash-2" disabled={!pickedN} onclick={() => app.removePicked(l)}>{t("pick.remove")}</Button>
-      </div>
+      <ListPickBar list={l} tracks={visibleTracks} canRemove={canRemovePicked} />
     {/if}
     <div class="colwrap" bind:this={colHeadEl}>
       {@render colHead(false)}
@@ -564,7 +509,7 @@
         </EmptyState>
       </div>
     {:else if recent}
-      <div class="rows">
+      <div class="rows" bind:this={listEl}>
         <VirtualRows count={recentRows.length} pitch={PITCH} overscan={4}>
           {#snippet row(i)}
             {@const r = recentRows[i]}
@@ -581,7 +526,8 @@
             <div class="slot">
               <div class="mover" class:lifted={drag?.from === entry.idx} style:transform="translateY({shift(entry.idx)}px)">
                 <SongRow tracks={visibleTracks} index={i} fromIndex={entry.idx} number={entry.idx + 1} from={l} album={l.kind !== "album" || !!author} context={title} selected={app.selectedRow === i}
-                  draggable={!!reorder && !pickMode} ondragstart={(e) => startDrag(entry.idx, e)} picking={pickMode} picked={pickMode && app.isPicked(entry.track)} />
+                  draggable={!!reorder && !pickMode} ondragstart={(e) => startDrag(entry.idx, e)} picking={pickMode} picked={pickMode && app.isPicked(entry.track)}
+                  onpick={(e) => app.togglePickedAt(visibleTracks, i, e.shiftKey)} />
               </div>
             </div>
           {/snippet}
@@ -734,14 +680,8 @@
   </div>
 
   {#if drag}
-    <!-- lists.rs SongDrag: w 420, h 56, px 10, gap 14, radius 8, hsla(0,0,.16), 1 px white 10 %. -->
-    <div class="dragview" style:left="{drag.x - 24}px" style:top="{drag.y - drag.dy}px">
-      <Icon name="grip-vertical" size={14} color="var(--text)" />
-      <Cover track={drag.track} size={40} radius={6} />
-      <span class="dt">
-        <span class="dtt"><SongTitle rating={rating(drag.track)}>{drag.track.title}</SongTitle></span>
-        <span class="dta trunc">{drag.track.artist}</span>
-      </span>
+    <div class="dragview" style:left="{drag.left}px" style:top="{drag.y - drag.dy}px" style:width="{drag.width}px">
+      <SongRow tracks={[drag.track]} index={0} number={drag.from + 1} album={l.kind !== "album" || !!author} lifted />
     </div>
   {/if}
 {/if}
@@ -750,16 +690,17 @@
   .lv { display: flex; flex-direction: column; min-width: 0; padding-bottom: 20px; }
 
   /* Sticky compact bar on scroll (height 0 anchor avoids any flow shift). */
-  .pin-anchor { position: sticky; top: 0; z-index: 20; height: 0; overflow: visible; margin: 0 calc(-1 * min(24px, var(--page-x))); }
-  .pin-bar { border-radius: 14px; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, .52); animation: fade-in .14s ease-out; transition: background-color .35s ease-out; }
-  .pin-top { height: 56px; padding: 0 min(24px, var(--page-x)); display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .pin-anchor { position: sticky; top: 0; z-index: 20; height: 0; overflow: visible; margin: 0 calc(-1 * var(--page-x)); }
+  .pin-bar { border-radius: 14px; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, .55), inset 0 -1px 0 rgba(255, 255, 255, .06); animation: pin-drop .14s var(--ease); }
+  @keyframes pin-drop { from { transform: translateY(-6px); } to { transform: none; } }
+  .pin-top { height: 56px; padding: 0 var(--page-x); display: flex; align-items: center; gap: 12px; min-width: 0; }
   .pin-title { font-size: calc(18px * var(--k)); font-weight: 700; color: var(--text); min-width: 0; }
   .pin-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 160px; height: 26px; padding: 0 9px; border-radius: 99px; background: #202024; font-size: var(--xs); color: var(--text); }
   .pin-chip:hover { background: #2c2c32; }
-  .pin-cols { padding: 0 min(24px, var(--page-x)); border-top: 1px solid rgba(255, 255, 255, .08); }
+  .pin-cols { padding: 0 var(--page-x); border-top: 1px solid rgba(255, 255, 255, .08); }
 
   /* Top Spotify-style hero */
-  .hero { position: relative; isolation: isolate; margin: -12px -24px 0; padding: 20px 24px 16px; border-radius: 14px 14px 0 0; display: flex; flex-direction: column; gap: 18px; }
+  .hero { position: relative; isolation: isolate; margin: -12px calc(-1 * var(--page-x)) 0; padding: 20px var(--page-x) 16px; border-radius: 14px 14px 0 0; display: flex; flex-direction: column; gap: 18px; }
   .hero-bg { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 0; transition: opacity .42s ease-out; }
   .hero-base.off { opacity: 0; }
   .hero-tint { opacity: 0; }
@@ -803,9 +744,6 @@
 
   /* Column headers aligned pixel-for-pixel with SongRow */
   .colwrap { margin-top: 6px; }
-  /* Select mode bar: stays at the top while the rows scroll under it. */
-  .pickbar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 8px; margin: 10px 0 0; padding: 8px 10px; border-radius: 12px; background: #161618; }
-  .pick-n { font-size: var(--md); font-weight: 600; color: var(--text); padding: 0 4px; }
   .colhead { container-type: inline-size; display: flex; align-items: center; gap: 14px; height: 34px; padding: 0 10px; border-bottom: 1px solid rgba(255, 255, 255, .08); font-size: 12px; font-weight: 500; color: var(--faint); min-width: 0; }
   .colhead.pinned { border-bottom: 0; }
   .colhead.hidden { visibility: hidden; }
@@ -831,33 +769,10 @@
   .sk-du { flex: none; width: 40px; display: flex; align-items: center; }
   .sk-more { flex: none; width: 28px; }
 
-  /* Bottom Recommended section for own playlists */
-  .recs { margin-top: 28px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, .08); display: flex; flex-direction: column; gap: 12px; }
-  .recs-head { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 0 10px; }
-  .recs-ht { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-  .recs-title { margin: 0; font-size: calc(18px * var(--k)); font-weight: 700; color: var(--text); }
-  .recs-sub { margin: 0; font-size: var(--sm); color: var(--dim); }
-  .recs-acts { display: flex; align-items: center; gap: 8px; flex: none; }
-  .recs-sk { display: flex; flex-direction: column; }
-  .sk-rec { cursor: default; pointer-events: none; }
-  .sk-rec:hover { background: none; }
-  .recs-list { display: flex; flex-direction: column; }
-  .rec-row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 10px; border-radius: 8px; cursor: pointer; transition: background-color .12s ease-out; min-width: 0; }
-  .rec-row:hover { background: rgba(255, 255, 255, .05); }
-  .rec-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .rec-tl { font-size: var(--md); color: var(--text); min-width: 0; }
-  .rec-ar { display: flex; align-items: center; min-width: 0; font-size: var(--sm); color: var(--dim); }
-  .rec-al { flex: 0 1 200px; width: 200px; min-width: 0; display: flex; font-size: var(--sm); color: var(--faint); }
-  .rec-add { flex: none; height: 30px; padding: 0 14px; border-radius: 99px; background: #222226; font-size: var(--xs); font-weight: 600; color: var(--text); transition: background-color .12s ease-out, transform .12s ease-out; }
-  .rec-add:hover { background: #303036; }
-  .rec-add:active { transform: scale(.96); }
-  .slot { position: relative; height: 56px; content-visibility: auto; contain-intrinsic-size: auto 56px; }
+  .slot { position: relative; height: 56px; }
   .mover { position: absolute; left: 0; right: 0; top: 0; transition: transform .18s var(--ease); }
   .settle .mover { transition: none; }
   .mover.lifted { opacity: 0; }
-  .dragging { cursor: grabbing; }
-  .dragview { position: fixed; z-index: 60; width: 420px; height: 56px; padding: 0 10px; display: flex; align-items: center; gap: 14px; border-radius: 8px; background: hsl(0 0% 18%); color: var(--text); cursor: grabbing; pointer-events: none; animation: fade-in .12s ease-out; }
-  .dt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  .dtt { font-size: var(--md); min-width: 0; }
-  .dta { font-size: var(--sm); color: var(--dim); }
+  .dragging, .dragging :global(*) { cursor: grabbing; }
+  .dragview { position: fixed; z-index: 60; pointer-events: none; }
 </style>

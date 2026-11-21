@@ -7,6 +7,7 @@
   import { t } from "../i18n.svelte";
   import { fadeEdges, pageChrome } from "../ui.svelte";
   import ErrorCard from "../components/ErrorCard.svelte";
+  import OverlayScrollbar from "./OverlayScrollbar.svelte";
   import Home from "../pages/Home.svelte";
   import Search from "../pages/Search.svelte";
   import Library from "../pages/Library.svelte";
@@ -45,12 +46,14 @@ ${e.stack ?? ""}`.trim() : String(e); }
     <div class="scroll page-scroll" bind:this={scroller} id="main-scroll" use:fadeEdges={{ top: pageChrome.stickyTop ? 0 : 28, bottom: 52, active: !app.compact }}>
       {#key key}<div class="pg" in:fade={{ duration: 200 }}><svelte:boundary onerror={report}><Current />{#snippet failed(e, reset)}{@render broken(e, reset)}{/snippet}</svelte:boundary></div>{/key}
     </div>
+    {#if !app.compact}<OverlayScrollbar el={scroller} />{/if}
   </div>
 {/if}
 
 <style>
   .broken { min-height: 60vh; display: grid; place-items: center; padding: 24px; }
   .fill, .frame { position: relative; width: 100%; height: 100%; }
-  .page-scroll { position: absolute; inset: 0; }
+  .page-scroll { position: absolute; inset: 0; scrollbar-width: none; -ms-overflow-style: none; }
+  .page-scroll::-webkit-scrollbar { display: none; width: 0; height: 0; }
   .pg { min-height: 100%; padding: var(--page-top) var(--page-x) calc(var(--gap) * 3); }
 </style>

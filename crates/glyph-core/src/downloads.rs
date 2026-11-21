@@ -306,8 +306,10 @@ impl Downloads {
     }
 
     pub async fn refresh(self: &std::sync::Arc<Self>, http: &reqwest::Client, old: Entry, url: &str, server: Option<&crate::server_client::ServerClient>) -> Result<()> {
-        let request = http.head(url);
-        let mut request = server.map(|s| s.authorize_url(http.head(url), url)).unwrap_or(request);
+        let mut request = match server {
+            Some(s) => s.authorize_url_async(http.head(url), url).await,
+            None => http.head(url),
+        };
         if let Some(etag) = &old.revision.etag { request = request.header("if-none-match", etag); }
         else if let Some(modified) = &old.revision.modified { request = request.header("if-modified-since", modified); }
         let response = request.timeout(Duration::from_secs(15)).send().await?;
@@ -531,6 +533,14 @@ impl Downloads {
 
     /// Copies `src` into the folder as `<name>.<ext>` and records it for `t`.
     pub fn store_file(&self, t: &Track, provider: ProviderId, src: &Path, ext: &str) -> Result<PathBuf> {
+        let path = self.store_file_unflushed(t, provider, src, ext)?;
+        self.save();
+        Ok(path)
+    }
+
+    /// Same as [`Self::store_file`] without immediately rewriting `index.json`;
+    /// call [`Self::flush_index`] once after a batch import to avoid O(N²) disk writes.
+    pub(crate) fn store_file_unflushed(&self, t: &Track, provider: ProviderId, src: &Path, ext: &str) -> Result<PathBuf> {
         let len = std::fs::metadata(src)?.len();
         if len == 0 || len > MAX_BYTES {
             bail!("unusable source file");
@@ -547,8 +557,12 @@ impl Downloads {
         let entry = Entry { track: t.clone(), file: name, provider, bytes: len, ts: now(),
             revision: Revision { sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality(), ..Default::default() } };
         self.map.lock().unwrap().insert(track_key(t), entry);
-        self.save();
         Ok(path)
+    }
+
+    /// Persists batched index updates (see [`Self::store_file_unflushed`]).
+    pub(crate) fn flush_index(&self) {
+        self.save();
     }
 
     /// Fetches `url` into the folder and records it for `t`.
@@ -557,9 +571,171 @@ impl Downloads {
             bail!("refusing non-HTTPS download URL");
         }
         std::fs::create_dir_all(self.path())?;
-        let request = server.map(|s| s.authorize_url(http.get(url),url)).unwrap_or_else(|| http.get(url));
+        if is_youtube_high_download(url) {
+            return self.fetch_ranged(http, t, provider, url, server).await;
+        }
+        let request = match server {
+            Some(s) => s.authorize_url_async(http.get(url), url).await,
+            None => http.get(url),
+        };
         let resp = request.timeout(Duration::from_secs(15 * 60)).send().await?.error_for_status()?;
         self.save_response(resp, t, provider).await
+    }
+
+    /// Parallel 1 MiB byte-range download for `/v1/download/youtube/*?quality=high`.
+    ///
+    /// Upstream googlevideo throttles single non-ranged GETs to playback pace
+    /// (~25-35 KB/s), and Cloudflare strips `Content-Length` on streamed 200
+    /// misses. Ranged 206 requests bypass the throttle (2-5 MB/s) and carry
+    /// the exact total length in `Content-Range` on the very first response.
+    async fn fetch_ranged(
+        &self,
+        http: &reqwest::Client,
+        t: &Track,
+        provider: ProviderId,
+        url: &str,
+        server: Option<&crate::server_client::ServerClient>,
+    ) -> Result<PathBuf> {
+        use std::io::Seek;
+        const RANGE_PART: u64 = 1024 * 1024;
+        const RANGE_PARALLEL: usize = 4;
+
+        let started = std::time::Instant::now();
+        let transfer = glyph_protocol::network::Transfer::start();
+        let first_req = match server {
+            Some(s) => s.authorize_url_async(http.get(url), url).await,
+            None => http.get(url),
+        };
+        let resp = first_req
+            .header(reqwest::header::RANGE, format!("bytes=0-{}", RANGE_PART - 1))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await?
+            .error_for_status()?;
+        if resp.status() == reqwest::StatusCode::OK {
+            return self.save_response(resp, t, provider).await;
+        }
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            bail!("expected a partial download, got HTTP {}", resp.status());
+        }
+        let content_range = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| anyhow::anyhow!("missing Content-Range header"))?;
+        let (start, end, total) = parse_content_range(content_range)
+            .ok_or_else(|| anyhow::anyhow!("invalid Content-Range header"))?;
+        if start != 0 || total == 0 || total > MAX_BYTES {
+            bail!("unexpected range bounds");
+        }
+        let etag = resp.headers().get("etag").and_then(|h| h.to_str().ok()).map(str::to_string);
+        let modified = resp.headers().get("last-modified").and_then(|h| h.to_str().ok()).map(str::to_string);
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if mime.starts_with("text/") || mime.contains("json") {
+            bail!("server returned a document instead of audio");
+        }
+        report(|p| p.set_total(total));
+        let ext = extension(&mime, resp.url().path());
+        let (name, part, file) = self.reserve_name(t, ext)?;
+        file.set_len(total)?;
+        let mut out = PendingFile::new(file, part);
+        let mut first_len = 0u64;
+        let mut body = resp.bytes_stream();
+        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), body.next()).await? {
+            let chunk = chunk?;
+            transfer.progress();
+            first_len += chunk.len() as u64;
+            if first_len > end + 1 {
+                bail!("range response exceeded requested length");
+            }
+            out.file.as_mut().unwrap().write_all(&chunk)?;
+            report(|p| p.add(chunk.len() as u64));
+        }
+        if first_len != end + 1 {
+            bail!("download cut off");
+        }
+        if end + 1 < total {
+            let ranges: Vec<(u64, u64)> = ((end + 1)..total)
+                .step_by(RANGE_PART as usize)
+                .map(|from| (from, (from + RANGE_PART).min(total) - 1))
+                .collect();
+            let transfer_ref = &transfer;
+            let mut parts = futures::stream::iter(ranges)
+                .map(|(from, to)| async move {
+                    let req = match server {
+                        Some(s) => s.authorize_url_async(http.get(url), url).await,
+                        None => http.get(url),
+                    };
+                    let resp = req
+                        .header(reqwest::header::RANGE, format!("bytes={from}-{to}"))
+                        .timeout(Duration::from_secs(60))
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                        bail!("expected HTTP 206 for range, got {}", resp.status());
+                    }
+                    let cr = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_content_range)
+                        .ok_or_else(|| anyhow::anyhow!("invalid Content-Range on range part"))?;
+                    if cr != (from, to, total) {
+                        bail!("range response changed during download");
+                    }
+                    let want = (to - from + 1) as usize;
+                    let mut buf = Vec::with_capacity(want);
+                    let mut stream = resp.bytes_stream();
+                    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), stream.next()).await? {
+                        let chunk = chunk?;
+                        transfer_ref.progress();
+                        if buf.len() + chunk.len() > want {
+                            bail!("range part exceeded requested length");
+                        }
+                        buf.extend_from_slice(&chunk);
+                        report(|p| p.add(chunk.len() as u64));
+                    }
+                    if buf.len() != want {
+                        bail!("download cut off");
+                    }
+                    Ok::<_, anyhow::Error>((from, buf))
+                })
+                .buffer_unordered(RANGE_PARALLEL);
+            while let Some(part) = parts.next().await {
+                let (from, buf) = part?;
+                let writer = out.file.as_mut().unwrap();
+                writer.seek(std::io::SeekFrom::Start(from))?;
+                writer.write_all(&buf)?;
+            }
+        }
+        glyph_protocol::network::observe(total, started.elapsed());
+        let path = self.path().join(&name);
+        out.commit(&path)?;
+        let sha256 = digest_file(&path)?;
+        let entry = Entry {
+            track: t.clone(),
+            file: name,
+            provider,
+            bytes: total,
+            ts: now(),
+            revision: Revision {
+                etag,
+                modified,
+                sha256: Some(sha256),
+                checked_at: now(),
+                hashed_at: now(),
+                quality: AudioQuality::High,
+            },
+        };
+        self.map.lock().unwrap().insert(track_key(t), entry);
+        self.save();
+        Ok(path)
     }
 
     async fn save_response(&self, resp: reqwest::Response, t: &Track, provider: ProviderId) -> Result<PathBuf> {
@@ -572,13 +748,15 @@ impl Downloads {
         if resp.content_length().is_some_and(|n| n > MAX_BYTES) {
             bail!("file too large");
         }
-        let expected = resp.content_length();
-        if let Some(n) = expected {
-            report(|p| p.set_total(n));
-        }
         let quality = if resp.url().path().starts_with("/v1/download/") && resp.url().query_pairs().any(|(k, v)| k == "quality" && v == "high") {
             AudioQuality::High
         } else { job_quality() };
+        let expected = resp.content_length();
+        // Transcoded or chunked responses omit Content-Length; seed an estimate
+        // from track duration so the UI leaves "Preparing download" as soon as
+        // headers arrive instead of staying indeterminate for the whole transfer.
+        let mut estimated = expected.unwrap_or_else(|| estimated_bytes(t.duration_ms, quality));
+        report(|p| p.set_total(estimated));
         let mime = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
         if mime.starts_with("text/") || mime.contains("json") {
             bail!("server returned a document instead of audio");
@@ -600,11 +778,18 @@ impl Downloads {
             }
             out.file.as_mut().unwrap().write_all(&chunk)?;
             digest.update(&chunk);
+            if expected.is_none() && bytes.saturating_mul(100) >= estimated.saturating_mul(95) {
+                estimated = (bytes.saturating_mul(100) / 95).max(bytes.saturating_add(64 * 1024));
+                report(|p| p.set_total(estimated));
+            }
             report(|p| p.add(chunk.len() as u64));
         }
         if expected.is_some_and(|n| n != bytes) { bail!("download cut off"); }
         if bytes == 0 {
             bail!("empty file");
+        }
+        if expected.is_none() {
+            report(|p| p.finish());
         }
         glyph_protocol::network::observe(bytes, started.elapsed());
         let path = self.path().join(&name);
@@ -661,6 +846,78 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn is_youtube_high_download(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
+    if !parsed.path().contains("/v1/download/youtube/") {
+        return false;
+    }
+    parsed.query_pairs().find(|(k, _)| k == "quality").is_none_or(|(_, v)| v == "high")
+}
+
+fn parse_content_range(header: &str) -> Option<(u64, u64, u64)> {
+    let (bounds, total) = header.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = bounds.split_once('-')?;
+    let (start, end, total) = (start.parse().ok()?, end.parse().ok()?, total.parse().ok()?);
+    (start <= end && end < total).then_some((start, end, total))
+}
+
+fn estimated_bytes(duration_ms: Option<u64>, quality: AudioQuality) -> u64 {
+    let kbps: u64 = match quality.effective() {
+        AudioQuality::Low => 48,
+        AudioQuality::Standard | AudioQuality::Auto => 96,
+        AudioQuality::High => 128,
+    };
+    let ms = duration_ms.filter(|&d| d > 0).unwrap_or(180_000);
+    // bytes ≈ ms * kbps / 8 (with a small floor so short tracks still have a valid total).
+    (ms.saturating_mul(kbps) / 8).max(64 * 1024)
+}
+
+/// Checks `glyph-audio`'s persistent `audio-ranges` cache for a **complete**
+/// cached playback file matching one of `urls`. Returns `(path, ext)` only
+/// when the manifest confirms `[0, total)` is present on disk.
+pub(crate) fn cached_audio_range(dir: &Path, urls: &[String]) -> Option<(PathBuf, &'static str)> {
+    use sha2::{Digest, Sha256};
+    for url in urls {
+        let hash = Sha256::digest(url.as_bytes());
+        let key: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let audio = dir.join(format!("{key}.audio"));
+        let manifest_path = audio.with_extension("json");
+        let Ok(raw) = std::fs::read(&manifest_path) else { continue };
+        let Ok((total, ranges)) = serde_json::from_slice::<(u64, Vec<(u64, u64)>)>(&raw) else { continue };
+        if total == 0 || total > MAX_BYTES || ranges != [(0, total)] {
+            continue;
+        }
+        if std::fs::metadata(&audio).is_ok_and(|m| m.is_file() && m.len() == total) {
+            let ext = sniff_extension(&audio);
+            return Some((audio, ext));
+        }
+    }
+    None
+}
+
+fn sniff_extension(path: &Path) -> &'static str {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let Ok(mut f) = std::fs::File::open(path) else { return "mp3" };
+    let Ok(n) = f.read(&mut head) else { return "mp3" };
+    let b = &head[..n];
+    if b.len() >= 8 && &b[4..8] == b"ftyp" {
+        "m4a"
+    } else if b.starts_with(b"OggS") {
+        "ogg"
+    } else if b.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        "webm"
+    } else if b.starts_with(b"fLaC") {
+        "flac"
+    } else if b.len() >= 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WAVE" {
+        "wav"
+    } else if b.len() >= 2 && b[0] == 0xff && (b[1] & 0xf6) == 0xf0 {
+        "aac"
+    } else {
+        "mp3"
+    }
 }
 
 /// File extension from the content type, else from the URL path.
@@ -1000,5 +1257,113 @@ mod tests {
         assert!(!dir.join(&name).exists());
         assert!(d2.tracks().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn chunked_download_reports_progress_without_content_length() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let d = Downloads::load(dir.path().to_path_buf());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let body = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: audio/mp4\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "4\r\nabcd\r\n",
+                "4\r\nefgh\r\n",
+                "0\r\n\r\n"
+            );
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        let job = Job { progress: Arc::default(), quality: AudioQuality::Standard };
+        let prog = job.progress.clone();
+        let mut song = track("Chunked");
+        song.duration_ms = Some(10_000);
+        let response = reqwest::Client::new().get(format!("http://{address}")).send().await.unwrap();
+        let path = run_job(job, d.save_response(response, &song, ProviderId::YouTube)).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
+        assert_eq!(prog.fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn cached_audio_range_only_returns_complete_entries_and_sniffs_extension() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let url_partial = "https://api.glyph.my/v1/audio/youtube/abcdefghijk?quality=high".to_string();
+        let url_complete = "https://api.glyph.my/v1/audio/youtube/12345678901?quality=high".to_string();
+        let write_entry = |url: &str, bytes: &[u8], ranges: Vec<(u64, u64)>| {
+            let hash = Sha256::digest(url.as_bytes());
+            let key: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+            let audio = dir.path().join(format!("{key}.audio"));
+            std::fs::write(&audio, bytes).unwrap();
+            std::fs::write(audio.with_extension("json"), serde_json::to_vec(&(bytes.len() as u64, ranges)).unwrap()).unwrap();
+            audio
+        };
+        let payload = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A ";
+        write_entry(&url_partial, payload, vec![(0, 8)]);
+        assert!(cached_audio_range(dir.path(), &[url_partial.clone()]).is_none());
+        let expected = write_entry(&url_complete, payload, vec![(0, payload.len() as u64)]);
+        let (path, ext) = cached_audio_range(dir.path(), &[url_partial, url_complete]).unwrap();
+        assert_eq!(path, expected);
+        assert_eq!(ext, "m4a");
+    }
+
+    #[tokio::test]
+    async fn ranged_download_reassembles_multiple_parts_and_reports_exact_progress() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let d = Downloads::load(dir.path().to_path_buf());
+        // 2.5 MiB payload -> 3 ranges of 1 MiB / 1 MiB / 0.5 MiB.
+        let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 512 * 1024)).map(|i| (i % 251) as u8).collect();
+        let total = payload.len();
+        let payload_srv = Arc::new(payload.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut handles = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let data = payload_srv.clone();
+                handles.push(std::thread::spawn(move || {
+                    let mut req = [0u8; 4096];
+                    let n = stream.read(&mut req).unwrap();
+                    let text = String::from_utf8_lossy(&req[..n]);
+                    let range = text
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range:").map(|v| v.trim().to_string()))
+                        .expect("range header");
+                    let (a, b) = range.strip_prefix("bytes=").unwrap().split_once('-').unwrap();
+                    let start: usize = a.parse().unwrap();
+                    let end: usize = b.parse::<usize>().unwrap().min(data.len() - 1);
+                    let slice = &data[start..=end];
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mp4\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        data.len(),
+                        slice.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(slice).unwrap();
+                }));
+            }
+            for h in handles { h.join().unwrap(); }
+        });
+        let job = Job { progress: Arc::default(), quality: AudioQuality::High };
+        let prog = job.progress.clone();
+        let song = track("Ranged");
+        let url = format!("http://{address}/v1/download/youtube/abcdefghijk?quality=high");
+        let http = reqwest::Client::new();
+        let path = run_job(job, d.fetch_ranged(&http, &song, ProviderId::YouTube, &url, None)).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(path.extension().unwrap(), "m4a");
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        assert_eq!(prog.fraction(), Some(1.0));
+        assert_eq!(d.map.lock().unwrap()[&track_key(&song)].bytes, total as u64);
     }
 }

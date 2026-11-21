@@ -12,6 +12,7 @@
   import { fadeEdges } from "../ui.svelte";
   import { onWeb } from "../web";
   import { closeDetail, pl } from "../settings/plugins-state.svelte";
+  import { back as migrateBack, mg } from "../settings/migrate-state.svelte";
   import Tog from "../settings/Tog.svelte";
   import { adv, setAdvanced, subHidden } from "../settings/advanced.svelte";
   import { pageComponent, pageInfo, pageShown, subtabs } from "../settings/pages";
@@ -35,6 +36,7 @@
   });
   function back() {
     if (phone.settingsInPage && page === "plugins" && pl.detail && phone.settingsSub < 2) { closeDetail(); return; }
+    if (phone.settingsInPage && page === "migrate" && mg.step !== "pick" && mg.step !== "running") { migrateBack(); return; }
     if (phone.settingsInPage) phone.settingsInPage = false; else app.settingsOpen = false;
   }
   function open(p: SettingsPage) { if (p !== app.settingsPage) phone.settingsSub = 0; app.settingsPage = p; phone.settingsInPage = true; }

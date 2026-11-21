@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.15 - 2026-11-21
+
+### Added
+
+- **Quick transfer & batch playlist migration**: paste links/copied songs or drag and drop playlist files (CSV, JSON, M3U, XSPF, TXT) directly into Transfer, filter lists, watch per-list progress with a background banner, retry failed lists, and save large lists immediately with automatic matching on playback.
+- **Quick jump, library filter/sort & queue to playlist**: search now offers Quick jump to pages and lists; Library adds filtering and sorting (Pinned first, A–Z, Most songs); multi-select lists get a quick pick bar (queue, add to playlist, download); and the queue can be saved as a new playlist.
+
+### Changed
+
+- **Faster network requests & cleaner scrolling**: enabled HTTP/2 for app HTTP requests, added custom overlay scrollbars, and refactored plugin and state management with Vitest UI tests.
+
+### Fixed
+
+- **Clearing Liked Songs sync**: clearing all Liked Songs now sends a single `liked_clear` sync signal so the clear syncs cleanly across devices.
+
 ## 0.12.14 - 2026-11-20
 
 ### Added

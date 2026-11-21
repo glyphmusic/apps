@@ -793,6 +793,12 @@ export class WebAccountManager {
           for (const entry of chunk) {
             if (entry.plain) {
               const pItem = entry.plain;
+              if (pItem.kind === SYNC_KIND.LIKED_CLEAR && !pItem.deleted) {
+                const likedPrefix = `${SYNC_KIND.LIKED}\0`;
+                for (const k of Object.keys(journal.known)) {
+                  if (k.startsWith(likedPrefix)) delete journal.known[k];
+                }
+              }
               const kKey = `${pItem.kind}\0${pItem.key}`;
               if (pItem.deleted) delete journal.known[kKey];
               else journal.known[kKey] = { hash: quickHash(pItem.value), rev: pushed.rev, updated_at: pItem.updated_at };
@@ -827,6 +833,7 @@ export class WebAccountManager {
     const devId = installId();
     let libChanged = false;
     let offsetsChanged = false;
+    const addedLikedKeys = new Set<string>();
 
     const recordKnown = (it: SyncItem, hashSource: unknown) => {
       const kKey = `${it.kind}\0${it.key}`;
@@ -845,7 +852,39 @@ export class WebAccountManager {
       let hashSource: unknown = it.value;
 
       switch (it.kind) {
+        case SYNC_KIND.LIKED_CLEAR: {
+          if (it.deleted) continue;
+          const at = Number(it.value?.at) || it.updated_at || 0;
+          const curCleared = lib.liked_cleared_at ?? 0;
+          if (at > curCleared) {
+            lib.liked_cleared_at = at;
+            lib.liked = [];
+            const likedPrefix = `${SYNC_KIND.LIKED}\0`;
+            for (const k of Object.keys(journal.known)) {
+              if (k.startsWith(likedPrefix)) delete journal.known[k];
+            }
+            addedLikedKeys.clear();
+            hashSource = { at };
+            libChanged = true;
+          } else if (at === curCleared) {
+            if (addedLikedKeys.size > 0) {
+              lib.liked = lib.liked.filter((t) => !addedLikedKeys.has(trackSyncId(t)) && !addedLikedKeys.has(trackKey(t)));
+              for (const k of addedLikedKeys) delete journal.known[`${SYNC_KIND.LIKED}\0${k}`];
+              addedLikedKeys.clear();
+              libChanged = true;
+            }
+            hashSource = { at };
+          } else {
+            continue;
+          }
+          break;
+        }
         case SYNC_KIND.LIKED: {
+          const clearedAt = lib.liked_cleared_at ?? 0;
+          if (!it.deleted && clearedAt > 0 && it.updated_at <= clearedAt) {
+            delete journal.known[`${SYNC_KIND.LIKED}\0${it.key}`];
+            continue;
+          }
           // A known song keeps its place (like the apps); a new one goes on top.
           const pos = lib.liked.findIndex((t) => trackSyncId(t) === it.key || trackKey(t) === it.key);
           lib.liked = lib.liked.filter((t) => trackSyncId(t) !== it.key && trackKey(t) !== it.key);
@@ -854,6 +893,9 @@ export class WebAccountManager {
             if (pos >= 0) lib.liked.splice(pos, 0, tr);
             else lib.liked.unshift(tr);
             hashSource = tr;
+            addedLikedKeys.add(it.key);
+          } else {
+            addedLikedKeys.delete(it.key);
           }
           libChanged = true;
           break;
@@ -997,6 +1039,13 @@ export class WebAccountManager {
       current.set(`${kind}\0${key}`, { kind, key, value });
     };
 
+    const clearedAt = lib.liked_cleared_at ?? 0;
+    const clearKey = `${SYNC_KIND.LIKED_CLEAR}\0all`;
+    if (clearedAt > 0) {
+      put(SYNC_KIND.LIKED_CLEAR, "all", { at: clearedAt });
+    }
+    const likedCleared = clearedAt > 0 && (!journal.known[clearKey] || journal.known[clearKey].hash !== quickHash({ at: clearedAt }));
+
     // Oldest first, like the apps: other devices put each new liked song on
     // top in arrival order, so newest-first would flip the list there.
     for (const t of [...lib.liked].reverse()) {
@@ -1045,12 +1094,18 @@ export class WebAccountManager {
     for (const [kKey, item] of current.entries()) {
       const h = quickHash(item.value);
       const prev = journal.known[kKey];
-      if (!prev || prev.hash !== h) {
+      const forceLiked = likedCleared && item.kind === SYNC_KIND.LIKED;
+      if (forceLiked || !prev || prev.hash !== h) {
+        const updated_at = item.kind === SYNC_KIND.LIKED_CLEAR
+          ? clearedAt
+          : item.kind === SYNC_KIND.LIKED && clearedAt > 0
+            ? Math.max(now, clearedAt + 1)
+            : now;
         diff.push({
           kind: item.kind,
           key: item.key,
           value: item.value,
-          updated_at: now,
+          updated_at,
           deleted: false,
           rev: prev?.rev ?? 0,
         });
@@ -1065,6 +1120,7 @@ export class WebAccountManager {
       if (kind === SYNC_KIND.KEYRING || kind === SYNC_KIND.E2E || kind === SYNC_KIND.E2E_PLAYLIST || kind === SYNC_KIND.SETTINGS || kind === SYNC_KIND.TASTE || kind === SYNC_KIND.FEED_NEW_SEEN) {
         continue;
       }
+      if (likedCleared && kind === SYNC_KIND.LIKED) continue;
       // For stats, only delete our own device's stats when stats are disabled
       if (kind === SYNC_KIND.STATS && !key.startsWith(`${devId}:`)) continue;
       if (!current.has(kKey)) {

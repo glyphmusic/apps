@@ -38,6 +38,7 @@ pub enum Service {
     SoundCloud,
     Deezer,
     LastFm,
+    Files,
 }
 
 /// What the user hands over.
@@ -53,7 +54,14 @@ pub enum Connect {
 }
 
 impl Service {
-    pub const ALL: [Service; 5] = [Service::Spotify, Service::YouTube, Service::SoundCloud, Service::Deezer, Service::LastFm];
+    pub const ALL: [Service; 6] = [
+        Service::Spotify,
+        Service::YouTube,
+        Service::SoundCloud,
+        Service::Deezer,
+        Service::LastFm,
+        Service::Files,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -62,6 +70,7 @@ impl Service {
             Service::SoundCloud => "SoundCloud",
             Service::Deezer => "Deezer",
             Service::LastFm => "Last.fm",
+            Service::Files => "Playlist files",
         }
     }
 
@@ -72,12 +81,13 @@ impl Service {
             Service::SoundCloud => "soundcloud",
             Service::Deezer => "deezer",
             Service::LastFm => "lastfm",
+            Service::Files => "files",
         }
     }
 
     pub fn connect(self) -> Connect {
         match self {
-            Service::Spotify => Connect::Paste { takeout: false },
+            Service::Spotify | Service::Files => Connect::Paste { takeout: false },
             Service::YouTube => Connect::Paste { takeout: true },
             Service::SoundCloud | Service::Deezer => Connect::Profile,
             Service::LastFm => Connect::UserName,
@@ -186,6 +196,15 @@ pub trait LibrarySource: Send + Sync {
     fn service(&self) -> Service;
     async fn overview(&self) -> Result<Overview>;
     async fn fetch(&self, c: &Collection) -> Result<Fetched>;
+    /// Same as [`fetch`], reporting reading progress and honoring early cancellation.
+    async fn fetch_with_progress(
+        &self,
+        c: &Collection,
+        _progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        _cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Fetched> {
+        self.fetch(c).await
+    }
 }
 
 /// Reads links and files the way a pasted link is imported (server first,
@@ -195,6 +214,35 @@ pub trait LinkReader: Send + Sync {
     async fn list(&self, input: ImportInput) -> Result<ParsedList>;
     /// Metadata of single song links, in order.
     async fn songs(&self, songs: Vec<SongLink>) -> Vec<Track>;
+    async fn list_with_progress(
+        &self,
+        input: ImportInput,
+        _progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        _cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<ParsedList> {
+        self.list(input).await
+    }
+    async fn songs_with_progress(
+        &self,
+        songs: Vec<SongLink>,
+        _progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        _cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Vec<Track> {
+        self.songs(songs).await
+    }
+    /// Lightweight metadata preview (title, cover, track count) for a pasted link.
+    async fn peek_link(&self, _url: &str, _src: &crate::import::RemoteSource) -> Option<(String, Option<String>, Option<usize>)> {
+        None
+    }
+    /// Fills Google Takeout video IDs via oEmbed, reporting progress and honoring cancel.
+    async fn fill_takeout(
+        &self,
+        tracks: Vec<Track>,
+        _progress: Option<&crate::flume_like::Sender<crate::ImportProgress>>,
+        _cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Vec<Track> {
+        tracks
+    }
 }
 
 /// What the user handed over.
@@ -250,13 +298,30 @@ pub fn source(service: Service, login: Login, ctx: SourceCtx) -> Result<Arc<dyn 
 
 // ------------------------------------------------------------ run
 
+/// Phase of the currently active collection inside a migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MigrationPhase {
+    #[default]
+    Reading,
+    Matching,
+}
+
+impl MigrationPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MigrationPhase::Reading => "reading",
+            MigrationPhase::Matching => "matching",
+        }
+    }
+}
+
 /// What the move reports while it runs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MigrationEvent {
     /// Starting collection `index` of `total`.
     Collection { index: usize, total: usize, collection: Collection },
-    /// Matching progress inside the current collection.
-    Progress { done: usize, total: usize },
+    /// Reading or matching progress inside the current collection.
+    Progress { phase: MigrationPhase, done: usize, total: usize },
     Done { collection: Collection, result: Migrated },
     Failed { collection: Collection, error: String },
     /// All collections handled (or cancelled).
@@ -276,6 +341,8 @@ pub struct Totals {
     pub songs: usize,
     pub matched: usize,
     pub unsure: usize,
+    /// Large lists (>100 songs) imported immediately and matched on playback.
+    pub deferred: usize,
     pub liked: usize,
     pub playlists: usize,
     pub albums: usize,
@@ -287,9 +354,15 @@ impl Totals {
     pub fn add(&mut self, c: &Collection, r: &Migrated) {
         match r {
             Migrated::Tracks(res) => {
-                self.songs += res.sure.len() + res.unsure.len() + res.not_found.len();
-                self.matched += res.sure.len() + res.unsure.len();
-                self.unsure += res.unsure.len();
+                let checked = res.sure.len() + res.unsure.len() + res.not_found.len();
+                if checked == 0 && !res.ordered.is_empty() {
+                    self.songs += res.ordered.len();
+                    self.deferred += res.ordered.len();
+                } else {
+                    self.songs += checked;
+                    self.matched += res.sure.len() + res.unsure.len();
+                    self.unsure += res.unsure.len();
+                }
                 match c.kind {
                     Kind::Liked => self.liked += res.ordered.len(),
                     _ => self.playlists += 1,
@@ -301,7 +374,8 @@ impl Totals {
     }
 
     pub fn percent(&self) -> usize {
-        if self.songs == 0 { 100 } else { self.matched * 100 / self.songs }
+        let checked = self.songs.saturating_sub(self.deferred);
+        if checked == 0 { 100 } else { self.matched * 100 / checked }
     }
 }
 
@@ -396,6 +470,11 @@ mod tests {
         t.add(&Collection::playlist("p", "P", None, None, None), &Migrated::Tracks(res));
         t.add(&Collection::artists(None), &Migrated::Artists(vec!["A".into(), "B".into()]));
         assert_eq!((t.songs, t.matched, t.unsure, t.liked, t.playlists, t.artists), (8, 6, 2, 4, 1, 2));
+        assert_eq!(t.percent(), 75);
+        // Large deferred list (>100 tracks): counts songs & deferred without dragging down matched %.
+        let big = ImportResult { name: "big".into(), origin: None, sure: vec![], unsure: vec![], not_found: vec![], ordered: vec![test_track(ProviderId::Spotify, "1", "t", "a", None); 150] };
+        t.add(&Collection::playlist("b", "Big", None, None, None), &Migrated::Tracks(big));
+        assert_eq!((t.songs, t.deferred, t.playlists), (158, 150, 2));
         assert_eq!(t.percent(), 75);
     }
 }

@@ -45,7 +45,7 @@
   let importing = $state(false);
   let importError = $state<string | null>(null);
   let spin = $state(0);
-  let prog = $state({ done: 0, total: 0 });
+  let prog = $state<{ done: number; total: number; phase?: "reading" | "matching" }>({ done: 0, total: 0 });
   let linkSeq = 0;
 
   const q = $derived(query.trim());
@@ -148,7 +148,7 @@
               {#if importError}
                 <div class="st err"><span class="ii"><Icon name="info" size={13} color="rgba(255,255,255,.6)" /></span><span>{importError}</span></div>
               {:else if importing}
-                <div class="st spin"><span class="mono sp">{"|/-\\"[spin % 4]}</span>{t("dialog.playlist.reading")}{#if prog.total > 0} {tf("import.progress", { done: prog.done, total: prog.total })}{/if}</div>
+                <div class="st spin"><span class="mono sp">{"|/-\\"[spin % 4]}</span>{prog.phase === "matching" ? t("migrate.phase.matching") : t("dialog.playlist.reading")}{#if prog.total > 0} {tf("import.progress", { done: prog.done, total: prog.total })}{:else if prog.done > 0} {prog.done}{/if}</div>
               {:else if linkFound}
                 <div class="st ok"><Icon name="check" size={13} color="rgba(255,255,255,.65)" />{tf("dialog.playlist.link.found", { kind: linkFound })}</div>
               {:else if pastedCounts[0] + pastedCounts[1] > 0}

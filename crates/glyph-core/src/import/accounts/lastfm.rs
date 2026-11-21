@@ -9,6 +9,8 @@ use crate::providers::lastfm::LastFm;
 pub struct LastFmLibrary {
     lf: Option<Arc<LastFm>>,
     user: String,
+    /// Loved tracks cached from `overview()` so `fetch()` avoids a duplicate roundtrip.
+    cached_loved: tokio::sync::OnceCell<Vec<Track>>,
     reader: Arc<dyn LinkReader>,
 }
 
@@ -22,14 +24,19 @@ pub fn user_name(input: &str) -> String {
 
 impl LastFmLibrary {
     pub fn new(lf: Option<Arc<LastFm>>, user: String, reader: Arc<dyn LinkReader>) -> Self {
-        Self { lf, user, reader }
+        Self { lf, user, cached_loved: tokio::sync::OnceCell::new(), reader }
     }
 
     async fn loved(&self) -> Result<Vec<Track>> {
-        match &self.lf {
-            Some(lf) => lf.loved_tracks(&self.user).await,
-            None => Ok(self.reader.list(ImportInput::Url(format!("https://www.last.fm/user/{}", self.user))).await?.tracks),
-        }
+        self.cached_loved
+            .get_or_try_init(|| async {
+                match &self.lf {
+                    Some(lf) => lf.loved_tracks(&self.user).await,
+                    None => Ok(self.reader.list(ImportInput::Url(format!("https://www.last.fm/user/{}", self.user))).await?.tracks),
+                }
+            })
+            .await
+            .cloned()
     }
 }
 

@@ -231,6 +231,10 @@ impl PartialEq for LibraryPath {
     fn eq(&self, _: &Self) -> bool { true }
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Library {
     #[serde(default)]
@@ -252,6 +256,10 @@ pub struct Library {
     #[serde(skip)]
     pub storage_path: LibraryPath,
     pub liked: Vec<Track>,
+    /// Unix ms of the last "Clear Liked Songs" action (0 = never).
+    /// Synced as a single `liked_clear` signal instead of per-song tombstones.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub liked_cleared_at: u64,
     /// Per-device activity; excluded from account sync. Capped at 500 songs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub song_activity: BTreeMap<String, SongActivity>,
@@ -537,6 +545,16 @@ impl Library {
         } else {
             self.liked.insert(0, track.clone());
         }
+        if let Ok(mut g) = self.liked_cache.0.lock() {
+            *g = None;
+        }
+    }
+
+    /// Removes all songs from Liked Songs and bumps `liked_cleared_at` so sync
+    /// sends a single `liked_clear` signal instead of one deletion per song.
+    pub fn clear_liked(&mut self, now_ms: u64) {
+        self.liked.clear();
+        self.liked_cleared_at = now_ms.max(self.liked_cleared_at.saturating_add(1));
         if let Ok(mut g) = self.liked_cache.0.lock() {
             *g = None;
         }

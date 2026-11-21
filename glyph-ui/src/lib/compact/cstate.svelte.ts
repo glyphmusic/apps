@@ -16,6 +16,8 @@ export const phone = $state({
   libFilter: 0,
   /** How far the page is scrolled (px): the list cover shrinks, the artist photo zooms. */
   scroll: 0,
+  /** Resting scrollTop of PhoneListView's pull-to-reveal search/sort threshold. */
+  listRevealH: 0,
 });
 
 /** The browser moves scroll-linked effects itself (on its own thread, in

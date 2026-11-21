@@ -177,40 +177,76 @@ pub struct LocalImport {
     pub failed: usize,
 }
 
-/// Imports `paths` (files or folders) into `store`. Blocking: run off the UI
-/// thread.
+/// Imports `paths` (files or folders) into `store` in parallel across CPU cores
+/// and flushes `index.json` once at the end. Blocking: run off the UI thread.
 pub fn import_files(store: &Downloads, paths: &[PathBuf]) -> LocalImport {
-    let mut out = LocalImport::default();
-    for path in collect(paths) {
-        let res = read_track(&path).and_then(|(track, cover)| {
-            if store.local(&track).is_none() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_ascii_lowercase();
-                store.store_file(&track, ProviderId::MusicBrainz, &path, &ext)?;
-            }
-            if let Some(bytes) = cover {
-                let dest = cover_path(store, &track);
-                if !dest.is_file() {
-                    match crate::cover::normalize_image(&bytes) {
-                        Ok(jpeg) => {
-                            if let Some(dir) = dest.parent() {
-                                let _ = std::fs::create_dir_all(dir);
-                            }
-                            let _ = paths::write_atomic(&dest, &jpeg);
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let files = collect(paths);
+    if files.is_empty() {
+        return LocalImport::default();
+    }
+    let total = files.len();
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 8)
+        .min(total);
+    let next = AtomicUsize::new(0);
+    let dirty = AtomicBool::new(false);
+    let results: std::sync::Mutex<Vec<Option<Result<Track>>>> = std::sync::Mutex::new((0..total).map(|_| None).collect());
+
+    let import_one = |path: &Path| -> Result<Track> {
+        let (track, cover) = read_track(path)?;
+        if store.local(&track).is_none() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_ascii_lowercase();
+            store.store_file_unflushed(&track, ProviderId::MusicBrainz, path, &ext)?;
+            dirty.store(true, Ordering::Relaxed);
+        }
+        if let Some(bytes) = cover {
+            let dest = cover_path(store, &track);
+            if !dest.is_file() {
+                match crate::cover::normalize_image(&bytes) {
+                    Ok(jpeg) => {
+                        if let Some(dir) = dest.parent() {
+                            let _ = std::fs::create_dir_all(dir);
                         }
-                        Err(e) => tracing::debug!("embedded cover of {} unreadable: {e}", path.display()),
+                        let _ = paths::write_atomic(&dest, &jpeg);
                     }
+                    Err(e) => tracing::debug!("embedded cover of {} unreadable: {e}", path.display()),
                 }
             }
-            Ok(track)
-        });
-        match res {
+        }
+        Ok(track)
+    };
+
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= total {
+                    break;
+                }
+                let res = import_one(&files[idx]);
+                results.lock().unwrap()[idx] = Some(res);
+            });
+        }
+    });
+
+    if dirty.load(Ordering::Relaxed) {
+        store.flush_index();
+    }
+
+    let mut out = LocalImport::default();
+    let mut seen = std::collections::HashSet::with_capacity(total);
+    for (idx, item) in results.into_inner().unwrap().into_iter().enumerate() {
+        match item.unwrap() {
             Ok(t) => {
-                if !out.tracks.iter().any(|x| x.id == t.id) {
+                if seen.insert(t.id.clone()) {
                     out.tracks.push(t);
                 }
             }
             Err(e) => {
-                tracing::info!("could not import {}: {e:#}", path.display());
+                tracing::info!("could not import {}: {e:#}", files[idx].display());
                 out.failed += 1;
             }
         }

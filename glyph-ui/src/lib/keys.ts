@@ -2,6 +2,7 @@
 // written like the app's config: "secondary-k" = Ctrl on Windows/Linux,
 // Cmd on macOS. The user's own keys come from config.ui.keys.
 import { app } from "./state.svelte";
+import { currentListNav, stepRowIndex } from "./state/list-nav.svelte";
 import { isMac, close } from "./window";
 
 export interface Shortcut { id: string; label: string; key: string; scope: "main" | "window" | "global"; group: "playback" | "navigation" | "app" }
@@ -92,10 +93,15 @@ function run(id: string, focusSearch: () => void) {
   }
 }
 
+export function isBareShortcut(key: string): boolean {
+  return !/secondary|ctrl|alt|cmd/.test(key) && !/^f\d+$/.test(key.split("-").pop()!);
+}
+
 export function installKeys(focusSearch: () => void): () => void {
   const views = ["home", "search", "library", "now_playing"] as const;
   const down = (e: KeyboardEvent) => {
-    const typing = (e.target as HTMLElement).closest("input, textarea, [contenteditable]") != null;
+    const target = e.target as HTMLElement | null;
+    const typing = target?.closest("input, textarea, [contenteditable]") != null;
     const k = eventKey(e);
     if (k === "escape") {
       if (app.ctx || app.controlMenu) return app.closeMenus();
@@ -103,6 +109,7 @@ export function installKeys(focusSearch: () => void): () => void {
       if (app.confirm) return (app.confirm = null);
       if (app.settingsOpen) return (app.settingsOpen = false);
       if (app.zen) return (app.zen = false);
+      if (app.picking) return app.stopPicking();
       if (!typing && app.history.length) return app.back();
       return;
     }
@@ -110,11 +117,54 @@ export function installKeys(focusSearch: () => void): () => void {
     if (k === "alt-right") { e.preventDefault(); app.forward(); return; }
     const nav = /^secondary-([1-9])$/.exec(k);
     if (nav) { e.preventDefault(); const v = views[+nav[1] - 1]; if (v) app.navigate(v); return; }
+
+    // Track-list keyboard navigation (↑ / ↓ / Enter / Delete) when no overlay/input is active.
+    const listNav = !typing && !app.compact && !app.searchFocused && !app.settingsOpen && !app.nameDialog && !app.confirm && !app.ctx && !app.controlMenu
+      ? currentListNav()
+      : null;
+    if (listNav) {
+      if (k === "down" || k === "shift-down" || k === "up" || k === "shift-up") {
+        const count = listNav.count();
+        const delta = k.endsWith("down") ? 1 : -1;
+        const next = stepRowIndex(app.selectedRow, delta, count);
+        if (next != null) {
+          e.preventDefault();
+          app.selectedRow = next;
+          listNav.scrollTo?.(next);
+          if (e.shiftKey && listNav.isPicking?.() && listNav.togglePick) {
+            listNav.togglePick(next, true);
+          }
+          return;
+        }
+      } else if (k === "enter" && app.selectedRow != null) {
+        const interactive = target?.closest("button, a, select, [role='button'], [role='menuitem']") != null;
+        if (!interactive) {
+          const count = listNav.count();
+          if (app.selectedRow >= 0 && app.selectedRow < count) {
+            e.preventDefault();
+            if (listNav.isPicking?.() && listNav.togglePick) listNav.togglePick(app.selectedRow, e.shiftKey);
+            else listNav.play(app.selectedRow);
+            return;
+          }
+        }
+      } else if ((k === "delete" || k === "backspace") && app.selectedRow != null && listNav.remove) {
+        const interactive = target?.closest("button, a, select") != null;
+        const count = listNav.count();
+        if (!interactive && app.selectedRow >= 0 && app.selectedRow < count) {
+          e.preventDefault();
+          const idx = app.selectedRow;
+          listNav.remove(idx);
+          const remaining = count - 1;
+          app.selectedRow = remaining > 0 ? Math.min(idx, remaining - 1) : null;
+          return;
+        }
+      }
+    }
+
     for (const sc of SHORTCUTS) {
       const key = keyOf(sc.id);
       if (!key || key !== k) continue;
-      const bare = !/secondary|ctrl|alt|cmd/.test(key) && !/^f\d+$/.test(key.split("-").pop()!);
-      if (bare && typing) return;
+      if (isBareShortcut(key) && typing) return;
       if (sc.scope === "main" && (app.settingsOpen || app.nameDialog)) return;
       e.preventDefault();
       run(sc.id, focusSearch);

@@ -62,6 +62,8 @@ pub(crate) struct DList {
     pub data: Vec<DTrack>,
     #[serde(default)]
     pub next: Option<String>,
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 pub(crate) fn convert(t: DTrack) -> Option<Track> {
@@ -350,13 +352,54 @@ impl Deezer {
     }
 
     pub(crate) async fn paged(&self, first: String) -> Result<Vec<Track>> {
-        let mut out = Vec::new();
-        let mut url = first;
-        let mut query: Vec<(&str, &str)> = vec![("limit", "100")];
+        use futures::stream::StreamExt;
         let max_tracks = crate::library::playlist_track_limit();
+        let v = self.get(&first, &[("limit", "100"), ("index", "0")]).await?;
+        let l: DList = serde_json::from_value(v)?;
+        let mut out: Vec<Track> = l.data.into_iter().filter_map(convert).collect();
+        if l.next.is_none() {
+            return Ok(out);
+        }
+        if let Some(total) = l.total {
+            if total > max_tracks {
+                anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+            }
+            if total > 100 {
+                let offsets: Vec<usize> = (100..total).step_by(100).collect();
+                let mut pages: Vec<Vec<Track>> = vec![Vec::new(); offsets.len()];
+                let mut stream = futures::stream::iter(offsets.into_iter().enumerate())
+                    .map(|(slot, idx)| {
+                        let url = first.clone();
+                        async move {
+                            let off = idx.to_string();
+                            let v = self.get(&url, &[("limit", "100"), ("index", off.as_str())]).await?;
+                            let l: DList = serde_json::from_value(v)?;
+                            Ok::<_, anyhow::Error>((slot, l.data.into_iter().filter_map(convert).collect()))
+                        }
+                    })
+                    .buffer_unordered(6);
+                while let Some(res) = stream.next().await {
+                    let (slot, tracks) = res?;
+                    pages[slot] = tracks;
+                }
+                for tracks in pages {
+                    out.extend(tracks);
+                }
+            }
+            if out.len() > max_tracks {
+                anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+            }
+            return Ok(out);
+        }
+        let mut url = l.next.unwrap();
         let max_pages = max_tracks.div_ceil(100);
-        for page_index in 0..=max_pages {
-            let v = self.get(&url, &query).await?;
+        for page_index in 1..=max_pages {
+            let next = reqwest::Url::parse(&url)?;
+            if next.scheme() != "https" || next.host_str() != Some("api.deezer.com")
+                || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
+                anyhow::bail!("invalid provider pagination URL");
+            }
+            let v = self.get(&url, &[]).await?;
             let l: DList = serde_json::from_value(v)?;
             out.extend(l.data.into_iter().filter_map(convert));
             match l.next {
@@ -364,13 +407,7 @@ impl Deezer {
                     if out.len() > max_tracks || page_index == max_pages {
                         anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
                     }
-                    let next = reqwest::Url::parse(&n)?;
-                    if next.scheme() != "https" || next.host_str() != Some("api.deezer.com")
-                        || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
-                        anyhow::bail!("invalid provider pagination URL");
-                    }
                     url = n;
-                    query.clear();
                 }
                 None => break,
             }
@@ -379,9 +416,10 @@ impl Deezer {
     }
 
     pub async fn playlist(&self, id: &str) -> Result<(String, Vec<Track>)> {
-        let v = self.get(&format!("{API}/playlist/{id}"), &[]).await?;
+        let meta_url = format!("{API}/playlist/{id}");
+        let tracks_url = format!("{API}/playlist/{id}/tracks");
+        let (v, tracks) = tokio::try_join!(self.get(&meta_url, &[]), self.paged(tracks_url))?;
         let name = v["title"].as_str().unwrap_or("Deezer playlist").to_string();
-        let tracks = self.paged(format!("{API}/playlist/{id}/tracks")).await?;
         Ok((name, tracks))
     }
 
@@ -417,12 +455,14 @@ impl Deezer {
 
     /// Public favourites of a user id.
     pub async fn user_favorites(&self, user_id: &str) -> Result<(String, Vec<Track>)> {
-        let name = match self.get(&format!("{API}/user/{user_id}"), &[]).await {
+        let user_url = format!("{API}/user/{user_id}");
+        let tracks_url = format!("{API}/user/{user_id}/tracks");
+        let (user_res, tracks_res) = tokio::join!(self.get(&user_url, &[]), self.paged(tracks_url));
+        let name = match user_res {
             Ok(v) => format!("{} (Deezer)", v["name"].as_str().unwrap_or("favorites")),
             Err(_) => "Deezer favorites".to_string(),
         };
-        let tracks = self.paged(format!("{API}/user/{user_id}/tracks")).await?;
-        Ok((name, tracks))
+        Ok((name, tracks_res?))
     }
 }
 

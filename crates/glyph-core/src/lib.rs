@@ -926,6 +926,21 @@ impl Backend {
                     }
                     return stored.map(Some);
                 }
+                // Already played completely at the same quality: copy straight
+                // from the playback range cache with zero network traffic.
+                let mut cache_urls = Vec::with_capacity(3);
+                if url.contains("/v1/download/") {
+                    let play_url = url.replacen("/v1/download/", "/v1/audio/", 1);
+                    if play_url.contains('?') {
+                        cache_urls.push(format!("{play_url}&adaptive=1"));
+                    }
+                    cache_urls.push(play_url);
+                }
+                cache_urls.push(url.clone());
+                if let Some((cached, ext)) = downloads::cached_audio_range(&storage::audio_ranges_dir(), &cache_urls) {
+                    downloads::report(|p| p.finish());
+                    return dl.store_file(&track, provider, &cached, ext).map(Some);
+                }
                 if provider == ProviderId::Jamendo {
                     if let Some(alt) = downloads::jamendo_format_url(&url, downloads::job_quality()) {
                         match dl.fetch(&inner.http, &track, provider, &alt, inner.server.as_ref()).await {
@@ -935,7 +950,30 @@ impl Backend {
                         downloads::report(|p| p.reset());
                     }
                 }
-                downloads::fetch_with_retry(&dl, &inner.http, &track, provider, &url, inner.server.as_ref()).await.map(Some)
+                match downloads::fetch_with_retry(&dl, &inner.http, &track, provider, &url, inner.server.as_ref()).await {
+                    Ok(p) => Ok(Some(p)),
+                    Err(e) => {
+                        // If a direct server download failed because the official
+                        // server went down, trip outage detection and retry locally.
+                        if let Some(server) = inner.live_server() {
+                            if outage::note(server.base_url(), &e).await.is_some() {
+                                tracing::info!("official server out during download, retrying locally");
+                                downloads::report(|p| p.reset());
+                                let Some((p2, u2)) = inner.download_url(&track).await? else { return Ok(None) };
+                                let local2 = std::path::Path::new(&u2);
+                                if p2 == ProviderId::YouTube && local2.is_absolute() && local2.is_file() {
+                                    let stored = dl.store_copy(&track, p2, local2);
+                                    if local2.starts_with(ytdlp::small_audio_dir()) {
+                                        let _ = std::fs::remove_file(local2);
+                                    }
+                                    return stored.map(Some);
+                                }
+                                return downloads::fetch_with_retry(&dl, &inner.http, &track, p2, &u2, None).await.map(Some);
+                            }
+                        }
+                        Err(e)
+                    }
+                }
             }))
             .await;
         self.dl_progress.lock().unwrap().remove(&key);
@@ -1294,9 +1332,11 @@ impl Backend {
     ) -> anyhow::Result<ImportResult> {
         let inner = self.cur();
         self.spawn(async move {
-            if let Some(server) = &inner.server {
-                if let Ok(health) = server.health().await {
-                    library::set_playlist_track_limit(health.playlist_max_tracks);
+            if inner.server_providers.as_ref().is_none_or(|p| p.is_empty()) {
+                if let Some(server) = &inner.server {
+                    if let Ok(health) = server.health().await {
+                        library::set_playlist_track_limit(health.playlist_max_tracks);
+                    }
                 }
             }
             let (list, origin) = import::fetch_list_with_progress(&input, &inner.providers, inner.server.as_ref(), &inner.http, &inner.config.keys, Some(&progress)).await?;
@@ -1306,7 +1346,7 @@ impl Backend {
             let worker = inner.clone();
             let result = import::match_all(list, origin, progress, move |t| {
                 let inner = worker.clone();
-                async move { inner.resolve(&t).await.ok().flatten() }
+                async move { inner.match_for_import(&t).await }
             })
             .await;
             inner.resolver.cache().flush();
@@ -1349,13 +1389,22 @@ impl Backend {
 
     /// The songs behind pasted song links, in order (unreadable ones left out).
     pub async fn songs_from_links(&self, text: &str) -> anyhow::Result<Vec<Track>> {
+        self.songs_from_links_with_progress(text, None).await
+    }
+
+    /// Same as [`Self::songs_from_links`], emitting reading progress as songs arrive.
+    pub async fn songs_from_links_with_progress(
+        &self,
+        text: &str,
+        progress: Option<flume_like::Sender<ImportProgress>>,
+    ) -> anyhow::Result<Vec<Track>> {
         use import::accounts::LinkReader;
         let songs = import::keyless::parse_pasted(text).songs;
         if songs.is_empty() {
             return Ok(Vec::new());
         }
         let inner = self.cur();
-        self.spawn(async move { InnerReader(inner).songs(songs).await }).await
+        self.spawn(async move { InnerReader(inner).songs_with_progress(songs, progress.as_ref(), None).await }).await
     }
 
     /// What the connected account holds (counts, playlists).
@@ -1363,10 +1412,10 @@ impl Backend {
         self.spawn(async move { src.overview().await }).await?
     }
 
-    /// Moves the picked collections one after the other: reads each, matches
-    /// its songs (4 at a time, like a link import) and reports it as
-    /// `MigrationEvent::Done` for the app to save. `cancel` stops after the
-    /// current song; a cancelled collection is not reported as done.
+    /// Moves the picked collections one after the other: reads each (reporting
+    /// live reading progress), matches its songs (8 in parallel, metadata-only)
+    /// and reports it as `MigrationEvent::Done` for the app to save. `cancel`
+    /// stops immediately; a cancelled collection is not reported as done.
     pub async fn migrate(
         &self,
         src: Arc<dyn import::accounts::LibrarySource>,
@@ -1374,13 +1423,15 @@ impl Backend {
         events: flume_like::Sender<import::accounts::MigrationEvent>,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<()> {
-        use import::accounts::{Fetched, Kind, MigrationEvent as Ev, Migrated};
+        use import::accounts::{Fetched, Kind, MigrationEvent as Ev, MigrationPhase, Migrated};
         use std::sync::atomic::Ordering;
         let inner = self.cur();
         self.spawn(async move {
-            if let Some(server) = &inner.server {
-                if let Ok(health) = server.health().await {
-                    library::set_playlist_track_limit(health.playlist_max_tracks);
+            if inner.server_providers.as_ref().is_none_or(|p| p.is_empty()) {
+                if let Some(server) = &inner.server {
+                    if let Ok(health) = server.health().await {
+                        library::set_playlist_track_limit(health.playlist_max_tracks);
+                    }
                 }
             }
             let total = collections.len();
@@ -1391,7 +1442,21 @@ impl Backend {
                     return;
                 }
                 let _ = events.send(Ev::Collection { index, total, collection: c.clone() });
-                let result = match src.fetch(&c).await {
+                let (rtx, mut rrx) = flume_like::channel::<ImportProgress>();
+                let read_events = events.clone();
+                let read_fwd = tokio::spawn(async move {
+                    while let Some(p) = rrx.recv().await {
+                        let _ = read_events.send(Ev::Progress { phase: MigrationPhase::Reading, done: p.done, total: p.total });
+                    }
+                });
+                let fetched = src.fetch_with_progress(&c, Some(&rtx), Some(&cancel)).await;
+                drop(rtx);
+                let _ = read_fwd.await;
+                if stopped() {
+                    let _ = events.send(Ev::Finished { cancelled: true });
+                    return;
+                }
+                let result = match fetched {
                     Err(e) => {
                         let _ = events.send(Ev::Failed { collection: c, error: format!("{e:#}") });
                         continue;
@@ -1410,7 +1475,7 @@ impl Backend {
                         let fwd_events = events.clone();
                         let fwd = tokio::spawn(async move {
                             while let Some(p) = prx.recv().await {
-                                let _ = fwd_events.send(Ev::Progress { done: p.done, total: p.total });
+                                let _ = fwd_events.send(Ev::Progress { phase: MigrationPhase::Matching, done: p.done, total: p.total });
                             }
                         });
                         let kind = match c.kind {
@@ -1418,15 +1483,10 @@ impl Backend {
                             _ => "playlist",
                         };
                         let list = import::files::ParsedList { name, label: format!("{}/{kind}", src.service().key()), tracks };
-                        let (worker, flag) = (inner.clone(), cancel.clone());
-                        let res = import::match_all(list, c.origin.clone(), ptx, move |t| {
-                            let (inner, flag) = (worker.clone(), flag.clone());
-                            async move {
-                                if flag.load(Ordering::Relaxed) {
-                                    return None;
-                                }
-                                inner.resolve(&t).await.ok().flatten()
-                            }
+                        let worker = inner.clone();
+                        let res = import::match_all_cancellable(list, c.origin.clone(), ptx, Some(cancel.clone()), move |t| {
+                            let inner = worker.clone();
+                            async move { inner.match_for_import(&t).await }
                         })
                         .await;
                         let _ = fwd.await;
@@ -1565,14 +1625,45 @@ struct InnerReader(Arc<Inner>);
 #[async_trait::async_trait]
 impl import::accounts::LinkReader for InnerReader {
     async fn list(&self, input: ImportInput) -> anyhow::Result<import::files::ParsedList> {
-        let i = &self.0;
-        Ok(import::fetch_list(&input, &i.providers, i.server.as_ref(), &i.http, &i.config.keys).await?.0)
+        self.list_with_progress(input, None, None).await
     }
 
     async fn songs(&self, songs: Vec<import::keyless::SongLink>) -> Vec<Track> {
+        self.songs_with_progress(songs, None, None).await
+    }
+
+    async fn list_with_progress(
+        &self,
+        input: ImportInput,
+        progress: Option<&flume_like::Sender<ImportProgress>>,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> anyhow::Result<import::files::ParsedList> {
+        let i = &self.0;
+        Ok(import::fetch_list_with_options(&input, &i.providers, i.server.as_ref(), &i.http, &i.config.keys, progress, cancel).await?.0)
+    }
+
+    async fn songs_with_progress(
+        &self,
+        songs: Vec<import::keyless::SongLink>,
+        progress: Option<&flume_like::Sender<ImportProgress>>,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Vec<Track> {
         let i = &self.0;
         let dz = i.providers.deezer.clone().unwrap_or_else(|| Arc::new(providers::deezer::Deezer::new(i.http.clone())));
-        import::keyless::read_songs(&songs, i.providers.spotify.as_ref(), &dz, &i.http).await
+        import::keyless::read_songs_with_progress(&songs, i.providers.spotify.as_ref(), &dz, &i.http, progress, cancel).await
+    }
+
+    async fn peek_link(&self, url: &str, src: &import::RemoteSource) -> Option<(String, Option<String>, Option<usize>)> {
+        import::keyless::peek_link_meta(&self.0.http, url, src).await
+    }
+
+    async fn fill_takeout(
+        &self,
+        tracks: Vec<Track>,
+        progress: Option<&flume_like::Sender<ImportProgress>>,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Vec<Track> {
+        import::keyless::fill_takeout_with_progress(&self.0.http, tracks, progress, cancel).await
     }
 }
 

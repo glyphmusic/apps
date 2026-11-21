@@ -66,7 +66,7 @@ fn spawn_ticker(core: &Arc<Core>) {
     let core = core.clone();
     crate::rt::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
             let list: Vec<(String, Track)> = active_lock().iter().map(|(k, t)| (k.clone(), t.clone())).collect();
             if list.is_empty() {
                 break;

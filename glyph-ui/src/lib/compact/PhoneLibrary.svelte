@@ -2,6 +2,7 @@
   // compact.rs library: chips Playlists / Albums / Artists (tap again = all),
   // then rows: 56 px cover, title 15, "Playlist · 12 songs" 12.5 dim with a
   // pink pin when pinned; pinned lists first; followed artists round.
+  import { fade } from "svelte/transition";
   import Icon from "../components/Icon.svelte";
   import Chip from "../components/Chip.svelte";
   import Cover from "../components/Cover.svelte";
@@ -44,26 +45,39 @@
   <Chip on={f === 2} onclick={() => set(2)}>{t("search.filter.albums")}</Chip>
   <Chip on={f === 3} onclick={() => set(3)}>{t("search.filter.artists")}</Chip>
 </div>
-{#each lists as it}
-  <button class="lr" onclick={() => app.openListView(it.list)} oncontextmenu={(e) => listMenu(e, it.list)}>
-    <ListCover list={it.list} size={56} />
-    <span class="tx">
-      <span class="t trunc">{app.listTitle(it.list)}</span>
-      <span class="s">{#if app.isPinned(it.list)}<Icon name="pin-fill" size={12} color="var(--accent)" />{/if}<span class="trunc">{it.sub}</span></span>
-    </span>
-  </button>
-{/each}
-{#each artists as name}
-  {@const tr = artTrack(name)}
-  <button class="lr" onclick={() => app.openArtistPage(name)} oncontextmenu={(e) => artistMenu(e, name)}>
-    {#if tr}<Cover track={tr} size={56} round />{:else}<span class="ph"><Icon name="user-round" size={22} color="rgba(255,255,255,.5)" /></span>{/if}
-    <span class="tx"><span class="t trunc">{name}</span><span class="s">{t("search.kind.artist")}</span></span>
-  </button>
-{/each}
-<div style:height="24px"></div>
+<div class="stage">
+  {#key f}
+    <div
+      class="slot"
+      in:fade={{ duration: 150, delay: 95 }}
+      out:fade={{ duration: 95 }}
+      onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}
+    >
+      {#each lists as it}
+        <button class="lr" onclick={() => app.openListView(it.list)} oncontextmenu={(e) => listMenu(e, it.list)}>
+          <ListCover list={it.list} size={56} />
+          <span class="tx">
+            <span class="t trunc">{app.listTitle(it.list)}</span>
+            <span class="s">{#if app.isPinned(it.list)}<Icon name="pin-fill" size={12} color="var(--accent)" />{/if}<span class="trunc">{it.sub}</span></span>
+          </span>
+        </button>
+      {/each}
+      {#each artists as name}
+        {@const tr = artTrack(name)}
+        <button class="lr" onclick={() => app.openArtistPage(name)} oncontextmenu={(e) => artistMenu(e, name)}>
+          {#if tr}<Cover track={tr} size={56} round />{:else}<span class="ph"><Icon name="user-round" size={22} color="rgba(255,255,255,.5)" /></span>{/if}
+          <span class="tx"><span class="t trunc">{name}</span><span class="s">{t("search.kind.artist")}</span></span>
+        </button>
+      {/each}
+      <div style:height="24px"></div>
+    </div>
+  {/key}
+</div>
 
 <style>
   .chips { display: flex; gap: 8px; padding: 0 16px 10px; }
+  .stage { display: grid; }
+  .slot { grid-area: 1 / 1; min-width: 0; }
   .lr { width: 100%; display: flex; align-items: center; gap: 12px; padding: 6px 16px; text-align: left; border-radius: 8px; transition: background-color .12s var(--ease), transform .16s var(--ease); }
   .lr:active { background: rgba(255, 255, 255, .05); transform: scale(.98); }
   .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }

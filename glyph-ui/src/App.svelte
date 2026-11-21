@@ -25,6 +25,7 @@
   import SettingsModal from "./lib/settings/SettingsModal.svelte";
   import Compact from "./lib/compact/Compact.svelte";
   import { loadPlugins, pl } from "./lib/settings/plugins-state.svelte";
+  import { installMigrateEvents } from "./lib/settings/migrate-state.svelte";
   import { installSettingsHash } from "./lib/settings/hash.svelte";
   import { installRoutes } from "./lib/routes.svelte";
   import { installAccountEvents } from "./lib/account-events.svelte";
@@ -178,6 +179,7 @@
       if (backend().kind !== "tauri") offRoutes = installRoutes();
       offSettingsHash = installSettingsHash();
       if (backend().kind !== "web") loadPlugins();
+      if (backend().kind !== "web") installMigrateEvents();
       if (backend().kind === "tauri" || backend().kind === "web") installAccountEvents();
       await reveal();
     }).catch(async (e) => {
@@ -343,10 +345,10 @@
       <div class="body" class:with-bar={showBar}>
         {#if !zen}
           <Sidebar width={leftW} />
-          <div class="sash" class:on={resizing === "left"} role="separator" aria-orientation="vertical" aria-label="Resize left sidebar"
+          <div class="sash left" class:on={resizing === "left"} role="separator" aria-orientation="vertical" aria-label="Resize left sidebar"
             onpointerdown={(e) => startResize(e, "left")} ondblclick={() => app.setLeftSidebarW(app.leftSidebarW > 64 ? 64 : 210, true)}></div>
         {/if}
-        <main class="main" class:narrow={rightOpen} data-part="page">
+        <main class="main" data-part="page">
           <Page />
         </main>
         {#if rightOpen}
@@ -377,11 +379,10 @@
   .body { flex: 1; min-height: 0; display: flex; gap: var(--gap); padding: 0 var(--gap); }
   .body.with-bar { margin-bottom: calc(-1 * var(--gap)); }
   .body > :global(nav) { padding-bottom: calc(12px + var(--gap)); }
-  /* The page reaches into the window margin so its scrollbar sits there. */
-  .main { position: relative; flex: 1; min-width: 0; height: 100%; margin-right: calc(-1 * var(--gap)); padding-right: var(--gap); }
-  .main.narrow { padding-right: 0; margin-right: 0; }
+  .main { position: relative; flex: 1; min-width: 0; height: 100%; }
   .right { flex: none; width: 320px; height: 100%; padding: var(--gap) 0 var(--gap); overflow: hidden; }
   .sash { position: relative; flex: none; width: 10px; margin: 12px -10px; z-index: 20; cursor: col-resize; touch-action: none; }
+  .sash.left { margin: 12px -5px 12px -15px; }
   .sash::after { content: ""; position: absolute; top: 50%; left: 50%; width: 2px; height: 36px; border-radius: 2px; background: rgba(255, 255, 255, .24); opacity: 0; transform: translate(-50%, -50%) scaleY(.75); transition: opacity .15s ease-out, transform .15s ease-out, background-color .15s ease-out, height .15s ease-out; }
   .sash:hover::after, .sash.on::after { opacity: 1; transform: translate(-50%, -50%) scaleY(1); }
   .sash.on::after { height: 56px; background: var(--accent); }

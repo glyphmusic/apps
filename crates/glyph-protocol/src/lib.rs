@@ -643,6 +643,9 @@ pub struct ProfilePlaylistSongs {
 /// kinds need no server change; clients ignore kinds they do not know.
 pub mod sync_kind {
     pub const LIKED: &str = "liked";
+    /// Single signal that all Liked Songs up to this point were cleared
+    /// (key: `all`, value: `{ "at": <unix ms> }`).
+    pub const LIKED_CLEAR: &str = "liked_clear";
     pub const PLAYLIST: &str = "playlist";
     pub const FOLLOWED: &str = "followed";
     pub const HIDDEN: &str = "hidden";

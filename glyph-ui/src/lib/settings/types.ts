@@ -163,18 +163,63 @@ export interface McpSession {
 export interface McpInfo { url: string | null; token: string | null; config: string | null; error: string | null; relay_running: boolean; token_loading: boolean; sessions?: McpSession[] }
 
 // ---- migrate (glyph_core::import::accounts) --------------------------
-export type MigrateService = "spotify" | "youtube" | "soundcloud" | "deezer" | "lastfm";
+export type MigrateService = "spotify" | "youtube" | "soundcloud" | "deezer" | "lastfm" | "files";
 export type MigrateTarget =
   | { kind: "liked" }
   | { kind: "playlist"; id: string }
   | { kind: "new_playlist"; name?: string | null };
-export interface MigrateCollection { id: string; kind: "liked" | "playlist" | "albums" | "artists"; name: string; hint: string; count: number | null; followed: boolean; default_on: boolean }
+export interface MigrateCollection {
+  id: string;
+  kind: "liked" | "playlist" | "albums" | "artists";
+  name: string;
+  hint: string;
+  count: number | null;
+  cover?: string | null;
+  followed: boolean;
+  default_on: boolean;
+}
 export interface MigrateOverview { account: string; collections: MigrateCollection[]; notes: string[]; done_before: string[] }
-export interface MigrateTotals { songs: number; matched: number; unsure: number; liked: number; playlists: number; albums: number; artists: number; failed: number }
+export interface MigrateTotals {
+  songs: number;
+  matched: number;
+  unsure: number;
+  deferred?: number;
+  liked: number;
+  playlists: number;
+  albums: number;
+  artists: number;
+  failed: number;
+}
+export interface MigrateRunItem {
+  id: string;
+  name: string;
+  kind: "liked" | "playlist" | "albums" | "artists";
+  cover?: string | null;
+  status: "queued" | "reading" | "matching" | "done" | "failed" | "skipped";
+  count: number | null;
+  added: number;
+  matched: number;
+  total_songs: number;
+  deferred: number;
+  playlist_id?: string | null;
+  error?: string | null;
+}
 export interface MigrateProgress {
   state: "idle" | "running" | "finished";
-  index: number; lists: number; current: string; done: number; total: number;
-  totals: MigrateTotals; failed: [string, string][]; notes: string[]; cancelled: boolean; stopping: boolean;
+  service?: MigrateService | null;
+  phase?: "reading" | "matching";
+  index: number;
+  lists: number;
+  current: string;
+  done: number;
+  total: number;
+  elapsed_ms?: number;
+  totals: MigrateTotals;
+  items?: MigrateRunItem[];
+  failed: [string, string][];
+  notes: string[];
+  cancelled: boolean;
+  stopping: boolean;
   /** Short progress text of the move ("[#####-----] 12/24"). */
   bar: string;
 }

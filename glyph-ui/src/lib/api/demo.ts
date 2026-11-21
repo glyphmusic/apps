@@ -242,6 +242,10 @@ export class DemoBackend implements Backend, DemoCtx {
         lib().liked = a.on ? [...(a.tracks as Track[]), ...rest] : rest;
         this.saveLibrary();
       },
+      clear_liked: () => {
+        lib().liked = [];
+        this.saveLibrary();
+      },
       playlist_create: (_, a) => { const id = `pl-${Date.now()}`; lib().playlists.unshift({ id, name: a.name, tracks: a.tracks ?? [], created_at: Date.now() }); this.saveLibrary(); return id; },
       playlist_rename: (_, a) => { const pl = lib().playlists.find((x) => x.id === a.id); if (pl) pl.name = a.name; this.saveLibrary(); },
       playlist_delete: (_, a) => { lib().playlists = lib().playlists.filter((x) => x.id !== a.id); this.saveLibrary(); },

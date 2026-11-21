@@ -122,6 +122,16 @@ pub fn like(core: C, track: Track, on: bool) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn like_many(core: C, tracks: Vec<Track>, on: bool) {
+    commands::like_many(&core, tracks, on)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn clear_liked(core: C) {
+    commands::clear_liked(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn playlist_create(core: C, name: String, tracks: Vec<Track>) -> String {
     commands::playlist_create(&core, name, tracks)
 }
@@ -154,6 +164,11 @@ pub fn playlist_add(core: C, id: String, tracks: Vec<Track>) -> usize {
 #[tauri::command(rename_all = "snake_case")]
 pub fn playlist_remove(core: C, id: String, index: usize) {
     commands::playlist_remove(&core, id, index)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn playlist_remove_many(core: C, id: String, indices: Vec<usize>) {
+    commands::playlist_remove_many(&core, id, indices)
 }
 
 #[tauri::command(rename_all = "snake_case")]

@@ -69,12 +69,18 @@
     const cutoff = barEl.getBoundingClientRect().bottom;
     const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .sv .head h1, .desk h1.hd");
     const playEl = mainEl.querySelector<HTMLElement>(".lv .head .play, .ap .mob-acts .rp, .sv .head .play");
+    const noArtList = ownList && !!mainEl.querySelector(".lv .head.no-art");
+    const effTop = ownList ? Math.max(0, top - phone.listRevealH) : top;
     // Artist pages and lists with a big picture: the bar turns dark only when
     // the title comes up to it, so the photo / shrinking cover stays visible.
-    barBgK = app.view === "artist" || ownList
-      ? (titleEl ? clamp01((cutoff + 36 - titleEl.getBoundingClientRect().top) / 48) : clamp01((top - 180) / 48))
-      : clamp01(top / 24);
-    titleK = titleEl ? clamp01((cutoff - titleEl.getBoundingClientRect().bottom) / 24) : clamp01((top - 20) / 36);
+    // Lists without cover art (Liked Songs, Downloads, Recent) start with their
+    // title right below the bar, so the bar stays transparent until scrolled.
+    barBgK = noArtList
+      ? clamp01(effTop / 24)
+      : app.view === "artist" || ownList
+        ? (titleEl ? clamp01((cutoff + 36 - titleEl.getBoundingClientRect().top) / 48) : clamp01((effTop - 180) / 48))
+        : clamp01(top / 24);
+    titleK = titleEl ? clamp01((cutoff - titleEl.getBoundingClientRect().bottom) / 24) : clamp01((effTop - 20) / 36);
     // Keep the bar play button hidden until the inline play button scrolls out of view.
     playK = playEl ? clamp01((cutoff - playEl.getBoundingClientRect().bottom) / 20) : 0;
   }
@@ -82,10 +88,13 @@
   $effect(() => {
     void viewKey;
     untrack(() => {
-      scrollTop = 0;
-      phone.scroll = 0;
-      mainEl?.scrollTo(0, 0);
-      syncBar(0);
+      if (!ownList) {
+        phone.listRevealH = 0;
+        scrollTop = 0;
+        phone.scroll = 0;
+        mainEl?.scrollTo(0, 0);
+        syncBar(0);
+      }
     });
   });
   $effect(() => {

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/glyph-protocol", "crates/glyph-core", "crates/glyph-audio", "crates/glyph-app", "crates/glyph-android", "crates/glyph-tauri"]
 
 [workspace.package]
-version = "0.12.14"
+version = "0.12.15"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/glyphmusic/apps"
@@ -21,7 +21,7 @@ tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
 futures = "0.3"
 flume = "0.11"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "http2"] }
 
 # Debug builds stay responsive: the audio/codec/UI stack is too slow unoptimized.
 [profile.dev]

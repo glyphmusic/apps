@@ -30,6 +30,7 @@
   import ReleaseCard from "./lists/ReleaseCard.svelte";
   import SkeletonRows from "./lists/SkeletonRows.svelte";
   import { app } from "../state.svelte";
+  import { registerListNav, scrollDomRowIntoView } from "../state/list-nav.svelte";
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
   import { revealK, fadeEdges } from "../ui.svelte";
@@ -153,6 +154,19 @@
   const seed = (r: Release): Track => ({ id: r.id, source: "deezer", title: r.title, artist: r.artist, album: r.title, cover_url: r.cover_url ?? undefined });
   const similar = $derived(page?.similar ?? []);
 
+  let popRowsEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    if (compact) return;
+    return registerListNav({
+      count: () => (showAll ? tracks.length : Math.min(5, tracks.length)),
+      play: (i) => {
+        const tr = tracks[i];
+        if (tr && app.allowed(tr)) app.play(tracks, i, name);
+      },
+      scrollTo: (i) => scrollDomRowIntoView(popRowsEl, i),
+    });
+  });
+
   function listMenu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
     app.openCtx({ x: e.clientX, y: e.clientY, track: liked[0] ?? null, list: likedList });
@@ -244,7 +258,7 @@
         {#if !has}
           <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
         {:else}
-          <div class="rows">
+          <div class="rows" bind:this={popRowsEl}>
             {#each tracks.slice(0, showAll ? tracks.length : 5) as _, i (i)}
               {#if compact}
                 <PhoneSongRow {tracks} index={i} context={name} number={i + 1} />
@@ -325,7 +339,7 @@
   .ap:not(.mob) { container: artist / inline-size; }
   .ap.mob { gap: 12px; }
   .hero-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
-  .hero { position: relative; margin: -12px -24px 0; height: 420px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
+  .hero { position: relative; margin: -12px calc(-1 * var(--page-x)) 0; height: 420px; border-radius: 14px 14px 0 0; overflow: hidden; flex: none; }
   /* Phones: the photo also fills the status bar strip (Compact.svelte .bleed), so it is that much taller. */
   .hero.mob { margin: calc(-1 * var(--page-top, 8px)) calc(-1 * var(--page-x, 16px)) 0; height: calc(min(320px, 44vh) + var(--safe-top, env(safe-area-inset-top, 0px))); min-height: calc(240px + var(--safe-top, env(safe-area-inset-top, 0px))); border-radius: 0; }
   /* ascii.rs photo_fade: crop at 30 % from the top, 80 % brightness, alpha

@@ -114,6 +114,8 @@ pub(crate) struct Page<T> {
     pub items: Vec<T>,
     #[serde(default)]
     pub next: Option<String>,
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,28 +171,65 @@ impl Spotify {
         Ok(v["name"].as_str().unwrap_or("Spotify playlist").to_string())
     }
 
-    /// All tracks of a public playlist (paged).
+    /// All tracks of a public playlist (first page discovers `total`, then the
+    /// remaining 50-song pages are fetched in parallel preserving order).
     pub async fn playlist_tracks(&self, id: &str) -> Result<Vec<Track>> {
-        let mut out = Vec::new();
-        let mut url = format!("{API}/playlists/{id}/items");
-        let mut query: Vec<(&str, &str)> = vec![("limit", "50")];
+        use futures::stream::StreamExt;
+        let base_url = format!("{API}/playlists/{id}/items");
         let max_tracks = crate::library::playlist_track_limit();
+        let first: Page<PlaylistItem> = self.get(&base_url, &[("limit", "50"), ("offset", "0")]).await?;
+        let mut out: Vec<Track> = first.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert).collect();
+        if first.next.is_none() {
+            return Ok(out);
+        }
+        if let Some(total) = first.total {
+            if total > max_tracks {
+                anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+            }
+            if total > 50 {
+                let offsets: Vec<usize> = (50..total).step_by(50).collect();
+                let mut pages: Vec<Vec<Track>> = vec![Vec::new(); offsets.len()];
+                let mut stream = futures::stream::iter(offsets.into_iter().enumerate())
+                    .map(|(slot, offset)| {
+                        let url = base_url.clone();
+                        async move {
+                            let off = offset.to_string();
+                            let page: Page<PlaylistItem> = self.get(&url, &[("limit", "50"), ("offset", off.as_str())]).await?;
+                            let tracks: Vec<Track> = page.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert).collect();
+                            Ok::<_, anyhow::Error>((slot, tracks))
+                        }
+                    })
+                    .buffer_unordered(8);
+                while let Some(res) = stream.next().await {
+                    let (slot, tracks) = res?;
+                    pages[slot] = tracks;
+                }
+                for tracks in pages {
+                    out.extend(tracks);
+                }
+            }
+            if out.len() > max_tracks {
+                anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
+            }
+            return Ok(out);
+        }
+        // Fallback if `total` was absent: follow `next` links sequentially.
+        let mut url = first.next.unwrap();
         let max_pages = max_tracks.div_ceil(50);
-        for page_index in 0..=max_pages {
-            let page: Page<PlaylistItem> = self.get(&url, &query).await?;
+        for page_index in 1..=max_pages {
+            let next = reqwest::Url::parse(&url)?;
+            if next.scheme() != "https" || next.host_str() != Some("api.spotify.com")
+                || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
+                anyhow::bail!("invalid provider pagination URL");
+            }
+            let page: Page<PlaylistItem> = self.get(&url, &[]).await?;
             out.extend(page.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert));
             match page.next {
                 Some(n) => {
                     if out.len() > max_tracks || page_index == max_pages {
                         anyhow::bail!("Playlist exceeds this server's limit of {max_tracks} songs");
                     }
-                    let next = reqwest::Url::parse(&n)?;
-                    if next.scheme() != "https" || next.host_str() != Some("api.spotify.com")
-                        || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
-                        anyhow::bail!("invalid provider pagination URL");
-                    }
                     url = n;
-                    query.clear();
                 }
                 None => break,
             }
