@@ -953,7 +953,7 @@ mod tests {
         let path = dir.path().join("resolver_cache.json");
         let c = MappingCache::load(Some(path.clone()));
         let tr = t(ProviderId::Audius, "a", "Song", "Band", None);
-        c.insert(&["k1".into()], Mapping { provider: ProviderId::Audius, track: tr, confidence: 0.9, ts: 1 });
+        c.insert(&["k1".into()], Mapping { provider: ProviderId::Audius, track: tr, confidence: 0.9, ts: 1, pinned: false });
         c.flush();
         let c2 = MappingCache::load(Some(path));
         assert_eq!(c2.get(&["k1".into()]).unwrap().1.track.id, "a");
