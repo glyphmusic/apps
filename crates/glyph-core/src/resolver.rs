@@ -44,6 +44,10 @@ struct Mapping {
     track: Track,
     confidence: f32,
     ts: u64,
+    /// Explicitly chosen by the user ("Not the right one"); survives automatic
+    /// re-resolution and is never overwritten by `remember`.
+    #[serde(default)]
+    pinned: bool,
 }
 
 /// Persistent mapping "song -> track at a full source" (JSON in the data dir).
@@ -73,20 +77,26 @@ impl MappingCache {
     }
 
     fn insert(&self, keys: &[String], mapping: Mapping) {
+        let force_flush = mapping.pinned;
         {
             let mut m = self.map.lock().unwrap();
             for k in keys {
+                if !mapping.pinned && m.get(k).is_some_and(|cur| cur.pinned) {
+                    continue;
+                }
                 m.insert(k.clone(), mapping.clone());
             }
             if m.len() > MAX_MAPPINGS {
-                let mut by_age: Vec<(String, u64)> = m.iter().map(|(k, v)| (k.clone(), v.ts)).collect();
+                let mut by_age: Vec<(String, u64)> =
+                    m.iter().filter(|(_, v)| !v.pinned).map(|(k, v)| (k.clone(), v.ts)).collect();
                 by_age.sort_by_key(|(_, ts)| *ts);
-                for (k, _) in by_age.into_iter().take(m.len() - MAX_MAPPINGS + 200) {
+                for (k, _) in by_age.into_iter().take(m.len().saturating_sub(MAX_MAPPINGS) + 200) {
                     m.remove(&k);
                 }
             }
         }
-        if self.unsaved.fetch_add(1, Ordering::Relaxed) + 1 >= 10 {
+        if force_flush || self.unsaved.fetch_add(1, Ordering::Relaxed) + 1 >= 10 {
+            self.unsaved.fetch_add(1, Ordering::Relaxed);
             self.flush();
         }
     }
@@ -328,8 +338,13 @@ impl Resolver {
 
     // -------------------------------------------------------------- resolve
 
-    /// Full pipeline: known ids -> cached mapping -> search at full sources -> preview.
+    /// Full pipeline: pinned user override -> known ids -> cached mapping -> search at full sources -> preview.
     pub async fn resolve(&self, track: &Track) -> Result<Option<Resolved>> {
+        if let Some(pinned) = self.pinned_override(track) {
+            if let Some(r) = self.resolve_exact(&pinned).await {
+                return Ok(Some(r));
+            }
+        }
         if let Some(r) = self.resolve_known(track).await {
             return Ok(Some(r));
         }
@@ -340,6 +355,13 @@ impl Resolver {
             return Ok(Some(r));
         }
         Ok(self.resolve_preview(track).await)
+    }
+
+    /// Resolves one exact `(source, id)` candidate without hitting the generic
+    /// song cache or falling back to other providers.
+    pub async fn resolve_exact(&self, candidate: &Track) -> Option<Resolved> {
+        let source = self.source_of(candidate.source, candidate).await?;
+        Some(Resolved { track: candidate.clone(), source, confidence: 1.0 })
     }
 
     async fn source_of(&self, provider: ProviderId, view: &Track) -> Option<PlaybackSource> {
@@ -475,8 +497,98 @@ impl Resolver {
     pub fn remember(&self, wanted: &Track, matched: &Track, confidence: f32) {
         self.cache.insert(
             &mapping_keys(wanted),
-            Mapping { provider: matched.source, track: matched.clone(), confidence, ts: paths::now_unix() },
+            Mapping {
+                provider: matched.source,
+                track: matched.clone(),
+                confidence,
+                ts: paths::now_unix(),
+                pinned: false,
+            },
         );
+    }
+
+    /// Pins a user-selected replacement for `wanted` locally on this device.
+    pub fn set_pinned(&self, wanted: &Track, chosen: &Track) {
+        self.cache.insert(
+            &mapping_keys(wanted),
+            Mapping {
+                provider: chosen.source,
+                track: chosen.clone(),
+                confidence: 1.0,
+                ts: paths::now_unix(),
+                pinned: true,
+            },
+        );
+    }
+
+    /// The user-pinned replacement for `wanted`, if they picked one via "Not the right one".
+    pub fn pinned_override(&self, wanted: &Track) -> Option<Track> {
+        let (_, m) = self.cache.get(&mapping_keys(wanted))?;
+        m.pinned.then_some(m.track)
+    }
+
+    /// Whatever mapping is currently remembered for `wanted` (pinned or automatic).
+    pub fn current_mapping(&self, wanted: &Track) -> Option<Track> {
+        self.cache.get(&mapping_keys(wanted)).map(|(_, m)| m.track)
+    }
+
+    /// Searches enabled full sources locally for alternative candidates for `track`.
+    pub async fn search_alternatives(
+        &self,
+        track: &Track,
+        query: Option<&str>,
+    ) -> Vec<glyph_protocol::MatchAlternative> {
+        let order = self.full_order();
+        if order.is_empty() {
+            return Vec::new();
+        }
+        let custom = query.map(str::trim).filter(|s| !s.is_empty());
+        let q = custom
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{} - {}", track.artist, track.title));
+        let cands = self.search_many(order.clone(), &q).await;
+        let current = self.current_mapping(track);
+        let mut seen = HashSet::new();
+        let mut scored: Vec<(f32, usize, glyph_protocol::MatchAlternative)> = Vec::new();
+        for (provider, cand) in cands {
+            if !seen.insert((provider, cand.track.id.clone())) {
+                continue;
+            }
+            let conf = score_candidate(track, &cand);
+            let is_cur = current
+                .as_ref()
+                .is_some_and(|c| c.source == provider && c.id == cand.track.id)
+                || (track.source == provider && track.id == cand.track.id);
+            if custom.is_none() && conf < 0.25 && !is_cur {
+                continue;
+            }
+            let tag = if is_cur {
+                Some("current".into())
+            } else if provider == ProviderId::YouTube && cand.bonus >= 0.14 {
+                Some("topic".into())
+            } else if cand.bonus > 0.0 || cand.track.title.to_lowercase().contains("official audio") {
+                Some("official_audio".into())
+            } else {
+                None
+            };
+            let prio = order.iter().position(|p| *p == provider).unwrap_or(order.len());
+            scored.push((
+                conf,
+                prio,
+                glyph_protocol::MatchAlternative {
+                    track: cand.track,
+                    confidence: conf,
+                    preview_url: None,
+                    tag,
+                },
+            ));
+        }
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        scored.into_iter().take(15).map(|(_, _, a)| a).collect()
     }
 
     async fn search_many(&self, providers: Vec<ProviderId>, query: &str) -> Vec<(ProviderId, Candidate)> {

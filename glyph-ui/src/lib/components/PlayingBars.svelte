@@ -3,10 +3,11 @@
   // move with the music (a gentle motion without a spectrum); low and still
   // while paused.
   import { app } from "../state.svelte";
-  let { size = 13, color = "var(--accent)" }: { size?: number; color?: string } = $props();
+  let { size = 13, color = "var(--accent)", active }: { size?: number; color?: string; active?: boolean } = $props();
+  const run = $derived(active ?? app.playing);
 </script>
 
-<span class="pb" class:run={app.playing} style:width="{size}px" style:height="{size}px" style:gap="{Math.max(1.5, size * 0.1)}px">
+<span class="pb" class:run style:width="{size}px" style:height="{size}px" style:gap="{Math.max(1.5, size * 0.1)}px">
   {#each [0, 1, 2, 3] as i}
     <i style:width="{Math.max(2, size * 0.16)}px" style:background={color} style:animation-delay="{-i * 0.37}s" style:animation-duration="{0.9 + i * 0.23}s"></i>
   {/each}

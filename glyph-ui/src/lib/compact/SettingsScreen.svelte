@@ -19,7 +19,7 @@
 
   const order = $derived<SettingsPage[]>((onWeb() ? [
     "overview", "account",
-    "playback", "appearance", "integrations", "about",
+    "playback", "appearance", "transfer", "integrations", "about",
   ] : [
     "overview", "account",
     "playback", "audio", "appearance", "storage", "migrate", "transfer", "server", "plugins", "notifications", "about",
@@ -43,8 +43,13 @@
   // Opened for one page (a tapped notification): straight into it.
   $effect(() => { const d = app.settingsDirect; if (d) { app.settingsDirect = null; open(d); } });
   const quick = $derived([
-    ...(onWeb() ? [] : [{ icon: "chart-column", label: t("sp.storage.saver"), on: app.config.storage.data_saver, run: () => app.setConfig((c) => (c.storage.data_saver = !c.storage.data_saver)) },
-    { icon: "sliders-horizontal", label: t("sp.eq"), on: app.config.audio.eq_enabled, run: () => app.setConfig((c) => (c.audio.eq_enabled = !c.audio.eq_enabled)) }]),
+    ...(onWeb() ? [
+      { icon: "chart-column", label: t("sp.stats"), on: app.config.stats.enabled, run: () => app.setConfig((c) => (c.stats.enabled = !c.stats.enabled)) },
+      { icon: "sparkles", label: t("sp.appearance.ascii_fx"), on: app.config.visuals.ascii_effects, run: () => app.setConfig((c) => (c.visuals.ascii_effects = !c.visuals.ascii_effects)) },
+    ] : [
+      { icon: "chart-column", label: t("sp.storage.saver"), on: app.config.storage.data_saver, run: () => app.setConfig((c) => (c.storage.data_saver = !c.storage.data_saver)) },
+      { icon: "sliders-horizontal", label: t("sp.eq"), on: app.config.audio.eq_enabled, run: () => app.setConfig((c) => (c.audio.eq_enabled = !c.audio.eq_enabled)) },
+    ]),
     { icon: "eye-off", label: t("sp.explicit"), on: app.config.audio.hide_explicit, run: () => app.setConfig((c) => (c.audio.hide_explicit = !c.audio.hide_explicit)) },
   ]);
 </script>

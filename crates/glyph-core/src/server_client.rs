@@ -260,6 +260,25 @@ impl ServerClient {
     pub fn download_youtube_url(&self, video_id: &str, quality: &str) -> String {
         self.url(&format!("/v1/download/youtube/{video_id}?quality={quality}"))
     }
+
+    pub fn audio_provider_url(&self, provider: ProviderId, id: &str) -> String {
+        let name = serde_json::to_value(provider)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "youtube".into());
+        self.url(&format!("/v1/audio/{name}/{id}"))
+    }
+
+    pub fn download_provider_url(&self, provider: ProviderId, id: &str, quality: &str) -> String {
+        if provider == ProviderId::YouTube {
+            return self.download_youtube_url(id, quality);
+        }
+        let name = serde_json::to_value(provider)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "youtube".into());
+        self.url(&format!("/v1/download/{name}/{id}"))
+    }
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Lets the server's operator ban this device (see `hardware`).
         let request = match crate::hardware::id() {
@@ -416,6 +435,58 @@ impl ServerClient {
         let video_id = VideoId::parse(video_id).ok_or_else(|| anyhow!("not a YouTube video id"))?;
         let body = YouTubeHintRequest { track: track.clone(), video_id };
         let resp = Self::check(self.member_request(self.post("/v1/youtube/hint")).await.timeout(Duration::from_secs(15)).json(&body).send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `POST /v1/match/alternatives`: candidate replacements for a song whose
+    /// resolved audio did not match what the user expected.
+    pub async fn match_alternatives(
+        &self,
+        track: &Track,
+        query: Option<String>,
+        priority: &[ProviderId],
+    ) -> Result<MatchAlternativesResponse> {
+        let body = MatchAlternativesRequest {
+            track: track.clone(),
+            query,
+            priority: priority.to_vec(),
+        };
+        let resp = Self::check(
+            self.member_request(self.post("/v1/match/alternatives"))
+                .await
+                .timeout(Duration::from_secs(15))
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?;
+        let mut out: MatchAlternativesResponse = resp.json().await?;
+        for alt in &mut out.alternatives {
+            if let Some(url) = alt.preview_url.as_mut() {
+                if url.starts_with("/v1/audio/") {
+                    *url = self.url(url);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `POST /v1/match/report`: save a wrong-song report + chosen replacement.
+    /// The server stores the vote without switching everyone else until enough
+    /// distinct listeners confirm it.
+    pub async fn report_wrong_match(
+        &self,
+        req: &WrongMatchReportRequest,
+    ) -> Result<WrongMatchReportResponse> {
+        let resp = Self::check(
+            self.member_request(self.post("/v1/match/report"))
+                .await
+                .timeout(Duration::from_secs(15))
+                .json(req)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(resp.json().await?)
     }
 

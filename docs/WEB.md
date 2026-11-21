@@ -54,6 +54,16 @@ sample catalogue out of `dist-web/`.
   `/web/album/<artist>/<title>`, `/web/profile/<handle>`, `/web/settings`),
   and `glyph-server` serves `/web/index.html` as an SPA fallback for unknown
   subpaths.
+- **Installable Web App / PWA (`src/lib/pwa.svelte.ts`, `src/lib/overlays/InstallSheet.svelte`):**
+  `build:web` emits `manifest.webmanifest`, `sw.js` (app-shell + immutable asset
+  cache; never intercepts `/v1/*` or cross-origin audio), and opaque iOS /
+  maskable icons (`apple-touch-icon.png`, `icon-192.png`,
+  `icon-maskable-512.png`). Chromium browsers trigger the native install dialog;
+  iPhone & iPad users get an interactive *"Add to Home Screen"* guide (also
+  opened directly via `/web/?install=1` from `glyph.my/download`).
+- **Settings backup & share (`src/lib/api/settings-share.ts`):**
+  *Settings › Backup & share* encodes and imports `glyph:settings:` codes and
+  `glyph-settings.json` files compatible with the desktop and Android apps.
 
 ## Build and serve
 

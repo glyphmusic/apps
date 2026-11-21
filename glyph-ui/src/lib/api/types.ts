@@ -455,4 +455,34 @@ export interface BackendEvents {
   mcp_approvals: { id: string; client: string; code: string }[];
   /** Emitted by the desktop memory guard when the process tree approaches its RAM cap. */
   memory_pressure: { level: "soft" | "hard" };
+  /** 30-second preview playback state inside the "Not the right one" modal. */
+  wrong_song_preview: WrongSongPreviewState;
+}
+
+export interface MatchAlternative {
+  track: Track;
+  confidence: number;
+  preview_url?: string | null;
+  tag?: string | null;
+}
+
+export interface MatchAlternativesResponse {
+  current_source?: ProviderId | null;
+  current_id?: string | null;
+  alternatives: MatchAlternative[];
+}
+
+export interface WrongMatchReportResponse {
+  recorded: boolean;
+  promoted: boolean;
+  votes: number;
+  threshold: number;
+}
+
+export interface WrongSongPreviewState {
+  key: string | null;
+  status: "loading" | "playing" | "paused" | "stopped" | "error";
+  position: number;
+  duration: number;
+  error?: string | null;
 }

@@ -1934,7 +1934,7 @@ pub async fn account_recovery(core: C<'_>) -> Res<String> {
 
 /// Admin API paths the dashboard may call (`/admin/v1/<path>`).
 fn admin_path_ok(path: &str) -> bool {
-    const ROOTS: &[&str] = &["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "cache/stats", "cache/clear", "companion/status", "app-releases"];
+    const ROOTS: &[&str] = &["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "jams", "cache/stats", "cache/clear", "companion/status", "app-releases"];
     let root = path.split('?').next().unwrap_or("");
     path.len() <= 200
         && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./?=&@%".contains(&b))
@@ -2430,7 +2430,7 @@ mod admin_tests {
 
     #[test]
     fn dashboard_only_reaches_its_own_admin_paths() {
-        for ok in ["me", "stats", "history", "accounts?limit=100&offset=0&q=al", "accounts/alice", "accounts/alice/revoke", "accounts/alice/profile/reset", "bans/remove", "blocks", "blocks/clear", "limits", "cache/clear"] {
+        for ok in ["me", "stats", "history", "accounts?limit=100&offset=0&q=al", "accounts/alice", "accounts/alice/revoke", "accounts/alice/profile/reset", "bans/remove", "blocks", "blocks/clear", "jams", "limits", "cache/clear"] {
             assert!(admin_path_ok(ok), "{ok}");
         }
         for bad in ["keys", "update/apply", "login", "accounts/alice/admin/../../keys", "statsx", "", "logs", "companion/update/apply", "http://evil/x"] {

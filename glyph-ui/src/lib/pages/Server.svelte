@@ -28,7 +28,7 @@
   import { admin, adminCall, type AdminSub } from "../admin/admin.svelte";
   import {
     fmtBytes, OTHER, SERIES,
-    type ActiveBlock, type AdminAccount, type AdminAccountRow, type AdminDevice, type AppRelease, type Ban, type BlockReason, type DayStats, type Limits, type ServerStats, type Slice,
+    type ActiveBlock, type AdminAccount, type AdminAccountRow, type AdminDevice, type AdminJam, type AppRelease, type Ban, type BlockReason, type DayStats, type Limits, type ServerStats, type Slice,
   } from "../admin/api";
 
   type Metric = "accounts" | "active" | "space";
@@ -41,6 +41,7 @@
   let draft = $state<Limits | null>(null);
   let bans = $state<Ban[]>([]);
   let blocks = $state<ActiveBlock[]>([]);
+  let jams = $state<AdminJam[]>([]);
   let releases = $state<AppRelease[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -66,13 +67,14 @@
     loading = true;
     error = null;
     try {
-      const [s, h, a, l, b, bl, r] = await Promise.all([
+      const [s, h, a, l, b, bl, jm, r] = await Promise.all([
         adminCall<ServerStats>("GET", "stats"),
         adminCall<{ days: DayStats[] }>("GET", "history").catch(() => ({ days: [] })),
         adminCall<{ accounts: AdminAccountRow[]; total: number }>("GET", "accounts?limit=500").catch(() => ({ accounts: [], total: 0 })),
         adminCall<Limits>("GET", "limits").catch(() => null),
         adminCall<{ bans: Ban[] }>("GET", "bans").catch(() => ({ bans: [] })),
         adminCall<{ blocks: ActiveBlock[] }>("GET", "blocks").catch(() => ({ blocks: [] })),
+        adminCall<{ jams: AdminJam[]; total: number }>("GET", "jams").catch(() => ({ jams: [], total: 0 })),
         adminCall<{ releases: AppRelease[] }>("GET", "app-releases").catch(() => ({ releases: [] })),
       ]);
       stats = s;
@@ -83,6 +85,7 @@
       draft = l ? { ...l } : null;
       bans = b.bans ?? [];
       blocks = bl.blocks ?? [];
+      jams = jm.jams ?? [];
       releases = r.releases ?? [];
     } catch (e) {
       error = String((e as Error).message ?? e);
@@ -345,6 +348,16 @@
   }
   const personBlocks = (p: AdminAccountRow) => blocks.filter((b) => b.user_id === p.id || b.handle === p.handle);
   const hasDeviceBan = (p: AdminAccountRow) => !p.banned && bans.some((b) => b.origin === p.id && b.kind !== "account");
+
+  // ---- active jam rooms
+  const jamListeners = $derived(jams.reduce((n, j) => n + j.member_count, 0));
+  const nowTick = $derived.by(() => { void app.clock; return Date.now(); });
+  function fmtJamDur(createdAt: number, now: number): string {
+    const mins = Math.floor(Math.max(0, now - createdAt) / 60_000);
+    if (mins < 1) return t("admin.jams.dur_lt_min");
+    if (mins < 60) return tf("admin.jams.dur_m", { m: mins });
+    return tf("admin.jams.dur_hm", { h: Math.floor(mins / 60), m: mins % 60 });
+  }
 </script>
 
 {#snippet more(label: string, to: AdminSub)}
@@ -450,6 +463,39 @@
         </span>
         {#if set}<Button kind="text" onclick={() => pick(ch, null)} disabled={busy}>{t("admin.versions.unpin")}</Button>{/if}
       </div>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet jamsCard()}
+  <div class="card cbox">
+    <div class="ch"><SectionTitle icon="radio" title={tf("admin.jams", { n: jams.length })} /></div>
+    {#each jams as j (j.code)}
+      <div class="jrow">
+        <span class="badge sm mono jcode">{j.code}</span>
+        <span class="jinfo">
+          <span class="jtop">
+            <span class="jhost trunc">@{j.host}</span>
+            <span class="badge sm">{tf("admin.jams.listeners", { n: j.member_count })}</span>
+            {#if !j.host_online}<span class="badge sm warn">{t("admin.jams.offline")}</span>{/if}
+            {#if j.queue_len > 0}<span class="badge sm">{tf("admin.jams.queue", { n: j.queue_len })}</span>{/if}
+          </span>
+          {#if j.track || j.members.length > 1}
+            <span class="jsub trunc">
+              {#if j.track}
+                <Icon name={j.playing ? "audio-lines" : "pause"} size={12} color={j.playing ? "var(--accent)" : "var(--faint)"} />
+                <span class="trunc">{j.track}</span>
+              {/if}
+              {#if j.members.length > 1}
+                <span class="jmem trunc">{j.track ? "· " : ""}{j.members.map((m) => `@${m}`).join(", ")}</span>
+              {/if}
+            </span>
+          {/if}
+        </span>
+        <span class="jdur mono">{fmtJamDur(j.created_at, nowTick)}</span>
+      </div>
+    {:else}
+      <div class="na">{t("admin.jams.none")}</div>
     {/each}
   </div>
 {/snippet}
@@ -606,8 +652,11 @@
       <Tile label={t("admin.tile.accounts")} value={String(acc?.accounts ?? total)} sub={stats.max_accounts ? tf("admin.tile.of", { n: stats.max_accounts }) : t("admin.tile.no_cap")} />
       <Tile label={t("admin.tile.active")} value={String(acc?.active_1d ?? 0)} sub={tf("admin.tile.active_sub", { w: acc?.active_7d ?? 0, m: acc?.active_30d ?? 0 })} delay={40} />
       <Tile label={t("admin.tile.devices")} value={String(acc?.devices ?? 0)} sub={tf("admin.tile.bans", { n: stats.bans })} delay={80} />
-      <Tile label={t("admin.tile.space")} value={st ? fmtBytes(used) : "–"} sub={uptime ?? (st?.audio_files != null ? tf("admin.tile.files", { n: st.audio_files }) : null)} delay={120} />
+      <Tile label={t("admin.tile.jams")} value={String(jams.length)} sub={jams.length ? tf("admin.tile.jams_sub", { n: jamListeners }) : t("admin.jams.idle")} delay={120} />
+      <Tile label={t("admin.tile.space")} value={st ? fmtBytes(used) : "–"} sub={uptime ?? (st?.audio_files != null ? tf("admin.tile.files", { n: st.audio_files }) : null)} delay={160} />
     </div>
+
+    {@render jamsCard()}
 
     <div class="two">
       <div class="card cbox">
@@ -756,6 +805,15 @@
   .ban { display: flex; align-items: center; gap: 10px; font-size: var(--sm); }
   .bl { flex: 1; min-width: 0; color: var(--text); }
   .bm { flex: none; font-size: var(--xs); color: var(--faint); }
+  .jrow { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255, 255, 255, .05); }
+  .jrow:first-of-type { border-top: 0; padding-top: 0; }
+  .jcode { letter-spacing: .04em; color: var(--text); }
+  .jinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .jtop { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .jhost { font-size: var(--sm); font-weight: 500; color: var(--text); }
+  .jsub { display: flex; align-items: center; gap: 5px; font-size: var(--xs); color: var(--dim); min-width: 0; }
+  .jmem { color: var(--faint); }
+  .jdur { flex: none; font-size: var(--xs); color: var(--dim); white-space: nowrap; }
   .chans { display: flex; flex-wrap: wrap; gap: 10px; }
   .chan { flex: 1; min-width: 220px; padding: 14px 18px; display: flex; align-items: center; gap: 8px; animation: rise-in .3s var(--ease) both; }
   :global(html.compact) .chan { min-width: calc(50% - 5px); padding: 12px 14px; flex-direction: column; align-items: flex-start; }

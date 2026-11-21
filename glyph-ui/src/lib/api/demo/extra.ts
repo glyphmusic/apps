@@ -188,7 +188,7 @@ const jamClone = (queueAll: boolean): JamState | null => {
 };
 const snap = (queueAll = false): JamSnapshot => ({ jam: jamClone(queueAll), waiting: null });
 const ev = (who: string, what: JamState["feed"][number]["what"], extra: Partial<JamState["feed"][number]> = {}) => ({ at_ms: Date.now(), who, what, ...extra });
-const perms = { add: true, play_now: false, skip: false, seek: false, pause: false };
+const perms = { add: true, play_now: true, skip: true, seek: true, pause: true };
 function newJam(host: boolean, code: string, ctx: DemoCtx): void {
   const cur = ctx.player.current ?? TRACKS[0];
   const queue: JamItem[] = TRACKS.slice(5, 10).map((track, i) => ({ id: track.id, track, by: i % 2 ? MEMBERS[i % 3] : host ? OWN : MEMBERS[0], votes: i === 1 ? [MEMBERS[1], MEMBERS[2]] : [] }));

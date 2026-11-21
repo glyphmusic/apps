@@ -191,20 +191,19 @@ export class WebEngine {
     this.nextAudio.load();
   }
 
-  /** Keep the blessed `<audio>` session active during an async track resolution. */
+  /** Keep (or synchronously unlock on iOS Safari) the `<audio>` session during async track resolution. */
   beginTransition() {
     this.gen++;
     clearTimeout(this.ytResumeTimer);
-    if (this.mode !== "audio" || !this.audioUnlocked) {
-      this.stopAudio();
-      this.stopYouTube();
-      this.mode = null;
-      return;
-    }
     this.stopYouTube();
     const url = this.getSilentWavUrl();
     if (!url) {
-      if (!this.audio.paused) this.audio.pause();
+      if (this.mode === "audio") {
+        if (!this.audio.paused) this.audio.pause();
+      } else {
+        this.stopAudio();
+        this.mode = null;
+      }
       return;
     }
     this.mode = "audio";
@@ -213,6 +212,7 @@ export class WebEngine {
     const a = this.audio;
     a.loop = true;
     if (a.src !== url) a.src = url;
+    this.audioUnlocked = true;
     void a.play().catch(() => {});
   }
 

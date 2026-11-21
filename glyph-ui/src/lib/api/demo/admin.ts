@@ -50,6 +50,34 @@ let blocks = [
   { id: "blk_1", reason: "abuse_block", kind: "account", label: "@theo (IP)", handle: "theo", user_id: "u_3", scope: "api", created_at: Date.now() - 3 * 60_000, expires_at: Date.now() + 12 * 60_000, hits: 14, clearable: true },
   { id: "blk_2", reason: "rate_limited", kind: "ip", label: "IP 4a8f12c9", handle: null as string | null, user_id: null as string | null, scope: "media", created_at: Date.now() - 15_000, expires_at: Date.now() + 45_000, hits: 3, clearable: false },
 ];
+const jams = [
+  {
+    code: "K7M2QP",
+    host: "mira",
+    members: ["mira", "jonas_beats", "lena"],
+    member_count: 3,
+    host_online: true,
+    created_at: Date.now() - 47 * 60_000,
+    last_seen: Date.now() - 4_000,
+    expires_at: Date.now() + (12 * 60 - 47) * 60_000,
+    track: "Kavinsky · Nightcall",
+    playing: true,
+    queue_len: 5,
+  },
+  {
+    code: "R9X4TN",
+    host: "kaito",
+    members: ["kaito", "sam"],
+    member_count: 2,
+    host_online: true,
+    created_at: Date.now() - 134 * 60_000,
+    last_seen: Date.now() - 11_000,
+    expires_at: Date.now() + (12 * 60 - 134) * 60_000,
+    track: "Daft Punk · Something About Us",
+    playing: false,
+    queue_len: 0,
+  },
+];
 
 function account(handle: string) {
   const a = accounts.find((x) => x.handle === handle);
@@ -115,6 +143,7 @@ const call: DemoHandler = (_ctx, a) => {
     blocks = blocks.filter((b) => b.id !== id);
     return { blocks: blocks.filter((b) => b.expires_at > Date.now()) };
   }
+  if (root === "jams") return { jams, total: jams.length };
   if (root === "cache/clear") return { cleared: true };
   if (root.startsWith("accounts/")) {
     const rest = root.slice(9);

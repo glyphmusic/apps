@@ -25,14 +25,24 @@
     if (app.allowed(tr)) app.play(tracks, index, context);
   }
   let sx = $state(0);
+  const armed = $derived(sx >= SWIPE_ACT);
+  function dampSwipe(dx: number): number {
+    if (dx <= 0) return 0;
+    if (dx <= SWIPE_ACT) return dx;
+    return Math.min(124, SWIPE_ACT + (dx - SWIPE_ACT) * 0.35);
+  }
   function menu(e: MouseEvent) { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: tr, from: from ? { list: from, index } : null }); }
 </script>
 
-<div class="wrap">
-  <span class="under" style:opacity={Math.min(1, sx / SWIPE_ACT)}><Icon name="list-plus" size={20} color="var(--accent)" /></span>
-  <div class="row" class:off={!app.allowed(tr) && !picking} class:picked style:transform={sx ? `translateX(${sx}px)` : undefined} class:settle={sx === 0}
+<div class="wrap" class:swiping-wrap={sx > 0}>
+  {#if sx > 0}
+    <div class="under" class:armed style:opacity={Math.min(1, sx / 22)}>
+      <span class="u-ic" class:pop={armed}><Icon name="list-plus" size={21} color={armed ? "#0d0d0d" : "var(--accent)"} /></span>
+    </div>
+  {/if}
+  <div class="row" class:off={!app.allowed(tr) && !picking} class:picked class:swiping={sx > 0} style:transform={sx ? `translateX(${sx}px)` : undefined} class:settle={sx === 0}
     onclick={tap} oncontextmenu={(e) => (picking ? e.preventDefault() : menu(e))} onkeydown={() => {}} role="row" tabindex="-1" aria-selected={picking ? picked : undefined}
-    use:drag={{ axis: "x", move: (dx) => (sx = picking ? 0 : Math.max(0, Math.min(120, dx))), end: (dx) => { if (!picking && dx >= SWIPE_ACT) app.queueAdd([tr], false); sx = 0; } }}>
+    use:drag={{ axis: "x", move: (dx) => (sx = picking ? 0 : dampSwipe(dx)), end: (dx, _dy, vx) => { if (!picking && (dx >= SWIPE_ACT || (vx > 0.5 && dx > 28))) app.queueAdd([tr], false); sx = 0; } }}>
     {#if number !== undefined}<span class="num mono">{number}</span>{/if}
     <span class="cvw">
       <Cover track={tr} size={48} radius={4} />
@@ -58,10 +68,27 @@
 </div>
 
 <style>
-  .wrap { position: relative; }
-  .under { position: absolute; left: 16px; top: 0; bottom: 0; display: flex; align-items: center; }
-  .row { position: relative; height: 56px; display: flex; align-items: center; gap: 12px; touch-action: pan-y; background: transparent; border-radius: 8px; transition: background-color .12s var(--ease), transform .16s var(--ease); }
-  .row.settle { transition: transform .24s var(--ease); }
+  .wrap { position: relative; border-radius: 10px; }
+  .wrap.swiping-wrap { overflow: hidden; }
+  .under {
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: color-mix(in srgb, var(--accent) 16%, #141416);
+    color: var(--accent);
+    pointer-events: none;
+    transition: background-color .16s ease-out, color .16s ease-out;
+  }
+  .under.armed { background: var(--accent); color: #0d0d0d; }
+  .u-ic { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; transition: transform .18s var(--ease); }
+  .u-ic.pop { transform: scale(1.18); }
+  .row { position: relative; height: 56px; display: flex; align-items: center; gap: 12px; touch-action: pan-y; background: transparent; border-radius: 10px; transition: background-color .12s var(--ease), transform .16s var(--ease); }
+  .row.swiping { transition: background-color .12s ease-out; background: #141416; }
+  .row.settle { transition: transform .22s var(--ease); }
   .row:active:not(:has(.b:active)) { background: rgba(255, 255, 255, .05); transform: scale(.982); }
   .row.off { opacity: .4; }
   .row.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); }

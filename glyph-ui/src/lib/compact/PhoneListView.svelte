@@ -417,7 +417,7 @@
   /* Starts under the status bar (the bar above is see-through until scrolled). */
   .lv { display: flex; flex-direction: column; gap: 8px; padding-top: var(--safe-top, env(safe-area-inset-top)); overflow-anchor: none; }
   .reveal-slot { flex: none; margin-bottom: -8px; display: flex; align-items: flex-end; }
-  .reveal-bar { width: 100%; height: 46px; padding: 4px 16px 6px; display: flex; align-items: center; gap: 8px; transition: opacity .08s linear; }
+  .reveal-bar { width: 100%; height: 56px; padding: 4px 16px 16px; display: flex; align-items: center; gap: 8px; transition: opacity .08s linear; }
   .msearch {
     flex: 1; min-width: 0; height: 36px; padding: 0 8px 0 11px; border-radius: 10px;
     background: rgba(255, 255, 255, .08); display: flex; align-items: center; gap: 8px;
@@ -439,7 +439,7 @@
   .head { display: flex; flex-direction: column; gap: 4px; padding: 0 16px; }
   .head.no-art { padding-top: 56px; }
   .head.no-art.has-reveal { padding-top: 8px; }
-  .art { display: flex; justify-content: center; padding: 14px 0 16px; }
+  .art { display: flex; justify-content: center; padding: 20px 0 16px; }
   .art.edit { align-self: center; transition: transform .14s var(--ease); }
   .art.edit:active { transform: scale(.98); }
   .cv { display: block; transform-origin: 50% 0; will-change: transform, opacity; }

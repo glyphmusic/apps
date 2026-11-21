@@ -24,7 +24,7 @@
   import { trackKey, type Track } from "../api/types";
   import { backend } from "../api/backend";
   import { drag, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
-  import { openNameDialog } from "../pages/lists/actions";
+  import { createDraftPlaylists } from "../draft-playlists.svelte";
   import { closeShareSheet, retryShare, shareProgress } from "../share-sheet.svelte";
 
   const empty: PickSongs = { tracks: [] };
@@ -48,6 +48,7 @@
   const like = $derived(likeSet ?? !list);
   let saveList = $state(true);
   let picked = $state<string[]>([]);
+  const drafts = createDraftPlaylists();
   let pull = $state(0);
   let busy = $state(false);
 
@@ -64,6 +65,7 @@
     picked = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id];
   }
   function close() {
+    drafts.clear();
     app.pickSongs = null;
     if (data.sheet) closeShareSheet();
   }
@@ -84,6 +86,10 @@
         : backend().call("share_save_list", { name: list.name, origin: list.origin ?? null, tracks }));
       n++;
     }
+    for (const d of drafts.items) {
+      wait.push(app.createPlaylist(d.name, tracks));
+      n++;
+    }
     for (const id of picked) {
       const p = app.playlist(id);
       if (!p) continue;
@@ -98,7 +104,9 @@
     if (!ready || busy) return;
     busy = true;
     const liked = like && !allLiked;
+    const createdNames = drafts.items.map((d) => d.name);
     const n = await apply();
+    drafts.clear();
     const saved = list && saveList;
     app.pickSongs = null;
     if (data.sheet) {
@@ -110,19 +118,19 @@
     // One toast for all of it (a saved list says so itself).
     if (saved && n === 1) return;
     if (liked && n === 1) app.toast(tracks.length === 1 ? t("import.song.added") : tf("share_in.liked_n", { n: tracks.length }));
+    else if (n === 1 && createdNames.length === 1) app.toast(tracks.length === 1 ? tf("toast.added_to_playlist", { name: createdNames[0] }) : tf("toast.added_n_to_playlist", { n: tracks.length, name: createdNames[0] }));
     else if (n === 1 && picked.length === 1) app.toast(tf("toast.added_to_playlist", { name: app.playlist(picked[0])?.name ?? "" }));
     else if (n > 1) app.toast(t("share_in.saved"));
   }
-  async function newPlaylist() {
+  function newPlaylist() {
     if (!ready) return;
-    await apply();
-    app.pickSongs = null;
-    openNameDialog(tracks);
+    drafts.promptCreate({ onCreated: () => {} });
   }
   function play() {
     if (ready) app.play(tracks, 0);
   }
   function key(e: KeyboardEvent) {
+    if (app.nameDialog) return;
     if (e.key === "Escape") { e.preventDefault(); close(); }
   }
 </script>
@@ -189,6 +197,16 @@
       <span class="nw"><Icon name="plus" size={compact ? 18 : 15} color="rgba(255,255,255,.85)" /></span>
       <span class="tx"><span class="nm trunc">{t("library.playlist.new")}</span></span>
     </button>
+    {#each drafts.items as d (d.id)}
+      <button class="row" onclick={() => drafts.remove(d.id)}>
+        <ListCover list={{ kind: "playlist", id: d.id }} size={compact ? 40 : 32} />
+        <span class="tx">
+          <span class="nm trunc">{d.name}</span>
+          <span class="ct trunc">{tf("common.n_songs", { n: 0 })}</span>
+        </span>
+        <span class="chk on"><Icon name="check" size={13} color="#000" /></span>
+      </button>
+    {/each}
     {#each lists as p (p.id)}
       {@const has = holdsAll(p.id)}
       {@const on = has || picked.includes(p.id)}

@@ -29,6 +29,7 @@
   import { installSettingsHash } from "./lib/settings/hash.svelte";
   import { installRoutes } from "./lib/routes.svelte";
   import { installAccountEvents } from "./lib/account-events.svelte";
+  import { installPwa } from "./lib/pwa.svelte";
   import { backend } from "./lib/api/backend";
   import ErrorCard from "./lib/components/ErrorCard.svelte";
   import Icon from "./lib/components/Icon.svelte";
@@ -152,6 +153,7 @@
     let offRoutes: (() => void) | undefined;
     let offSettingsHash: (() => void) | undefined;
     let cleanupWebMini: (() => void) | undefined;
+    const offPwa = installPwa();
     const clearStartupListeners = () => {
       window.removeEventListener("error", onStartupError);
       window.removeEventListener("unhandledrejection", onStartupRejection);
@@ -205,6 +207,7 @@
       offRoutes?.();
       offSettingsHash?.();
       cleanupWebMini?.();
+      offPwa();
       mq.removeEventListener("change", sync);
       offKeys();
       window.removeEventListener("hashchange", onHashChange);

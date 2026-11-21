@@ -445,6 +445,7 @@
       {#if !compact && subOpen("recommend")}<Flyout {flip}>{@render recommendBody(song)}</Flyout>{/if}
     </MenuItem>
     <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
+    <MenuItem icon="arrow-right-left" label={t("ctx.wrong_song")} onenter={closesSub} onclick={run(() => app.openWrongSong(song))} />
     {#if !onWeb() && isDownloading(song)}
       <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />
     {/if}
@@ -563,7 +564,7 @@
   .n2 { font-size: 12px; color: rgba(255, 255, 255, .45); }
 
   .bs-dim { position: fixed; inset: 0; z-index: 80; background: rgba(0, 0, 0, .55); }
-  .bs-panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: min(82vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 16px)); border-radius: 16px 16px 0 0; border-top: 1px solid rgba(255, 255, 255, .08); background: hsl(0 0% 8%); box-shadow: 0 -12px 40px rgba(0, 0, 0, .6); padding-bottom: max(10px, var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; --mi-h: 48px; --mi-px: 16px; --mi-r: 8px; --mi-fs: 15px; --mi-gap: 14px; }
+  .bs-panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: min(82vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 16px)); border-radius: 16px 16px 0 0; border-top: 1px solid rgba(255, 255, 255, .08); background: hsl(0 0% 8%); box-shadow: 0 -12px 40px rgba(0, 0, 0, .6); padding-bottom: max(10px, var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; --mi-h: 42px; --mi-px: 14px; --mi-r: 10px; --mi-fs: 15.5px; --mi-gap: 13px; }
   .bs-panel.settle { transition: transform .24s var(--ease); }
   .bs-grab { flex: none; touch-action: none; }
   .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 6px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
@@ -579,7 +580,7 @@
   .bs-body { flex: 0 1 auto; min-height: 0; transition: height .22s var(--ease); }
   .bs-slot { grid-area: 1 / 1; min-width: 0; }
   .bs-slot:global(.leaving) { position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
-  .bs-list { flex: 0 1 auto; min-height: 0; max-height: var(--bs-body-max, 65vh); padding: 6px; display: flex; flex-direction: column; }
+  .bs-list { flex: 0 1 auto; min-height: 0; max-height: var(--bs-body-max, 65vh); padding: 6px 8px; display: flex; flex-direction: column; }
 
   .pl-row { flex: none; width: 100%; min-height: var(--mi-h, 38px); padding: 5px var(--mi-px, 10px); border-radius: var(--mi-r, 6px); display: flex; align-items: center; gap: var(--mi-gap, 10px); text-align: left; cursor: pointer; transition: background-color .12s ease-out, transform .16s var(--ease); }
   .bs-list .pl-row { padding-top: 7px; padding-bottom: 7px; }

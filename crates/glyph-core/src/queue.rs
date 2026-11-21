@@ -138,6 +138,11 @@ impl Queue {
         self.manual_current = None;
     }
 
+    /// Drops only the hand-queued ("Up next") songs, keeping the current track and context.
+    pub fn clear_manual(&mut self) {
+        self.manual.clear();
+    }
+
     /// Songs in the context (the list playback started from).
     pub fn len(&self) -> usize {
         self.base.len()

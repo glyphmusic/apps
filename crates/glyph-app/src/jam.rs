@@ -547,7 +547,14 @@ pub fn leave_for_sign_out(core: &Core) {
     if jam_active() {
         leave(core);
     }
-    lock(&rt().jam).waiting = None;
+    {
+        let mut u = lock(&rt().jam);
+        u.waiting = None;
+        u.resume = None;
+        u.resume_at = None;
+        u.resume_tries = 0;
+    }
+    clear_saved_jam();
     bump();
     emit_jam(core);
 }
@@ -562,6 +569,12 @@ fn emit_jam(core: &Core) {
 pub fn open_link(core: &Arc<Core>, link: &str) {
     if glyph_protocol::jam::normalize_code(link).is_none() {
         return;
+    }
+    {
+        let mut u = lock(&rt().jam);
+        u.resume = None;
+        u.resume_at = None;
+        u.resume_tries = 0;
     }
     if core.backend().is_none() {
         lock(&rt().jam).pending = Some(link.to_string());
@@ -604,6 +617,9 @@ pub fn setup(core: &Arc<Core>) {
         let mut out = lock(&rt().out);
         out.sync_discovery(core);
         out.sync_mpd(core);
+    }
+    if let Some(saved) = load_saved_jam() {
+        lock(&rt().jam).resume = Some(saved);
     }
     let core = core.clone();
     let _ = std::thread::Builder::new().name("glyph-net".into()).spawn(move || loop {
@@ -925,6 +941,59 @@ fn use_local(core: &Core) {
 
 // ------------------------------------------------------------ jam: state
 
+/// Persisted so restarting the app automatically rejoins an active Jam.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct SavedJam {
+    code: String,
+    handle: String,
+    #[serde(default = "default_true")]
+    listen_here: bool,
+    /// Pre-jam queue, so leaving after an app restart does not keep the jam queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_queue: Option<glyph_core::QueueSnapshot>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn saved_jam_path() -> PathBuf {
+    glyph_core::paths::data_dir().join("jam.json")
+}
+
+fn load_saved_jam() -> Option<SavedJam> {
+    let s: SavedJam = glyph_core::paths::read_json(&saved_jam_path())?;
+    let code = glyph_protocol::jam::normalize_code(&s.code)?;
+    if s.handle.trim().is_empty() {
+        return None;
+    }
+    Some(SavedJam { code, handle: s.handle, listen_here: s.listen_here, saved_queue: s.saved_queue })
+}
+
+fn save_jam(code: &str, handle: &str, listen_here: bool, saved_queue: Option<&Queue>) {
+    let saved = SavedJam {
+        code: code.to_string(),
+        handle: handle.to_string(),
+        listen_here,
+        saved_queue: saved_queue.map(Queue::snapshot),
+    };
+    if let Err(e) = glyph_core::paths::write_json(&saved_jam_path(), &saved) {
+        tracing::info!("jam: save failed: {e}");
+    }
+}
+
+fn queue_from_snapshot(snap: Option<glyph_core::QueueSnapshot>) -> Option<Queue> {
+    snap.map(|s| {
+        let mut q = Queue::new();
+        q.restore(s);
+        q
+    })
+}
+
+fn clear_saved_jam() {
+    let _ = std::fs::remove_file(saved_jam_path());
+}
+
 /// Jam state of the app.
 #[derive(Default)]
 struct JamUi {
@@ -935,6 +1004,13 @@ struct JamUi {
     waiting: Option<String>,
     /// A jam link that arrived before the backend was ready.
     pending: Option<String>,
+    /// Saved jam from the previous run, waiting for backend + account to resume.
+    resume: Option<SavedJam>,
+    /// Startup resume request is currently in flight.
+    resuming: bool,
+    /// Next retry time when resuming failed transiently (e.g. offline at launch).
+    resume_at: Option<Instant>,
+    resume_tries: u32,
 }
 
 struct Jam {
@@ -1243,16 +1319,21 @@ fn host_items(q: &Queue, j: &Jam, limit: usize) -> Vec<Item> {
 
 /// What plays now, as published.
 fn host_now(core: &Core, j: &Jam) -> Option<Now> {
-    let (cur, resolving) = {
+    let (cur, resolving, restored_pos) = {
         let st = core.st();
-        (st.current.clone(), st.resolving)
+        (st.current.clone(), st.resolving, st.restored_pos)
     };
     let resolved = match (&cur, last_load()) {
         (Some(c), Some((tr, _))) if same_song(c, &tr) => Some(tr),
         _ => None,
     };
     let hold = rt().hold.load(Ordering::Relaxed);
-    let (pos, playing) = (position(core), is_playing(core));
+    let playing = is_playing(core);
+    let pos = if !playing && !resolving {
+        restored_pos.unwrap_or_else(|| position(core))
+    } else {
+        position(core)
+    };
     cur.map(|track| Now {
         track,
         position_ms: pos.as_millis() as u64,
@@ -1327,8 +1408,15 @@ pub async fn jam_start(core: C<'_>) -> Res {
     let core = core.clone();
     let b = core.backend_or_err()?;
     let me = account_handle(&core)?;
-    if lock(&rt().jam).busy {
-        return Ok(snapshot(&core, false));
+    {
+        let mut u = lock(&rt().jam);
+        if u.busy {
+            drop(u);
+            return Ok(snapshot(&core, false));
+        }
+        u.resume = None;
+        u.resume_at = None;
+        u.resume_tries = 0;
     }
     if jam_active() {
         leave(&core);
@@ -1338,14 +1426,27 @@ pub async fn jam_start(core: C<'_>) -> Res {
     lock(&rt().jam).busy = false;
     match r {
         Ok(state) => {
-            let mut j = Jam::new(state.code.clone(), true, me, state);
-            // Songs already queued by hand are the jam's first ones.
-            {
-                let st = core.st();
-                for tr in st.queue.upcoming().into_iter().take(st.queue.manual_len()) {
-                    j.by.insert(track_key(tr), j.me.clone());
+            let code = state.code.clone();
+            let mut j = Jam::new(code.clone(), true, me.clone(), state);
+            // Always start a new jam with all guest controls enabled by default
+            // (even against older servers that return restrictive defaults).
+            j.perms = Perms::default();
+            // Save the host's own queue and start the jam with an empty jam queue.
+            let (saved_q, cleared) = {
+                let mut st = core.st();
+                let saved = st.queue.clone();
+                let had_manual = st.queue.manual_len() > 0;
+                if had_manual {
+                    st.queue.clear_manual();
                 }
+                (saved, had_manual)
+            };
+            if cleared {
+                core.queue_changed();
+                core.emit_queue();
             }
+            save_jam(&code, &me, true, Some(&saved_q));
+            j.saved_queue = Some(saved_q);
             lock(&rt().jam).jam = Some(j);
             bump();
             host_loop(&core);
@@ -1371,6 +1472,9 @@ async fn join(core: &Arc<Core>, text: &str) -> Result<(), String> {
         }
         u.busy = true;
         u.waiting = None;
+        u.resume = None;
+        u.resume_at = None;
+        u.resume_tries = 0;
     }
     if jam_active() {
         leave(core);
@@ -1388,7 +1492,7 @@ async fn join(core: &Arc<Core>, text: &str) -> Result<(), String> {
             // Own jam (another device of this account): not as a guest.
             Some(state) if state.host == me => Err("That is your own Jam.".into()),
             Some(state) => {
-                enter_guest(core, code, me, state, false);
+                enter_guest(core, code, me, state, true, None, false);
                 Ok(())
             }
             None => Err("not_found".into()),
@@ -1416,7 +1520,7 @@ fn knock_loop(core: Arc<Core>, code: String, me: String, gen: u64) {
                     lock(&rt().jam).waiting = None;
                     match res.state {
                         Some(state) if state.host == me => toast_info(&core, "jam.err.own"),
-                        Some(state) => enter_guest(&core, code.clone(), me.clone(), state, true),
+                        Some(state) => enter_guest(&core, code.clone(), me.clone(), state, true, None, true),
                         None => toast_info(&core, "jam.err.server"),
                     }
                     return;
@@ -1439,14 +1543,20 @@ pub async fn jam_join(core: C<'_>, code: String) -> Res {
 
 /// In as a guest: the queue shows the host's (the own one comes back when
 /// leaving), playback follows the host.
-fn enter_guest(core: &Arc<Core>, code: String, me: String, state: State, say: bool) {
+fn enter_guest(core: &Arc<Core>, code: String, me: String, state: State, listen_here: bool, saved_queue: Option<Queue>, say: bool) {
     let host = state.host.clone();
-    let mut j = Jam::new(code, false, me, state);
-    j.saved_queue = Some(core.st().queue.clone());
+    let mut j = Jam::new(code.clone(), false, me.clone(), state);
+    j.listen_here = listen_here;
+    let saved_q = saved_queue.unwrap_or_else(|| core.st().queue.clone());
+    save_jam(&code, &me, listen_here, Some(&saved_q));
+    j.saved_queue = Some(saved_q);
     {
         let mut u = lock(&rt().jam);
         u.jam = Some(j);
         u.waiting = None;
+        u.resume = None;
+        u.resume_at = None;
+        u.resume_tries = 0;
     }
     bump();
     mirror_queue(core);
@@ -1456,6 +1566,130 @@ fn enter_guest(core: &Arc<Core>, code: String, me: String, state: State, say: bo
     if say {
         toast(core, "jam.joined_you", Value::Null, Some(format!("@{host}")), "ok");
     }
+}
+
+/// Resumes an active jam as its host after the app restarted.
+fn resume_host(core: &Arc<Core>, me: String, state: State, saved_queue: Option<Queue>) {
+    let code = state.code.clone();
+    let mut j = Jam::new(code.clone(), true, me.clone(), state.clone());
+    j.guests = state.members.iter().filter(|m| !m.host && m.handle != j.me).map(|m| m.handle.clone()).collect();
+    for item in &state.queue {
+        j.by.insert(item.id.clone(), item.by.clone());
+        if !item.votes.is_empty() {
+            j.votes.insert(item.id.clone(), item.votes.iter().cloned().collect());
+        }
+    }
+    let restore_queue = {
+        let mut st = core.st();
+        if st.queue.manual_len() == 0 && !state.queue.is_empty() {
+            let manual: Vec<Track> = state.queue.iter().map(|i| i.track.clone()).collect();
+            let after: Vec<Track> = if st.queue.upcoming().is_empty() {
+                state.after.clone()
+            } else {
+                st.queue.upcoming_context().into_iter().cloned().collect()
+            };
+            guard(|| st.queue.mirror(manual, after));
+            true
+        } else {
+            for tr in st.queue.upcoming().into_iter().take(st.queue.manual_len()) {
+                j.by.entry(track_key(tr)).or_insert_with(|| j.me.clone());
+            }
+            false
+        }
+    };
+    if restore_queue {
+        core.queue_changed();
+        core.emit_queue();
+    }
+    let restore_now = {
+        let st = core.st();
+        st.current.is_none().then(|| state.now.clone()).flatten()
+    };
+    save_jam(&code, &me, true, saved_queue.as_ref());
+    j.saved_queue = saved_queue;
+    if let Some(n) = restore_now {
+        j.resume_at = state.position_at(j.server_now());
+        let track = n.resolved.unwrap_or(n.track);
+        lock(&rt().jam).jam = Some(j);
+        bump();
+        core.start_track(track);
+        rt().hold.store(true, Ordering::Relaxed);
+    } else {
+        lock(&rt().jam).jam = Some(j);
+        bump();
+    }
+    host_loop(core);
+    emit_jam(core);
+}
+
+/// Checks if the saved jam from the previous session is still live and rejoins it.
+fn resume_saved(core: &Arc<Core>, b: Arc<Backend>, saved: SavedJam, gen: u64) {
+    let core = core.clone();
+    crate::rt::spawn(async move {
+        let r = call(b.jam_state(&saved.code, 0)).await;
+        enum Action {
+            Host(State),
+            Guest(State),
+            Clear,
+            None,
+        }
+        let act = {
+            let mut u = lock(&rt().jam);
+            u.resuming = false;
+            if cur_gen() != gen
+                || u.jam.is_some()
+                || u.waiting.is_some()
+                || u.resume.as_ref().map(|s| &s.code) != Some(&saved.code)
+            {
+                Action::None
+            } else {
+                match r {
+                    Ok(state) => {
+                        u.resume = None;
+                        u.resume_at = None;
+                        u.resume_tries = 0;
+                        if state.host == saved.handle {
+                            Action::Host(state)
+                        } else {
+                            Action::Guest(state)
+                        }
+                    }
+                    Err((c, _)) if gone(c.as_deref()) => {
+                        u.resume = None;
+                        u.resume_at = None;
+                        u.resume_tries = 0;
+                        Action::Clear
+                    }
+                    Err((_, msg)) => {
+                        tracing::info!("jam resume: {msg}");
+                        u.resume_tries = u.resume_tries.saturating_add(1);
+                        let delay = (1u64 << u.resume_tries.min(5)).min(30);
+                        u.resume_at = Some(Instant::now() + Duration::from_secs(delay));
+                        Action::None
+                    }
+                }
+            }
+        };
+        let saved_q = queue_from_snapshot(saved.saved_queue);
+        match act {
+            Action::Host(state) => resume_host(&core, saved.handle, state, saved_q),
+            Action::Guest(state) => enter_guest(&core, state.code.clone(), saved.handle, state, saved.listen_here, saved_q, false),
+            Action::Clear => {
+                clear_saved_jam();
+                // The jam ended while closed: restore pre-jam queue so any
+                // host-persisted jam queue does not linger.
+                if let Some(q) = saved_q {
+                    let should_restore = core.st().queue.manual_len() > 0;
+                    if should_restore {
+                        core.st().queue = q;
+                        core.queue_changed();
+                        core.emit_queue();
+                    }
+                }
+            }
+            Action::None => {}
+        }
+    });
 }
 
 pub fn jam_leave(core: C<'_>, code: Option<String>) {
@@ -1478,6 +1712,7 @@ pub fn jam_leave(core: C<'_>, code: Option<String>) {
 fn leave(core: &Core) {
     let Some(j) = lock(&rt().jam).jam.take() else { return };
     bump();
+    clear_saved_jam();
     let (code, host) = (j.code.clone(), j.host);
     after(core, j);
     if let Some(b) = core.backend() {
@@ -1493,6 +1728,7 @@ fn leave(core: &Core) {
 fn lost(core: &Core, why: String) {
     let Some(j) = lock(&rt().jam).jam.take() else { return };
     bump();
+    clear_saved_jam();
     after(core, j);
     toast(core, &problem_key(&why), Value::Null, None, "info");
     emit_jam(core);
@@ -1509,27 +1745,33 @@ fn demote(core: &Arc<Core>) {
     let core = core.clone();
     crate::rt::spawn(async move {
         if let Err(e) = join(&core, &code).await {
+            if gone(Some(e.as_str())) {
+                clear_saved_jam();
+            }
             toast(&core, &problem_key(&e), Value::Null, None, "info");
         }
     });
 }
 
-/// Back to normal after a jam: tempo, the own queue, nothing shown that is
-/// not loaded here.
+/// Back to normal after a jam: tempo, the own queue (never keeping the jam
+/// queue), nothing shown that is not loaded here.
 fn after(core: &Core, j: Jam) {
-    if j.host {
-        return;
-    }
-    if (j.speed - 1.0).abs() > f32::EPSILON {
-        if let Some(p) = &core.player {
-            p.set_speed(1.0);
+    if !j.host {
+        if (j.speed - 1.0).abs() > f32::EPSILON {
+            if let Some(p) = &core.player {
+                p.set_speed(1.0);
+            }
         }
-    }
-    if !j.listen_here {
-        clear_remote(core);
+        if !j.listen_here {
+            clear_remote(core);
+        }
     }
     if let Some(q) = j.saved_queue {
         core.st().queue = q;
+        core.queue_changed();
+        core.emit_queue();
+    } else if core.st().queue.manual_len() > 0 {
+        core.st().queue.clear_manual();
         core.queue_changed();
         core.emit_queue();
     }
@@ -1538,7 +1780,12 @@ fn after(core: &Core, j: Jam) {
 /// The host's song shown while listening at the host is not loaded here:
 /// forget it.
 fn clear_remote(core: &Core) {
-    core.st().current = None;
+    {
+        let mut st = core.st();
+        st.current = None;
+        st.restored_pos = None;
+        st.restored_duration = None;
+    }
     *lock(&rt().shown) = None;
     core.emit_player();
 }
@@ -1702,12 +1949,13 @@ pub fn jam_set_listen_here(core: C<'_>, here: bool) -> Value {
                 j.synced_at = None;
                 j.settle_until = None;
                 j.speed = 1.0;
-                true
+                Some((j.code.clone(), j.me.clone(), j.saved_queue.clone()))
             }
-            None => false,
+            None => None,
         }
     };
-    if changed {
+    if let Some((code, me, saved_q)) = changed {
+        save_jam(&code, &me, here, saved_q.as_ref());
         if here {
             // `sync` starts the host's song here.
             clear_remote(core);
@@ -2016,6 +2264,9 @@ fn jam_tick(core: &Arc<Core>) {
     let pending = {
         let mut u = lock(&rt().jam);
         if u.pending.is_some() && core.backend().is_some() && !u.busy {
+            u.resume = None;
+            u.resume_at = None;
+            u.resume_tries = 0;
             u.pending.take()
         } else {
             None
@@ -2023,6 +2274,42 @@ fn jam_tick(core: &Arc<Core>) {
     };
     if let Some(link) = pending {
         open_link(core, &link);
+    }
+    let to_resume = {
+        let mut u = lock(&rt().jam);
+        if u.jam.is_none()
+            && u.waiting.is_none()
+            && !u.busy
+            && !u.resuming
+            && u.resume.is_some()
+            && u.resume_at.is_none_or(|t| Instant::now() >= t)
+        {
+            if let Some(b) = core.backend() {
+                if let Some(acc) = b.account() {
+                    let saved = u.resume.clone().unwrap();
+                    if acc.account.handle != saved.handle {
+                        u.resume = None;
+                        u.resume_at = None;
+                        u.resume_tries = 0;
+                        Some(Err(()))
+                    } else {
+                        u.resuming = true;
+                        Some(Ok((b, saved, cur_gen())))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    match to_resume {
+        Some(Ok((b, saved, gen))) => resume_saved(core, b, saved, gen),
+        Some(Err(())) => clear_saved_jam(),
+        None => {}
     }
     let (host, clock_due) = {
         let u = lock(&rt().jam);
@@ -2174,13 +2461,22 @@ fn maybe_publish(core: &Arc<Core>) {
     let Some(b) = core.backend() else { return };
     let gen = cur_gen();
     let (playing, pos, has) = {
-        let (resolving, has) = {
+        let (resolving, has, restored_pos) = {
             let st = core.st();
-            (st.resolving, st.current.is_some())
+            (st.resolving, st.current.is_some(), st.restored_pos)
         };
         let hold = rt().hold.load(Ordering::Relaxed);
         let playing = has && (is_playing(core) || (resolving && !hold));
-        (playing, if has { position(core).as_millis() as u64 } else { 0 }, has)
+        let p = if has {
+            if !playing && !resolving {
+                restored_pos.unwrap_or_else(|| position(core)).as_millis() as u64
+            } else {
+                position(core).as_millis() as u64
+            }
+        } else {
+            0
+        };
+        (playing, p, has)
     };
     let _ = has;
     let mut u = lock(&rt().jam);
@@ -2363,6 +2659,7 @@ fn host_add(core: &Core, track: Track, from: &str) {
     if guard(|| core.st().queue.push(track)).is_none() {
         return;
     }
+    core.queue_changed();
     core.emit_queue();
     if let Some(j) = lock(&rt().jam).jam.as_mut() {
         j.by.insert(id, from.to_string());
@@ -2384,6 +2681,7 @@ fn host_play_now(core: &Core, track: Track, from: &str) {
     if guard(|| core.st().queue.play_next(track)).is_none() {
         return;
     }
+    core.queue_changed();
     core.emit_queue();
     next_song(core);
     toast(core, "jam.played", json!({ "who": format!("@{from}") }), Some(title), "info");
@@ -2427,6 +2725,7 @@ fn host_vote(core: &Core, item: &str, from: &str, up: bool) {
             }
         }
     }
+    core.queue_changed();
     core.emit_queue();
 }
 
@@ -2441,6 +2740,7 @@ fn host_remove(core: &Core, item: &str) {
         pos.is_some()
     };
     if removed {
+        core.queue_changed();
         core.emit_queue();
     }
     if let Some(j) = lock(&rt().jam).jam.as_mut() {
@@ -2549,11 +2849,11 @@ fn sync(core: &Core) {
         let Some(now) = j.state.now.clone() else { return };
         (now, j.settle_until.is_some_and(|t| Instant::now() < t), j.host_position().unwrap_or(0), j.speed)
     };
-    let (cur, resolving) = {
+    let (cur, resolving, restored) = {
         let st = core.st();
-        (st.current.clone(), st.resolving)
+        (st.current.clone(), st.resolving, st.restored_pos.is_some())
     };
-    let here = cur.is_some_and(|c| same_song(&c, &now.track));
+    let here = cur.is_some_and(|c| same_song(&c, &now.track)) && !restored;
     if !here {
         // The host's song is about to end and this app already went on to
         // the next one: the host follows in a moment.
@@ -2707,6 +3007,9 @@ fn become_host(core: &Arc<Core>, state: State) {
             start = Some((n.resolved.unwrap_or(n.track), !n.playing));
         }
     }
+    let code = j.code.clone();
+    j.saved_queue = old.saved_queue;
+    save_jam(&code, &me, true, j.saved_queue.as_ref());
     lock(&rt().jam).jam = Some(j);
     bump();
     if let Some((track, paused)) = start {
@@ -2715,5 +3018,23 @@ fn become_host(core: &Arc<Core>, state: State) {
         rt().hold.store(paused, Ordering::Relaxed);
     }
     host_loop(core);
+    emit_jam(core);
     toast(core, "jam.you_host", Value::Null, None, "ok");
+}
+
+#[cfg(test)]
+mod saved_jam_tests {
+    use super::SavedJam;
+
+    #[test]
+    fn saved_jam_roundtrip_and_default_listen_here() {
+        let s = SavedJam { code: "K7M2QP".into(), handle: "alice".into(), listen_here: false, saved_queue: None };
+        let raw = serde_json::to_string(&s).unwrap();
+        let back: SavedJam = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back, s);
+
+        let minimal: SavedJam = serde_json::from_str(r#"{"code":"K7M2QP","handle":"alice"}"#).unwrap();
+        assert!(minimal.listen_here);
+        assert!(minimal.saved_queue.is_none());
+    }
 }

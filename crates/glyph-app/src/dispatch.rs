@@ -1,9 +1,9 @@
 use crate::controller::{Core, PlayFrom};
 use crate::jam::{Perms, Reaction};
 use crate::transfer::PickedFile;
-use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer};
+use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, wrong_song};
 use glyph_core::{ListKey, SearchItem};
-use glyph_protocol::Track;
+use glyph_protocol::{ProviderId, Track};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -546,6 +546,27 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             transfer::migrate_cancel(core);
             Ok(Value::Null)
         }
+
+        // ---- wrong song ("Not the right one") ----
+        "wrong_song_alternatives" => res(wrong_song::alternatives(core, req(&args, "track")?, opt(&args, "query")?).await),
+        "wrong_song_preview" => {
+            wrong_song::preview_start(core, req(&args, "track")?, opt(&args, "preview_url")?).await?;
+            Ok(Value::Null)
+        }
+        "wrong_song_preview_stop" => {
+            wrong_song::preview_stop(core);
+            Ok(Value::Null)
+        }
+        "wrong_song_select" => res(
+            wrong_song::select(
+                core,
+                req(&args, "original")?,
+                req(&args, "chosen")?,
+                opt::<ProviderId>(&args, "wrong_provider")?,
+                opt(&args, "wrong_id")?,
+            )
+            .await,
+        ),
 
         other => Err(format!("unknown command: {other}")),
     }

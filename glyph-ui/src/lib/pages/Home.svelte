@@ -15,10 +15,14 @@
   import ListCard from "./home/ListCard.svelte";
   import ReleaseCard from "./home/ReleaseCard.svelte";
   import CardSkeleton from "./home/CardSkeleton.svelte";
+  import Icon from "../components/Icon.svelte";
   import { app } from "../state.svelte";
+  import { onWeb } from "../web";
+  import { dismissInstallBanner, openInstallSheet, pwa, triggerNativeInstall } from "../pwa.svelte";
   import { t } from "../i18n.svelte";
   import { uniqBy } from "../fmt";
   import { listId, trackKey, type ListKey, type Track } from "../api/types";
+  import { slide } from "svelte/transition";
 
   type HomeRecentEntry =
     | { kind: "song"; track: Track; key: string }
@@ -81,11 +85,31 @@
     app.play(recentSongs, Math.max(0, recentSongs.findIndex((x) => trackKey(x) === k)));
   }
   const showAll = (title: string, icon: string, tracks: typeof recs) => () => app.openSection({ title, icon, tracks });
+  const showInstallBanner = $derived(onWeb() && app.compact && !pwa.installed && !pwa.bannerDismissed);
+  async function installFromBanner() {
+    if (pwa.canPrompt) {
+      const res = await triggerNativeInstall();
+      if (res === "accepted") { app.toast(t("web.pwa.installed_toast")); return; }
+      if (res === "dismissed") return;
+    }
+    openInstallSheet();
+  }
 </script>
 
 <div class="home">
   <!-- Phones: the greeting sits in the compact header (views.rs TOUCH). -->
   {#if !app.compact}<SectionTitle heading title={t("home.greeting")} />{/if}
+  {#if showInstallBanner}
+    <div class="pwa-banner" transition:slide={{ duration: 200 }}>
+      <img class="pwa-ic" src="{import.meta.env.BASE_URL}apple-touch-icon.png" alt="Glyph" width="40" height="40" />
+      <div class="pwa-tx">
+        <b class="trunc">{t(pwa.ios ? "web.pwa.banner.title_ios" : "web.pwa.banner.title")}</b>
+        <span class="trunc">{t(pwa.ios ? "web.pwa.banner.sub_ios" : "web.pwa.banner.sub")}</span>
+      </div>
+      <button class="pwa-go" onclick={installFromBanner}>{t(pwa.ios ? "web.pwa.banner.add" : "web.pwa.banner.install")}</button>
+      <button class="pwa-x" onclick={dismissInstallBanner} aria-label={t("tip.x")}><Icon name="x" size={15} /></button>
+    </div>
+  {/if}
   <HomeCards />
 
   <HomeSection icon="disc-3" title={t("home.recent")} more={recent.length ? () => app.openListView({ kind: "recent" }) : undefined}>
@@ -143,4 +167,39 @@
 <style>
   .home, .feeds { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
   :global(html.compact) .home, :global(html.compact) .feeds { gap: 20px; }
+  .pwa-banner {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 10px 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, .07);
+  }
+  .pwa-ic { flex: none; width: 40px; height: 40px; border-radius: 10px; background: #050505; }
+  .pwa-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .pwa-tx b { font-size: 13.5px; font-weight: 600; color: #fff; }
+  .pwa-tx span { font-size: 12px; color: var(--dim); }
+  .pwa-go {
+    flex: none;
+    height: 32px;
+    padding: 0 13px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #000;
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: opacity .12s, transform .14s var(--ease);
+  }
+  .pwa-go:active { opacity: .85; transform: scale(.95); }
+  .pwa-x {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: var(--faint);
+  }
+  .pwa-x:active { background: rgba(255, 255, 255, .1); color: #fff; }
 </style>

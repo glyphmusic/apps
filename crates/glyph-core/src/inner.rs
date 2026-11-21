@@ -29,6 +29,7 @@ impl Inner {
         let mut server = None;
         let mut server_providers = None;
         let mut server_rates = false;
+        let mut server_wrong_song = false;
         let url = server_client::normalize_base_url(config.effective_server_url());
         if !url.is_empty() {
             let key_url = url.clone();
@@ -40,6 +41,7 @@ impl Inner {
                     crate::app_outdated::note_health(h.min_app_version.as_deref());
                     library::set_playlist_track_limit(h.playlist_max_tracks);
                     server_rates = h.supports(glyph_protocol::capability::RATINGS);
+                    server_wrong_song = h.supports(glyph_protocol::capability::WRONG_SONG);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
                     server = Some(client);
@@ -62,7 +64,7 @@ impl Inner {
             }
         }
         let covers = covers.with_server(server.clone());
-        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, covers, lyrics_cache })
+        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, server_wrong_song, covers, lyrics_cache })
     }
 
     /// The server, unless it is the official one and that is out (see
@@ -431,6 +433,13 @@ impl Inner {
 impl Inner {
 
     pub(super) async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
+        // User explicitly selected a replacement via "Not the right one":
+        // honour their choice locally immediately without waiting for server consensus.
+        if let Some(pinned) = self.resolver.pinned_override(t) {
+            if let Some(r) = self.resolve_exact(&pinned).await? {
+                return Ok(Some(r));
+            }
+        }
         if self.config.providers.youtube_mode == config::YouTubeMode::Local
             && self.config.providers.enabled.contains(&ProviderId::YouTube)
             && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube))
@@ -530,9 +539,14 @@ impl Inner {
         Ok(self.resolver.resolve_preview(t).await)
     }
 
-    /// First source that offers a download: the song's own ids, then the
-    /// full source the resolver matched it to.
+    /// First source that offers a download: a user-pinned replacement first,
+    /// then the song's own ids, then the full source the resolver matched it to.
     pub(super) async fn download_url(&self, t: &Track) -> Result<Option<(ProviderId, String)>> {
+        if let Some(pinned) = self.resolver.pinned_override(t) {
+            if let Some(hit) = self.download_url_exact(&pinned).await? {
+                return Ok(Some(hit));
+            }
+        }
         if self.config.providers.youtube_mode == config::YouTubeMode::Local
             && (self.config.providers.youtube_only || t.source == ProviderId::YouTube || self.resolver.priority().first() == Some(&ProviderId::YouTube)) {
             if let Some((matched, _)) = self.local_youtube_match(t, None).await {
@@ -654,6 +668,208 @@ impl Inner {
             Err(e) => {
                 tracing::info!(provider = ?p, "download lookup failed: {e}");
                 None
+            }
+        }
+    }
+
+    /// Resolves one exact candidate `(source, id)` directly (for 30-second
+    /// previews and user-pinned replacements).
+    pub(super) async fn resolve_exact(&self, candidate: &Track) -> Result<Option<Resolved>> {
+        let p = candidate.source;
+        if p == ProviderId::YouTube {
+            if self.config.providers.youtube_mode == config::YouTubeMode::Local || self.local_youtube_on() {
+                if let Some(r) = self.local_youtube(candidate, Some(&candidate.id)).await {
+                    return Ok(Some(r));
+                }
+            }
+            if let Some(server) = self.live_server() {
+                if self.server_providers.as_ref().is_some_and(|ps| ps.contains(&ProviderId::YouTube))
+                    && ytdlp::valid_video_id(&candidate.id)
+                {
+                    let url = server.audio_provider_url(ProviderId::YouTube, &candidate.id);
+                    return Ok(Some(Resolved {
+                        track: candidate.clone(),
+                        source: PlaybackSource::Stream { provider: ProviderId::YouTube, url, mime: None },
+                        confidence: 1.0,
+                    }));
+                }
+            }
+            if let Some(r) = self.rescue_on_this_computer(candidate, Some(&candidate.id)).await {
+                return Ok(Some(r));
+            }
+            return Ok(self.resolver.resolve_exact(candidate).await);
+        }
+        if let Some(r) = self.resolver.resolve_exact(candidate).await {
+            return Ok(Some(r));
+        }
+        if let Some(server) = self.live_server() {
+            if self.server_providers.as_ref().is_some_and(|ps| ps.contains(&p)) {
+                let url = server.audio_provider_url(p, &candidate.id);
+                return Ok(Some(Resolved {
+                    track: candidate.clone(),
+                    source: PlaybackSource::Stream { provider: p, url, mime: None },
+                    confidence: 1.0,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Download URL for one exact candidate `(source, id)` (user-pinned replacement).
+    async fn download_url_exact(&self, candidate: &Track) -> Result<Option<(ProviderId, String)>> {
+        let p = candidate.source;
+        let quality = match downloads::job_quality() {
+            config::AudioQuality::Low => "low",
+            config::AudioQuality::High => "high",
+            _ => "standard",
+        };
+        if p == ProviderId::YouTube {
+            if self.config.providers.youtube_mode == config::YouTubeMode::Local {
+                if let Some(u) = self.download_at(ProviderId::YouTube, candidate).await {
+                    return Ok(Some((ProviderId::YouTube, u)));
+                }
+                if let Some(Resolved { source: PlaybackSource::Stream { url, .. }, .. }) =
+                    self.local_youtube(candidate, Some(&candidate.id)).await
+                {
+                    return Ok(Some((ProviderId::YouTube, url)));
+                }
+                return Ok(None);
+            }
+            if let Some(server) = self.live_server() {
+                if self.server_providers.as_ref().is_some_and(|ps| ps.contains(&ProviderId::YouTube))
+                    && ytdlp::valid_video_id(&candidate.id)
+                {
+                    return Ok(Some((ProviderId::YouTube, server.download_youtube_url(&candidate.id, quality))));
+                }
+            }
+            if let Some(u) = self.download_at(ProviderId::YouTube, candidate).await {
+                return Ok(Some((ProviderId::YouTube, u)));
+            }
+            if let Some(Resolved { source: PlaybackSource::Stream { url, .. }, .. }) =
+                self.local_youtube(candidate, Some(&candidate.id)).await
+            {
+                return Ok(Some((ProviderId::YouTube, url)));
+            }
+            return Ok(None);
+        }
+        if let Some(u) = self.download_at(p, candidate).await {
+            return Ok(Some((p, u)));
+        }
+        if let Some(server) = self.live_server() {
+            if self.server_providers.as_ref().is_some_and(|ps| ps.contains(&p)) {
+                return Ok(Some((p, server.download_provider_url(p, &candidate.id, quality))));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Fetches replacement candidates from the server (when supported) and/or local
+    /// providers + native YouTube search.
+    pub(super) async fn match_alternatives(
+        &self,
+        track: &Track,
+        query: Option<String>,
+    ) -> Result<glyph_protocol::MatchAlternativesResponse> {
+        let enabled = &self.config.providers.enabled;
+        let priority: Vec<ProviderId> = self.resolver.priority().into_iter().filter(|p| enabled.contains(p)).collect();
+        let mut resp = if let Some(server) = self.live_server().filter(|_| self.server_wrong_song) {
+            match server.match_alternatives(track, query.clone(), &priority).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::info!("server match_alternatives failed, falling back locally: {e:#}");
+                    glyph_protocol::MatchAlternativesResponse {
+                        current_source: None,
+                        current_id: None,
+                        alternatives: Vec::new(),
+                    }
+                }
+            }
+        } else {
+            glyph_protocol::MatchAlternativesResponse {
+                current_source: None,
+                current_id: None,
+                alternatives: Vec::new(),
+            }
+        };
+
+        // Ensure current local pinned/cached match is reflected as current.
+        if let Some(cur) = self.resolver.current_mapping(track) {
+            resp.current_source = Some(cur.source);
+            resp.current_id = Some(cur.id);
+        }
+
+        // Fill/augment with local providers & native YouTube search when the server
+        // isn't used or returned few candidates.
+        if resp.alternatives.len() < 6 {
+            let mut seen: std::collections::HashSet<(ProviderId, String)> = resp
+                .alternatives
+                .iter()
+                .map(|a| (a.track.source, a.track.id.clone()))
+                .collect();
+            let local_alts = self.resolver.search_alternatives(track, query.as_deref()).await;
+            for alt in local_alts {
+                if seen.insert((alt.track.source, alt.track.id.clone())) {
+                    resp.alternatives.push(alt);
+                }
+            }
+            if enabled.contains(&ProviderId::YouTube) && resp.alternatives.len() < 8 {
+                let q = query
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{} {}", track.artist, track.title));
+                if let Ok(Ok(yt_cands)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), ytnative::search(&self.http, &q, 10)).await
+                {
+                    let cur_pair = resp.current_source.zip(resp.current_id.as_deref());
+                    for c in yt_cands {
+                        if !seen.insert((ProviderId::YouTube, c.track.id.clone())) {
+                            continue;
+                        }
+                        let conf = resolver::score_candidate(track, &c);
+                        let tag = if cur_pair == Some((ProviderId::YouTube, c.track.id.as_str())) {
+                            Some("current".into())
+                        } else if c.bonus >= 0.14 {
+                            Some("topic".into())
+                        } else if c.bonus > 0.0 || c.track.title.to_lowercase().contains("official audio") {
+                            Some("official_audio".into())
+                        } else {
+                            None
+                        };
+                        let preview_url = self.live_server().and_then(|s| {
+                            self.server_providers
+                                .as_ref()
+                                .is_some_and(|ps| ps.contains(&ProviderId::YouTube))
+                                .then(|| s.audio_provider_url(ProviderId::YouTube, &c.track.id))
+                        });
+                        resp.alternatives.push(glyph_protocol::MatchAlternative {
+                            track: c.track,
+                            confidence: conf,
+                            preview_url,
+                            tag,
+                        });
+                    }
+                }
+            }
+            resp.alternatives.truncate(15);
+        }
+        Ok(resp)
+    }
+
+    /// Sends a wrong-song selection to the server (if connected and supported).
+    pub(super) async fn report_wrong_match(
+        &self,
+        req: &glyph_protocol::WrongMatchReportRequest,
+    ) -> Result<Option<glyph_protocol::WrongMatchReportResponse>> {
+        let Some(server) = self.live_server().filter(|_| self.server_wrong_song) else {
+            return Ok(None);
+        };
+        match server.report_wrong_match(req).await {
+            Ok(r) => Ok(Some(r)),
+            Err(e) => {
+                tracing::info!("wrong-match report to server failed: {e:#}");
+                Ok(None)
             }
         }
     }

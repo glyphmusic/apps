@@ -276,6 +276,9 @@ pub mod capability {
     /// Search rates YouTube uploads at Deezer itself (cached on the server),
     /// so the app does not look them up again.
     pub const RATINGS: &str = "ratings";
+    /// Wrong-song alternatives and consensus reporting (`/v1/match/alternatives`,
+    /// `/v1/match/report`).
+    pub const WRONG_SONG: &str = "wrong_song";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -340,6 +343,73 @@ pub struct YouTubeHintResponse {
     pub accepted: bool,
     /// The song's shared id is now this video (verified by the server).
     pub confirmed: bool,
+}
+
+// -------------------------------------------------- /v1/match/alternatives & /v1/match/report
+
+/// `POST /v1/match/alternatives`: candidate replacements for a track whose
+/// resolved audio did not match what the listener expected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchAlternativesRequest {
+    pub track: Track,
+    /// Optional user-refined search query; when omitted, derived from `track`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Preferred order of full sources; empty = server default.
+    #[serde(default)]
+    pub priority: Vec<ProviderId>,
+}
+
+/// One candidate replacement song returned by `/v1/match/alternatives`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchAlternative {
+    pub track: Track,
+    /// Similarity to the wanted song (0.0..=1.0).
+    pub confidence: f32,
+    /// Playable URL for a 30-second preview (proxied `/v1/audio/...` or direct
+    /// stream/preview URL), when available directly from the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_url: Option<String>,
+    /// Short hint badge such as `"current"`, `"topic"`, or `"official_audio"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchAlternativesResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_source: Option<ProviderId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_id: Option<String>,
+    pub alternatives: Vec<MatchAlternative>,
+}
+
+/// `POST /v1/match/report`: "the resolved song was wrong, I picked `chosen`".
+/// The server stores the vote without switching other users immediately; only
+/// once enough distinct listeners agree and the server verifies `chosen` does
+/// the global match change for everyone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WrongMatchReportRequest {
+    pub track: Track,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrong_provider: Option<ProviderId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrong_id: Option<String>,
+    pub chosen: Track,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WrongMatchReportResponse {
+    /// Whether this voter's report was recorded.
+    pub recorded: bool,
+    /// `true` once consensus + server verification promoted `chosen` globally.
+    pub promoted: bool,
+    /// Distinct voters currently supporting `chosen` for this song.
+    #[serde(default)]
+    pub votes: u32,
+    /// Minimum distinct voters required before global promotion can happen.
+    #[serde(default)]
+    pub threshold: u32,
 }
 
 // ---------------------------------------------------------------- /v1/lyrics
@@ -1517,16 +1587,16 @@ pub mod jam {
         #[serde(default = "yes")]
         pub add: bool,
         /// Play a picked song right away instead of queueing it.
-        #[serde(default)]
+        #[serde(default = "yes")]
         pub play_now: bool,
         /// Skip to the next / previous song.
-        #[serde(default)]
+        #[serde(default = "yes")]
         pub skip: bool,
         /// Jump within the song.
-        #[serde(default)]
+        #[serde(default = "yes")]
         pub seek: bool,
         /// Play and pause.
-        #[serde(default)]
+        #[serde(default = "yes")]
         pub pause: bool,
     }
 
@@ -1536,7 +1606,7 @@ pub mod jam {
 
     impl Default for Perms {
         fn default() -> Self {
-            Self { add: true, play_now: false, skip: false, seek: false, pause: false }
+            Self { add: true, play_now: true, skip: true, seek: true, pause: true }
         }
     }
 
@@ -1917,15 +1987,17 @@ pub mod jam {
         }
 
         #[test]
-        fn perms_default_to_adding_only() {
+        fn perms_default_to_all_enabled() {
             let p: Perms = serde_json::from_str("{}").unwrap();
             assert_eq!(p, Perms::default());
-            assert!(p.add && !p.any_control() && !p.allows(&Control::Next));
-            assert!(p.allows_op(&Op::Add { track: track() }) && !p.allows_op(&Op::PlayNow { track: track() }));
+            assert!(p.add && p.play_now && p.skip && p.seek && p.pause && p.any_control());
+            assert!(p.allows(&Control::Next) && p.allows(&Control::Pause) && p.allows(&Control::Seek { ms: 1 }));
+            assert!(p.allows_op(&Op::Add { track: track() }) && p.allows_op(&Op::PlayNow { track: track() }));
             assert!(p.allows_op(&Op::React { reaction: Reaction::Fire }));
-            let p = Perms { seek: true, add: false, ..p };
+            let p = Perms { add: false, pause: false, play_now: false, ..p };
             assert!(p.allows(&Control::Seek { ms: 1 }) && !p.allows(&Control::Pause));
             assert!(!p.allows_op(&Op::Vote { item: "x".into(), up: true }));
+            assert!(!p.allows_op(&Op::PlayNow { track: track() }));
         }
 
         #[test]

@@ -14,7 +14,7 @@
   import IconButton from "../components/IconButton.svelte";
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import { app } from "../state.svelte";
-  import { onWeb } from "../web";
+  import { thisIcon, thisName } from "../connect";
   import { t, tf } from "../i18n.svelte";
   import { rating, type Track } from "../api/types";
   import { jam } from "../jam.svelte";
@@ -47,7 +47,7 @@
   const manual = $derived(Math.min(app.queue.user, up.length));
   const base = $derived((app.queue.index ?? -1) + 1);
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
-  const devName = $derived(remote?.name ?? app.config.audio.output_device ?? t("connect.this_phone"));
+  const devName = $derived(remote?.name ?? app.config.audio.output_device ?? thisName());
   const sleepLabelText = $derived.by(() => {
     void app.clock;
     const s = app.sleep;
@@ -91,20 +91,30 @@
     const container = listEl;
     if (!row || !container) return;
     const rowEls = [...container.querySelectorAll<HTMLElement>("[data-qrow]")];
-    const centers = rowEls.map((el) => el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2);
+    const startScroll = container.scrollTop;
+    const centers = rowEls.map((el) => {
+      const r = el.getBoundingClientRect();
+      return r.top + r.height / 2 + startScroll;
+    });
+    const startCenter = centers[from] ?? (row.getBoundingClientRect().top + 30 + startScroll);
     const h = row.getBoundingClientRect().height || 60;
     const startY = e.clientY;
     let started = false;
     try { grip.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     const blockTouch = (ev: TouchEvent) => ev.preventDefault();
     const onMove = (ev: PointerEvent) => {
-      const dy = ev.clientY - startY;
+      const scrollDelta = container.scrollTop - startScroll;
+      const dy = ev.clientY - startY + scrollDelta;
       if (!started) {
-        if (Math.abs(dy) < 4) return;
+        if (Math.abs(ev.clientY - startY) < 4) return;
         started = true;
+        swipe = null;
       }
-      let slot = from;
-      for (let i = 0; i < centers.length; i++) if (ev.clientY > centers[i]) slot = i;
+      const draggedCenter = startCenter + dy;
+      let slot = 0;
+      for (let i = 0; i < centers.length; i++) {
+        if (i !== from && draggedCenter > centers[i]) slot++;
+      }
       slot = Math.max(0, Math.min(up.length - 1, slot));
       dragRow = { from, slot, dy, h };
     };
@@ -129,13 +139,22 @@
     addEventListener("pointercancel", onCancel);
   }
 
+  /** Rubber-band damping past the swipe threshold so swiping feels physical. */
+  function dampSwipe(dx: number): number {
+    const sign = dx < 0 ? -1 : 1;
+    const abs = Math.abs(dx);
+    const max = dx < 0 ? 132 : 124;
+    if (abs <= SWIPE_ACT) return dx;
+    return sign * Math.min(max, SWIPE_ACT + (abs - SWIPE_ACT) * 0.35);
+  }
+
   const rowKey = (u: { track: Track; index: number }) => `${u.index}:${u.track.source}:${u.track.id}`;
   /** Sideways swipe on a queue row: right adds it again, left removes it. */
   function swipeEnd(u: { track: Track; index: number }, dx: number, vx: number) {
     const key = rowKey(u);
     swipe = null;
-    if (dx >= SWIPE_ACT || (vx > 0.5 && dx > 24)) app.queueAdd([u.track], false);
-    else if (dx <= -SWIPE_ACT || (vx < -0.5 && dx < -24)) { leaving = [...leaving, key]; app.queueRemove(u.index); }
+    if (dx >= SWIPE_ACT || (vx > 0.5 && dx > 28)) app.queueAdd([u.track], false);
+    else if (dx <= -SWIPE_ACT || (vx < -0.5 && dx < -28)) { leaving = [...leaving, key]; app.queueRemove(u.index); }
   }
 
   function rowShift(i: number): number {
@@ -178,7 +197,7 @@
             {#if !editing}
               {#if app.queue.context}<span class="sub trunc">{t("np.playing_from")} „{app.queue.context}“</span>{/if}
               <button class="dev-line" onclick={() => { app.showQueue = false; app.showDevices = true; }}>
-                <Icon name={remote ? (DEV_ICON[remote.kind] ?? "cast") : (onWeb() ? "globe" : "headphones")} size={13} color="var(--accent)" />
+                <Icon name={remote ? (DEV_ICON[remote.kind] ?? "cast") : thisIcon()} size={13} color="var(--accent)" />
                 <span class="trunc">{devName}</span>
               </button>
             {/if}
@@ -248,18 +267,40 @@
           {#if !editing && i === manual && manual > 0 && up.length > manual}
             <div class="sec">{app.queue.context ? tf("queue.from_n", { name: app.queue.context, n: up.length - manual }) : tf("queue.later_n", { n: up.length - manual })}</div>
           {/if}
-          <div class="q-wrap" class:gone>
-          {#if sx > 0}<span class="under add" style:opacity={Math.min(1, sx / SWIPE_ACT)}><Icon name="list-plus" size={20} color="var(--accent)" /></span>{/if}
-          {#if sx < 0}<span class="under rm" style:opacity={Math.min(1, -sx / SWIPE_ACT)}><Icon name="trash-2" size={20} color="hsla(0, 75%, 68%, .95)" /></span>{/if}
+          {@const shiftY = rowShift(i)}
+          {@const armedAdd = sx >= SWIPE_ACT}
+          {@const armedRm = sx <= -SWIPE_ACT}
+          <div
+            class="q-wrap"
+            class:gone
+            class:dragging
+            class:reordering={!!dragRow && !dragging}
+            class:swiping-wrap={sx !== 0}
+            style:transform={shiftY ? `translateY(${shiftY}px)` : undefined}
+            data-qrow
+          >
+          {#if sx > 0}
+            <div class="under add" class:armed={armedAdd} style:opacity={Math.min(1, sx / 22)}>
+              <span class="u-ic" class:pop={armedAdd}>
+                <Icon name="list-plus" size={21} color={armedAdd ? "#0d0d0d" : "var(--accent)"} />
+              </span>
+            </div>
+          {/if}
+          {#if sx < 0}
+            <div class="under rm" class:armed={armedRm} style:opacity={Math.min(1, -sx / 22)}>
+              <span class="u-ic" class:pop={armedRm}>
+                <Icon name="trash-2" size={21} color={armedRm ? "#fff" : "hsla(0, 78%, 68%, .95)"} />
+              </span>
+            </div>
+          {/if}
           <div
             class="r tap q-row"
             class:dragging
             class:swiping={sx !== 0}
-            data-qrow
-            style:transform="translate({gone ? -110 : 0}%, 0) translate({sx}px, {rowShift(i)}px)"
+            style:transform={gone ? "translateX(-110%)" : sx ? `translateX(${sx}px)` : undefined}
             use:drag={{
               axis: "x",
-              move: (dx) => { if (!editing && !dragRow && !gone) swipe = { key, dx: Math.max(-140, Math.min(120, dx)) }; },
+              move: (dx) => { if (!editing && !dragRow && !gone) swipe = { key, dx: dampSwipe(dx) }; },
               end: (dx, _dy, vx) => { if (!editing && !dragRow && !gone) swipeEnd(u, dx, vx); else swipe = null; },
             }}
             onclick={() => (editing ? toggleSel(u.index) : app.queueJump(u.index))}
@@ -329,7 +370,7 @@
 
 <style>
   .dim { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, .55); }
-  .panel { position: absolute; left: 0; right: 0; bottom: 0; height: min(86vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px)); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: max(var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; }
+  .panel { position: absolute; left: 0; right: 0; bottom: 0; height: min(86vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px)); height: min(86dvh, calc(100dvh - var(--safe-top, env(safe-area-inset-top)) - 12px)); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: max(var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; }
   .panel.settle { transition: transform .24s var(--ease); }
   .grab { flex: none; touch-action: none; }
   .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 8px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
@@ -363,17 +404,34 @@
 
   .list { flex: 1; min-height: 0; position: relative; }
   .sec { padding: 12px 16px 4px; font-size: 13px; font-weight: 700; color: var(--dim); }
-  .r { width: 100%; height: 60px; padding: 0 8px 0 16px; display: flex; align-items: center; gap: 12px; text-align: left; }
-  .q-wrap { position: relative; overflow: hidden; transition: opacity .2s ease-out; }
+  .r { width: 100%; height: 60px; padding: 0 4px 0 10px; display: flex; align-items: center; gap: 12px; text-align: left; }
+  .q-wrap { position: relative; border-radius: 10px; margin: 0 6px; transition: opacity .2s ease-out; }
+  .q-wrap.reordering { transition: transform .18s var(--ease), opacity .2s ease-out; }
+  .q-wrap.dragging { z-index: 10; transition: none; }
+  .q-wrap.swiping-wrap, .q-wrap.gone { overflow: hidden; }
   .q-wrap.gone { opacity: 0; pointer-events: none; }
-  .under { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; pointer-events: none; }
-  .under.add { left: 20px; }
-  .under.rm { right: 20px; }
-  .q-row { position: relative; background: hsl(0 0% 8%); touch-action: pan-y; transition: transform .14s var(--ease), background-color .12s ease-out; }
-  .q-row.swiping { transition: background-color .12s ease-out; }
+  .under {
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+    padding: 0 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+    transition: background-color .16s ease-out, color .16s ease-out;
+  }
+  .under.add { justify-content: flex-start; background: color-mix(in srgb, var(--accent) 16%, #141416); color: var(--accent); }
+  .under.add.armed { background: var(--accent); color: #0d0d0d; }
+  .under.rm { justify-content: flex-end; background: hsla(0, 72%, 52%, .18); color: hsla(0, 78%, 70%, .95); }
+  .under.rm.armed { background: hsl(0 72% 52%); color: #fff; }
+  .u-ic { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; transition: transform .18s var(--ease); }
+  .u-ic.pop { transform: scale(1.18); }
+  .q-row { position: relative; border-radius: 10px; background: hsl(0 0% 8%); touch-action: pan-y; transition: transform .22s var(--ease), background-color .12s ease-out; }
+  .q-row.swiping { transition: background-color .12s ease-out; background: #161618; }
   /* Solid while pressed, so the swipe icons underneath never show through. */
   .q-row.tap:active { background: hsl(0 0% 11%); }
-  .q-row.dragging { position: relative; z-index: 3; transition: none; background: rgba(255, 255, 255, .09); border-radius: 10px; }
+  .q-row.dragging { transition: none; background: #1e1e22; border-radius: 10px; }
   .tap:active { background: rgba(255, 255, 255, .06); }
   .chk { flex: none; width: 19px; height: 19px; border-radius: 4px; background: rgba(255, 255, 255, .16); display: grid; place-items: center; transition: background-color .12s ease-out; }
   .chk.on { background: var(--accent); }

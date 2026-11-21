@@ -5,6 +5,7 @@
 import { backend } from "../api/backend";
 import { app } from "../state.svelte";
 import { t, tf } from "../i18n.svelte";
+import { createDraftPlaylists, draftIdOf, draftValue, isDraftValue } from "../draft-playlists.svelte";
 import { errText, pickFiles, readClipboard } from "./util";
 import type { MigrateOverview, MigrateProgress, MigrateResume, MigrateRunItem, MigrateService, MigrateTarget } from "./types";
 
@@ -51,16 +52,26 @@ export const mg = $state({
   resume: undefined as MigrateResume | null | undefined,
   overview: null as MigrateOverview | null,
   picked: {} as Record<string, boolean>,
-  /** Destination per track collection id: `"liked" | "new" | "pl:<id>"`. */
+  /** Destination per track collection id: `"liked" | "new" | "draft:<id>" | "pl:<id>"`. */
   targets: {} as Record<string, string>,
-  /** Optional custom playlist name per collection id when destination is `"new"`. */
-  targetNames: {} as Record<string, string>,
   progress: null as MigrateProgress | null,
   finished: null as MigrateProgress | null,
   /** Live running tick (ms) so the elapsed clock ticks smoothly during transfers. */
   clockNow: 0,
   runStartedClient: 0,
 });
+
+/** Temporary new playlists created from the Choose destination dropdown; auto-pruned when unused. */
+export const migrateDrafts = createDraftPlaylists();
+
+function pruneUnusedDrafts() {
+  const used = new Set<string>();
+  for (const v of Object.values(mg.targets)) {
+    const did = draftIdOf(v);
+    if (did) used.add(did);
+  }
+  migrateDrafts.prune(used);
+}
 
 let pulseTimer = 0;
 let fallbackTimer = 0;
@@ -133,6 +144,21 @@ function handleProgress(p: MigrateProgress | null | undefined, fromPush = false)
   if (p.state === "finished" && mg.step === "running") {
     stopFallback();
     stopClock();
+    for (const it of p.items ?? []) {
+      if (it.status !== "done" || !it.playlist_id) continue;
+      const prev = mg.targets[it.id];
+      if (!prev || !isDraftValue(prev)) continue;
+      for (const k of Object.keys(mg.targets)) {
+        if (mg.targets[k] === prev) mg.targets[k] = `pl:${it.playlist_id}`;
+      }
+    }
+    const failedDrafts = new Set<string>();
+    for (const it of p.items ?? []) {
+      if (it.status !== "failed") continue;
+      const did = draftIdOf(mg.targets[it.id] ?? "");
+      if (did) failedDrafts.add(did);
+    }
+    migrateDrafts.prune(failedDrafts);
     mg.finished = p;
     mg.progress = null;
     mg.step = "done";
@@ -169,6 +195,7 @@ export function installMigrateEvents(): () => void {
 }
 
 export function pick(service: MigrateService, profile = "") {
+  migrateDrafts.clear();
   mg.service = service;
   mg.profile = profile;
   mg.pasted = null;
@@ -180,6 +207,7 @@ export function pick(service: MigrateService, profile = "") {
 }
 
 export function openLink() {
+  migrateDrafts.clear();
   mg.error = null;
   mg.step = "link";
 }
@@ -191,6 +219,7 @@ export function clearPasted() {
 }
 
 export function back() {
+  migrateDrafts.clear();
   mg.error = null;
   mg.resume = undefined;
   if ((mg.step === "choose" || mg.step === "loading") && mg.service && mg.returnStep === "connect") {
@@ -202,6 +231,7 @@ export function back() {
 
 export function toPick() {
   if (mg.step === "running") return;
+  migrateDrafts.clear();
   mg.error = null;
   mg.resume = undefined;
   mg.step = "pick";
@@ -389,7 +419,7 @@ async function load(service: MigrateService, login: Record<string, unknown>) {
         .filter((c) => c.kind === "liked" || c.kind === "playlist")
         .map((c) => [c.id, c.kind === "liked" ? "liked" : "new"]),
     );
-    mg.targetNames = {};
+    migrateDrafts.clear();
     mg.step = "choose";
   } catch (e) {
     mg.error = errText(e);
@@ -402,10 +432,23 @@ export function toggle(id: string) { if (mg.picked[id]) delete mg.picked[id]; el
 export function setTarget(id: string, value: string) {
   mg.targets[id] = value;
   mg.picked[id] = true;
+  pruneUnusedDrafts();
 }
 
-export function setTargetName(id: string, name: string) {
-  mg.targetNames[id] = name;
+export function promptNewTarget(id: string, initial = "") {
+  migrateDrafts.promptCreate({
+    initial,
+    onCreated: (draft) => setTarget(id, draftValue(draft.id)),
+  });
+}
+
+export function promptRenameTarget(id: string, initial = "") {
+  const did = draftIdOf(mg.targets[id] ?? "");
+  if (did && migrateDrafts.get(did)) {
+    migrateDrafts.promptRename(did);
+    return;
+  }
+  promptNewTarget(id, initial);
 }
 
 /** Ticks (or unticks) every playlist. */
@@ -446,9 +489,14 @@ function buildTargets(cols: { id: string; kind: string }[]): Record<string, Migr
     const raw = mg.targets[c.id] ?? (c.kind === "liked" ? "liked" : "new");
     if (raw === "liked") targets[c.id] = { kind: "liked" };
     else if (raw.startsWith("pl:")) targets[c.id] = { kind: "playlist", id: raw.slice(3) };
-    else {
-      const custom = (mg.targetNames[c.id] ?? "").trim();
-      targets[c.id] = { kind: "new_playlist", name: custom || null };
+    else if (isDraftValue(raw)) {
+      const did = draftIdOf(raw)!;
+      const draft = migrateDrafts.get(did);
+      targets[c.id] = draft
+        ? { kind: "new_playlist", name: draft.name, draft_id: draft.id }
+        : { kind: "new_playlist", name: null };
+    } else {
+      targets[c.id] = { kind: "new_playlist", name: null };
     }
   }
   return targets;
@@ -465,6 +513,12 @@ export async function start() {
   mg.error = null;
   try {
     await backend().call("migrate_start", { service: mg.service, selected, targets });
+    const usedDrafts = new Set<string>();
+    for (const c of cols) {
+      const did = draftIdOf(mg.targets[c.id] ?? "");
+      if (did) usedDrafts.add(did);
+    }
+    migrateDrafts.prune(usedDrafts);
     app.toast(`${t("migrate.started")} · ${serviceOf(mg.service).name}`);
     mg.step = "running";
     mg.progress = null;

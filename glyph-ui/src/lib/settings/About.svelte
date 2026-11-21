@@ -24,6 +24,7 @@
   import AppOnly from "./AppOnly.svelte";
   import NoteLogo from "../overlays/NoteLogo.svelte";
   import { onWeb } from "../web";
+  import { openInstallSheet, pwa } from "../pwa.svelte";
   import { copyText, errText, isMobile } from "./util";
   import type { UpdateState } from "./types";
   let { sub = 0 }: { sub?: number } = $props();
@@ -114,7 +115,16 @@
       </Surface>
       <div class="gap"></div>
       <Rows>
-        {#if web}<AppOnly />{:else}
+        {#if web}
+        <Row label={t(pwa.ios ? "web.pwa.add_home" : "web.pwa.row_title")} info={t(pwa.installed ? "web.pwa.installed_desc" : (pwa.ios ? "web.pwa.sub_ios" : "web.pwa.sub"))}>
+          {#if pwa.installed}
+            <span class="pwa-ok"><Icon name="check" size={14} color="var(--ok)" /><span>{t("web.pwa.installed_badge")}</span></span>
+          {:else}
+            <Button kind="primary" icon="download" onclick={openInstallSheet}>{t(pwa.ios ? "web.pwa.banner.add" : "web.pwa.banner.install")}</Button>
+          {/if}
+        </Row>
+        <AppOnly />
+        {:else}
         <Row label={t("update.auto")} info={t("sp.about.auto.desc")}>
           <Tog on={app.config.updates.auto_install} onchange={(v) => app.setConfig((c) => { c.updates.auto_install = v; })} label={t("update.auto")} />
         </Row>
@@ -147,5 +157,6 @@
   .chk:disabled { opacity: .6; cursor: default; }
   .st { font-size: 11.5px; text-align: center; }
   .links { padding-top: 14px; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .pwa-ok { height: 30px; padding: 0 11px; border-radius: 999px; background: rgba(255, 255, 255, .07); display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: rgba(255, 255, 255, .86); }
   .man { padding: 12px 0; font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 </style>

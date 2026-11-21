@@ -5,6 +5,7 @@
 import type { Device } from "./api/types";
 import { app } from "./state.svelte";
 import { t } from "./i18n.svelte";
+import { pwa } from "./pwa.svelte";
 
 export type DeviceX = Device & {
   /** Glyph apps: the platform it runs on ("windows", "android", ...). */
@@ -53,8 +54,21 @@ export function deviceIcon(d: DeviceX): string {
   }
 }
 
-export const thisIcon = () => (app.platform === "web" ? "globe" : app.platform === "android" || app.platform === "ios" ? "smartphone" : "monitor");
-export const thisName = () => t(app.platform === "web" ? "connect.this_browser" : app.platform === "android" || app.platform === "ios" ? "connect.this_phone" : "connect.this_computer");
+const mobilePhoneWeb = () => app.platform === "web" && (pwa.mobile || app.compact);
+export const thisIcon = () => (
+  app.platform === "android" || app.platform === "ios" || mobilePhoneWeb()
+    ? "smartphone"
+    : app.platform === "web"
+      ? (pwa.standalone ? "monitor" : "globe")
+      : "monitor"
+);
+export const thisName = () => t(
+  app.platform === "android" || app.platform === "ios" || (mobilePhoneWeb() && pwa.standalone)
+    ? "connect.this_phone"
+    : app.platform === "web"
+      ? (pwa.standalone ? "connect.this_computer" : "connect.this_browser")
+      : "connect.this_computer",
+);
 export const isGlyphApp = (d: DeviceX) => d.kind === "glyph" || d.kind === "account";
 
 /** The other device music plays on (icon, name), if any. */

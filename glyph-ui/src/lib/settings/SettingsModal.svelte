@@ -20,7 +20,7 @@
   import { setTab, sui } from "./settings.svelte";
   import { subHidden } from "./advanced.svelte";
   import { closeDetail, findListing, loadPlugins, pl } from "./plugins-state.svelte";
-  import { mg, serviceOf, toPick } from "./migrate-state.svelte";
+  import { back as migrateBack, mg, serviceOf, toPick } from "./migrate-state.svelte";
 
   // Redirect away if the active settings page is not available (e.g. Integrations while signed out on /web).
   $effect(() => {
@@ -58,7 +58,7 @@
         const svcName = serviceOf(mg.service).name;
         const acc = mg.overview?.account.trim() ?? "";
         if (mg.step === "choose") {
-          const backToConnect = mg.returnStep === "connect" ? () => { mg.error = null; mg.step = "connect"; } : undefined;
+          const backToConnect = mg.returnStep === "connect" ? migrateBack : undefined;
           if (acc && acc.toLowerCase() !== svcName.toLowerCase()) {
             return [root, { label: svcName, onclick: backToConnect }, { label: acc }];
           }

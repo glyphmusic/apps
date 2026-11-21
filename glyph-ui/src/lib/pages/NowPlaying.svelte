@@ -119,6 +119,7 @@
           <ThinBar width={150} value={app.volume} onpick={(f) => app.setVolume(f)} label={(f) => `${Math.round(f * 100)}%`} onwheelstep={wheelVol} />
           <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
           <ToggleButton name="timer" size={16} on={app.sleep != null || app.controlMenu?.menu === "sleep"} accent="var(--accent)" onclick={menu("sleep")} oncontextmenu={menu("sleep")} />
+          <IconButton name="arrow-right-left" size={15} label={t("tip.wrong_song")} onclick={() => app.openWrongSong(cur)} />
           {#if app.config.ui.np_download}
             {#if dl === "busy"}
               <button type="button" class="dl dl-cancel" use:tip={dlTip} aria-label={t("ctx.cancel_download")} onclick={() => app.cancelDownloads([cur])}><DownloadBadge state="busy" progress={prog} size={16} arrow="arrow-down" cancellable /></button>

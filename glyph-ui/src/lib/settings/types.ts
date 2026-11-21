@@ -167,7 +167,7 @@ export type MigrateService = "spotify" | "youtube" | "soundcloud" | "deezer" | "
 export type MigrateTarget =
   | { kind: "liked" }
   | { kind: "playlist"; id: string }
-  | { kind: "new_playlist"; name?: string | null };
+  | { kind: "new_playlist"; name?: string | null; draft_id?: string | null };
 export interface MigrateCollection {
   id: string;
   kind: "liked" | "playlist" | "albums" | "artists";

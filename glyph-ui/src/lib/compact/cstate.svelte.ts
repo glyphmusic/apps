@@ -1,6 +1,7 @@
 import { cubicOut } from "svelte/easing";
 import { app } from "../state.svelte";
 import { fx } from "../ui.svelte";
+import { pwa } from "../pwa.svelte";
 
 // Phone layout state (compact.rs / compact/now_playing.rs): Now Playing is a
 // sheet over the page (it never enters the back history), lyrics open full
@@ -266,6 +267,7 @@ export function installCompactLongPress(holdMs = 360): () => void {
 /** Handles Android hardware/gesture back before backgrounding the activity. */
 export function installAndroidBack() {
   (window as unknown as { __glyphBack?: () => boolean }).__glyphBack = () => {
+    if (pwa.sheetOpen) { pwa.sheetOpen = false; return true; }
     if (app.confirm) { app.confirm = null; return true; }
     if (app.shareSheet) { app.shareSheet = null; return true; }
     if (app.pickSongs) { app.pickSongs = null; return true; }

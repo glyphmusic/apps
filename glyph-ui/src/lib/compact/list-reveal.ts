@@ -3,9 +3,9 @@
 /** Height of the translucent mobile backbar (`Compact.svelte .backbar.over`). */
 export const REVEAL_TOP_BAR = 52;
 /** Height of the search + sort bar row sitting beneath the backbar when revealed. */
-export const REVEAL_BAR_H = 46;
+export const REVEAL_BAR_H = 56;
 /** Resting scroll offset for lists without cover art (keeps h1 at y = 56 px). */
-export const REVEAL_NO_ART_H = 50;
+export const REVEAL_NO_ART_H = 60;
 
 /**
  * Resting scrollTop ("Schwellenpunkt") so a mobile list opens in its exact

@@ -18,7 +18,8 @@ import { WebAccountManager } from "./web-account";
 import { WebConnectManager } from "./web-connect";
 import { WebMcpManager } from "./web-mcp";
 import { ApiError, server, serverOrigin, type PlaybackCommandWire, type PlaybackSource, type SearchEvent } from "./web-server";
-import { decodeShare, encodeShare } from "./share-code";
+import { PREFIX as SHARE_PREFIX, decodeShare, encodeShare, shareLinkId } from "./share-code";
+import { SETTINGS_FILE_NAME, applySharedSettings, decodeSettings, encodeSettings, isSettingsCode, settingsToJson } from "./settings-share";
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
 import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
@@ -152,6 +153,7 @@ export class WebBackend implements Backend {
   private subs = new Map<string, Set<(p: any) => void>>();
   private handlers: Record<string, Handler>;
   private engine: WebEngine;
+  private previewAudio: HTMLAudioElement | null = null;
   /** The current song's resolved source is loaded in the engine. */
   private loaded = false;
   /** Bumped on every new song; late answers for an old one are dropped. */
@@ -184,6 +186,7 @@ export class WebBackend implements Backend {
   private playingFrom: ListKey | null = null;
   private lastMediaPosAt = 0;
   private lastMediaDur: number | null = null;
+  private settingsUndo: Config | null = null;
 
   /** localStorage had no library (too big for it): read it from IndexedDB first. */
   private libraryFromIdb = false;
@@ -1134,12 +1137,15 @@ export class WebBackend implements Backend {
   }
   private metadata(t: Track) {
     if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+    const fallbackArt = typeof location !== "undefined"
+      ? [{ src: `${location.origin}${import.meta.env.BASE_URL}icon-512.png`, sizes: "512x512", type: "image/png" }]
+      : [];
     const apply = (artworkUrl: string | null) => {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: t.title,
         artist: t.artist,
         album: t.album ?? "",
-        artwork: artworkUrl ? [{ src: artworkUrl }] : [],
+        artwork: artworkUrl ? [{ src: artworkUrl }] : fallbackArt,
       });
     };
     const directCover = t.cover_url && !isYoutubeCover(t.cover_url) ? t.cover_url : null;
@@ -1640,7 +1646,52 @@ export class WebBackend implements Backend {
         if (/^(mailto|sms):/.test(url)) location.href = url;
         else window.open(url, "_blank", "noopener,noreferrer");
       },
-      import_text: () => this.toast("web.app_only", "info"),
+      import_text: async (a) => {
+        const text = String(a.text ?? "").trim();
+        if (!text) return undefined;
+        if (isSettingsCode(text)) return { kind: "settings", text };
+        if (text.startsWith(SHARE_PREFIX)) {
+          try {
+            const { name, tracks } = await decodeShare(text);
+            if (tracks.length) {
+              return { kind: "share_preview", share_kind: "playlist", name, code: text, link: "", author: null, tracks };
+            }
+          } catch { /* fall through */ }
+        }
+        const id = shareLinkId(text);
+        if (id) {
+          try {
+            return await this.handlers.share_open({ id });
+          } catch { /* fall through */ }
+        }
+        this.toast("web.app_only", "info");
+        return undefined;
+      },
+      // ---- settings backup & share (compatible with desktop & Android) ----
+      settings_code: () => encodeSettings(this.config, VERSION),
+      settings_file: () => ({ name: SETTINGS_FILE_NAME, text: settingsToJson(this.config, VERSION) }),
+      settings_import: async (a) => {
+        const sections = await decodeSettings(String(a.text ?? ""));
+        const before = wire(this.config);
+        const next = wire(this.config);
+        const changed = applySharedSettings(next, sections);
+        if (changed) {
+          this.settingsUndo = before;
+          this.config = next;
+          save("config", this.config);
+          this.emit("config", this.config);
+          this.account.scheduleSync();
+        }
+        return { changed };
+      },
+      settings_undo: () => {
+        if (!this.settingsUndo) return;
+        this.config = this.settingsUndo;
+        this.settingsUndo = null;
+        save("config", this.config);
+        this.emit("config", this.config);
+        this.account.scheduleSync();
+      },
       cover_path: (a) => a.track?.cover_url ?? null,
       track_album: async (a) => {
         const tr = a.track as Track | undefined;
@@ -1671,6 +1722,68 @@ export class WebBackend implements Backend {
       device_connect: (a) => this.connect.connect(String(a.id ?? "")),
       device_use_local: () => this.connect.useLocal(),
       device_select: () => this.connect.devicesJson(),
+      // ---- wrong song ("Not the right one") ----
+      wrong_song_alternatives: async (a) => {
+        const track = a.track as Track;
+        const query = (a.query as string | null) ?? null;
+        return server.matchAlternatives(track, query, this.config.providers.priority.filter((p) => WEB_SOURCES.includes(p)));
+      },
+      wrong_song_preview: async (a) => {
+        const track = a.track as Track;
+        const previewUrl = (a.preview_url as string | null) ?? null;
+        this.stopWrongSongPreview();
+        const k = `${track.source}:${track.id}`;
+        this.emit("wrong_song_preview", { key: k, status: "loading", position: 0, duration: 30, error: null });
+        let url = previewUrl;
+        if (!url) {
+          try {
+            const res = await server.resolve(track, [track.source]);
+            const src = direct(res.source);
+            if (src && (src.kind === "stream" || src.kind === "preview")) url = src.url;
+          } catch { /* handled below */ }
+        }
+        if (!url) {
+          this.emit("wrong_song_preview", { key: k, status: "error", position: 0, duration: 30, error: "Preview unavailable in browser for this source" });
+          return;
+        }
+        const audio = new Audio(url);
+        audio.volume = this.player.muted ? 0 : this.player.volume;
+        this.previewAudio = audio;
+        audio.ontimeupdate = () => {
+          const pos = Math.min(30, audio.currentTime || 0);
+          if (pos >= 30) {
+            this.stopWrongSongPreview();
+            return;
+          }
+          this.emit("wrong_song_preview", { key: k, status: "playing", position: pos, duration: Math.min(30, audio.duration || 30), error: null });
+        };
+        audio.onended = () => this.stopWrongSongPreview();
+        audio.onerror = () => this.emit("wrong_song_preview", { key: k, status: "error", position: 0, duration: 30, error: "Preview failed to load" });
+        await audio.play().catch(() => {
+          this.emit("wrong_song_preview", { key: k, status: "error", position: 0, duration: 30, error: "Playback blocked" });
+        });
+      },
+      wrong_song_preview_stop: () => this.stopWrongSongPreview(),
+      wrong_song_select: async (a) => {
+        this.stopWrongSongPreview();
+        const original = a.original as Track;
+        const chosen = a.chosen as Track;
+        const wrongProvider = (a.wrong_provider as ProviderId | null) ?? null;
+        const wrongId = (a.wrong_id as string | null) ?? null;
+        const report = await server.reportWrongMatch(original, chosen, wrongProvider, wrongId).catch(() => ({
+          recorded: false, promoted: false, votes: 0, threshold: 3,
+        }));
+        if (this.player.current && trackKey(this.player.current) === trackKey(original)) {
+          void this.start({ ...original, source: chosen.source, id: chosen.id }, true);
+        }
+        this.emit("toast", {
+          text: "",
+          key: report.promoted ? "toast.wrong_song_promoted" : "toast.wrong_song_saved",
+          sub: original.title,
+          kind: "ok",
+        });
+        return report;
+      },
       // ---- not in a browser: answers that keep the UI calm ----
       download: (a) => {
         for (const t of (a.tracks ?? []) as Track[]) this.emit("download", { key: trackKey(t), progress: null, done: true });
@@ -1685,5 +1798,14 @@ export class WebBackend implements Backend {
       providers_cooling: () => [],
       update_state: () => ({ checking: false, installing: null, installed: false, error: null, status: { kind: "none" } }),
     };
+  }
+
+  private stopWrongSongPreview() {
+    if (this.previewAudio) {
+      this.previewAudio.pause();
+      this.previewAudio.src = "";
+      this.previewAudio = null;
+    }
+    this.emit("wrong_song_preview", { key: null, status: "stopped", position: 0, duration: 30, error: null });
   }
 }

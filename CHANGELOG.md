@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.0 - 2026-11-21
+
+### Added
+
+- **"Not the right one?" for songs**: if a song played or downloaded the wrong version, open its menu, listen to a 30-second preview of other versions, refine the search and pick the right one. Your choice is saved for you and downloaded right away; the match only changes for everyone once enough listeners confirm it.
+- **Install Glyph as an app (web player)**: the web player offers an install prompt with step-by-step help for iPhone/iPad (Add to Home Screen), Safari on Mac (Add to Dock) and other browsers, plus new app icons.
+- **Active Jams in the Server dashboard**: admins see running Jam rooms with listeners, queue length and how long they have been running.
+- **Draft playlists and shareable settings**: new playlists can be named on phones before they are created, and settings can be shared between devices.
+
+### Changed
+
+- **Polish across phone and desktop**: refreshed bottom sheets, share sheet, now-playing sheet, titlebar, playing-bars animation and settings pages (design guide updated).
+
 ## 0.12.16 - 2026-11-21
 
 ### Added

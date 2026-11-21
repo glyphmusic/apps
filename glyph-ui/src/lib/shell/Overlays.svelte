@@ -4,16 +4,19 @@
   import { app } from "../state.svelte";
   import { isTauri } from "../api/backend";
   import { isWebMiniFallback } from "../web-mini.svelte";
+  import { pwa } from "../pwa.svelte";
   import ContextMenu from "../overlays/ContextMenu.svelte";
   import ControlMenu from "../overlays/ControlMenu.svelte";
   import NameDialog from "../overlays/NameDialog.svelte";
   import AddShared from "../overlays/AddShared.svelte";
+  import WrongSongModal from "../overlays/WrongSongModal.svelte";
   import ConfirmDialog from "../overlays/ConfirmDialog.svelte";
   import McpApprove from "../overlays/McpApprove.svelte";
   import MiniPlayer from "../overlays/MiniPlayer.svelte";
   import Jam from "../overlays/Jam.svelte";
   import Onboarding from "../overlays/Onboarding.svelte";
   import Splash from "../overlays/Splash.svelte";
+  import InstallSheet from "../overlays/InstallSheet.svelte";
   import CropDialog from "../pages/profile/CropDialog.svelte";
 </script>
 
@@ -22,10 +25,12 @@
 {#if app.ctx}<ContextMenu />{/if}
 {#if app.controlMenu}<ControlMenu />{/if}
 {#if app.pickSongs}<AddShared />{/if}
+{#if app.wrongSong}<WrongSongModal />{/if}
 {#if app.nameDialog}<NameDialog />{/if}
 {#if app.confirm}<ConfirmDialog />{/if}
 {#if app.jamOpen}<Jam />{/if}
 {#if app.onboarding}<Onboarding />{/if}
 {#if app.splash}<Splash />{/if}
+{#if pwa.sheetOpen}<InstallSheet />{/if}
 <McpApprove />
 <CropDialog />

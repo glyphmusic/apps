@@ -8,6 +8,7 @@
   import Avatar from "./Avatar.svelte";
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
+  import { openInstallSheet, pwa } from "../pwa.svelte";
   import { t } from "../i18n.svelte";
   import { admin } from "../admin/admin.svelte";
   import { phone, drag, sheetIn, sheetOut, shouldClose } from "./cstate.svelte";
@@ -22,6 +23,7 @@
       { icon: "users", label: t("jam.title"), run: () => { app.showQueue = false; app.showDevices = true; app.jamOpen = true; } },
       { icon: "arrow-right-left", label: t("library.migrate"), run: () => app.openSettings("migrate") },
     ]),
+    ...(onWeb() && !pwa.installed ? [{ icon: "smartphone", label: t(pwa.ios ? "web.pwa.add_home" : "web.install_app"), run: openInstallSheet }] : []),
     ...(admin.on ? [{ icon: "server", label: t("admin.title"), run: () => { admin.sub = ""; app.navigate("server"); } }] : []),
     { icon: "settings", label: t("nav.settings"), run: () => app.openSettings() },
   ]);

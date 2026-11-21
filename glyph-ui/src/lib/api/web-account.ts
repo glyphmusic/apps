@@ -102,6 +102,15 @@ function detectPlatform(): string {
 
 function detectDeviceName(): string {
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const nav = typeof navigator !== "undefined" ? (navigator as Navigator & { standalone?: boolean }) : undefined;
+  const standalone = nav?.standalone === true
+    || (typeof window !== "undefined" && window.matchMedia?.("(display-mode: standalone)").matches);
+  if (standalone) {
+    if (/iPhone|iPod/i.test(ua)) return "Glyph (iPhone)";
+    if (/iPad/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) return "Glyph (iPad)";
+    if (/Android/i.test(ua)) return "Glyph (Android)";
+    return "Glyph Web App";
+  }
   const browser = ua.includes("Firefox/")
     ? "Firefox"
     : ua.includes("Edg/")

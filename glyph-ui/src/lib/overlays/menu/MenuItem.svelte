@@ -6,20 +6,23 @@
   // `sub`: a row with a flyout (chevron 14 white 40 %, highlighted while open).
   import type { Snippet } from "svelte";
   import Icon from "../../components/Icon.svelte";
+  import { app } from "../../state.svelte";
   let {
     icon, label, color = "rgba(255,255,255,.7)", danger = false, open = false, sub = false, onclick, onenter, children,
   }: {
     icon: string; label: string; color?: string; danger?: boolean; open?: boolean; sub?: boolean;
     onclick?: (e: MouseEvent) => void; onenter?: () => void; children?: Snippet;
   } = $props();
+  const iconSize = $derived(app.compact ? 18 : 15);
+  const chevSize = $derived(app.compact ? 16 : 14);
 </script>
 
 <div class="mi-wrap">
   <div class="mi" class:danger class:open role="menuitem" tabindex="-1" onclick={onclick} onpointerenter={onenter}
     onkeydown={(e) => e.key === "Enter" && onclick?.(e as unknown as MouseEvent)}>
-    <Icon name={icon} size={15} color={danger ? "hsla(0, 75%, 68%, .9)" : color} />
+    <Icon name={icon} size={iconSize} color={danger ? "hsla(0, 75%, 68%, .9)" : color} />
     <span class="lb trunc">{label}</span>
-    {#if sub}<Icon name="chevron-right" size={14} color="rgba(255,255,255,.4)" />{/if}
+    {#if sub}<Icon name="chevron-right" size={chevSize} color="rgba(255,255,255,.4)" />{/if}
   </div>
   {#if children}{@render children()}{/if}
 </div>

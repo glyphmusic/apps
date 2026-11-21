@@ -3,7 +3,7 @@
 // updates, logs and handing out the role stay with the owner's password.
 // Same list as `admin_path_ok` in crates/glyph-app/src/account.rs.
 
-const ROOTS = ["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "cache/stats", "cache/clear", "companion/status", "app-releases"];
+const ROOTS = ["me", "stats", "history", "status", "limits", "accounts", "account-defaults", "bans", "blocks", "jams", "cache/stats", "cache/clear", "companion/status", "app-releases"];
 
 /** Admin API paths the dashboard may call. */
 export function adminPathOk(path: string): boolean {
@@ -79,6 +79,20 @@ export interface ActiveBlock {
   expires_at: number;
   hits: number;
   clearable: boolean;
+}
+
+export interface AdminJam {
+  code: string;
+  host: string;
+  members: string[];
+  member_count: number;
+  host_online: boolean;
+  created_at: number;
+  last_seen: number;
+  expires_at: number;
+  track?: string | null;
+  playing: boolean;
+  queue_len: number;
 }
 
 /** One part of a ring chart. */

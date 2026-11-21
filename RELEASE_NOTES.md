@@ -1,7 +1,8 @@
-# Glyph 0.12.16 - 2026-11-21
+# Glyph 0.13.0 - 2026-11-21
 
-- **Cancel in-progress downloads**: stop a running song download or batch playlist download from the context menu, download badge or multi-select bar.
-- **Fewer Android permissions**: removed unused `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `RECEIVE_BOOT_COMPLETED` permissions from the Android APK to reduce Google Play Protect false positives.
-- **Transfer & UI fixes**: smoother multi-playlist transfers, improved Deezer/Spotify import & cover handling, and list/context-menu fixes across desktop, mobile and web.
+- **"Not the right one?"**: wrong version of a song? Preview other versions for 30 seconds, pick the right one and it downloads right away. The match changes for everyone once enough listeners agree.
+- **Install Glyph as an app (web player)**: install prompt with guides for iPhone/iPad, Mac and other browsers, plus new app icons.
+- **Active Jams in the Server dashboard**, name new playlists before creating them on phones, and shareable settings.
+- **Polish** for bottom sheets, share sheet, now-playing sheet and titlebar.
 
 See CHANGELOG.md for the complete changes.

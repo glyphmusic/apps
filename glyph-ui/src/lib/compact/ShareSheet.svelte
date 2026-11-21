@@ -193,7 +193,7 @@
 
 <style>
   .dim { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .55); }
-  .panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: calc(14px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; align-items: center; overflow: hidden; }
+  .panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px); max-height: calc(100dvh - var(--safe-top, env(safe-area-inset-top)) - 12px); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: calc(14px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; align-items: center; overflow: hidden; }
   .panel.settle { transition: transform .24s var(--ease); }
   .hdl { flex: none; display: block; width: 36px; height: 4px; margin: 10px auto 14px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
 

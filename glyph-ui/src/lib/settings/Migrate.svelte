@@ -2,13 +2,14 @@
   // Settings > Transfer music: original flat Liner settings layout on the start
   // screen, accumulative paste & drag-drop on Connect, SkeletonSwap chooser with
   // covers/counts/rename, live event-driven progress queue, and Done summary.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { app } from "../state.svelte";
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
   import { fx } from "../ui.svelte";
+  import { createDraftPlaylists, draftIdOf, draftValue, isDraftValue, type DraftPlaylist } from "../draft-playlists.svelte";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -23,7 +24,7 @@
   import Spin from "./Spin.svelte";
   import { openUrl, readClipboard } from "./util";
   import * as M from "./migrate-state.svelte";
-  import { mg, SERVICES, serviceOf } from "./migrate-state.svelte";
+  import { mg, migrateDrafts, SERVICES, serviceOf } from "./migrate-state.svelte";
   import type { ListKey } from "../api/types";
   import type { MigrateCollection, MigrateRunItem, MigrateTotals } from "./types";
 
@@ -48,9 +49,8 @@
   const mainCols = $derived(mg.overview?.collections.filter((c) => c.kind !== "playlist") ?? []);
   const listCols = $derived(mg.overview?.collections.filter((c) => c.kind === "playlist") ?? []);
 
-  // Filter & inline rename state in Choose step
+  // Filter state in Choose step
   let filterQ = $state("");
-  let renaming = $state<Record<string, boolean>>({});
   const filteredLists = $derived.by(() => {
     const q = filterQ.trim().toLowerCase();
     if (!q) return listCols;
@@ -59,7 +59,10 @@
   $effect(() => {
     if (mg.step !== "choose") {
       filterQ = "";
-      renaming = {};
+    }
+    if (mg.step !== "link") {
+      linkDrafts.clear();
+      if (isDraftValue(linkTarget)) linkTarget = "new";
     }
   });
 
@@ -69,8 +72,9 @@
 
   // Single-link import state (when entering via "By link")
   let linkUrl = $state("");
-  let linkName = $state("");
   let linkTarget = $state("new");
+  const linkDrafts = createDraftPlaylists();
+  onDestroy(() => linkDrafts.clear());
   let linkFound = $state<string | null>(null);
   let linkPasted = $state<[number, number]>([0, 0]);
   let linkBusy = $state(false);
@@ -97,20 +101,58 @@
       list: { kind: "playlist", id: p.id } as ListKey,
     })),
   );
-  function playlistMenuItems(newLabel: string) {
+  function draftOptions(drafts: DraftPlaylist[]) {
+    return drafts.map((d) => ({
+      value: draftValue(d.id),
+      label: d.name,
+      sub: tf("common.n_songs", { n: 0 }),
+      list: { kind: "playlist", id: d.id } as ListKey,
+    }));
+  }
+  function playlistMenuItems(drafts: DraftPlaylist[], newLabel = t("migrate.target.new")) {
+    const items = [...draftOptions(drafts), ...userPlaylistOptions];
     return [
       { value: "new", label: newLabel, icon: "plus" },
-      ...(userPlaylistOptions.length ? [{ sep: true as const }, ...userPlaylistOptions] : []),
+      ...(items.length ? [{ sep: true as const }, ...items] : []),
     ];
   }
-  const linkDestOptions = $derived(playlistMenuItems(t("migrate.target.new")));
+  const linkDestOptions = $derived(playlistMenuItems(linkDrafts.items));
+  const choosePlaylistOptions = $derived(playlistMenuItems(migrateDrafts.items));
+  const targetOptions = $derived([
+    { value: "liked", label: t("migrate.liked"), icon: "heart" },
+    { label: t("list.kind.playlist"), icon: "list-music", children: choosePlaylistOptions },
+  ]);
 
-  function targetOptionsFor(c: MigrateCollection) {
-    const newLabel = c.kind === "playlist" && c.name.trim() ? tf("migrate.target.new_named", { name: c.name.trim() }) : t("migrate.target.new");
-    return [
-      { value: "liked", label: t("migrate.liked"), icon: "heart" },
-      { label: t("list.kind.playlist"), icon: "list-music", children: playlistMenuItems(newLabel) },
-    ];
+  function targetLabelFor(c: MigrateCollection, dest: string): string | undefined {
+    if (dest === "new" && c.kind === "playlist" && c.name.trim()) {
+      return tf("migrate.target.new_named", { name: c.name.trim() });
+    }
+    return undefined;
+  }
+
+  function pickTarget(c: MigrateCollection, v: string) {
+    if (v === "new") {
+      const cur = mg.targets[c.id] ?? (c.kind === "liked" ? "liked" : "new");
+      const initial = isDraftValue(cur) ? "" : c.kind === "playlist" ? c.name.trim() : "";
+      M.promptNewTarget(c.id, initial);
+      return;
+    }
+    M.setTarget(c.id, v);
+  }
+
+  function pickLinkTarget(v: string) {
+    if (v === "new") {
+      linkDrafts.promptCreate({
+        onCreated: (draft) => {
+          linkTarget = draftValue(draft.id);
+          linkDrafts.prune([draft.id]);
+        },
+      });
+      return;
+    }
+    linkTarget = v;
+    const did = draftIdOf(v);
+    linkDrafts.prune(did ? [did] : []);
   }
 
   function displayName(c: MigrateCollection): string {
@@ -157,18 +199,21 @@
     if (!v || linkBusy) return;
     mg.error = null;
     linkBusy = true;
-    const isNew = linkTarget === "new";
+    const did = draftIdOf(linkTarget);
+    const draft = did ? linkDrafts.get(did) : undefined;
+    const playlistId = linkTarget.startsWith("pl:") ? linkTarget.slice(3) : null;
     const r = await backend()
       .call<{ error?: string | null; playlist?: string } | null>("import_link", {
         url: v,
-        name: isNew ? linkName.trim() || null : null,
-        playlist_id: !isNew && linkTarget.startsWith("pl:") ? linkTarget.slice(3) : null,
+        name: draft ? draft.name : null,
+        playlist_id: playlistId,
       })
       .catch((e) => ({ error: String(e) }));
     linkBusy = false;
     if (r?.error) { mg.error = r.error; return; }
     linkUrl = "";
-    linkName = "";
+    linkDrafts.clear();
+    if (did) linkTarget = "new";
   }
 
   // Global Ctrl+V shortcut when not typing inside an input/textarea
@@ -412,13 +457,19 @@
             {/if}
           </div>
           <Row label={t("migrate.target")}>
-            <Select value={linkTarget} options={linkDestOptions} onpick={(v) => (linkTarget = v)} />
+            {#if isDraftValue(linkTarget)}
+              {@const did = draftIdOf(linkTarget)!}
+              <button
+                class="renbtn"
+                title={t("migrate.rename")}
+                aria-label={t("migrate.rename")}
+                onclick={() => linkDrafts.promptRename(did)}
+              >
+                <Icon name="pencil" size={13} color={ICON} />
+              </button>
+            {/if}
+            <Select value={linkTarget} options={linkDestOptions} onpick={pickLinkTarget} />
           </Row>
-          {#if linkTarget === "new"}
-            <Row label={t("dialog.playlist.placeholder")}>
-              <Field bind:value={linkName} placeholder={t("migrate.target.name_optional")} mono={false} onenter={importSingleLink} label={t("dialog.playlist.placeholder")} />
-            </Row>
-          {/if}
         </Rows>
         <div class="foot end">
           <Button kind="primary" disabled={linkBusy || !linkUrl.trim()} onclick={importSingleLink}>{linkBusy ? t("dialog.importing") : t("dialog.import")}</Button>
@@ -675,7 +726,6 @@
   {@const on = !!mg.picked[c.id]}
   {@const hasDest = c.kind === "liked" || c.kind === "playlist"}
   {@const dest = mg.targets[c.id] ?? (c.kind === "liked" ? "liked" : "new")}
-  {@const showRename = on && hasDest && dest === "new" && (renaming[c.id] || (c.kind === "liked" && !c.name.trim()))}
   <div class="cwrap">
     <div class="cr" class:off={!on}>
       <button class="ctog" onclick={() => M.toggle(c.id)}>
@@ -685,7 +735,7 @@
         {:else}
           <span class="thumb ph"><Icon name={kindIcon(c.kind)} size={15} color={on ? "rgba(255,255,255,.75)" : "rgba(255,255,255,.35)"} /></span>
         {/if}
-        <span class="cn" class:off={!on}>{mg.targetNames[c.id]?.trim() || displayName(c)}</span>
+        <span class="cn" class:off={!on}>{displayName(c)}</span>
         {#if c.count != null}
           <span class="mono cc">{c.count}</span>
         {/if}
@@ -694,32 +744,20 @@
       </button>
       {#if hasDest}
         <div class="dest" class:dim={!on}>
-          {#if on && dest === "new"}
+          {#if on && (dest === "new" || isDraftValue(dest))}
             <button
               class="renbtn"
-              class:on={!!renaming[c.id]}
               title={t("migrate.rename")}
               aria-label={t("migrate.rename")}
-              onclick={() => (renaming[c.id] = !renaming[c.id])}
+              onclick={() => M.promptRenameTarget(c.id, c.kind === "playlist" ? c.name.trim() : "")}
             >
-              <Icon name="pencil" size={13} color={renaming[c.id] ? "var(--accent)" : ICON} />
+              <Icon name="pencil" size={13} color={ICON} />
             </button>
           {/if}
-          <Select value={dest} options={targetOptionsFor(c)} onpick={(v) => M.setTarget(c.id, v)} />
+          <Select value={dest} label={targetLabelFor(c, dest)} options={targetOptions} onpick={(v) => pickTarget(c, v)} />
         </div>
       {/if}
     </div>
-    {#if showRename}
-      <div class="cname">
-        <input
-          class="lin sm"
-          value={mg.targetNames[c.id] ?? ""}
-          oninput={(e) => M.setTargetName(c.id, e.currentTarget.value)}
-          placeholder={c.name.trim() || t("migrate.target.name_optional")}
-          spellcheck="false"
-        />
-      </div>
-    {/if}
   </div>
 {/snippet}
 
@@ -798,8 +836,7 @@
   .dest { flex: none; display: flex; align-items: center; gap: 6px; transition: opacity .15s; }
   .dest.dim { opacity: .45; }
   .renbtn { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; transition: background-color .12s; }
-  .renbtn:hover, .renbtn.on { background: rgba(255, 255, 255, .08); }
-  .cname { padding: 0 6px 6px 80px; }
+  .renbtn:hover { background: rgba(255, 255, 255, .08); }
   .cn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: #fff; transition: color .15s; }
   .cn.off { color: rgba(255, 255, 255, .52); }
   .cc { flex: none; padding: 1px 6px; border-radius: 5px; background: rgba(255, 255, 255, .07); font-size: 11px; color: rgba(255, 255, 255, .64); }
@@ -812,7 +849,6 @@
   .lrow { display: flex; align-items: center; gap: 8px; }
   .lin { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border: 0; outline: none; border-radius: 8px; background: rgba(255, 255, 255, .06); font-size: 13px; color: #fff; transition: background-color .15s ease-out; }
   .lin:focus { background: rgba(255, 255, 255, .1); }
-  .lin.sm { width: 100%; height: 32px; font-size: 13px; }
   .lin::placeholder { color: rgba(255, 255, 255, .32); }
   .lst { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12.5px; color: rgba(255, 255, 255, .52); }
   .lst.ok { justify-content: flex-start; color: rgba(255, 255, 255, .82); }
@@ -887,8 +923,4 @@
   .fe { max-width: 360px; font-size: 12.5px; color: rgba(255, 255, 255, .55); }
   .err { margin-top: 12px; display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; background: rgba(255, 255, 255, .05); font-size: 13px; color: rgba(255, 255, 255, .85); animation: rise-in .2s var(--ease); }
   .ei { flex: none; padding-top: 1px; display: flex; }
-
-  @media (max-width: 560px) {
-    .cname { padding-left: 10px; }
-  }
 </style>

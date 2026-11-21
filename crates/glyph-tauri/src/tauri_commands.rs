@@ -3,10 +3,10 @@
 use glyph_app::controller::{Core, PlayFrom};
 use glyph_app::jam::{Perms, Reaction};
 use glyph_app::transfer::PickedFile;
-use glyph_app::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer};
+use glyph_app::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, wrong_song};
 use glyph_core::{ListKey, SearchItem};
 use glyph_protocol::mcp::{Approval, Session as McpSession};
-use glyph_protocol::Track;
+use glyph_protocol::{MatchAlternativesResponse, ProviderId, Track, WrongMatchReportResponse};
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::State;
@@ -1108,4 +1108,40 @@ pub fn plugin_action(core: C<'_>, plugin: String, item: String) {
 #[tauri::command(rename_all = "snake_case")]
 pub fn plugin_lyrics(core: C<'_>, key: String) -> Vec<Value> {
     plugins::plugin_lyrics(&core, key)
+}
+
+// ---- wrong song ("Not the right one") ----
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn wrong_song_alternatives(
+    core: C<'_>,
+    track: Track,
+    query: Option<String>,
+) -> Res<MatchAlternativesResponse> {
+    wrong_song::alternatives(&core, track, query).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn wrong_song_preview(
+    core: C<'_>,
+    track: Track,
+    preview_url: Option<String>,
+) -> Res {
+    wrong_song::preview_start(&core, track, preview_url).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn wrong_song_preview_stop(core: C<'_>) {
+    wrong_song::preview_stop(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn wrong_song_select(
+    core: C<'_>,
+    original: Track,
+    chosen: Track,
+    wrong_provider: Option<ProviderId>,
+    wrong_id: Option<String>,
+) -> Res<WrongMatchReportResponse> {
+    wrong_song::select(&core, original, chosen, wrong_provider, wrong_id).await
 }

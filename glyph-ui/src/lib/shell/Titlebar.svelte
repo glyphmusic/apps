@@ -9,6 +9,7 @@
   import { app } from "../state.svelte";
   import { tip } from "../ui.svelte";
   import { GET_APP_URL, onWeb } from "../web";
+  import { openInstallSheet, pwa } from "../pwa.svelte";
   import { isTauri } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
   import { close, isMac, isMaximized, minimize, titlebarDown, toggleMaximize, watchMaximized } from "../window";
@@ -19,7 +20,7 @@
     isTauri() && app.platform !== "android" && app.platform !== "ios" && app.platform !== "web" && !onWeb(),
   );
   const windowControls = $derived(desktop && !mac);
-  const webInstall = $derived(!isTauri());
+  const webInstall = $derived(!isTauri() && !pwa.installed);
   const canBack = $derived(app.history.length > 0);
   const canForward = $derived(app.forwardHistory.length > 0);
   onMount(() => {
@@ -77,10 +78,17 @@
       <button class="up mono" onclick={() => app.openSettings("about")}>{tf("update.badge", { v: app.update.version.replace(/^v/, "") })}</button>
     {/if}
     {#if webInstall}
-      <a class="install" href={GET_APP_URL} target="_blank" rel="noopener noreferrer" data-no-drag>
-        <Icon name="download" size={14} />
-        <span>{t("web.install_app")}</span>
-      </a>
+      {#if onWeb()}
+        <button type="button" class="install" onclick={openInstallSheet} data-no-drag>
+          <Icon name="download" size={14} />
+          <span>{t("web.install_app")}</span>
+        </button>
+      {:else}
+        <a class="install" href={GET_APP_URL} target="_blank" rel="noopener noreferrer" data-no-drag>
+          <Icon name="download" size={14} />
+          <span>{t("web.install_app")}</span>
+        </a>
+      {/if}
     {/if}
     <button
       class="pfp"

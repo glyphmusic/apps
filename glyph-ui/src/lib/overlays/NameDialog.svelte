@@ -14,16 +14,18 @@
   // picture + Save (h 40, px 24; white when something changed, else white
   // 16 % with white 40 % text). Backdrop black 55 %.
   import { addEqPreset } from "../settings/eq";
-  import { fade, scale } from "svelte/transition";
+  import { fade, fly, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
   import IconButton from "../components/IconButton.svelte";
   import Button from "../components/Button.svelte";
   import Switch from "../components/Switch.svelte";
   import ListCover from "../components/ListCover.svelte";
+  import Decode from "../components/Decode.svelte";
   import { app } from "../state.svelte";
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
+  import { press } from "../ui.svelte";
   import { pickCover, playlistX, removeCover, setPlaylistStorage, toggleAutoDownload } from "../pages/lists/actions";
   import type { ProfileSettingsData } from "../settings/types";
   import { errText } from "../settings/util";
@@ -69,7 +71,12 @@
   const pubChanged = $derived(initialPub !== null && pub !== null && pub !== initialPub);
   const changed = $derived(!!initial && !!p && name.trim() !== "" && (name.trim() !== initial.name || (p.cover ?? null) !== initial.cover || !!p.auto_download !== initial.auto || pubChanged));
 
-  const okLabel = $derived(t(editId || eq ? "dialog.save" : "dialog.create"));
+  const okLabel = $derived(d.okLabel ?? t(editId || eq ? "dialog.save" : "dialog.create"));
+  const titleLabel = $derived(d.title ?? t(eq ? "dialog.eq.title" : "dialog.playlist.title"));
+  const mobileNew = $derived(app.compact && !editId && !eq);
+  const mobileTitle = $derived(d.title ?? t("dialog.playlist.mobile_title"));
+  const mobilePlaceholder = $derived(d.fallback ?? tf("library.new_playlist_name", { n: app.library.playlists.length + 1 }));
+  const submitDisabled = $derived(!!d.nonEmpty && !name.trim());
 
   function close() { app.nameDialog = null; }
   async function submit() {
@@ -97,6 +104,14 @@
       if (typed) { addEqPreset({ name: typed, gains: [...app.config.audio.eq_gains] }); }
       return;
     }
+    if (d.onSubmit) {
+      if (d.nonEmpty && !typed) return;
+      const nm = typed || d.fallback || tf("library.new_playlist_name", { n: app.library.playlists.length + 1 });
+      const fn = d.onSubmit;
+      close();
+      await fn(nm);
+      return;
+    }
     const nm = typed || tf("library.new_playlist_name", { n: app.library.playlists.length + 1 });
     const tracks = $state.snapshot(d.tracks);
     close();
@@ -106,11 +121,33 @@
     else app.toast(tracks.length === 1 ? tf("toast.added_to_playlist", { name: nm }) : tf("toast.added_n_to_playlist", { n: tracks.length, name: nm }));
   }
   function key(e: KeyboardEvent) {
-    if (e.key === "Escape") { e.preventDefault(); close(); }
-    else if (e.key === "Enter") { e.preventDefault(); submit(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submit(); }
   }
 </script>
 
+{#if mobileNew}
+  <div class="m-stage" transition:fade|global={{ duration: 200 }} role="dialog" aria-modal="true" aria-label={mobileTitle} tabindex="-1">
+    <div class="m-inner" in:fly|global={{ y: 16, duration: 240, easing: cubicOut }} out:fly|global={{ y: 8, duration: 150, easing: cubicOut }}>
+      <h1 class="m-title"><Decode text={mobileTitle} key="mob-new-pl" /></h1>
+      <div class="m-field">
+        <input
+          class="m-input"
+          bind:this={input}
+          bind:value={name}
+          placeholder={mobilePlaceholder}
+          onkeydown={key}
+          spellcheck="false"
+          enterkeyhint="done"
+        />
+      </div>
+      <div class="m-acts">
+        <button type="button" class="m-btn m-cancel" use:press onclick={close}>{t("dialog.cancel")}</button>
+        <button type="button" class="m-btn m-create" use:press disabled={submitDisabled} onclick={submit}>{okLabel}</button>
+      </div>
+    </div>
+  </div>
+{:else}
 <div class="layer" transition:fade|global={{ duration: 160 }}>
   <div class="tdim" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})"></div>
   <div class="bd" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
@@ -147,19 +184,114 @@
       </div>
     {:else}
       <div class="panel" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
-        <div class="tt">{t(eq ? "dialog.eq.title" : "dialog.playlist.title")}</div>
+        <div class="tt">{titleLabel}</div>
         <div class="field"><input bind:this={input} bind:value={name} placeholder={eq ? "" : t("dialog.playlist.placeholder")} onkeydown={key} spellcheck="false" /></div>
         <div class="foot">
           <span class="flex1"></span>
           <Button onclick={close}>{t("dialog.cancel")}</Button>
-          <Button kind="primary" onclick={submit}>{okLabel}</Button>
+          <Button kind="primary" disabled={submitDisabled} onclick={submit}>{okLabel}</Button>
         </div>
       </div>
     {/if}
   </div>
 </div>
+{/if}
 
 <style>
+  .m-stage {
+    position: fixed;
+    inset: 0;
+    z-index: 95;
+    background: rgba(8, 8, 9, .28);
+    padding: max(24px, var(--safe-top, env(safe-area-inset-top))) 28px max(28px, var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font);
+  }
+  .m-inner {
+    width: 100%;
+    max-width: 316px;
+    margin-bottom: 6vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+  }
+  .m-title {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: rgba(255, 255, 255, .92);
+    text-align: center;
+  }
+  .m-field {
+    width: 100%;
+    margin-top: 4px;
+    display: flex;
+    justify-content: center;
+    border-bottom: 1.5px solid rgba(255, 255, 255, .2);
+    transition: border-color .18s ease-out;
+  }
+  .m-field:focus-within {
+    border-bottom-color: var(--accent);
+  }
+  .m-input {
+    width: 100%;
+    height: auto;
+    padding: 8px 4px 12px;
+    background: none;
+    border: 0;
+    outline: none;
+    text-align: center;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: rgba(255, 255, 255, .98);
+    caret-color: var(--accent);
+    font-family: inherit;
+  }
+  .m-input::placeholder {
+    color: rgba(255, 255, 255, .26);
+    font-weight: 600;
+  }
+  .m-acts {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .m-btn {
+    height: 40px;
+    padding: 0 22px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color .14s ease-out, opacity .14s ease-out, transform .14s var(--ease);
+  }
+  .m-cancel {
+    background: #202022;
+    color: rgba(255, 255, 255, .88);
+  }
+  .m-cancel:active {
+    background: #2c2c30;
+  }
+  .m-create {
+    padding: 0 26px;
+    background: #fff;
+    color: #000;
+    font-weight: 600;
+  }
+  .m-create:active {
+    opacity: .86;
+  }
+  .m-create:disabled {
+    opacity: .38;
+    cursor: default;
+  }
   .layer { position: fixed; inset: 0; z-index: 90; }
   .tdim { position: absolute; left: 0; right: 0; top: 0; height: var(--titlebar-h); pointer-events: none; }
   .bd { position: absolute; top: var(--titlebar-h); left: 0; right: 0; bottom: 0; padding-bottom: var(--titlebar-h); display: flex; align-items: center; justify-content: center; }

@@ -114,7 +114,7 @@ export function pageShown(p: SettingsPage): boolean {
   // The web player has no equalizer, server, storage, plugins or system settings.
   if (onWeb()) {
     if (p === "integrations") return app.account != null;
-    return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "about";
+    return p === "overview" || p === "account" || p === "playback" || p === "appearance" || p === "transfer" || p === "about";
   }
   // Phones show integrations for the AI assistant settings only.
   if (p === "integrations") return onPhone() || !isMobile();

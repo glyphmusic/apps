@@ -54,7 +54,17 @@ export interface CtxMenu {
 /** app.rs Toast: "Title · Sub" (sub shown in caps), check or info icon, optional undo. */
 export interface Toast { id: number; title: string; sub?: string; kind: "ok" | "info"; at: number; life: number; undo?: { label?: string; run: () => void }; gone?: number }
 
-export interface NameDialog { tracks: Track[]; rename?: string | null; eqPreset?: boolean; initial?: string }
+export interface NameDialog {
+  tracks: Track[];
+  rename?: string | null;
+  eqPreset?: boolean;
+  initial?: string;
+  title?: string;
+  okLabel?: string;
+  fallback?: string;
+  nonEmpty?: boolean;
+  onSubmit?: (name: string) => void | Promise<void>;
+}
 /** What the phone share menu shares: one song, a list, loose songs (recap),
  *  an artist, or a ready link (a Jam invite). */
 export interface ShareTarget {
@@ -178,6 +188,8 @@ class App {
   shareSheet = $state<ShareTarget | null>(null);
   /** Songs shared or opened with Glyph: where they go (overlays/AddShared.svelte). */
   pickSongs = $state<PickSongs | null>(null);
+  /** "Not the right one" alternative picker modal (overlays/WrongSongModal.svelte). */
+  wrongSong = $state<Track | null>(null);
   onboarding = $state(false);
   splash = $state(false);
   jamOpen = $state(false);
@@ -1106,6 +1118,7 @@ class App {
     const r = await backend().call<{ kind?: string; text?: string; id?: string; name?: string; code?: string; link?: string; author?: string | null; tracks?: Track[] } | undefined | void>("import_text", { text, ask });
     if (!r || typeof r !== "object") return;
     if (r.kind === "pick" && r.tracks?.length) { this.ctx = null; this.pickSongs = { tracks: r.tracks }; return; }
+    if (r.kind === "settings") { this.pendingSettingsCode = r.text ?? text; this.openSettings("transfer"); return; }
     if (r.kind === "migrate") {
       await openPasted(r.text ?? text);
     } else if (r.kind === "playlist" && r.id) this.openListView({ kind: "playlist", id: r.id });
@@ -1238,6 +1251,7 @@ class App {
   // ---- menus, toasts ----
   openCtx(m: CtxMenu) { this.controlMenu = null; this.ctx = m; }
   closeMenus() { this.ctx = null; this.controlMenu = null; }
+  openWrongSong(track: Track) { this.closeMenus(); this.wrongSong = track; }
   toast(msg: string, kind: Toast["kind"] = "ok", undo?: Toast["undo"]) {
     const id = ++this.toastSeq;
     const cut = msg.indexOf(" · ");

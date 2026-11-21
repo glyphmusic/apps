@@ -94,14 +94,17 @@ function updateFavicon(accent: number) {
   });
 }
 
-/** Sets the CSS tokens of theme `id`, the favicon, and the text size factor. */
+/** Sets the CSS tokens of theme `id`, the favicon, theme-color meta, and the text size factor. */
 export function applyTheme(id: string, textScale = 1) {
   const c = themeColors(id), s = document.documentElement.style;
+  const baseHex = css(c.base);
   s.setProperty("--accent", css(c.accent));
-  s.setProperty("--bg", css(c.base));
+  s.setProperty("--bg", baseHex);
   s.setProperty("--k", String(Math.min(1.3, Math.max(0.9, textScale || 1))));
   const r = (c.accent >> 16) & 255, g = (c.accent >> 8) & 255, b = c.accent & 255;
   s.setProperty("--accent-rgb", `${r}, ${g}, ${b}`);
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (meta) meta.content = baseHex;
   updateFavicon(c.accent);
 }
 

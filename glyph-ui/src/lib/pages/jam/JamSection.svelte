@@ -163,6 +163,19 @@
         <Tog on={j.approve_joins} label={t("jam.approve")} onchange={(on) => setApprove(on)} />
       </div>
     </div>
+
+    {#if feed.length}
+      {@render heading(t("jam.activity"))}
+      <div class="card list">
+        {#each feed as e, i (e.at_ms + e.who + i)}
+          <div class="f" class:sep={i > 0}>
+            <Avatar src={avatarOf(e.who)} size={18} flat />
+            <span class="ft trunc">{feedText(e)}</span>
+            <span class="fa mono">{ago(j.server_ms + (performance.now() - jam.at), e.at_ms)}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
   </div>
 {:else}
   <div class="pad">
@@ -269,19 +282,6 @@
       </div>
     {/if}
     {#if more}<div class="fl pm"><Button onclick={showAll}>{t("artist.more")}</Button></div>{/if}
-
-    {#if feed.length}
-      {@render heading(t("jam.activity"))}
-      <div class="card list">
-        {#each feed as e, i (e.at_ms + e.who + i)}
-          <div class="f" class:sep={i > 0}>
-            <Avatar src={avatarOf(e.who)} size={18} flat />
-            <span class="ft trunc">{feedText(e)}</span>
-            <span class="fa mono">{ago(j.server_ms + (performance.now() - jam.at), e.at_ms)}</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
   </div>
 {/if}
 

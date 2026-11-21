@@ -40,7 +40,11 @@ struct Choice {
 pub enum MigrateTarget {
     Liked,
     Playlist { id: String },
-    NewPlaylist { name: Option<String> },
+    NewPlaylist {
+        name: Option<String>,
+        #[serde(default)]
+        draft_id: Option<String>,
+    },
 }
 
 /// Per-collection live status inside a running or finished migration.
@@ -90,6 +94,9 @@ struct Run {
     total: usize,
     totals: Totals,
     targets: HashMap<String, MigrateTarget>,
+    /// Maps a UI draft playlist id to the created playlist id once the first
+    /// collection targeting that draft has been saved.
+    draft_playlists: HashMap<String, String>,
     items: Vec<RunItem>,
     failed: Vec<(String, String)>,
     notes: Vec<String>,
@@ -862,7 +869,7 @@ pub async fn migrate_start(
                 None => kind_name(c.kind),
             };
             let display = match targets.get(&c.id) {
-                Some(MigrateTarget::NewPlaylist { name: Some(custom) }) if !custom.trim().is_empty() => custom.trim().to_string(),
+                Some(MigrateTarget::NewPlaylist { name: Some(custom), .. }) if !custom.trim().is_empty() => custom.trim().to_string(),
                 _ => collection_name(&core, c),
             };
             RunItem {
@@ -895,6 +902,7 @@ pub async fn migrate_start(
             total: 0,
             totals: Totals::default(),
             targets,
+            draft_playlists: HashMap::new(),
             items,
             failed: Vec::new(),
             notes: choice.overview.notes.clone(),
@@ -947,7 +955,7 @@ pub async fn migrate_start(
 
 fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
     let mut emit_snap: Option<Value> = None;
-    let mut apply_args: Option<(Collection, Migrated, Option<MigrateTarget>)> = None;
+    let mut apply_args: Option<(Collection, Migrated, Option<MigrateTarget>, Option<String>)> = None;
     let mut flush_sync = false;
     {
         let mut g = tr.lock();
@@ -1007,7 +1015,16 @@ fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
                 emit_snap = Some(run.to_json());
             }
             MigrationEvent::Done { collection, result } => {
-                let target = run.targets.get(&collection.id).cloned();
+                let mut target = run.targets.get(&collection.id).cloned();
+                let draft_key = match &target {
+                    Some(MigrateTarget::NewPlaylist { draft_id: Some(did), .. }) => Some(did.clone()),
+                    _ => None,
+                };
+                if let Some(ref did) = draft_key {
+                    if let Some(pid) = run.draft_playlists.get(did) {
+                        target = Some(MigrateTarget::Playlist { id: pid.clone() });
+                    }
+                }
                 let mut stats_col = collection.clone();
                 if let Some(ref tgt) = target {
                     stats_col.kind = match tgt {
@@ -1041,7 +1058,7 @@ fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
                         }
                     }
                 }
-                apply_args = Some((collection, result, target));
+                apply_args = Some((collection, result, target, draft_key));
             }
             MigrationEvent::Finished { cancelled } => {
                 run.finished = true;
@@ -1065,11 +1082,14 @@ fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
             }
         }
     }
-    if let Some((collection, result, target)) = apply_args {
+    if let Some((collection, result, target, draft_key)) = apply_args {
         let applied = apply_migrated(core, &collection, result, target.as_ref());
         let snap = {
             let mut g = tr.lock();
             if let Some(run) = g.run.as_mut() {
+                if let (Some(did), Some(pid)) = (draft_key, applied.playlist_id.as_ref()) {
+                    run.draft_playlists.entry(did).or_insert_with(|| pid.clone());
+                }
                 if let Some(it) = run.items.iter_mut().find(|it| it.id == collection.id) {
                     it.added = applied.added;
                     it.playlist_id = applied.playlist_id;
@@ -1130,10 +1150,13 @@ fn apply_migrated(core: &Core, c: &Collection, result: Migrated, target: Option<
                         AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
                     }
                 }
-                Some(MigrateTarget::NewPlaylist { name }) => {
+                Some(MigrateTarget::NewPlaylist { name, .. }) => {
                     let custom = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
                     let list_name = custom.map(str::to_string).unwrap_or_else(|| fallback_list_name(core, c, &res.name));
-                    let (p, added) = st.library.save_import(&list_name, c.origin.as_deref(), res.ordered);
+                    // A user-named new playlist always creates a fresh playlist rather than
+                    // merging into an older import that happened to share the same origin.
+                    let origin = if custom.is_some() { None } else { c.origin.as_deref() };
+                    let (p, added) = st.library.save_import(&list_name, origin, res.ordered);
                     AppliedOutcome { added, playlist_id: Some(p.id.clone()), final_name: Some(p.name.clone()) }
                 }
                 None => match c.kind {

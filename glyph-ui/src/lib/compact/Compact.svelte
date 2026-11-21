@@ -9,6 +9,7 @@
   import { app } from "../state.svelte";
   import { listId } from "../api/types";
   import { onWeb } from "../web";
+  import { openInstallSheet, pwa } from "../pwa.svelte";
   import { jam } from "../jam.svelte";
   import { press } from "../ui.svelte";
   import { t, tf } from "../i18n.svelte";
@@ -157,6 +158,39 @@
     app.play(barTracks, i, ctx);
   }
   const connectActive = $derived(app.devices.some((d) => d.active && d.kind !== "this") || app.jamOpen || jam.state != null);
+  const hideShell = $derived(!!(app.nameDialog && !app.nameDialog.rename && !app.nameDialog.eqPreset));
+
+  // Standalone PWA (especially iPhone): left-edge swipe right acts as native back on inner pages.
+  onMount(() => {
+    let startX = 0, startY = 0, tracking = false;
+    const onTouchStart = (e: TouchEvent) => {
+      if (!pwa.standalone || tabView || phone.npOpen || phone.drawerOpen || phone.lyricsOpen || app.settingsOpen || app.showQueue || app.showDevices || app.shareSheet || pwa.sheetOpen) return;
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (t.clientX > 28) return;
+      startX = t.clientX;
+      startY = t.clientY;
+      tracking = true;
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - startX;
+      const dy = Math.abs(t.clientY - startY);
+      if (dx > 68 && dx > dy * 1.4) back();
+    };
+    const onTouchCancel = () => { tracking = false; };
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchCancel);
+    };
+  });
 </script>
 
 {#snippet barPlayBtn()}
@@ -176,12 +210,21 @@
   {/if}
 {/snippet}
 
-<div class="phone" data-skin class:under={phone.npOpen} class:fading={!phone.npOpen || phone.npPull === 0} style:opacity={phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}>
+<div
+  class="phone"
+  data-skin
+  class:under={phone.npOpen || hideShell}
+  class:fading={hideShell || !phone.npOpen || phone.npPull === 0}
+  style:opacity={hideShell ? 0 : phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}
+>
   {#if app.view !== "artist" && !ownList}
   <div class="top" style:background="rgba(10, 10, 10, {topK})">
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
       {#snippet actions()}
+        {#if onWeb() && !pwa.installed}
+          <IconAction name="download" label={t("web.install_app")} onclick={openInstallSheet} />
+        {/if}
         <IconAction name="monitor-speaker" label={t("connect.title")} color={connectActive ? "var(--accent)" : undefined} onclick={() => { app.showQueue = false; app.showDevices = true; }} />
       {/snippet}
     </Header>

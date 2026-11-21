@@ -318,6 +318,21 @@ export const server = {
   resolve: (track: Track, priority: ProviderId[], youtubeOnly = false) =>
     sendJson<ResolveResponse>("POST", "/v1/resolve?direct=1", { track: wireTrack(track), priority, youtube_only: youtubeOnly }),
 
+  matchAlternatives: (track: Track, query: string | null, priority: ProviderId[]) =>
+    sendJson<import("./types").MatchAlternativesResponse>("POST", "/v1/match/alternatives?direct=1", {
+      track: wireTrack(track),
+      ...(query ? { query } : {}),
+      priority,
+    }),
+
+  reportWrongMatch: (track: Track, chosen: Track, wrongProvider?: ProviderId | null, wrongId?: string | null) =>
+    sendJson<import("./types").WrongMatchReportResponse>("POST", "/v1/match/report", {
+      track: wireTrack(track),
+      chosen: wireTrack(chosen),
+      ...(wrongProvider ? { wrong_provider: wrongProvider } : {}),
+      ...(wrongId ? { wrong_id: wrongId } : {}),
+    }),
+
   cover: (track: Track) =>
     sendJson<{ url?: string | null; album?: string | null }>("POST", "/v1/cover", wireTrack(track)),
 

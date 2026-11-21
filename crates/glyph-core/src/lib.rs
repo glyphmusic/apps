@@ -401,6 +401,8 @@ struct Inner {
     server_providers: Option<Vec<ProviderId>>,
     /// The server rates YouTube uploads in its search (`capability::RATINGS`).
     server_rates: bool,
+    /// The server supports wrong-song alternatives & reporting (`capability::WRONG_SONG`).
+    server_wrong_song: bool,
     covers: CoverCache,
     lyrics_cache: LyricsCache,
 }
@@ -685,10 +687,18 @@ impl Backend {
             let source = PlaybackSource::Stream { provider, url: path.to_string_lossy().into_owned(), mime };
             return Ok(Some(Resolved { track: track.clone(), source, confidence: 1.0 }));
         }
-        // Played lately: straight from the disk cache.
-        if let Some(path) = stream_cached(track).or_else(|| (track.source == ProviderId::YouTube).then(|| ytdlp::cached_audio(&track.id)).flatten()) {
+        // Played lately: straight from the disk cache (unless the user pinned
+        // a different source for this song).
+        let pinned = self.cur().resolver.pinned_override(track);
+        let yt_cache = match &pinned {
+            Some(p) if p.source == ProviderId::YouTube => ytdlp::cached_audio(&p.id),
+            Some(_) => None,
+            None => (track.source == ProviderId::YouTube).then(|| ytdlp::cached_audio(&track.id)).flatten(),
+        };
+        if let Some(path) = stream_cached(track).or(yt_cache) {
             let mime = Some(downloads::mime_of(&path).to_string());
-            let source = PlaybackSource::Stream { provider: track.source, url: path.to_string_lossy().into_owned(), mime };
+            let provider = pinned.as_ref().map(|p| p.source).unwrap_or(track.source);
+            let source = PlaybackSource::Stream { provider, url: path.to_string_lossy().into_owned(), mime };
             return Ok(Some(Resolved { track: track.clone(), source, confidence: 1.0 }));
         }
         if connectivity::platform_online() == Some(false) { return Ok(None); }
@@ -773,6 +783,73 @@ impl Backend {
     pub async fn refresh_source(&self, track: &Track) -> anyhow::Result<Option<Resolved>> {
         ytdlp::forget_urls();
         self.resolve(track).await
+    }
+
+    /// Resolves one exact candidate `(source, id)` directly (for 30-second
+    /// previews in "Not the right one" without hitting generic caches).
+    pub async fn resolve_exact(&self, candidate: &Track) -> anyhow::Result<Option<Resolved>> {
+        let (inner, candidate) = (self.cur(), candidate.clone());
+        self.spawn(async move {
+            let mut r = inner.resolve_exact(&candidate).await?;
+            if let (Some(server), Some(resolved)) = (inner.live_server(), r.as_mut()) {
+                if let PlaybackSource::Stream { url, .. } | PlaybackSource::Preview { url, .. } = &mut resolved.source {
+                    *url = server.audio_quality_url(url, inner.config.audio.quality);
+                }
+            }
+            Ok::<_, anyhow::Error>(r)
+        })
+        .await?
+    }
+
+    /// Fetches candidate replacement matches for a song the listener marked as wrong.
+    pub async fn match_alternatives(
+        &self,
+        track: &Track,
+        query: Option<String>,
+    ) -> anyhow::Result<glyph_protocol::MatchAlternativesResponse> {
+        let (inner, track) = (self.cur(), track.clone());
+        let dl_provider = self.downloads.local(&track).map(|(_, p)| p);
+        self.spawn(async move {
+            let mut resp = inner.match_alternatives(&track, query).await?;
+            if resp.current_source.is_none() {
+                if let Some(p) = dl_provider {
+                    resp.current_source = Some(p);
+                }
+            }
+            Ok::<_, anyhow::Error>(resp)
+        })
+        .await?
+    }
+
+    /// Saves a personal local override so `original` resolves & downloads from `chosen`
+    /// immediately on this device (even before global consensus changes the server).
+    pub fn set_pinned_match(&self, original: &Track, chosen: &Track) {
+        self.cur().resolver.set_pinned(original, chosen);
+        self.clear_stream_cache_for(original);
+    }
+
+    /// Drops any warm-resolved entry or cached audio stream file for `track`.
+    pub fn clear_stream_cache_for(&self, track: &Track) {
+        let key = dedupe::track_key(track);
+        self.warm.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        let dir = stream_cache_dir();
+        let name = stream_cache_name(track);
+        for ext in ["mp3", "m4a", "ogg", "flac", "opus", "wav", "aac"] {
+            let p = dir.join(format!("{name}.{ext}"));
+            if p.is_file() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+
+    /// Reports a wrong-song selection to the server's consensus store (no-op if
+    /// offline or if the connected server does not support `wrong_song`).
+    pub async fn report_wrong_match(
+        &self,
+        req: glyph_protocol::WrongMatchReportRequest,
+    ) -> anyhow::Result<Option<glyph_protocol::WrongMatchReportResponse>> {
+        let inner = self.cur();
+        self.spawn(async move { inner.report_wrong_match(&req).await }).await?
     }
 
     /// YouTube plays through a local yt-dlp (prefetching is worth it).

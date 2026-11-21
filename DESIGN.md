@@ -35,9 +35,12 @@ and register any running animation in the app's frame loop
   out by a solid (not see-through) fill. Settings blur the page behind them.
 - Errors are shown as a calm card (round alert icon, plain sentence, details
   folded away, try again), never as a raw line of text.
-- ASCII is an accent only: the background raster, `[ BADGES ]`, skeleton
-  shimmer, the optional ASCII cover (the real cover drawn in characters).
-  Everything else is a normal polished desktop UI: Glyph's own round icons
+- ASCII is an accent only: the background raster, skeleton shimmer, and the
+  optional ASCII cover (the real cover drawn in characters).
+- **Never use bracketed ASCII labels like `[ BADGE ]`, `[ PREVIEW 0:30 ]`, or
+  `[ STATUS ]` anywhere in the UI.** Use clean, flat pills/badges or plain
+  labels in normal Inter text (title/sentence case, no square brackets).
+- Everything else is a normal polished desktop UI: Glyph's own round icons
   (`docs/ICONS.md`), Inter, small sizes (about 13.5 px body).
 - One accent colour, the pink. Text stays readable on the glow.
 - Toggleable things show their state in the icon itself: filled when on.
