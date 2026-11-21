@@ -909,10 +909,25 @@ impl Backend {
         let (inner, dl, track) = (self.cur(), self.downloads.clone(), track.clone());
         let job = downloads::Job { progress: Arc::default(), quality: inner.config.audio.download_quality.effective() };
         let key = dedupe::track_key(&track);
-        self.dl_progress.lock().unwrap().insert(key.clone(), job.progress.clone());
+        let progress = job.progress.clone();
+        self.dl_progress.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), progress.clone());
         let queue = self.download_queue.clone();
-        let res = self
-            .spawn(downloads::run_job(job, async move {
+        struct DownloadGuard {
+            handle: tokio::task::JoinHandle<anyhow::Result<Option<PathBuf>>>,
+            dl_progress: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<downloads::Progress>>>>,
+            key: String,
+            progress: Arc<downloads::Progress>,
+        }
+        impl Drop for DownloadGuard {
+            fn drop(&mut self) {
+                self.handle.abort();
+                let mut map = self.dl_progress.lock().unwrap_or_else(|e| e.into_inner());
+                if map.get(&self.key).is_some_and(|p| Arc::ptr_eq(p, &self.progress)) {
+                    map.remove(&self.key);
+                }
+            }
+        }
+        let handle = self.rt.as_ref().expect("runtime alive").spawn(downloads::run_job(job, async move {
                 let _location = dl.relocation.read().await;
                 let _permit = queue.acquire().await;
                 let Some((provider, url)) = inner.download_url(&track).await? else { return Ok(None) };
@@ -974,9 +989,10 @@ impl Backend {
                         Err(e)
                     }
                 }
-            }))
-            .await;
-        self.dl_progress.lock().unwrap().remove(&key);
+            }));
+        let mut guard = DownloadGuard { handle, dl_progress: self.dl_progress.clone(), key, progress };
+        let res = (&mut guard.handle).await.map_err(|e| anyhow!("backend task failed: {e}"));
+        drop(guard);
         res?
     }
 
@@ -1344,9 +1360,11 @@ impl Backend {
                 anyhow::bail!("Playlists may contain at most {} songs", library::playlist_track_limit());
             }
             let worker = inner.clone();
+            let guard = Arc::new(inner::ImportMatchGuard::new());
             let result = import::match_all(list, origin, progress, move |t| {
                 let inner = worker.clone();
-                async move { inner.match_for_import(&t).await }
+                let guard = guard.clone();
+                async move { inner.match_for_import_guarded(&t, &guard).await }
             })
             .await;
             inner.resolver.cache().flush();
@@ -1435,6 +1453,16 @@ impl Backend {
                 }
             }
             let total = collections.len();
+            // Sum known track counts up front so transferring e.g. 15 playlists
+            // of 70 songs (= 1,050 songs) immediately defers matching to playback
+            // instead of firing 1,050 resolve/search requests.
+            let known_total: usize = collections
+                .iter()
+                .filter(|c| matches!(c.kind, Kind::Liked | Kind::Playlist))
+                .filter_map(|c| c.count)
+                .sum();
+            let mut eager_matched: usize = 0;
+            let match_guard = Arc::new(inner::ImportMatchGuard::new());
             let stopped = || cancel.load(Ordering::Relaxed);
             for (index, c) in collections.into_iter().enumerate() {
                 if stopped() {
@@ -1471,6 +1499,11 @@ impl Backend {
                             let _ = events.send(Ev::Failed { collection: c, error: format!("Playlists may contain at most {} songs", library::playlist_track_limit()) });
                             continue;
                         }
+                        let defer = known_total > import::MAX_EAGER_MATCH_TRACKS
+                            || eager_matched.saturating_add(tracks.len()) > import::MAX_EAGER_MATCH_TRACKS;
+                        if !defer {
+                            eager_matched = eager_matched.saturating_add(tracks.len());
+                        }
                         let (ptx, mut prx) = flume_like::channel::<ImportProgress>();
                         let fwd_events = events.clone();
                         let fwd = tokio::spawn(async move {
@@ -1484,9 +1517,11 @@ impl Backend {
                         };
                         let list = import::files::ParsedList { name, label: format!("{}/{kind}", src.service().key()), tracks };
                         let worker = inner.clone();
-                        let res = import::match_all_cancellable(list, c.origin.clone(), ptx, Some(cancel.clone()), move |t| {
+                        let guard = match_guard.clone();
+                        let res = import::match_all_with_options(list, c.origin.clone(), ptx, Some(cancel.clone()), defer, move |t| {
                             let inner = worker.clone();
-                            async move { inner.match_for_import(&t).await }
+                            let guard = guard.clone();
+                            async move { inner.match_for_import_guarded(&t, &guard).await }
                         })
                         .await;
                         let _ = fwd.await;

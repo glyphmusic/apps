@@ -53,7 +53,7 @@ impl DeezerLibrary {
         if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
             bail!("cancelled");
         }
-        let v = self.dz.get(&first, &[("limit", "100"), ("index", "0")]).await?;
+        let v = self.dz.get_retry(&first, &[("limit", "100"), ("index", "0")]).await?;
         let mut out: Vec<serde_json::Value> = v["data"].as_array().cloned().unwrap_or_default();
         let known_total = total(&v).map(|t| t.min(max_pages * 100));
         if let (Some(tx), Some(lbl)) = (progress, label) {
@@ -77,11 +77,11 @@ impl DeezerLibrary {
                             bail!("cancelled");
                         }
                         let off = idx.to_string();
-                        let v = dz.get(&url, &[("limit", "100"), ("index", off.as_str())]).await?;
+                        let v = dz.get_retry(&url, &[("limit", "100"), ("index", off.as_str())]).await?;
                         Ok::<_, anyhow::Error>((slot, v["data"].as_array().cloned().unwrap_or_default()))
                     }
                 })
-                .buffer_unordered(6);
+                .buffer_unordered(3);
             while let Some(res) = stream.next().await {
                 if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
                     bail!("cancelled");
@@ -103,7 +103,7 @@ impl DeezerLibrary {
             if url.is_empty() || cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
                 break;
             }
-            let v = self.dz.get(&url, &[]).await?;
+            let v = self.dz.get_retry(&url, &[]).await?;
             if let Some(items) = v["data"].as_array() {
                 out.extend(items.iter().cloned());
             }
@@ -227,7 +227,7 @@ impl LibrarySource for DeezerLibrary {
                             (idx, Some(SavedAlbum { title: release.title, artist: release.artist, tracks }))
                         }
                     })
-                    .buffer_unordered(12);
+                    .buffer_unordered(4);
                 while let Some((idx, album)) = stream.next().await {
                     if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
                         break;

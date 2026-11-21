@@ -149,7 +149,7 @@ impl Transfer {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn running(&self) -> bool {
+    pub(crate) fn running(&self) -> bool {
         self.lock().run.as_ref().is_some_and(|r| !r.finished)
     }
 }
@@ -948,6 +948,7 @@ pub async fn migrate_start(
 fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
     let mut emit_snap: Option<Value> = None;
     let mut apply_args: Option<(Collection, Migrated, Option<MigrateTarget>)> = None;
+    let mut flush_sync = false;
     {
         let mut g = tr.lock();
         let Some(run) = g.run.as_mut().filter(|r| !r.finished) else { return };
@@ -1046,6 +1047,7 @@ fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
                 run.finished = true;
                 run.cancelled = cancelled;
                 run.finished_elapsed_ms = Some(run.started_at.elapsed().as_millis() as u64);
+                flush_sync = run.totals.songs > 0 || run.totals.albums > 0 || run.totals.artists > 0;
                 if cancelled {
                     for it in &mut run.items {
                         if matches!(it.status, "queued" | "reading" | "matching") {
@@ -1086,6 +1088,10 @@ fn on_event(core: &Arc<Core>, tr: &Transfer, ev: MigrationEvent) {
         }
     } else if let Some(snap) = emit_snap {
         core.emit("migrate_progress", snap);
+        if flush_sync {
+            // Re-arm the normal 2 s sync debounce now that the transfer finished.
+            crate::account::library_changed(core);
+        }
     }
 }
 

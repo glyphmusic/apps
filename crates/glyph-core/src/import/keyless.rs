@@ -154,39 +154,77 @@ pub async fn spotify_embed(http: &reqwest::Client, kind: &str, id: &str) -> Resu
     }
 }
 
-/// Coordinated adaptive concurrency + shared 429 cooldown for bulk Spotify
-/// embed fetches so 1,500+ pasted links run fast without losing tracks when
-/// Spotify's edge rate limit triggers.
-struct SpotifyGate {
+/// Coordinated adaptive concurrency + per-request pacing + shared 429 cooldown
+/// for bulk track-metadata fetches (Spotify embed, YouTube oEmbed, Deezer) so
+/// 1,000+ pasted links transfer smoothly without hitting upstream ~180/min or
+/// 50/5s rate limits or silently dropping tracks.
+struct RateGate {
     in_flight: std::sync::atomic::AtomicUsize,
     limit: std::sync::atomic::AtomicUsize,
+    max_limit: usize,
+    min_limit: usize,
     ok_streak: std::sync::atomic::AtomicUsize,
+    base_interval_ms: u64,
+    interval_ms: std::sync::atomic::AtomicU64,
+    base_backoff_ms: u64,
     backoff_ms: std::sync::atomic::AtomicU64,
     paused_until: std::sync::Mutex<Option<std::time::Instant>>,
+    next_slot: std::sync::Mutex<std::time::Instant>,
+    last_429: std::sync::Mutex<Option<std::time::Instant>>,
     notify: tokio::sync::Notify,
 }
 
-struct SpotifyPermit<'a>(&'a SpotifyGate);
-impl Drop for SpotifyPermit<'_> {
+struct RatePermit<'a>(&'a RateGate);
+impl Drop for RatePermit<'_> {
     fn drop(&mut self) {
         self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         self.0.notify.notify_waiters();
     }
 }
 
-impl SpotifyGate {
-    fn new() -> Self {
+impl RateGate {
+    fn with_params(initial_limit: usize, max_limit: usize, min_limit: usize, base_interval_ms: u64, base_backoff_ms: u64) -> Self {
         Self {
             in_flight: std::sync::atomic::AtomicUsize::new(0),
-            limit: std::sync::atomic::AtomicUsize::new(20),
+            limit: std::sync::atomic::AtomicUsize::new(initial_limit),
+            max_limit,
+            min_limit,
             ok_streak: std::sync::atomic::AtomicUsize::new(0),
-            backoff_ms: std::sync::atomic::AtomicU64::new(2_000),
+            base_interval_ms,
+            interval_ms: std::sync::atomic::AtomicU64::new(base_interval_ms),
+            base_backoff_ms,
+            backoff_ms: std::sync::atomic::AtomicU64::new(base_backoff_ms),
             paused_until: std::sync::Mutex::new(None),
+            next_slot: std::sync::Mutex::new(std::time::Instant::now()),
+            last_429: std::sync::Mutex::new(None),
             notify: tokio::sync::Notify::new(),
         }
     }
 
-    async fn acquire<'a>(&'a self, cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Option<SpotifyPermit<'a>> {
+    /// Paced below Spotify's ~180 req/min rolling window for large pastes (>80
+    /// uncached links), while staying fast for small pastes.
+    fn for_spotify(uncached_count: usize) -> Self {
+        if uncached_count > 80 {
+            Self::with_params(4, 6, 1, 380, 3_000)
+        } else {
+            Self::with_params(8, 10, 1, 60, 2_000)
+        }
+    }
+
+    fn for_youtube(uncached_count: usize) -> Self {
+        if uncached_count > 80 {
+            Self::with_params(5, 6, 1, 140, 2_000)
+        } else {
+            Self::with_params(8, 10, 1, 40, 2_000)
+        }
+    }
+
+    /// Deezer allows 50 requests / 5 s (10 req/s); pace around ~7 req/s.
+    fn for_deezer() -> Self {
+        Self::with_params(4, 5, 1, 140, 5_000)
+    }
+
+    async fn acquire<'a>(&'a self, cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Option<RatePermit<'a>> {
         use std::sync::atomic::Ordering;
         loop {
             if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -203,7 +241,43 @@ impl SpotifyGate {
             let notified = self.notify.notified();
             let cap = self.limit.load(Ordering::SeqCst);
             if self.in_flight.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < cap).then_some(n + 1)).is_ok() {
-                return Some(SpotifyPermit(self));
+                let permit = RatePermit(self);
+                let spacing = std::time::Duration::from_millis(self.interval_ms.load(Ordering::Relaxed));
+                if !spacing.is_zero() {
+                    let slot = {
+                        let mut g = self.next_slot.lock().unwrap_or_else(|e| e.into_inner());
+                        let now = std::time::Instant::now();
+                        let start = (*g).max(now);
+                        *g = start + spacing;
+                        start
+                    };
+                    let mut interrupted_by_pause = false;
+                    loop {
+                        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                            return None;
+                        }
+                        let paused = {
+                            let g = self.paused_until.lock().unwrap_or_else(|e| e.into_inner());
+                            g.is_some_and(|u| u > std::time::Instant::now())
+                        };
+                        if paused {
+                            interrupted_by_pause = true;
+                            break;
+                        }
+                        let now = std::time::Instant::now();
+                        if now >= slot {
+                            break;
+                        }
+                        tokio::time::sleep((slot - now).min(std::time::Duration::from_millis(200))).await;
+                    }
+                    if interrupted_by_pause {
+                        // Drop permit and re-enter after cooldown so resuming honors the lowered
+                        // concurrency cap and fresh pacing instead of creating a thundering herd.
+                        drop(permit);
+                        continue;
+                    }
+                }
+                return Some(permit);
             }
             tokio::select! {
                 _ = notified => {}
@@ -215,28 +289,59 @@ impl SpotifyGate {
     fn on_ok(&self) {
         use std::sync::atomic::Ordering;
         let streak = self.ok_streak.fetch_add(1, Ordering::Relaxed) + 1;
-        if streak >= 30 {
+        if streak >= 40 {
             self.ok_streak.store(0, Ordering::Relaxed);
-            self.backoff_ms.store(2_000, Ordering::Relaxed);
-            let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 20).then_some((n + 2).min(20)));
+            self.backoff_ms.store(self.base_backoff_ms, Ordering::Relaxed);
+            let max_lim = self.max_limit;
+            let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max_lim).then_some((n + 1).min(max_lim)));
+            let cur_gap = self.interval_ms.load(Ordering::Relaxed);
+            if cur_gap > self.base_interval_ms {
+                let tighter = (cur_gap * 85 / 100).max(self.base_interval_ms);
+                self.interval_ms.store(tighter, Ordering::Relaxed);
+            }
             self.notify.notify_waiters();
         }
     }
 
     fn on_rate_limited(&self, retry_after_secs: Option<u64>) {
         use std::sync::atomic::Ordering;
+        let now = std::time::Instant::now();
         self.ok_streak.store(0, Ordering::Relaxed);
+        // Deduplicate concurrent 429s from the same in-flight burst (within 2 s)
+        // so one rate-limit window does not multiply backoff/interval N times.
+        let fresh_incident = {
+            let mut last = self.last_429.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = last.is_none_or(|t| now.saturating_duration_since(t) >= std::time::Duration::from_secs(2));
+            if fresh {
+                *last = Some(now);
+            }
+            fresh
+        };
         let prev = self.backoff_ms.load(Ordering::Relaxed);
         let wait_ms = match retry_after_secs.filter(|&s| s > 0) {
-            Some(s) => (s.min(15)) * 1_000,
+            Some(s) => s.clamp(2, 120) * 1_000,
             None => prev,
         };
-        self.backoff_ms.store((prev * 2).min(15_000), Ordering::Relaxed);
-        let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some((n / 2).max(6)));
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
-        let mut g = self.paused_until.lock().unwrap_or_else(|e| e.into_inner());
-        if g.is_none_or(|cur| until > cur) {
-            *g = Some(until);
+        if fresh_incident {
+            self.backoff_ms.store(prev.saturating_mul(2).min(60_000), Ordering::Relaxed);
+            let min_lim = self.min_limit;
+            let _ = self.limit.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some((n / 2).max(min_lim)));
+            let cur_gap = self.interval_ms.load(Ordering::Relaxed);
+            let bumped = cur_gap.max(350).saturating_mul(3) / 2;
+            self.interval_ms.store(bumped.min(2_500), Ordering::Relaxed);
+        }
+        let until = now + std::time::Duration::from_millis(wait_ms);
+        {
+            let mut g = self.paused_until.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none_or(|cur| until > cur) {
+                *g = Some(until);
+            }
+        }
+        {
+            let mut slot = self.next_slot.lock().unwrap_or_else(|e| e.into_inner());
+            if until > *slot {
+                *slot = until;
+            }
         }
     }
 }
@@ -244,12 +349,14 @@ impl SpotifyGate {
 async fn fetch_spotify_track_with_retry(
     http: &reqwest::Client,
     id: &str,
-    gate: &SpotifyGate,
+    gate: &RateGate,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Option<Track> {
     use std::sync::atomic::Ordering;
-    for attempt in 0..5u32 {
-        let Some(_permit) = gate.acquire(cancel).await else { return None };
+    let mut rate_limits = 0u32;
+    let mut transients = 0u32;
+    loop {
+        let Some(permit) = gate.acquire(cancel).await else { return None };
         match fetch_spotify_embed_once(http, "track", id).await {
             EmbedFetch::Ok(_, tracks) => {
                 gate.on_ok();
@@ -257,20 +364,136 @@ async fn fetch_spotify_track_with_retry(
             }
             EmbedFetch::RateLimited(retry_after) => {
                 gate.on_rate_limited(retry_after);
-                drop(_permit);
-                continue;
-            }
-            EmbedFetch::Transient(_) if attempt < 2 => {
-                drop(_permit);
-                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                drop(permit);
+                rate_limits += 1;
+                if rate_limits >= 16 {
                     return None;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(400 * u64::from(attempt + 1))).await;
             }
-            EmbedFetch::Transient(_) | EmbedFetch::Fatal(_) => return None,
+            EmbedFetch::Transient(_) => {
+                drop(permit);
+                transients += 1;
+                if transients >= 3 || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(400 * u64::from(transients))).await;
+            }
+            EmbedFetch::Fatal(_) => return None,
         }
     }
-    None
+}
+
+async fn fetch_youtube_oembed_once(http: &reqwest::Client, id: &str) -> EmbedFetch {
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let resp = match http
+        .get("https://www.youtube.com/oembed")
+        .query(&[("url", url.as_str()), ("format", "json")])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return EmbedFetch::Transient(e.into()),
+    };
+    match resp.status().as_u16() {
+        200..=299 => {}
+        429 => {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            return EmbedFetch::RateLimited(retry_after);
+        }
+        500..=599 => return EmbedFetch::Transient(anyhow!("YouTube oEmbed HTTP {}", resp.status().as_u16())),
+        s => return EmbedFetch::Fatal(anyhow!("YouTube oEmbed HTTP {s}")),
+    }
+    let v: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return EmbedFetch::Transient(e.into()),
+    };
+    let Some(title) = v["title"].as_str() else {
+        return EmbedFetch::Fatal(anyhow!("video not found"));
+    };
+    let channel = v["author_name"].as_str().unwrap_or("");
+    EmbedFetch::Ok(title.to_string(), vec![crate::providers::youtube::video_track(id, title, channel, None, None).0])
+}
+
+async fn fetch_youtube_track_with_retry(
+    http: &reqwest::Client,
+    id: &str,
+    gate: &RateGate,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<Track> {
+    use std::sync::atomic::Ordering;
+    let mut rate_limits = 0u32;
+    let mut transients = 0u32;
+    loop {
+        let Some(permit) = gate.acquire(cancel).await else { return None };
+        match fetch_youtube_oembed_once(http, id).await {
+            EmbedFetch::Ok(_, tracks) => {
+                gate.on_ok();
+                return tracks.into_iter().next();
+            }
+            EmbedFetch::RateLimited(retry_after) => {
+                gate.on_rate_limited(retry_after);
+                drop(permit);
+                rate_limits += 1;
+                if rate_limits >= 12 {
+                    return None;
+                }
+            }
+            EmbedFetch::Transient(_) => {
+                drop(permit);
+                transients += 1;
+                if transients >= 3 || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(350 * u64::from(transients))).await;
+            }
+            EmbedFetch::Fatal(_) => return None,
+        }
+    }
+}
+
+async fn fetch_deezer_track_with_retry(
+    deezer: &crate::providers::deezer::Deezer,
+    id: &str,
+    gate: &RateGate,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<Track> {
+    use crate::provider::ProviderError;
+    use std::sync::atomic::Ordering;
+    let mut rate_limits = 0u32;
+    let mut transients = 0u32;
+    loop {
+        let Some(permit) = gate.acquire(cancel).await else { return None };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), deezer.track_by_id(id)).await {
+            Ok(Ok(track)) => {
+                gate.on_ok();
+                return Some(track);
+            }
+            Ok(Err(e)) if matches!(e.downcast_ref::<ProviderError>(), Some(ProviderError::Quota)) => {
+                gate.on_rate_limited(Some(5));
+                drop(permit);
+                rate_limits += 1;
+                if rate_limits >= 12 {
+                    return None;
+                }
+            }
+            Ok(Err(e)) if matches!(e.downcast_ref::<ProviderError>(), Some(ProviderError::NotFound)) => {
+                return None;
+            }
+            Ok(Err(_)) | Err(_) => {
+                drop(permit);
+                transients += 1;
+                if transients >= 3 || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(400 * u64::from(transients))).await;
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------ YouTube
@@ -652,8 +875,10 @@ fn save_import_track_cache(path: &std::path::Path, mut map: std::collections::Ha
 
 /// Metadata of pasted song links, in order (songs that cannot be read are
 /// left out). Reuses cached metadata from earlier imports, batches Spotify API
-/// lookups (50 per call, 6 in parallel) when a key is present, and otherwise
-/// reads embed/oEmbed pages up to 24 in parallel with coordinated 429 retry.
+/// lookups (50 per call, 3 in parallel) when a key is present, and otherwise
+/// reads embed/oEmbed pages with per-provider adaptive pacing, coordinated 429
+/// cooldowns and periodic disk-cache checkpoints so 1,000+ songs never hit
+/// upstream ~180/min blocks or lose progress.
 pub async fn read_songs(
     songs: &[SongLink],
     spotify: Option<&std::sync::Arc<crate::providers::spotify::Spotify>>,
@@ -706,7 +931,7 @@ pub async fn read_songs_with_progress(
         return slots.into_iter().flatten().collect();
     }
 
-    // Spotify with a key: 50 per request, 6 batches in parallel.
+    // Spotify with a key: 50 per request, 3 batches in parallel (throttled & retried on 429).
     let mut known: std::collections::HashMap<String, Track> = Default::default();
     if let Some(sp) = spotify {
         let sp_ids: Vec<String> = missing
@@ -728,7 +953,7 @@ pub async fn read_songs_with_progress(
                     }
                 }
             })
-            .buffer_unordered(6);
+            .buffer_unordered(3);
         while let Some(batch) = batch_stream.next().await {
             if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return Vec::new();
@@ -741,13 +966,13 @@ pub async fn read_songs_with_progress(
         }
     }
 
-    let mut newly_cached = 0usize;
+    let mut unsaved_cache = 0usize;
     let mut remaining: Vec<(usize, SongLink)> = Vec::new();
     for (idx, s) in missing {
         if let SongLink::Spotify(ref id) = s {
             if let Some(t) = known.get(id) {
                 disk_cache.insert(s.cache_key(), t.clone());
-                newly_cached += 1;
+                unsaved_cache += 1;
                 slots[idx] = Some(t.clone());
                 done += 1;
                 continue;
@@ -755,70 +980,58 @@ pub async fn read_songs_with_progress(
         }
         remaining.push((idx, s));
     }
-    if newly_cached > 0 {
+    if unsaved_cache > 0 {
         if let Some(tx) = progress {
             let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done, total });
         }
     }
 
-    let gate = std::sync::Arc::new(SpotifyGate::new());
+    let sp_uncached = remaining.iter().filter(|(_, s)| matches!(s, SongLink::Spotify(_))).count();
+    let yt_uncached = remaining.iter().filter(|(_, s)| matches!(s, SongLink::YouTube(_))).count();
+    let sp_gate = std::sync::Arc::new(RateGate::for_spotify(sp_uncached));
+    let yt_gate = std::sync::Arc::new(RateGate::for_youtube(yt_uncached));
+    let dz_gate = std::sync::Arc::new(RateGate::for_deezer());
     let mut stream = futures::stream::iter(remaining)
         .map(|(idx, s)| {
-            let gate = gate.clone();
+            let sp_gate = sp_gate.clone();
+            let yt_gate = yt_gate.clone();
+            let dz_gate = dz_gate.clone();
             async move {
                 if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                     return (idx, s, None);
                 }
                 let track = match &s {
-                    SongLink::Spotify(id) => fetch_spotify_track_with_retry(http, id, &gate, cancel).await,
-                    SongLink::YouTube(id) => {
-                        let mut found = None;
-                        for attempt in 0..2u32 {
-                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) { break; }
-                            if let Ok(Ok(t)) = tokio::time::timeout(std::time::Duration::from_secs(10), youtube_video(http, id)).await {
-                                found = Some(t);
-                                break;
-                            }
-                            if attempt == 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                            }
-                        }
-                        found
-                    }
-                    SongLink::Deezer(id) => {
-                        let mut found = None;
-                        for attempt in 0..2u32 {
-                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) { break; }
-                            if let Ok(Ok(t)) = tokio::time::timeout(std::time::Duration::from_secs(10), deezer.track_by_id(id)).await {
-                                found = Some(t);
-                                break;
-                            }
-                            if attempt == 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                            }
-                        }
-                        found
-                    }
+                    SongLink::Spotify(id) => fetch_spotify_track_with_retry(http, id, &sp_gate, cancel).await,
+                    SongLink::YouTube(id) => fetch_youtube_track_with_retry(http, id, &yt_gate, cancel).await,
+                    SongLink::Deezer(id) => fetch_deezer_track_with_retry(deezer, id, &dz_gate, cancel).await,
                 };
                 (idx, s, track)
             }
         })
-        .buffer_unordered(24);
+        .buffer_unordered(10);
     while let Some((idx, link, track)) = stream.next().await {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             break;
         }
         if let Some(ref t) = track {
             disk_cache.insert(link.cache_key(), t.clone());
-            newly_cached += 1;
+            unsaved_cache += 1;
         }
         slots[idx] = track;
         done += 1;
         if let Some(tx) = progress {
             let _ = tx.send(crate::ImportProgress { label: "IMPORT reading songs".into(), done, total });
         }
+        // Checkpoint periodically so cancelling/restarting a 1,000-song paste
+        // reuses already-fetched tracks immediately without re-hitting the API.
+        if unsaved_cache >= 50 {
+            unsaved_cache = 0;
+            let snap = disk_cache.clone();
+            let p = cache_path.clone();
+            let _ = tokio::task::spawn_blocking(move || save_import_track_cache(&p, snap)).await;
+        }
     }
-    if newly_cached > 0 {
+    if unsaved_cache > 0 {
         let _ = tokio::task::spawn_blocking(move || save_import_track_cache(&cache_path, disk_cache)).await;
     }
     slots.into_iter().flatten().collect()
@@ -971,18 +1184,40 @@ mod tests {
     }
 
     #[test]
-    fn spotify_gate_backs_off_on_429_and_recovers() {
+    fn rate_gate_paces_large_batches_dedupes_429_and_recovers() {
         use std::sync::atomic::Ordering;
-        let gate = SpotifyGate::new();
-        assert_eq!(gate.limit.load(Ordering::SeqCst), 20);
-        gate.on_rate_limited(Some(1));
-        assert_eq!(gate.limit.load(Ordering::SeqCst), 10);
-        assert!(gate.paused_until.lock().unwrap().is_some());
-        gate.on_rate_limited(None);
-        assert_eq!(gate.limit.load(Ordering::SeqCst), 6);
-        for _ in 0..30 {
-            gate.on_ok();
+        // Large 1,000-song Spotify paste starts proactively paced under 180 req/min.
+        let big = RateGate::for_spotify(1_000);
+        assert_eq!(big.limit.load(Ordering::SeqCst), 4);
+        assert!(big.interval_ms.load(Ordering::Relaxed) >= 350, "must pace under ~180 req/min");
+
+        // Concurrent 429s from the same burst deduplicate instead of collapsing immediately.
+        big.on_rate_limited(Some(45));
+        assert_eq!(big.limit.load(Ordering::SeqCst), 2);
+        let gap_after_first = big.interval_ms.load(Ordering::Relaxed);
+        assert!(gap_after_first > 380);
+        let paused = big.paused_until.lock().unwrap().unwrap();
+        // Honors full Retry-After (45 s), not prematurely clamped to 15 s.
+        assert!(paused.saturating_duration_since(std::time::Instant::now()) >= std::time::Duration::from_secs(40));
+        // Second 429 within the 2 s burst window does not double-penalize concurrency or gap.
+        big.on_rate_limited(Some(10));
+        assert_eq!(big.limit.load(Ordering::SeqCst), 2);
+        assert_eq!(big.interval_ms.load(Ordering::Relaxed), gap_after_first);
+
+        // Next distinct 429 incident drops concurrency all the way to 1.
+        *big.last_429.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        big.on_rate_limited(None);
+        assert_eq!(big.limit.load(Ordering::SeqCst), 1);
+
+        // Clean streak recovers concurrency (+1) and tightens pacing gently.
+        for _ in 0..40 {
+            big.on_ok();
         }
-        assert_eq!(gate.limit.load(Ordering::SeqCst), 8);
+        assert_eq!(big.limit.load(Ordering::SeqCst), 2);
+        assert!(big.interval_ms.load(Ordering::Relaxed) >= big.base_interval_ms);
+
+        // Deezer gate stays safely under 50 req / 5 s.
+        let dz = RateGate::for_deezer();
+        assert!(dz.interval_ms.load(Ordering::Relaxed) >= 120);
     }
 }

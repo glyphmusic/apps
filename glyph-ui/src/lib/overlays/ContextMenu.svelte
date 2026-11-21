@@ -135,6 +135,8 @@
   const album = $derived(list?.kind === "album");
   const has = $derived(songs.length > 0);
   const allDl = $derived(has && songs.every((x) => app.isDownloaded(x)));
+  const anyDlBusy = $derived(has && songs.some(isDownloading));
+  const allDlOrBusy = $derived(has && songs.every((x) => app.isDownloaded(x) || isDownloading(x)));
   const versions = $derived(own ? (lib().playlist_versions ?? []).filter((v) => v.id === own).slice(0, 10) : []);
   const listKind = $derived(list?.kind === "album" ? list.artist : t("list.kind.playlist"));
   // ---- song ----
@@ -244,8 +246,10 @@
 
 {#snippet moreBody(song: Track)}
   {@const songArtists = splitArtists(song.artist)}
-  {#if !onWeb() && (app.isDownloaded(song) || !isDownloading(song))}
-    {#if app.isDownloaded(song)}
+  {#if !onWeb()}
+    {#if isDownloading(song)}
+      <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={() => (moreSub = null)} onclick={run(() => app.cancelDownloads([song]))} />
+    {:else if app.isDownloaded(song)}
       <MenuItem icon="trash-2" label={t("ctx.remove_download")} danger onenter={() => (moreSub = null)} onclick={run(() => removeDownloads([song]))} />
     {:else}
       <MenuItem icon="download" label={t("ctx.download")} onenter={() => (moreSub = null)} onclick={run(() => app.download([song]))} />
@@ -273,8 +277,10 @@
     {#if !onWeb()}
       {#if allDl}
         <MenuItem icon="trash-2" label={t("ctx.remove_downloads")} danger onenter={() => (moreSub = null)} onclick={run(() => removeDownloads(songs))} />
-      {:else}
+      {:else if !allDlOrBusy}
         <MenuItem icon="download" label={t("ctx.download_all")} onenter={() => (moreSub = null)} onclick={run(() => app.download(songs))} />
+      {:else}
+        <MenuItem icon="x" label={t("ctx.cancel_downloads")} danger onenter={() => (moreSub = null)} onclick={run(() => app.cancelDownloads(songs))} />
       {/if}
     {/if}
     <Sep />
@@ -391,6 +397,9 @@
       <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => queueAll(songs))} />
       <Sep />
     {/if}
+    {#if !onWeb() && anyDlBusy}
+      <MenuItem icon="x" label={t("ctx.cancel_downloads")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads(songs))} />
+    {/if}
     <MenuItem icon="ellipsis" label={t("ctx.more")} sub open={!compact && subOpen("more")}
       onenter={() => { if (!compact) { sub = "more"; moreSub = null; } }} onclick={compact ? () => setSub("more") : undefined}>
       {#if !compact && subOpen("more")}
@@ -436,6 +445,9 @@
       {#if !compact && subOpen("recommend")}<Flyout {flip}>{@render recommendBody(song)}</Flyout>{/if}
     </MenuItem>
     <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
+    {#if !onWeb() && isDownloading(song)}
+      <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />
+    {/if}
     <MenuItem icon="ellipsis" label={t("ctx.more")} sub open={!compact && subOpen("more")}
       onenter={() => { if (!compact) { sub = "more"; moreSub = null; } }} onclick={compact ? () => setSub("more") : undefined}>
       {#if !compact && subOpen("more")}

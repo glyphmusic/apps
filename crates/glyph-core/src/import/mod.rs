@@ -227,14 +227,17 @@ pub async fn fetch_list_with_options(
                 return Ok((ParsedList { name, label, tracks }, Some(url)));
             }
             // The server first (its keys), then the app's own keys, then the
-            // ways that need no key at all.
+            // ways that need no key at all. Skip the server while an active
+            // abuse block is cooling down whenever a local fallback can read it.
             let sc_on_server = matches!(src, RemoteSource::SoundCloud(_));
             let mut first_err = None;
             if let (Some(server), true) = (server, src.server_capable() || sc_on_server) {
-                match server.import_with_options(&url, progress, cancel).await {
-                    Ok(r) if !r.tracks.is_empty() => return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url))),
-                    Ok(_) => {}
-                    Err(e) => first_err = Some(e),
+                if sc_on_server || !server.is_import_blocked() {
+                    match server.import_with_options(&url, progress, cancel).await {
+                        Ok(r) if !r.tracks.is_empty() => return Ok((ParsedList { name: r.name, label, tracks: r.tracks }, Some(url))),
+                        Ok(_) => {}
+                        Err(e) => first_err = Some(e),
+                    }
                 }
             }
             if sc_on_server {
@@ -299,7 +302,12 @@ async fn fetch_direct(src: &RemoteSource, p: &Providers) -> Result<ParsedList> {
     Ok(ParsedList { name, label, tracks })
 }
 
-/// Small imports match with `resolve` (8 in parallel without head-of-line blocking,
+/// Maximum songs eagerly matched per import or library transfer before saving
+/// the rest as metadata and matching on playback (avoids rate-limit storms on
+/// 1,000+ song transfers split across many small playlists).
+pub const MAX_EAGER_MATCH_TRACKS: usize = 100;
+
+/// Small imports match with `resolve` (4 in parallel without head-of-line blocking,
 /// order preserved). Large imports (>100 songs) keep metadata and defer matching
 /// until playback, reporting progress as `IMPORT <label> ██████░░ done/total`.
 pub async fn match_all<F, Fut>(
@@ -312,7 +320,7 @@ where
     F: Fn(Track) -> Fut,
     Fut: Future<Output = Option<Resolved>>,
 {
-    match_all_cancellable(list, origin, progress, None, resolve).await
+    match_all_with_options(list, origin, progress, None, false, resolve).await
 }
 
 /// Same as [`match_all`], stopping immediately when `cancel` becomes `true`.
@@ -327,12 +335,30 @@ where
     F: Fn(Track) -> Fut,
     Fut: Future<Output = Option<Resolved>>,
 {
+    match_all_with_options(list, origin, progress, cancel, false, resolve).await
+}
+
+/// Same as [`match_all_cancellable`], allowing multi-playlist transfers to
+/// force deferred metadata-only matching once the cumulative song budget
+/// (`MAX_EAGER_MATCH_TRACKS`) is reached.
+pub async fn match_all_with_options<F, Fut>(
+    list: ParsedList,
+    origin: Option<String>,
+    progress: flume_like::Sender<ImportProgress>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    force_defer: bool,
+    resolve: F,
+) -> ImportResult
+where
+    F: Fn(Track) -> Fut,
+    Fut: Future<Output = Option<Resolved>>,
+{
     use std::sync::atomic::Ordering;
     let total = list.tracks.len();
     let label = format!("IMPORT {}", list.label);
     let _ = progress.send(ImportProgress { label: label.clone(), done: 0, total });
     // Keep large transfers local: save provider metadata and match on playback.
-    if total > 100 {
+    if force_defer || total > MAX_EAGER_MATCH_TRACKS {
         let _ = progress.send(ImportProgress { label, done: total, total });
         return ImportResult { name: list.name, origin, ordered: list.tracks,
             sure: vec![], unsure: vec![], not_found: vec![] };
@@ -349,7 +375,7 @@ where
             (idx, t, r)
         }
     }))
-    .buffer_unordered(16);
+    .buffer_unordered(4);
     let mut done = 0;
     while let Some((idx, original, resolved)) = stream.next().await {
         if cancel_ref.is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -512,6 +538,19 @@ mod tests {
         assert_eq!(result.ordered.len(), 5000);
         assert_eq!(result.ordered[4999].id, "4999");
         assert!(result.not_found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_defer_skips_matching_for_small_lists_in_big_transfers() {
+        let list = ParsedList { name: "Small Slice".into(), label: "spotify/playlist".into(),
+            tracks: (0..60).map(|i| test_track(ProviderId::Spotify, &i.to_string(), &format!("Song {i}"), "Artist", None)).collect() };
+        let (tx, _) = flume_like::channel();
+        let result = match_all_with_options(list, None, tx, None, true, |_| async {
+            panic!("force_defer must skip eager matching even for lists <= 100 songs");
+        }).await;
+        assert_eq!(result.ordered.len(), 60);
+        assert_eq!(result.ordered[59].id, "59");
+        assert!(result.sure.is_empty() && result.unsure.is_empty() && result.not_found.is_empty());
     }
 
     #[tokio::test]

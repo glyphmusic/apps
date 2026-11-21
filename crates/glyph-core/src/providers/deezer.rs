@@ -255,7 +255,7 @@ impl Deezer {
 
     /// The songs of a release, in order.
     pub async fn album_tracks(&self, release: &Release) -> Result<Vec<Track>> {
-        let v = self.get(&format!("{API}/album/{}/tracks", release.id), &[("limit", "200")]).await?;
+        let v = self.get_retry(&format!("{API}/album/{}/tracks", release.id), &[("limit", "200")]).await?;
         let list: Vec<DTrack> = serde_json::from_value(v["data"].clone()).unwrap_or_default();
         Ok(list
             .into_iter()
@@ -274,6 +274,22 @@ impl Deezer {
         let v: serde_json::Value = send_json(self.http.get(url).query(query)).await?;
         check_error(&v)?;
         Ok(v)
+    }
+
+    /// Like [`Self::get`], retrying Deezer's 5 s quota window (HTTP 429 or JSON
+    /// error code 4) for bulk playlist / profile transfers.
+    pub(crate) async fn get_retry(&self, url: &str, query: &[(&str, &str)]) -> Result<serde_json::Value> {
+        for attempt in 0..5u32 {
+            let v: serde_json::Value = send_json_with_retry(self.http.get(url).query(query), 3).await?;
+            match check_error(&v) {
+                Ok(()) => return Ok(v),
+                Err(e) if matches!(e.downcast_ref::<ProviderError>(), Some(ProviderError::Quota)) && attempt < 4 => {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(ProviderError::Quota.into())
     }
 
     /// Songs like `track` without any key: top songs of the artists Deezer
@@ -354,7 +370,7 @@ impl Deezer {
     pub(crate) async fn paged(&self, first: String) -> Result<Vec<Track>> {
         use futures::stream::StreamExt;
         let max_tracks = crate::library::playlist_track_limit();
-        let v = self.get(&first, &[("limit", "100"), ("index", "0")]).await?;
+        let v = self.get_retry(&first, &[("limit", "100"), ("index", "0")]).await?;
         let l: DList = serde_json::from_value(v)?;
         let mut out: Vec<Track> = l.data.into_iter().filter_map(convert).collect();
         if l.next.is_none() {
@@ -372,12 +388,12 @@ impl Deezer {
                         let url = first.clone();
                         async move {
                             let off = idx.to_string();
-                            let v = self.get(&url, &[("limit", "100"), ("index", off.as_str())]).await?;
+                            let v = self.get_retry(&url, &[("limit", "100"), ("index", off.as_str())]).await?;
                             let l: DList = serde_json::from_value(v)?;
                             Ok::<_, anyhow::Error>((slot, l.data.into_iter().filter_map(convert).collect()))
                         }
                     })
-                    .buffer_unordered(6);
+                    .buffer_unordered(3);
                 while let Some(res) = stream.next().await {
                     let (slot, tracks) = res?;
                     pages[slot] = tracks;
@@ -399,7 +415,7 @@ impl Deezer {
                 || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
                 anyhow::bail!("invalid provider pagination URL");
             }
-            let v = self.get(&url, &[]).await?;
+            let v = self.get_retry(&url, &[]).await?;
             let l: DList = serde_json::from_value(v)?;
             out.extend(l.data.into_iter().filter_map(convert));
             match l.next {
@@ -418,7 +434,7 @@ impl Deezer {
     pub async fn playlist(&self, id: &str) -> Result<(String, Vec<Track>)> {
         let meta_url = format!("{API}/playlist/{id}");
         let tracks_url = format!("{API}/playlist/{id}/tracks");
-        let (v, tracks) = tokio::try_join!(self.get(&meta_url, &[]), self.paged(tracks_url))?;
+        let (v, tracks) = tokio::try_join!(self.get_retry(&meta_url, &[]), self.paged(tracks_url))?;
         let name = v["title"].as_str().unwrap_or("Deezer playlist").to_string();
         Ok((name, tracks))
     }

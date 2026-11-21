@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.16 - 2026-11-21
+
+### Added
+
+- **Cancel in-progress downloads**: cancel a running song download or batch playlist download directly from the context menu, download badge or multi-select bar (translated across all locales).
+
+### Changed
+
+- **Fewer Android permissions**: removed unused `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `RECEIVE_BOOT_COMPLETED` permissions from the Android app to reduce Google Play Protect false positives while keeping background notification checks working.
+
+### Fixed
+
+- **Batch transfers & list polish**: improved multi-playlist transfer pacing, Deezer/Spotify/keyless import and cover lookups, and list/context-menu interactions across desktop, mobile and web.
+
 ## 0.12.15 - 2026-11-21
 
 ### Added

@@ -83,12 +83,14 @@ impl Inner {
     /// hit is shared back so the next user skips the search.
     pub(super) async fn local_youtube_match(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
         if !self.local_youtube_on() { return None; }
-        self.local_youtube_match_here(t, hint).await
+        self.local_youtube_match_here(t, hint, true).await
     }
 
     /// [`Self::local_youtube_match`] without asking whether local YouTube is
-    /// the chosen mode (see [`Self::rescue_on_this_computer`]).
-    async fn local_youtube_match_here(&self, t: &Track, hint: Option<&str>) -> Option<(Track, f32)> {
+    /// the chosen mode (see [`Self::rescue_on_this_computer`]). `share_hint`
+    /// is disabled during bulk imports/transfers so matching never fires a
+    /// burst of `POST /v1/youtube/hint` calls at the server.
+    async fn local_youtube_match_here(&self, t: &Track, hint: Option<&str>, share_hint: bool) -> Option<(Track, f32)> {
         let yt = self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
         let as_video = |id: &str| {
             let mut view = t.clone();
@@ -113,7 +115,7 @@ impl Inner {
             };
             let (best, confidence) = resolver::best_candidate(t, cands)?;
             self.resolver.remember(t, &best.track, confidence);
-            if confidence >= resolver::SURE_CONFIDENCE {
+            if share_hint && confidence >= resolver::SURE_CONFIDENCE {
                 if let Some(server) = self.server.clone() {
                     let (want, id) = (t.clone(), best.track.id.clone());
                     tokio::spawn(async move {
@@ -199,7 +201,7 @@ impl Inner {
         }
         self.providers.youtube.as_ref().filter(|y| y.local().is_some())?;
         tracing::info!("server found no YouTube audio, trying this computer");
-        let first = self.local_youtube_match_here(t, hint).await;
+        let first = self.local_youtube_match_here(t, hint, true).await;
         self.local_youtube_from(t, first).await
     }
 
@@ -294,7 +296,72 @@ impl Inner {
             let _ = self.resolve(&t).await;
         }
     }
+}
 
+/// Bounds and paces server `/v1/resolve` fallback calls during a single import
+/// or multi-playlist transfer so bulk matching never trips the server's rate
+/// limit or 15-minute abuse block (even for guests).
+pub(super) struct ImportMatchGuard {
+    server_calls: std::sync::atomic::AtomicUsize,
+    server_blocked: std::sync::atomic::AtomicBool,
+    last_server_call: tokio::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl ImportMatchGuard {
+    /// At most this many server `/v1/resolve` fallback calls per transfer;
+    /// any remaining tracks keep their metadata and resolve on playback.
+    const MAX_SERVER_RESOLVES: usize = 25;
+    /// Minimum gap between consecutive server `/v1/resolve` calls (~200/min ceiling).
+    const SERVER_GAP: std::time::Duration = std::time::Duration::from_millis(300);
+
+    pub(super) fn new() -> Self {
+        Self {
+            server_calls: std::sync::atomic::AtomicUsize::new(0),
+            server_blocked: std::sync::atomic::AtomicBool::new(false),
+            last_server_call: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn claim_server_slot(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.server_blocked.load(Ordering::Relaxed) {
+            return false;
+        }
+        let claimed = self
+            .server_calls
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < Self::MAX_SERVER_RESOLVES).then_some(n + 1))
+            .is_ok();
+        if !claimed {
+            return false;
+        }
+        let mut last = self.last_server_call.lock().await;
+        if self.server_blocked.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Some(at) = *last {
+            let elapsed = at.elapsed();
+            if elapsed < Self::SERVER_GAP {
+                tokio::time::sleep(Self::SERVER_GAP - elapsed).await;
+            }
+        }
+        if self.server_blocked.load(Ordering::Relaxed) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
+    }
+
+    fn note_server_error(&self, err: &anyhow::Error) {
+        use std::sync::atomic::Ordering;
+        if matches!(server_client::server_error(err), Some((429, _))) {
+            // Stop all further server fallback calls immediately on the very
+            // first 429 so we never accumulate abuse-ban strikes.
+            self.server_blocked.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Inner {
     /// Fast metadata-only matching for playlist imports and library transfers.
     ///
     /// `ImportMatch::to_track()` only keeps the matched source's ID and metadata
@@ -304,9 +371,10 @@ impl Inner {
     /// 1. 0 ms if the track already has an enabled full-source ID (e.g. YouTube/SoundCloud).
     /// 2. 0 ms if already in the local persistent mapping cache.
     /// 3. Lightweight metadata search (native YouTube search or enabled local providers)
-    ///    without extracting audio streams.
-    /// 4. Server fallback only if local providers couldn't match and server mode is active.
-    pub(super) async fn match_for_import(&self, t: &Track) -> Option<Resolved> {
+    ///    without extracting audio streams or firing `POST /v1/youtube/hint` bursts.
+    /// 4. Paced, bounded server fallback (at most 25 calls per transfer, halted
+    ///    immediately on 429) only if local providers couldn't match and server mode is active.
+    pub(super) async fn match_for_import_guarded(&self, t: &Track, guard: &ImportMatchGuard) -> Option<Resolved> {
         let enabled = &self.config.providers.enabled;
         let yt_only = self.config.providers.youtube_only;
         let wrap = |(matched, confidence): (Track, f32)| Resolved {
@@ -330,7 +398,7 @@ impl Inner {
                 || self.config.providers.youtube_mode == config::YouTubeMode::Local
                 || self.resolver.priority().first() == Some(&ProviderId::YouTube));
         if yt_first {
-            if let Some(hit) = self.local_youtube_match_here(t, None).await {
+            if let Some(hit) = self.local_youtube_match_here(t, None, false).await {
                 if hit.1 >= resolver::SURE_CONFIDENCE || yt_only {
                     return Some(wrap(hit));
                 }
@@ -349,13 +417,18 @@ impl Inner {
         if let Some(hit) = self.resolver.match_by_search(t, enabled, yt_only).await {
             return Some(wrap(hit));
         }
-        // Only fall back to full server resolve when local providers could not match
-        // (e.g. a server-only provider key like Jamendo/SoundCloud).
-        if self.live_server().is_some() && !self.local_youtube_on() {
-            return self.resolve(t).await.ok().flatten();
+        // Bounded, paced server fallback only when local providers could not match.
+        if self.live_server().is_some() && !self.local_youtube_on() && guard.claim_server_slot().await {
+            match self.resolve(t).await {
+                Ok(r) => return r,
+                Err(e) => guard.note_server_error(&e),
+            }
         }
         None
     }
+}
+
+impl Inner {
 
     pub(super) async fn resolve(&self, t: &Track) -> Result<Option<Resolved>> {
         if self.config.providers.youtube_mode == config::YouTubeMode::Local

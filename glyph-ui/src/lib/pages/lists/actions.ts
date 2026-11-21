@@ -135,7 +135,8 @@ export function downloadTip(tracks: Track[]): string {
   const total = tracks.length;
   if (!total) return t("tip.download");
   const saved = tracks.filter((x) => app.isDownloaded(x)).length;
-  if (tracks.some(isDownloading)) return tf("tip.dl_busy", { done: saved, total });
+  const busy = tracks.filter(isDownloading).length;
+  if (busy > 0) return `${tf("tip.dl_busy", { done: saved, total })} · ${t(busy === 1 ? "ctx.cancel_download" : "ctx.cancel_downloads")}`;
   return saved === 0 ? t("tip.download") : tf("tip.dl_saved", { done: saved, total });
 }
 

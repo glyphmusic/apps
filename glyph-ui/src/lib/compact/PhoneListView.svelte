@@ -8,6 +8,7 @@
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import IconAction from "./IconAction.svelte";
   import Icon from "../components/Icon.svelte";
+  import DownloadBadge from "../components/DownloadBadge.svelte";
   import PhoneSongRow from "./PhoneSongRow.svelte";
   import VirtualRows from "../components/VirtualRows.svelte";
   import SkeletonSwap from "../components/SkeletonSwap.svelte";
@@ -16,16 +17,19 @@
   import { onWeb } from "../web";
   import { t, tf } from "../i18n.svelte";
   import { listId, trackKey, type Track } from "../api/types";
-  import { albumSkeletonCount, listSort, openNameDialog, shownTracks, sortId } from "../pages/lists/actions";
+  import { albumSkeletonCount, downloadsView, listSort, openNameDialog, removeDownloads, shownTracks, sortId } from "../pages/lists/actions";
   import { cachedAlbumKind } from "../pages/lists/albumMeta.svelte";
   import { phone, scrollFx } from "./cstate.svelte";
-  import { REVEAL_BAR_H, REVEAL_TOP_BAR, revealHeight, revealOpacity, revealSnapTarget } from "./list-reveal";
+  import { REVEAL_BAR_H, REVEAL_TOP_BAR, revealHeight, revealOpacity, revealSettleScroll, revealSnapTarget } from "./list-reveal";
+
+  const readMainH = () => (typeof document !== "undefined" ? document.getElementById("main-scroll")?.clientHeight || 0 : 0);
 
   let w = $state(390);
-  let mainH = $state(760);
+  let mainH = $state(readMainH() || 760);
   let filterQ = $state("");
   let searchFocused = $state(false);
   let searchInput: HTMLInputElement | undefined = $state();
+  let lvEl: HTMLDivElement | undefined = $state();
 
   const l = $derived(app.openList!);
   const lKey = $derived(listId(l));
@@ -53,7 +57,10 @@
   const canSort = $derived(!!sortId(l));
   const sort = $derived(listSort(l));
   const keepOpen = $derived(searchFocused || q.length > 0 || app.controlMenu?.menu === "sort");
-  const barOpacity = $derived(keepOpen ? 1 : revealOpacity(phone.scroll, revealH));
+  let settledKey = $state("");
+  let settledRevealH = $state(0);
+  const revealSettled = $derived(settledKey === lKey && settledRevealH === revealH);
+  const barOpacity = $derived(keepOpen ? 1 : !revealSettled ? 0 : revealOpacity(phone.scroll, revealH));
 
   /** Cover shrink starts only once scrolled past the resting threshold (`revealH`). */
   const effScroll = $derived(Math.max(0, phone.scroll - revealH));
@@ -71,28 +78,96 @@
     phone.listRevealH = 0;
   });
 
-  // Reset filter & place the scroll container at the resting threshold on list open.
-  let settledForKey = "";
+  // Reset filter & place the scroll container at the resting threshold on list
+  // open or whenever the reveal bar appears/changes height (e.g. async track load).
   $effect(() => {
     const key = lKey;
     const targetH = revealH;
-    if (key !== settledForKey) {
+    const prevKey = untrack(() => settledKey);
+    const prevH = untrack(() => settledRevealH);
+    const isNewList = key !== prevKey;
+    if (isNewList) {
       untrack(() => {
         filterQ = "";
         searchFocused = false;
       });
     }
-    if (key === settledForKey && targetH === 0) return;
-    const isNewList = key !== settledForKey;
-    settledForKey = key;
-    if (!isNewList) return;
-    void tick().then(() => {
-      const sc = document.getElementById("main-scroll");
-      if (!sc) return;
-      mainH = sc.clientHeight || mainH;
-      sc.scrollTop = targetH;
-      phone.scroll = targetH;
+    const sc = document.getElementById("main-scroll");
+    if (!sc) {
+      settledKey = key;
+      settledRevealH = targetH;
+      return;
+    }
+    const nextScroll = revealSettleScroll({
+      isNewList,
+      prevRevealH: prevH,
+      nextRevealH: targetH,
+      currentScrollTop: sc.scrollTop,
     });
+    if (nextScroll == null) return;
+
+    let cancelled = false;
+    let raf = 0;
+    const finish = () => {
+      settledKey = key;
+      settledRevealH = targetH;
+    };
+    const apply = (): boolean => {
+      if (cancelled) return true;
+      const ch = sc.clientHeight;
+      if (ch && ch !== untrack(() => mainH)) {
+        mainH = ch;
+        if (lvEl && targetH > 0) {
+          lvEl.style.minHeight = `${Math.max(0, Math.ceil(ch) - untrack(() => tailOffset) + targetH + 1)}px`;
+        }
+      }
+      sc.scrollTop = nextScroll;
+      phone.scroll = sc.scrollTop;
+      return targetH <= 0 || sc.scrollTop >= targetH - 1;
+    };
+
+    if (apply()) {
+      finish();
+      return;
+    }
+
+    const onUserScroll = () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      raf = 0;
+      finish();
+      detach();
+    };
+    const detach = () => {
+      sc.removeEventListener("touchstart", onUserScroll);
+      sc.removeEventListener("wheel", onUserScroll);
+      sc.removeEventListener("pointerdown", onUserScroll);
+    };
+    sc.addEventListener("touchstart", onUserScroll, { passive: true });
+    sc.addEventListener("wheel", onUserScroll, { passive: true });
+    sc.addEventListener("pointerdown", onUserScroll, { passive: true });
+
+    void tick().then(() => {
+      if (cancelled) return;
+      if (apply()) {
+        detach();
+        finish();
+        return;
+      }
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (cancelled) return;
+        apply();
+        detach();
+        finish();
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      detach();
+    };
   });
 
   $effect(() => {
@@ -117,7 +192,7 @@
     const snap = () => {
       clearTimeout(settleTimer);
       settleTimer = 0;
-      if (touching) return;
+      if (touching || !revealSettled) return;
       const target = revealSnapTarget({
         scrollTop: sc.scrollTop,
         revealH,
@@ -181,7 +256,7 @@
   }
 
   const here = $derived(app.player.current ? visibleTracks.some((x) => trackKey(x) === app.currentKey) : false);
-  const allDl = $derived(tracks.length > 0 && tracks.every((x) => app.isDownloaded(x)));
+  const dl = $derived(downloadsView(tracks));
   async function play() {
     if (here) return app.togglePlay();
     const i = visibleTracks.findIndex((x) => app.allowed(x));
@@ -206,8 +281,9 @@
 
 <div
   class="lv"
+  bind:this={lvEl}
   bind:clientWidth={w}
-  style:min-height={revealH > 0 ? `${Math.max(0, mainH - tailOffset + revealH)}px` : undefined}
+  style:min-height={revealH > 0 ? `${Math.max(0, Math.ceil(mainH) - tailOffset + revealH + 1)}px` : undefined}
 >
   {#if hasRevealBar}
     <div
@@ -275,7 +351,21 @@
     </div>
     {#if !pickMode}
     <div class="acts">
-      {#if tracks.length && !onWeb()}<IconAction name="arrow-down-to-line" label={t("tip.download")} bg={allDl ? "rgba(255,255,255,.1)" : undefined} onclick={() => app.download(tracks)} />{/if}
+      {#if tracks.length && !onWeb()}
+        {#if dl.state === "busy"}
+          <button type="button" class="dl-act" aria-label={t("ctx.cancel_downloads")} onclick={() => app.cancelDownloads(tracks)}>
+            <DownloadBadge state="busy" progress={dl.progress} size={22} arrow="x" />
+          </button>
+        {:else if l.kind !== "downloads"}
+          {#if dl.state === "done"}
+            <button type="button" class="dl-act" aria-label={t("ctx.remove_downloads")} onclick={() => removeDownloads(tracks)}>
+              <DownloadBadge state="done" size={20} />
+            </button>
+          {:else}
+            <IconAction name="arrow-down-to-line" label={t("tip.download")} onclick={() => app.download(tracks)} />
+          {/if}
+        {/if}
+      {/if}
       {#if l.kind === "playlist"}<IconAction name="pencil" label={t("list.edit")} onclick={() => openNameDialog([], l.id)} />{/if}
       {#if pickable && tracks.length}<IconAction name="circle-check" label={t("pick.select")} onclick={() => app.startPicking(l)} />{/if}
       <span class="flex1"></span>
@@ -325,7 +415,7 @@
 
 <style>
   /* Starts under the status bar (the bar above is see-through until scrolled). */
-  .lv { display: flex; flex-direction: column; gap: 8px; padding-top: var(--safe-top, env(safe-area-inset-top)); }
+  .lv { display: flex; flex-direction: column; gap: 8px; padding-top: var(--safe-top, env(safe-area-inset-top)); overflow-anchor: none; }
   .reveal-slot { flex: none; margin-bottom: -8px; display: flex; align-items: flex-end; }
   .reveal-bar { width: 100%; height: 46px; padding: 4px 16px 6px; display: flex; align-items: center; gap: 8px; transition: opacity .08s linear; }
   .msearch {
@@ -364,6 +454,8 @@
   .n { font-size: 13px; color: var(--dim); }
   .link:hover { color: var(--text); text-decoration: underline; }
   .acts { margin-top: 8px; display: flex; align-items: center; gap: 4px; }
+  .dl-act { flex: none; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; transition: background-color .12s; }
+  .dl-act:active { background: rgba(255, 255, 255, .08); }
   .play { flex: none; width: 52px; height: 52px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
   /* Stays under the top bar while the rows scroll. */
   .picks { position: sticky; top: calc(52px + var(--safe-top, env(safe-area-inset-top))); z-index: 3; padding: 0 16px; display: flex; flex-direction: column; }

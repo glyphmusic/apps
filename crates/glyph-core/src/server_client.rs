@@ -116,6 +116,8 @@ pub struct ServerClient {
     install_id: String,
     bearer: Option<String>,
     auth_required: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    import_paused_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    import_blocked_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 /// Random anonymous install id, persisted in the data dir.
@@ -160,7 +162,71 @@ impl ServerClient {
     }
 
     pub fn new(url: &str, http: reqwest::Client, install_id: String) -> Self {
-        Self { base: normalize_base_url(url), http, install_id, bearer: None, auth_required: Default::default() }
+        Self {
+            base: normalize_base_url(url),
+            http,
+            install_id,
+            bearer: None,
+            auth_required: Default::default(),
+            import_paused_until: Default::default(),
+            import_blocked_until: Default::default(),
+        }
+    }
+
+    /// `true` while the server recently rejected an import with an abuse block
+    /// (`temporarily_blocked` / `banned`), so callers fall back locally instead
+    /// of hammering a blocked server.
+    pub fn is_import_blocked(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut g = self.import_blocked_until.lock().unwrap_or_else(|e| e.into_inner());
+        match *g {
+            Some(until) if until > now => true,
+            Some(_) => {
+                *g = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn note_import_rate_limit(&self, err: &anyhow::Error) {
+        let Some(se) = err.downcast_ref::<ServerError>() else { return };
+        let now = std::time::Instant::now();
+        if matches!(se.code.as_str(), "temporarily_blocked" | "banned") {
+            let secs = se.retry_after_s.unwrap_or(900).clamp(30, 900);
+            let until = now + Duration::from_secs(secs);
+            let mut g = self.import_blocked_until.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none_or(|cur| until > cur) {
+                *g = Some(until);
+            }
+            return;
+        }
+        if se.status == 429 || (se.status == 503 && se.code == "provider_rate_limited") {
+            let secs = se.retry_after_s.unwrap_or(5).clamp(1, 120);
+            let until = now + Duration::from_secs(secs);
+            let mut g = self.import_paused_until.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none_or(|cur| until > cur) {
+                *g = Some(until);
+            }
+        }
+    }
+
+    async fn wait_import_pause(
+        &self,
+        cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                anyhow::bail!("cancelled");
+            }
+            let wait = {
+                let g = self.import_paused_until.lock().unwrap_or_else(|e| e.into_inner());
+                g.and_then(|u| u.checked_duration_since(std::time::Instant::now()))
+            };
+            let Some(d) = wait else { return Ok(()) };
+            tokio::time::sleep(d.min(Duration::from_millis(200))).await;
+        }
     }
 
     pub fn with_bearer(mut self, token: Option<String>) -> Result<Self> {
@@ -459,13 +525,66 @@ impl ServerClient {
             total: Option<usize>,
         }
         let max_tracks = crate::library::playlist_track_limit().clamp(1, 50_000);
-        let fetch_page = |offset: usize| async move {
-            let request = self.member_request(self.post("/v1/import/spotify")).await
-                .timeout(Duration::from_secs(60)).json(&serde_json::json!({"url": url, "offset": offset}));
-            let value: serde_json::Value = Self::read_json_with_retry(request).await?;
-            let paginated = value.get("next_offset").is_some();
-            let page: Page = serde_json::from_value(value)?;
-            Ok::<_, anyhow::Error>((paginated, page))
+        let throttled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let next_slot = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let fetch_page = |offset: usize| {
+            let throttled = throttled.clone();
+            let next_slot = next_slot.clone();
+            async move {
+                let mut last_err = None;
+                for attempt in 0..5u32 {
+                    self.wait_import_pause(cancel).await?;
+                    if throttled.load(Ordering::Relaxed) {
+                        let slot = {
+                            let mut g = next_slot.lock().unwrap_or_else(|e| e.into_inner());
+                            let now = std::time::Instant::now();
+                            let start = (*g).max(now);
+                            *g = start + Duration::from_millis(400);
+                            start
+                        };
+                        while std::time::Instant::now() < slot {
+                            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                                anyhow::bail!("cancelled");
+                            }
+                            let rem = slot.saturating_duration_since(std::time::Instant::now());
+                            tokio::time::sleep(rem.min(Duration::from_millis(150))).await;
+                        }
+                        self.wait_import_pause(cancel).await?;
+                    }
+                    let request = self.member_request(self.post("/v1/import/spotify")).await
+                        .timeout(Duration::from_secs(60)).json(&serde_json::json!({"url": url, "offset": offset}));
+                    let res: Result<serde_json::Value> = async {
+                        Ok(Self::check(request.send().await?).await?.json().await?)
+                    }
+                    .await;
+                    match res {
+                        Ok(value) => {
+                            let paginated = value.get("next_offset").is_some();
+                            let page: Page = serde_json::from_value(value)?;
+                            return Ok::<_, anyhow::Error>((paginated, page));
+                        }
+                        Err(err) => {
+                            self.note_import_rate_limit(&err);
+                            if matches!(server_error(&err), Some((429, _)) | Some((503, "provider_rate_limited"))) {
+                                throttled.store(true, Ordering::Relaxed);
+                            }
+                            let retry_wait = if attempt < 4 { retry_delay(&err, attempt.min(1)) } else { None };
+                            let Some(wait) = retry_wait else { return Err(err); };
+                            last_err = Some(err);
+                            let mut slept = Duration::ZERO;
+                            while slept < wait {
+                                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                                    anyhow::bail!("cancelled");
+                                }
+                                let step = (wait - slept).min(Duration::from_millis(200));
+                                tokio::time::sleep(step).await;
+                                slept += step;
+                            }
+                        }
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| anyhow!("import request failed")))
+            }
         };
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             anyhow::bail!("cancelled");
@@ -496,20 +615,24 @@ impl ServerClient {
             return Err(anyhow!("invalid import pagination; no playlist was saved"));
         }
         // Fast path: when the server reports `total`, fetch remaining 100-track
-        // pages in parallel (4 concurrent) while preserving exact track order.
+        // pages in parallel (3 concurrent, automatically pacing on any 429) while
+        // preserving exact track order.
         if let Some(total) = known_total.filter(|&t| t > 100) {
             let offsets: Vec<usize> = (100..total).step_by(100).collect();
             let mut slots: Vec<Vec<Track>> = vec![Vec::new(); offsets.len()];
             let mut done = result.tracks.len();
             let mut stream = futures::stream::iter(offsets.into_iter().enumerate())
-                .map(|(slot, off)| async move {
-                    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                        return Err(anyhow!("cancelled"));
+                .map(|(slot, off)| {
+                    let fut = fetch_page(off);
+                    async move {
+                        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                            return Err(anyhow!("cancelled"));
+                        }
+                        let (_, page) = fut.await?;
+                        Ok::<_, anyhow::Error>((slot, page.list.tracks))
                     }
-                    let (_, page) = fetch_page(off).await?;
-                    Ok::<_, anyhow::Error>((slot, page.list.tracks))
                 })
-                .buffer_unordered(4);
+                .buffer_unordered(3);
             while let Some(res) = stream.next().await {
                 if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                     anyhow::bail!("cancelled");
@@ -1263,6 +1386,11 @@ fn retry_delay(error: &anyhow::Error, attempt: u32) -> Option<Duration> {
     if attempt >= 2 { return None; }
     let fallback = 1 << attempt;
     if let Some(error) = error.downcast_ref::<ServerError>() {
+        // Never retry an active abuse block, ban or daily quota — retrying
+        // only wastes time and can accumulate extra hits.
+        if matches!(error.code.as_str(), "temporarily_blocked" | "banned" | "youtube_daily_limit") {
+            return None;
+        }
         if error.status != 429 && !(500..=599).contains(&error.status) { return None; }
         return Some(Duration::from_secs(error.retry_after_s.unwrap_or(if error.status == 429 { 5 * fallback } else { fallback }).clamp(1, 120)));
     }
@@ -1277,13 +1405,92 @@ mod account_tests {
 
     #[test]
     fn metadata_retries_only_transient_errors_and_honours_retry_after() {
-        let error = |status, retry_after_s| anyhow::Error::new(ServerError { status, retry_after_s, code: String::new(), message: String::new() });
-        for status in [400, 401, 403, 404, 409] { assert_eq!(retry_delay(&error(status, None), 0), None); }
-        assert_eq!(retry_delay(&error(503, None), 0), Some(Duration::from_secs(1)));
-        assert_eq!(retry_delay(&error(503, None), 1), Some(Duration::from_secs(2)));
-        assert_eq!(retry_delay(&error(429, Some(12)), 0), Some(Duration::from_secs(12)));
-        assert_eq!(retry_delay(&error(429, Some(u64::MAX)), 0), Some(Duration::from_secs(120)));
-        assert_eq!(retry_delay(&error(503, None), 2), None);
+        let error = |status, code: &str, retry_after_s| {
+            anyhow::Error::new(ServerError { status, retry_after_s, code: code.into(), message: String::new() })
+        };
+        for status in [400, 401, 403, 404, 409] { assert_eq!(retry_delay(&error(status, "", None), 0), None); }
+        for code in ["temporarily_blocked", "banned", "youtube_daily_limit"] {
+            assert_eq!(retry_delay(&error(429, code, Some(60)), 0), None, "{code} must never be retried");
+        }
+        assert_eq!(retry_delay(&error(503, "", None), 0), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(&error(503, "", None), 1), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(&error(429, "rate_limited", Some(12)), 0), Some(Duration::from_secs(12)));
+        assert_eq!(retry_delay(&error(429, "rate_limited", Some(u64::MAX)), 0), Some(Duration::from_secs(120)));
+        assert_eq!(retry_delay(&error(503, "", None), 2), None);
+    }
+
+    #[tokio::test]
+    async fn server_import_recovers_from_429_and_halts_on_abuse_block() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // 1. Soft 429 on page 1 -> waits retry_after_s and succeeds with all 300 songs in order.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let page1_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let p1 = page1_hits.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 { break; }
+                    req.extend_from_slice(&buf[..n]);
+                    if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let hdr = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+                        let len = hdr.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if req.len() >= end + 4 + len { break; }
+                    }
+                }
+                let body_start = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let v: serde_json::Value = serde_json::from_slice(&req[body_start..]).unwrap();
+                let offset = v["offset"].as_u64().unwrap() as usize;
+                if offset == 100 && p1.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let err = r#"{"code":"rate_limited","message":"slow down","retry_after_s":1}"#;
+                    let hdr = format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", err.len());
+                    stream.write_all(hdr.as_bytes()).unwrap();
+                    stream.write_all(err.as_bytes()).unwrap();
+                    continue;
+                }
+                let tracks: Vec<serde_json::Value> = (offset..offset + 100)
+                    .map(|i| serde_json::json!({ "id": format!("s{i}"), "source": "spotify", "title": format!("Song {i}"), "artist": "Artist" }))
+                    .collect();
+                let next = (offset + 100 < 300).then_some(offset + 100);
+                let resp = serde_json::json!({ "name": "Rate Limited 300", "source": "spotify", "tracks": tracks, "next_offset": next, "total": 300 }).to_string();
+                let hdr = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", resp.len());
+                stream.write_all(hdr.as_bytes()).unwrap();
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+        let client = ServerClient::new(&format!("http://{addr}"), reqwest::Client::new(), "test-429".into());
+        let imported = client.import_with_options("https://open.spotify.com/playlist/rl300", None, None).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(imported.tracks.len(), 300);
+        assert_eq!(imported.tracks[0].title, "Song 0");
+        assert_eq!(imported.tracks[299].title, "Song 299");
+        assert!(!client.is_import_blocked());
+
+        // 2. Hard abuse block (`temporarily_blocked`) -> fails immediately with 0 retries and marks blocked.
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_srv = hits.clone();
+        let server2 = std::thread::spawn(move || {
+            let (mut stream, _) = listener2.accept().unwrap();
+            let mut req = [0u8; 4096];
+            let _ = stream.read(&mut req);
+            hits_srv.fetch_add(1, Ordering::SeqCst);
+            let err = r#"{"code":"temporarily_blocked","message":"abuse block","retry_after_s":900}"#;
+            let hdr = format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 900\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", err.len());
+            stream.write_all(hdr.as_bytes()).unwrap();
+            stream.write_all(err.as_bytes()).unwrap();
+        });
+        let client2 = ServerClient::new(&format!("http://{addr2}"), reqwest::Client::new(), "test-block".into());
+        assert!(client2.import_with_options("https://open.spotify.com/playlist/blocked", None, None).await.is_err());
+        server2.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "temporarily_blocked must never be retried");
+        assert!(client2.is_import_blocked());
     }
 
     #[tokio::test]

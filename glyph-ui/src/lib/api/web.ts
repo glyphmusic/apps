@@ -1676,6 +1676,9 @@ export class WebBackend implements Backend {
         for (const t of (a.tracks ?? []) as Track[]) this.emit("download", { key: trackKey(t), progress: null, done: true });
         this.toast("web.app_only", "info");
       },
+      download_cancel: (a) => {
+        for (const t of (a.tracks ?? []) as Track[]) this.emit("download", { key: trackKey(t), progress: null, done: true });
+      },
       downloaded_bytes: () => 0,
       output_devices: () => [],
       playback_status: () => ({ mpd: { connected: null, error: null }, devices: null }),

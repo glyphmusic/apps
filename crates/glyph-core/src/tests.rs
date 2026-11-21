@@ -293,6 +293,127 @@ async fn server_download_skips_resolve_roundtrip_when_youtube_id_is_known_or_cac
 }
 
 #[tokio::test]
+async fn multi_playlist_1050_song_migration_defers_matching_without_server_flood() {
+    use crate::import::accounts::{Collection, Fetched, LibrarySource, Migrated, MigrationEvent, Overview, Service};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FifteenLists;
+    #[async_trait::async_trait]
+    impl LibrarySource for FifteenLists {
+        fn service(&self) -> Service { Service::Spotify }
+        async fn overview(&self) -> anyhow::Result<Overview> { Ok(Overview { account: "test".into(), collections: vec![], notes: vec![] }) }
+        async fn fetch(&self, c: &Collection) -> anyhow::Result<Fetched> {
+            let tracks = (0..70)
+                .map(|i| Track {
+                    id: format!("{}-{i}", c.id),
+                    source: ProviderId::Spotify,
+                    title: format!("Song {i}"),
+                    artist: "Artist".into(),
+                    album: None,
+                    duration_ms: Some(180_000),
+                    cover_url: None,
+                    isrc: None,
+                    permalink: None,
+                    external_ids: Default::default(),
+                    explicit: false,
+                })
+                .collect();
+            Ok(Fetched::Tracks(tracks))
+        }
+    }
+
+    let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("GLYPH_DATA_DIR", dir.path().join("data"));
+    std::env::set_var("GLYPH_CACHE_DIR", dir.path().join("cache"));
+
+    // Mock glyph-server that counts EVERY non-health API call.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    let api_calls = Arc::new(AtomicUsize::new(0));
+    let calls_srv = api_calls.clone();
+    let srv = std::thread::spawn(move || {
+        let health = serde_json::json!({"server_version":"test","protocol_version":1,"providers":["youtube"]}).to_string();
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let first = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+                    if first.starts_with("GET /v1/health") {
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{health}", health.len());
+                    } else {
+                        calls_srv.fetch_add(1, Ordering::SeqCst);
+                        let err = r#"{"code":"rate_limited","message":"unexpected api call","retry_after_s":60}"#;
+                        let _ = write!(s, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{err}", err.len());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(5)),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut cfg = Config::default();
+    cfg.server_url = base;
+    cfg.providers.enabled = vec![ProviderId::YouTube];
+    cfg.providers.youtube_only = true;
+    cfg.providers.youtube_mode = crate::config::YouTubeMode::Server;
+    let backend = Backend::new(cfg).await.unwrap();
+
+    // Case 1: 15 playlists × 70 songs = 1,050 songs with known counts -> ALL 15 defer immediately (0 server calls!).
+    let cols: Vec<Collection> = (0..15)
+        .map(|i| Collection::playlist(&format!("pl{i}"), &format!("Playlist {i}"), Some(70), None, None))
+        .collect();
+    let (tx, mut rx) = crate::flume_like::channel();
+    backend.migrate(Arc::new(FifteenLists), cols, tx, Arc::new(AtomicBool::new(false))).await.unwrap();
+    let mut total_songs = 0usize;
+    let mut deferred_lists = 0usize;
+    while let Some(ev) = rx.recv().await {
+        if let MigrationEvent::Done { result: Migrated::Tracks(res), .. } = ev {
+            total_songs += res.ordered.len();
+            if res.sure.is_empty() && res.unsure.is_empty() && res.not_found.is_empty() {
+                deferred_lists += 1;
+            }
+        }
+    }
+    assert_eq!(total_songs, 1050);
+    assert_eq!(deferred_lists, 15, "all 15 playlists must defer when known total > 100");
+    assert_eq!(api_calls.load(Ordering::SeqCst), 0, "1,050-song transfer must make 0 server resolve/hint calls");
+
+    // Case 2: 15 playlists × 70 songs with UNKNOWN counts -> only playlist 1 (70 <= 100) runs matching,
+    // and playlists 2..15 defer immediately; server fallback halts on the very first 429 (<= 4 calls!).
+    let cols_unknown: Vec<Collection> = (0..15)
+        .map(|i| Collection::playlist(&format!("u{i}"), &format!("Unknown {i}"), None, None, None))
+        .collect();
+    let (tx2, mut rx2) = crate::flume_like::channel();
+    backend.migrate(Arc::new(FifteenLists), cols_unknown, tx2, Arc::new(AtomicBool::new(false))).await.unwrap();
+    let mut total_songs2 = 0usize;
+    let mut deferred_lists2 = 0usize;
+    while let Some(ev) = rx2.recv().await {
+        if let MigrationEvent::Done { result: Migrated::Tracks(res), .. } = ev {
+            total_songs2 += res.ordered.len();
+            if res.sure.is_empty() && res.unsure.is_empty() && res.not_found.is_empty() {
+                deferred_lists2 += 1;
+            }
+        }
+    }
+    assert_eq!(total_songs2, 1050);
+    assert_eq!(deferred_lists2, 14, "playlists 2..15 must defer once cumulative count exceeds 100");
+    assert!(api_calls.load(Ordering::SeqCst) <= 4, "server fallback must halt immediately on 429 (got {})", api_calls.load(Ordering::SeqCst));
+
+    stop.store(true, Ordering::Relaxed);
+    srv.join().unwrap();
+    std::env::remove_var("GLYPH_DATA_DIR");
+    std::env::remove_var("GLYPH_CACHE_DIR");
+}
+
+#[tokio::test]
 #[ignore]
 async fn live_benchmark_download_preparing_and_total_speed() {
     let _g = paths::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

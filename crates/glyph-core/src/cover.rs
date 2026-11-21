@@ -98,8 +98,13 @@ pub struct CoverResult {
     pub cover_url: Option<String>,
 }
 
+/// Pacing between `/v1/upstream` cover downloads (covered by the generous media bucket).
 const SERVER_REQ_GAP: Duration = Duration::from_millis(180);
-const SERVER_RATE_LIMIT_DEFAULT_SECS: u64 = 15;
+/// Base pacing between `POST /v1/cover` metadata lookups (covered by the strict API
+/// bucket: <= 133 req/min base, adaptively slows to ~50 req/min on 429).
+const SERVER_META_REQ_GAP_BASE_MS: u64 = 450;
+const SERVER_META_REQ_GAP_MAX_MS: u64 = 1_200;
+const SERVER_RATE_LIMIT_DEFAULT_SECS: u64 = 30;
 
 pub struct CoverCache {
     server: Option<crate::server_client::ServerClient>,
@@ -119,6 +124,8 @@ pub struct CoverCache {
     /// Bounds concurrent network cover lookups so large playlists load progressively.
     fetch_sem: tokio::sync::Semaphore,
     last_server_req: tokio::sync::Mutex<Option<std::time::Instant>>,
+    last_server_meta_req: tokio::sync::Mutex<Option<std::time::Instant>>,
+    server_meta_gap_ms: std::sync::atomic::AtomicU64,
     server_cooldown_until: Mutex<Option<std::time::Instant>>,
 }
 
@@ -138,6 +145,8 @@ impl CoverCache {
             pruning: Arc::new(AtomicBool::new(false)),
             fetch_sem: tokio::sync::Semaphore::new(2),
             last_server_req: tokio::sync::Mutex::new(None),
+            last_server_meta_req: tokio::sync::Mutex::new(None),
+            server_meta_gap_ms: std::sync::atomic::AtomicU64::new(SERVER_META_REQ_GAP_BASE_MS),
             server_cooldown_until: Mutex::new(None),
         }
     }
@@ -178,26 +187,33 @@ impl CoverCache {
         }
     }
 
-    fn note_rate_limit(&self, retry_after_s: Option<u64>) {
-        let secs = retry_after_s.unwrap_or(SERVER_RATE_LIMIT_DEFAULT_SECS).clamp(5, 120);
+    fn note_rate_limit(&self, retry_after_s: Option<u64>, is_abuse_block: bool) {
+        let default_s = if is_abuse_block { 900 } else { SERVER_RATE_LIMIT_DEFAULT_SECS };
+        let secs = retry_after_s.unwrap_or(default_s).clamp(5, 900);
         let until = std::time::Instant::now() + Duration::from_secs(secs);
         let mut g = self.server_cooldown_until.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_none_or(|cur| until > cur) {
             *g = Some(until);
         }
+        // Slow down future POST /v1/cover metadata lookups so browsing a 1,000-song
+        // imported playlist stays well below even guest per-minute API caps.
+        let cur = self.server_meta_gap_ms.load(Ordering::Relaxed);
+        let next = (cur.saturating_mul(3) / 2).clamp(650, SERVER_META_REQ_GAP_MAX_MS);
+        self.server_meta_gap_ms.store(next, Ordering::Relaxed);
     }
 
     fn note_server_error(&self, err: &anyhow::Error) -> bool {
         if let Some(se) = err.downcast_ref::<crate::server_client::ServerError>() {
             if se.status == 429 {
-                self.note_rate_limit(se.retry_after_s);
+                let blocked = matches!(se.code.as_str(), "temporarily_blocked" | "banned");
+                self.note_rate_limit(se.retry_after_s, blocked);
                 return true;
             }
             return se.status >= 500 || se.status == 408;
         }
         if let Some(re) = err.downcast_ref::<reqwest::Error>() {
             if re.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
-                self.note_rate_limit(None);
+                self.note_rate_limit(None, false);
                 return true;
             }
             return re.is_timeout() || re.is_connect() || re.status().is_some_and(|s| s.is_server_error());
@@ -211,6 +227,18 @@ impl CoverCache {
             let elapsed = at.elapsed();
             if elapsed < SERVER_REQ_GAP {
                 tokio::time::sleep(SERVER_REQ_GAP - elapsed).await;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
+    async fn pace_server_meta(&self) {
+        let gap = Duration::from_millis(self.server_meta_gap_ms.load(Ordering::Relaxed));
+        let mut last = self.last_server_meta_req.lock().await;
+        if let Some(at) = *last {
+            let elapsed = at.elapsed();
+            if elapsed < gap {
+                tokio::time::sleep(gap - elapsed).await;
             }
         }
         *last = Some(std::time::Instant::now());
@@ -318,7 +346,7 @@ impl CoverCache {
             if self.server_cooling_down() {
                 return Ok(None);
             }
-            self.pace_server().await;
+            self.pace_server_meta().await;
             match server.cover_meta(track).await {
                 Ok(meta) => {
                     found_album = meta.album;
@@ -382,7 +410,7 @@ impl CoverCache {
                 let mut candidate = track.clone();
                 // Own non-YouTube URL was already tried above; ask server to search metadata if missing/failed.
                 candidate.cover_url = None;
-                self.pace_server().await;
+                self.pace_server_meta().await;
                 let mut server_ok = true;
                 match server.cover_meta(&candidate).await {
                     Ok(meta) => {
@@ -1008,5 +1036,32 @@ mod tests {
         let upgraded = cache.get(&yt_track).await.unwrap().unwrap();
         assert_eq!(image::image_dimensions(&upgraded).unwrap(), (32, 32));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn cover_rate_limit_cools_down_and_slows_metadata_pacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CoverCache::new(dir.path().to_path_buf(), reqwest::Client::new(), Arc::new(Providers::default()));
+        let initial_gap = cache.server_meta_gap_ms.load(Ordering::Relaxed);
+        assert!(initial_gap >= SERVER_META_REQ_GAP_BASE_MS);
+        let soft_429 = anyhow::Error::new(crate::server_client::ServerError {
+            status: 429,
+            code: "rate_limited".into(),
+            message: "slow down".into(),
+            retry_after_s: Some(25),
+        });
+        assert!(cache.note_server_error(&soft_429));
+        assert!(cache.server_cooling_down());
+        assert!(cache.server_meta_gap_ms.load(Ordering::Relaxed) > initial_gap);
+
+        let hard_block = anyhow::Error::new(crate::server_client::ServerError {
+            status: 429,
+            code: "temporarily_blocked".into(),
+            message: "abuse".into(),
+            retry_after_s: Some(900),
+        });
+        assert!(cache.note_server_error(&hard_block));
+        let until = cache.server_cooldown_until.lock().unwrap().unwrap();
+        assert!(until.saturating_duration_since(std::time::Instant::now()) >= std::time::Duration::from_secs(850));
     }
 }

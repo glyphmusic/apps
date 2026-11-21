@@ -1433,11 +1433,31 @@ impl Backend {
                 *sync_state().lock().unwrap() = Some(st.clone());
                 for batch in crate::e2e_sync::batches(wires, 200, 512 * 1024) {
                     let items: Vec<SyncItem> = batch.iter().map(|w| w.item.clone()).collect();
-                    let r = with_auth(&c, |t| {
-                        let (c, items, acc) = (c.clone(), items.clone(), acc.clone());
-                        async move { require_session(&acc)?; c.sync_push(&t, items).await }
-                    })
-                    .await?;
+                    let r = {
+                        let mut attempt = 0u32;
+                        loop {
+                            let res = with_auth(&c, |t| {
+                                let (c, items, acc) = (c.clone(), items.clone(), acc.clone());
+                                async move { require_session(&acc)?; c.sync_push(&t, items).await }
+                            })
+                            .await;
+                            match res {
+                                Ok(r) => break r,
+                                Err(e) if attempt < 2
+                                    && matches!(server_error(&e), Some((429, code)) if code != "temporarily_blocked" && code != "banned") =>
+                                {
+                                    let wait = e
+                                        .downcast_ref::<crate::server_client::ServerError>()
+                                        .and_then(|s| s.retry_after_s)
+                                        .unwrap_or(5 << attempt)
+                                        .clamp(1, 60);
+                                    attempt += 1;
+                                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    };
                     round.pushed += r.accepted as usize;
                     let stale: std::collections::BTreeSet<(String, String)> = r.stale.iter().map(|i| (i.kind.clone(), i.key.clone())).collect();
                     let accepted: Vec<_> = batch.into_iter().filter(|w| !stale.contains(&(w.item.kind.clone(), w.item.key.clone()))).collect();

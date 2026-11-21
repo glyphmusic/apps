@@ -2,6 +2,7 @@
 // written like the app's config: "secondary-k" = Ctrl on Windows/Linux,
 // Cmd on macOS. The user's own keys come from config.ui.keys.
 import { app } from "./state.svelte";
+import { trackKey } from "./api/types";
 import { currentListNav, stepRowIndex } from "./state/list-nav.svelte";
 import { isMac, close } from "./window";
 
@@ -79,7 +80,11 @@ function run(id: string, focusSearch: () => void) {
     case "like": return app.player.current && app.toggleLike(app.player.current);
     case "shuffle": return app.toggleShuffle();
     case "repeat": return app.cycleRepeat();
-    case "download": return app.player.current && app.download([app.player.current]);
+    case "download": {
+      const cur = app.player.current;
+      if (!cur) return;
+      return trackKey(cur) in app.downloading ? app.cancelDownloads([cur]) : app.download([cur]);
+    }
     case "loop_start": return app.setLoop(app.position, app.player.loop_b ?? null);
     case "loop_end": return app.setLoop(app.player.loop_a ?? 0, app.position);
     case "loop_clear": return app.setLoop(null, null);

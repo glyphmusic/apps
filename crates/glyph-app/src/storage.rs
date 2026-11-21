@@ -43,13 +43,45 @@ pub fn setup(core: &Arc<Core>) {
 
 // ---------------------------------------------------------------- downloads
 
+#[derive(Default)]
+struct CancelToken {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancelToken {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ActiveDownload {
+    track: Track,
+    cancel: Arc<CancelToken>,
+}
+
 /// Songs downloading now, by UI key.
-fn active() -> &'static Mutex<HashMap<String, Track>> {
-    static A: OnceLock<Mutex<HashMap<String, Track>>> = OnceLock::new();
+fn active() -> &'static Mutex<HashMap<String, ActiveDownload>> {
+    static A: OnceLock<Mutex<HashMap<String, ActiveDownload>>> = OnceLock::new();
     A.get_or_init(Default::default)
 }
 
-fn active_lock() -> std::sync::MutexGuard<'static, HashMap<String, Track>> {
+fn active_lock() -> std::sync::MutexGuard<'static, HashMap<String, ActiveDownload>> {
     active().lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -67,12 +99,19 @@ fn spawn_ticker(core: &Arc<Core>) {
     crate::rt::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let list: Vec<(String, Track)> = active_lock().iter().map(|(k, t)| (k.clone(), t.clone())).collect();
+            let list: Vec<(String, Track, Arc<CancelToken>)> = active_lock()
+                .iter()
+                .filter(|(_, e)| !e.cancel.is_cancelled())
+                .map(|(k, e)| (k.clone(), e.track.clone(), e.cancel.clone()))
+                .collect();
             if list.is_empty() {
                 break;
             }
             if let Some(b) = core.backend() {
-                for (k, t) in list {
+                for (k, t, token) in list {
+                    if !active_lock().get(&k).is_some_and(|e| Arc::ptr_eq(&e.cancel, &token)) {
+                        continue;
+                    }
                     // Not started yet (waiting for its turn): nothing to say.
                     if let Some(p) = b.download_progress(&t) {
                         core.emit("download", json!({ "key": k, "progress": p, "done": false }));
@@ -81,58 +120,73 @@ fn spawn_ticker(core: &Arc<Core>) {
             }
         }
         RUNNING.store(false, Ordering::SeqCst);
+        if !active_lock().is_empty() {
+            spawn_ticker(&core);
+        }
     });
+}
+
+enum JobOutcome {
+    Cancelled,
+    Finished(anyhow::Result<Option<PathBuf>>),
 }
 
 /// Downloads songs through the backend's bounded queue; songs no source
 /// offers for download are skipped and counted in the closing toast.
 /// `auto`: started by a list that downloads new songs by itself; it starts
 /// silently and only reports what was saved or failed.
-pub fn download_tracks(core: &Arc<Core>, tracks: Vec<Track>, auto: bool) {
+/// `silent`: started by account sync; no toasts at all.
+fn start_downloads(core: &Arc<Core>, tracks: Vec<Track>, auto: bool, silent: bool) {
     // Songs the UI marked as busy but that will not run: tell it they are done.
     let skip = |tr: &Track| done_event(core, &ui_key(tr));
     if is_offline() {
-        if !auto {
+        if !auto && !silent {
             core.toast_key("offline.download_online", "info");
         }
         tracks.iter().for_each(skip);
         return;
     }
     let Some(b) = core.backend() else {
-        if !auto {
+        if !auto && !silent {
             core.toast_key("toast.dl_unready", "info");
         }
         tracks.iter().for_each(skip);
         return;
     };
-    let mut seen = HashSet::new();
-    let mut todo: Vec<Track> = Vec::new();
-    for tr in tracks {
-        let key = ui_key(&tr);
-        if b.is_downloaded(&tr) {
-            skip(&tr);
-        } else if active_lock().contains_key(&key) || !seen.insert(key) {
-            // Running already: its own events go on.
-        } else {
-            todo.push(tr);
+    let mut jobs: Vec<(Track, Arc<CancelToken>)> = Vec::new();
+    let mut skipped: Vec<Track> = Vec::new();
+    {
+        let mut a = active_lock();
+        let mut seen = HashSet::new();
+        for tr in tracks {
+            let key = ui_key(&tr);
+            if b.is_downloaded(&tr) {
+                skipped.push(tr);
+            } else if a.contains_key(&key) || !seen.insert(key.clone()) {
+                // Running already: its own events go on.
+            } else {
+                let cancel = Arc::new(CancelToken::default());
+                a.insert(key, ActiveDownload { track: tr.clone(), cancel: cancel.clone() });
+                jobs.push((tr, cancel));
+            }
         }
     }
-    if todo.is_empty() {
-        if !auto {
+    skipped.iter().for_each(skip);
+    if jobs.is_empty() {
+        if !auto && !silent {
             core.toast_key("toast.dl_already", "info");
         }
         return;
     }
-    {
-        let mut a = active_lock();
-        for tr in &todo {
-            a.insert(ui_key(tr), tr.clone());
+    if auto || silent {
+        for (tr, _) in &jobs {
+            core.emit("download", json!({ "key": ui_key(tr), "progress": null, "done": false }));
         }
     }
     spawn_ticker(core);
-    let total = todo.len();
-    let first_title = todo[0].title.clone();
-    if !auto {
+    let total = jobs.len();
+    let first_title = jobs[0].0.title.clone();
+    if !auto && !silent {
         if total == 1 {
             toast(core, "toast.dl_started_one", json!({ "title": first_title }), "ok");
         } else {
@@ -143,38 +197,64 @@ pub fn download_tracks(core: &Arc<Core>, tracks: Vec<Track>, auto: bool) {
     crate::rt::spawn(async move {
         let (mut ok, mut missing, mut failed) = (0usize, 0usize, 0usize);
         let mut saved_at: Option<PathBuf> = None;
-        let mut pending = futures::stream::iter(todo)
-            .map(|tr| {
+        let mut pending = futures::stream::iter(jobs)
+            .map(|(tr, cancel)| {
                 let b = b.clone();
                 async move {
-                    let r = b.download(&tr).await;
-                    (tr, r)
+                    if cancel.is_cancelled() {
+                        return (tr, cancel, JobOutcome::Cancelled);
+                    }
+                    let r = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => JobOutcome::Cancelled,
+                        res = b.download(&tr) => JobOutcome::Finished(res),
+                    };
+                    (tr, cancel, r)
                 }
             })
             .buffer_unordered(10);
-        while let Some((tr, result)) = pending.next().await {
+        while let Some((tr, cancel, result)) = pending.next().await {
+            let key = ui_key(&tr);
+            let removed_ours = {
+                let mut a = active_lock();
+                if a.get(&key).is_some_and(|e| Arc::ptr_eq(&e.cancel, &cancel)) {
+                    a.remove(&key);
+                    true
+                } else {
+                    false
+                }
+            };
             let saved = match result {
-                Ok(Some(path)) => {
+                JobOutcome::Cancelled => false,
+                JobOutcome::Finished(Ok(Some(path))) => {
                     ok += 1;
                     saved_at = Some(path);
                     true
                 }
-                Ok(None) => {
+                JobOutcome::Finished(Ok(None)) => {
                     missing += 1;
                     false
                 }
-                Err(e) => {
+                JobOutcome::Finished(Err(e)) => {
                     tracing::warn!(title = %tr.title, "download failed: {e:#}");
                     failed += 1;
                     false
                 }
             };
-            let key = ui_key(&tr);
-            active_lock().remove(&key);
-            done_event(&core, &key);
+            if removed_ours {
+                done_event(&core, &key);
+            }
             if saved {
                 core.emit_library();
             }
+        }
+        if silent {
+            return;
+        }
+        // Every song in this batch was cancelled before finishing: the cancel
+        // action already told the user.
+        if ok == 0 && missing == 0 && failed == 0 {
+            return;
         }
         // Songs no source offers for download are expected in an automatic
         // run; it says nothing unless something happened.
@@ -215,8 +295,46 @@ pub fn download_tracks(core: &Arc<Core>, tracks: Vec<Track>, auto: bool) {
     });
 }
 
+pub fn download_tracks(core: &Arc<Core>, tracks: Vec<Track>, auto: bool) {
+    start_downloads(core, tracks, auto, false);
+}
+
+/// Songs sync asks for offline use: fetched without toasts, still cancellable.
+pub fn download_silent(core: &Arc<Core>, tracks: Vec<Track>) {
+    start_downloads(core, tracks, true, true);
+}
+
 pub fn download(core: C, tracks: Vec<Track>) {
     download_tracks(core, tracks, false);
+}
+
+/// Cancels running or queued downloads for `tracks`.
+pub fn download_cancel(core: C, tracks: Vec<Track>) {
+    let mut cancelled: Vec<(String, String)> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    {
+        let mut a = active_lock();
+        for tr in &tracks {
+            let key = ui_key(tr);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            keys.push(key.clone());
+            if let Some(entry) = a.remove(&key) {
+                entry.cancel.cancel();
+                cancelled.push((key, entry.track.title));
+            }
+        }
+    }
+    for key in &keys {
+        done_event(core, key);
+    }
+    match cancelled.as_slice() {
+        [] => {}
+        [(_, title)] => toast(core, "toast.dl_cancelled_one", json!({ "title": title }), "info"),
+        many => toast(core, "toast.dl_cancelled", json!({ "n": many.len() }), "info"),
+    }
 }
 
 /// Deletes the downloaded file of one song (the UI says how many were removed).
@@ -692,4 +810,35 @@ fn spawn_connectivity(core: &Arc<Core>) {
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancel_token_resolves_when_already_cancelled() {
+        let token = CancelToken::default();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
+        tokio::time::timeout(Duration::from_millis(200), token.cancelled()).await.expect("should resolve immediately");
+    }
+
+    #[tokio::test]
+    async fn cancel_token_wakes_waiting_task() {
+        let token = Arc::new(CancelToken::default());
+        let waiter = {
+            let token = token.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+            })
+        };
+        tokio::task::yield_now().await;
+        token.cancel();
+        tokio::time::timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("waiter should wake")
+            .expect("waiter should not panic");
+    }
 }

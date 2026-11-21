@@ -107,7 +107,6 @@ final class Notifications {
             JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(ctx, CheckJob.class))
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                     .setPeriodic(EVERY_MS, FLEX_MS)
-                    .setPersisted(true)
                     .build();
             js.schedule(job);
         } catch (Exception e) {

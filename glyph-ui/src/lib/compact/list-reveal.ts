@@ -46,3 +46,27 @@ export function revealOpacity(scrollTop: number, revealH: number): number {
   const fadeRange = Math.max(1, revealH * 0.85);
   return Math.min(1, Math.max(0, 1 - scrollTop / fadeRange));
 }
+
+/**
+ * Computes the scrollTop to apply when a mobile list opens or when its
+ * pull-to-reveal bar height changes (e.g. after async tracks finish loading
+ * or when toggling multi-select pick mode):
+ * - A new list always starts at its resting threshold (`nextRevealH`) so the
+ *   search + sort bar stays hidden by default.
+ * - On the same list, when the bar mounts (`0 -> nextRevealH`) or changes
+ *   height, shift `currentScrollTop` by the delta so content stays anchored
+ *   and a list at the top (`0`) settles at `nextRevealH` (hidden) instead of
+ *   exposing the bar.
+ * - Returns `null` when neither the list nor `revealH` changed.
+ */
+export function revealSettleScroll(opts: {
+  isNewList: boolean;
+  prevRevealH: number;
+  nextRevealH: number;
+  currentScrollTop: number;
+}): number | null {
+  const { isNewList, prevRevealH, nextRevealH, currentScrollTop } = opts;
+  if (isNewList) return nextRevealH;
+  if (prevRevealH === nextRevealH) return null;
+  return Math.max(0, currentScrollTop + (nextRevealH - prevRevealH));
+}

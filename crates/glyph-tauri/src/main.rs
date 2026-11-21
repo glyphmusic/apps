@@ -185,6 +185,7 @@ fn main() {
             tauri_commands::playback_status,
             tauri_commands::set_sleep,
             tauri_commands::download,
+            tauri_commands::download_cancel,
             tauri_commands::download_remove,
             tauri_commands::playlist_storage,
             tauri_commands::playlist_auto_download,

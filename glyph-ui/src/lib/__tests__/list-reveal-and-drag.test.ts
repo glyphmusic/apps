@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { REVEAL_BAR_H, REVEAL_NO_ART_H, REVEAL_TOP_BAR, revealHeight, revealOpacity, revealSnapTarget } from "../compact/list-reveal";
+import { REVEAL_BAR_H, REVEAL_NO_ART_H, REVEAL_TOP_BAR, revealHeight, revealOpacity, revealSettleScroll, revealSnapTarget } from "../compact/list-reveal";
 import { clampDragSlot, dragShift } from "../pages/lists/list-drag";
 
 describe("mobile list pull-to-reveal threshold", () => {
@@ -32,6 +32,24 @@ describe("mobile list pull-to-reveal threshold", () => {
     expect(revealOpacity(98, 98)).toBe(0);
     expect(revealOpacity(50, 50)).toBe(0);
     expect(revealOpacity(20, 98)).toBeGreaterThan(0.5);
+  });
+
+  it("hides the reveal bar on open and after async track loading finishes", () => {
+    // Opening an already-loaded list lands directly at its resting threshold.
+    expect(revealSettleScroll({ isNewList: true, prevRevealH: 0, nextRevealH: 98, currentScrollTop: 420 })).toBe(98);
+    expect(revealSettleScroll({ isNewList: true, prevRevealH: 0, nextRevealH: 50, currentScrollTop: 0 })).toBe(50);
+
+    // Opening a loading list resets to 0, then shifts to revealH once tracks arrive.
+    expect(revealSettleScroll({ isNewList: true, prevRevealH: 98, nextRevealH: 0, currentScrollTop: 300 })).toBe(0);
+    expect(revealSettleScroll({ isNewList: false, prevRevealH: 0, nextRevealH: 98, currentScrollTop: 0 })).toBe(98);
+    expect(revealSettleScroll({ isNewList: false, prevRevealH: 0, nextRevealH: 98, currentScrollTop: 140 })).toBe(238);
+
+    // Entering and leaving pick mode preserves position without exposing the bar.
+    expect(revealSettleScroll({ isNewList: false, prevRevealH: 98, nextRevealH: 0, currentScrollTop: 98 })).toBe(0);
+    expect(revealSettleScroll({ isNewList: false, prevRevealH: 0, nextRevealH: 98, currentScrollTop: 0 })).toBe(98);
+
+    // Unchanged list + revealH leaves user scroll (including pulled-open 0) alone.
+    expect(revealSettleScroll({ isNewList: false, prevRevealH: 98, nextRevealH: 98, currentScrollTop: 0 })).toBeNull();
   });
 });
 

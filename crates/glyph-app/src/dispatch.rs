@@ -412,6 +412,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             storage::download(core, req(&args, "tracks")?);
             Ok(Value::Null)
         }
+        "download_cancel" => {
+            storage::download_cancel(core, req(&args, "tracks")?);
+            Ok(Value::Null)
+        }
         "download_remove" => {
             storage::download_remove(core, req(&args, "track")?);
             Ok(Value::Null)

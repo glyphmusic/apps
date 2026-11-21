@@ -165,9 +165,15 @@ impl Spotify {
         send_json(req).await
     }
 
+    async fn get_import<T: serde::de::DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
+        let token = self.token().await?;
+        let req = self.http.get(url).bearer_auth(token).query(query);
+        send_json_with_retry(req, 6).await
+    }
+
     /// Name of a public playlist.
     pub async fn playlist_name(&self, id: &str) -> Result<String> {
-        let v: serde_json::Value = self.get(&format!("{API}/playlists/{id}"), &[("fields", "name")]).await?;
+        let v: serde_json::Value = self.get_import(&format!("{API}/playlists/{id}"), &[("fields", "name")]).await?;
         Ok(v["name"].as_str().unwrap_or("Spotify playlist").to_string())
     }
 
@@ -177,7 +183,7 @@ impl Spotify {
         use futures::stream::StreamExt;
         let base_url = format!("{API}/playlists/{id}/items");
         let max_tracks = crate::library::playlist_track_limit();
-        let first: Page<PlaylistItem> = self.get(&base_url, &[("limit", "50"), ("offset", "0")]).await?;
+        let first: Page<PlaylistItem> = self.get_import(&base_url, &[("limit", "50"), ("offset", "0")]).await?;
         let mut out: Vec<Track> = first.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert).collect();
         if first.next.is_none() {
             return Ok(out);
@@ -194,12 +200,12 @@ impl Spotify {
                         let url = base_url.clone();
                         async move {
                             let off = offset.to_string();
-                            let page: Page<PlaylistItem> = self.get(&url, &[("limit", "50"), ("offset", off.as_str())]).await?;
+                            let page: Page<PlaylistItem> = self.get_import(&url, &[("limit", "50"), ("offset", off.as_str())]).await?;
                             let tracks: Vec<Track> = page.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert).collect();
                             Ok::<_, anyhow::Error>((slot, tracks))
                         }
                     })
-                    .buffer_unordered(8);
+                    .buffer_unordered(3);
                 while let Some(res) = stream.next().await {
                     let (slot, tracks) = res?;
                     pages[slot] = tracks;
@@ -222,7 +228,7 @@ impl Spotify {
                 || next.port_or_known_default() != Some(443) || !next.username().is_empty() || next.password().is_some() {
                 anyhow::bail!("invalid provider pagination URL");
             }
-            let page: Page<PlaylistItem> = self.get(&url, &[]).await?;
+            let page: Page<PlaylistItem> = self.get_import(&url, &[]).await?;
             out.extend(page.items.into_iter().filter_map(|i| i.item.or(i.track)).filter_map(convert));
             match page.next {
                 Some(n) => {
@@ -267,7 +273,7 @@ pub(crate) fn album_tracks_from(v: &serde_json::Value) -> Vec<Track> {
 impl Spotify {
     /// Name and songs of an album (first 50 come inline, the rest paged).
     pub async fn album(&self, id: &str) -> Result<(String, String, Vec<Track>)> {
-        let v: serde_json::Value = self.get(&format!("{API}/albums/{id}"), &[]).await?;
+        let v: serde_json::Value = self.get_import(&format!("{API}/albums/{id}"), &[]).await?;
         let name = v["name"].as_str().unwrap_or("Spotify album").to_string();
         let artist = v["artists"][0]["name"].as_str().unwrap_or("").to_string();
         let mut tracks = album_tracks_from(&v);
@@ -278,7 +284,7 @@ impl Spotify {
             if guard > 20 {
                 break;
             }
-            let page: serde_json::Value = self.get(&url, &[]).await?;
+            let page: serde_json::Value = self.get_import(&url, &[]).await?;
             let wrapped = serde_json::json!({ "name": v["name"], "images": v["images"], "tracks": page });
             tracks.extend(album_tracks_from(&wrapped));
             next = page["next"].as_str().map(str::to_string);
@@ -289,7 +295,7 @@ impl Spotify {
     /// Up to 50 songs by id in one request.
     pub async fn tracks_by_ids(&self, ids: &[&str]) -> Result<Vec<Track>> {
         let joined = ids.join(",");
-        let v: serde_json::Value = self.get(&format!("{API}/tracks"), &[("ids", joined.as_str())]).await?;
+        let v: serde_json::Value = self.get_import(&format!("{API}/tracks"), &[("ids", joined.as_str())]).await?;
         Ok(v["tracks"]
             .as_array()
             .map(|l| l.iter().filter_map(|t| serde_json::from_value::<STrack>(t.clone()).ok()).filter_map(convert).collect())
@@ -298,9 +304,9 @@ impl Spotify {
 
     /// An artist's name and top songs.
     pub async fn artist_top(&self, id: &str) -> Result<(String, Vec<Track>)> {
-        let a: serde_json::Value = self.get(&format!("{API}/artists/{id}"), &[]).await?;
+        let a: serde_json::Value = self.get_import(&format!("{API}/artists/{id}"), &[]).await?;
         let name = a["name"].as_str().unwrap_or("Spotify artist").to_string();
-        let v: serde_json::Value = self.get(&format!("{API}/artists/{id}/top-tracks"), &[("market", "US")]).await?;
+        let v: serde_json::Value = self.get_import(&format!("{API}/artists/{id}/top-tracks"), &[("market", "US")]).await?;
         let tracks = v["tracks"]
             .as_array()
             .map(|l| l.iter().filter_map(|t| serde_json::from_value::<STrack>(t.clone()).ok()).filter_map(convert).collect())

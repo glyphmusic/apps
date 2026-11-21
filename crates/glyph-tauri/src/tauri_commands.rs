@@ -446,6 +446,11 @@ pub fn download(core: C, tracks: Vec<Track>) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn download_cancel(core: C, tracks: Vec<Track>) {
+    storage::download_cancel(&core, tracks)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn download_remove(core: C, track: Track) {
     storage::download_remove(&core, track)
 }

@@ -613,7 +613,9 @@
           {/if}
           {#if !onWeb() && has && l.kind !== "downloads"}
             {#if dl.state === "busy"}
-              <span class="dlb" use:tip={downloadTip(tracks)}><DownloadBadge state="busy" progress={dl.progress} size={22} arrow="download" /></span>
+              <button type="button" class="dlb act-btn dl-cancel" use:tip={downloadTip(tracks)} aria-label={t("ctx.cancel_downloads")} onclick={() => app.cancelDownloads(tracks)}>
+                <DownloadBadge state="busy" progress={dl.progress} size={22} arrow="download" cancellable />
+              </button>
             {:else if dl.state === "done"}
               <button type="button" class="dlb act-btn" use:tip={t("ctx.remove_downloads")} aria-label={t("ctx.remove_downloads")} onclick={() => removeDownloads(tracks)}>
                 <DownloadBadge state="done" size={20} />
@@ -622,7 +624,9 @@
               <IconButton name="arrow-down-to-line" size={18} box={38} label={downloadTip(tracks)} onclick={() => app.download(tracks)} />
             {/if}
           {:else if !onWeb() && has && dl.state === "busy"}
-            <span class="dlb" use:tip={downloadTip(tracks)}><DownloadBadge state="busy" progress={dl.progress} size={22} arrow="download" /></span>
+            <button type="button" class="dlb act-btn dl-cancel" use:tip={downloadTip(tracks)} aria-label={t("ctx.cancel_downloads")} onclick={() => app.cancelDownloads(tracks)}>
+              <DownloadBadge state="busy" progress={dl.progress} size={22} arrow="download" cancellable />
+            </button>
           {/if}
           {#if app.sharedPreview}
             <Button kind="primary" onclick={addShared}>{t("list.add_shared")}</Button>

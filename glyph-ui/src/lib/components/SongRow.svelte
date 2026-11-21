@@ -85,7 +85,8 @@
   const dlTip = $derived.by(() => {
     if (dl === "done") return t("tip.dl_song_done");
     const p = app.downloading[key];
-    return p == null ? t("tip.dl_song_prepare") : p >= 0.995 ? t("tip.dl_song_finish") : tf("tip.dl_song_busy", { pct: Math.round(p * 100) });
+    const status = p == null ? t("tip.dl_song_prepare") : p >= 0.995 ? t("tip.dl_song_finish") : tf("tip.dl_song_busy", { pct: Math.round(p * 100) });
+    return `${status} · ${t("ctx.cancel_download")}`;
   });
   // ui/ytdlp.rs prefetch_on_hover: after a short rest on a row the song is looked up, so a click plays at once.
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
@@ -133,7 +134,20 @@
   <span class="tx">
     <span class="tl" class:on={playing}><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
     <span class="ar">
-      {#if dl !== "none"}<span class="dl" use:tip={dlTip}><DownloadBadge state={dl} progress={app.downloading[key] ?? null} size={14} /></span>{/if}
+      {#if dl === "busy"}
+        <button
+          type="button"
+          class="dl dl-cancel"
+          use:tip={dlTip}
+          aria-label={t("ctx.cancel_download")}
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => { e.stopPropagation(); app.cancelDownloads([tr]); }}
+        >
+          <DownloadBadge state="busy" progress={app.downloading[key] ?? null} size={14} cancellable />
+        </button>
+      {:else if dl === "done"}
+        <span class="dl" use:tip={dlTip}><DownloadBadge state="done" size={14} /></span>
+      {/if}
       <button class="link trunc" onclick={(e) => { e.stopPropagation(); app.openArtistPage(tr.artist); }}>{tr.artist}</button>
     </span>
   </span>
@@ -165,6 +179,9 @@
   .tl.on { color: var(--accent); font-weight: 600; }
   .ar { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--sm); color: var(--dim); }
   .dl { flex: none; width: 16px; height: 16px; display: grid; place-items: center; }
+  .dl-cancel { width: 18px; height: 18px; margin: -1px; border-radius: 50%; cursor: pointer; transition: background-color .12s ease-out; }
+  .dl-cancel:hover { background: rgba(255, 255, 255, .14); }
+  .dl-cancel:active { background: rgba(255, 255, 255, .22); }
   .link { min-width: 0; max-width: 100%; }
   .link:hover { color: var(--text); text-decoration: underline; }
   .al { flex: 0 1 200px; width: 200px; min-width: 0; display: flex; font-size: var(--sm); color: var(--faint); }

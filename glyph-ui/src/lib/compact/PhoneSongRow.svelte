@@ -5,14 +5,17 @@
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
   import SongTitle from "../components/SongTitle.svelte";
+  import DownloadBadge from "../components/DownloadBadge.svelte";
   import { app } from "../state.svelte";
   import { saveMenu } from "../pages/lists/actions";
   import { holdMenu } from "../ui.svelte";
-  import { rating, type ListKey, type Track } from "../api/types";
+  import { rating, trackKey, type ListKey, type Track } from "../api/types";
   import { t } from "../i18n.svelte";
   import { drag, SWIPE_ACT } from "./cstate.svelte";
   let { tracks, index, from = null, context, number }: { tracks: Track[]; index: number; from?: ListKey | null; context?: string; number?: number } = $props();
   const tr = $derived(tracks[index]);
+  const key = $derived(trackKey(tr));
+  const dlBusy = $derived(key in app.downloading);
   const now = $derived(app.isCurrent(tr));
   // Select mode of this list: a tap picks the row (check over the cover).
   const picking = $derived(!!from && app.isPicking(from));
@@ -42,6 +45,11 @@
         <span class="trunc">{tr.artist}</span>
       </span>
     </span>
+    {#if dlBusy && !picking}
+      <button type="button" class="b" aria-label={t("ctx.cancel_download")} onpointerdown={(e) => e.stopPropagation()} onclick={(e) => { e.stopPropagation(); app.cancelDownloads([tr]); }}>
+        <DownloadBadge state="busy" progress={app.downloading[key] ?? null} size={18} arrow="x" />
+      </button>
+    {/if}
     {#if app.isLiked(tr) && !picking}
       <button class="b" aria-label={t("tip.heart")} onpointerdown={(e) => e.stopPropagation()} onclick={(e) => { e.stopPropagation(); app.toggleLike(tr); }} oncontextmenu={saveMenu(tr)} use:holdMenu={saveMenu(tr)}><Icon name="heart-fill" size={18} color="var(--accent)" /></button>
     {/if}

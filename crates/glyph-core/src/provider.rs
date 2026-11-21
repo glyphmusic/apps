@@ -120,8 +120,12 @@ fn host_rate(host: &str) -> (f32, f32) {
         (2.0, 4.0)
     } else if host.contains("archive.org") {
         (2.0, 4.0)
+    } else if host.contains("spotify.com") {
+        // Stay comfortably below Spotify's ~180 req/min rolling window.
+        (2.5, 4.0)
     } else if host.contains("deezer.com") {
-        (8.0, 10.0)
+        // Stay safely below Deezer's 50 req / 5 s quota.
+        (6.5, 8.0)
     } else if host.contains("googleapis.com") {
         (3.0, 5.0)
     } else {
@@ -172,6 +176,58 @@ pub async fn send_json<T: DeserializeOwned>(req: reqwest::RequestBuilder) -> Res
         .into());
     }
     Ok(resp.json::<T>().await?)
+}
+
+/// Like [`send_json`], for bulk imports/transfers: honors `Retry-After` on HTTP
+/// 429 and briefly retries 5xx/timeouts instead of aborting a 1,000-song move.
+pub async fn send_json_with_retry<T: DeserializeOwned>(req: reqwest::RequestBuilder, max_retries: u32) -> Result<T> {
+    for attempt in 0..=max_retries {
+        let cloned = match req.try_clone() {
+            Some(c) => c,
+            None => return send_json(req).await,
+        };
+        let (client, built) = cloned.build_split();
+        let built = built?;
+        if let Some(host) = built.url().host_str() {
+            throttle(host).await;
+        }
+        match client.execute(built).await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp.json::<T>().await?);
+                }
+                let code = status.as_u16();
+                if code == 429 && attempt < max_retries {
+                    let retry_s = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                        .unwrap_or_else(|| (2u64 << attempt.min(4)).min(30))
+                        .clamp(1, 60);
+                    tokio::time::sleep(Duration::from_secs(retry_s)).await;
+                    continue;
+                }
+                if (500..=599).contains(&code) && attempt < max_retries.min(2) {
+                    tokio::time::sleep(Duration::from_secs(1u64 << attempt)).await;
+                    continue;
+                }
+                return Err(match code {
+                    429 | 403 => ProviderError::Quota,
+                    404 => ProviderError::NotFound,
+                    s => ProviderError::Http(s),
+                }
+                .into());
+            }
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < max_retries.min(2) => {
+                tokio::time::sleep(Duration::from_secs(1u64 << attempt)).await;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(ProviderError::Quota.into())
 }
 
 // ------------------------------------------------------------ serde helpers

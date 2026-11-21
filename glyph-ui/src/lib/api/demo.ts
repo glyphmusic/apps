@@ -92,6 +92,7 @@ export class DemoBackend implements Backend, DemoCtx {
   player: PlayerState = { status: "idle", current: null, position: 0, duration: null, volume: 0.8, muted: false, shuffle: false, repeat: "off", source: null, preview: false };
   private subs = new Map<string, Set<(p: any) => void>>();
   private handlers: Record<string, DemoHandler> = {};
+  private dlTimers = new Map<string, number>();
   private timer = 0;
 
   constructor() {
@@ -312,12 +313,43 @@ export class DemoBackend implements Backend, DemoCtx {
       download: (_, a) => {
         for (const t of a.tracks as Track[]) {
           const key = trackKey(t);
+          if (lib().downloads.some((x) => trackKey(x) === key)) {
+            this.emit("download", { key, progress: 1, done: true });
+            continue;
+          }
+          if (this.dlTimers.has(key)) continue;
           let f = 0;
           const id = window.setInterval(() => {
             f += 0.2;
-            if (f >= 1) { clearInterval(id); lib().downloads.push(t); this.saveLibrary(); this.emit("download", { key, progress: 1, done: true }); }
-            else this.emit("download", { key, progress: f, done: false });
+            if (f >= 1) {
+              clearInterval(id);
+              this.dlTimers.delete(key);
+              lib().downloads.push(t);
+              this.saveLibrary();
+              this.emit("download", { key, progress: 1, done: true });
+            } else {
+              this.emit("download", { key, progress: f, done: false });
+            }
           }, 300);
+          this.dlTimers.set(key, id);
+        }
+      },
+      download_cancel: (_, a) => {
+        const cancelled: Track[] = [];
+        for (const t of (a.tracks ?? []) as Track[]) {
+          const key = trackKey(t);
+          const id = this.dlTimers.get(key);
+          if (id != null) {
+            clearInterval(id);
+            this.dlTimers.delete(key);
+            cancelled.push(t);
+          }
+          this.emit("download", { key, progress: null, done: true });
+        }
+        if (cancelled.length === 1) {
+          this.emit("toast", { key: "toast.dl_cancelled_one", text: "toast.dl_cancelled_one", vars: { title: cancelled[0].title }, kind: "info" });
+        } else if (cancelled.length > 1) {
+          this.emit("toast", { key: "toast.dl_cancelled", text: "toast.dl_cancelled", vars: { n: cancelled.length }, kind: "info" });
         }
       },
       download_remove: (_, a) => { lib().downloads = lib().downloads.filter((t) => trackKey(t) !== trackKey(a.track)); this.saveLibrary(); },
@@ -333,5 +365,9 @@ export class DemoBackend implements Backend, DemoCtx {
     };
   }
 
-  destroy() { clearInterval(this.timer); }
+  destroy() {
+    clearInterval(this.timer);
+    for (const id of this.dlTimers.values()) clearInterval(id);
+    this.dlTimers.clear();
+  }
 }

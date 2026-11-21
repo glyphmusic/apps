@@ -6,6 +6,7 @@
   import { app } from "../../state.svelte";
   import { onWeb } from "../../web";
   import { t, tf } from "../../i18n.svelte";
+  import { isDownloading } from "./actions";
   import type { ListKey, Track } from "../../api/types";
 
   let {
@@ -20,6 +21,7 @@
 
   const pickedTracks = $derived(app.pickedTracksOf(tracks));
   const pickedN = $derived(pickedTracks.length);
+  const pickedBusy = $derived(pickedTracks.filter(isDownloading));
   const allPicked = $derived(tracks.length > 0 && pickedN === tracks.length);
 
   const playlistOptions = $derived.by(() => {
@@ -56,6 +58,12 @@
     app.download(pickedTracks);
     app.stopPicking();
   }
+
+  function cancelPickedDownloads() {
+    if (!pickedBusy.length) return;
+    app.cancelDownloads(pickedBusy);
+    app.stopPicking();
+  }
 </script>
 
 <div class="pickbar" role="toolbar" aria-label={t("pick.select")}>
@@ -69,7 +77,11 @@
       <Select value={null as string | null} label={t("pick.playlist")} options={playlistOptions} onpick={addPickedToPlaylist} />
     </span>
     {#if !onWeb() && list.kind !== "downloads"}
-      <IconButton name="arrow-down-to-line" size={16} box={32} disabled={!pickedN} label={t("pick.download")} onclick={downloadPicked} />
+      {#if pickedBusy.length}
+        <IconButton name="x" size={16} box={32} color="var(--danger)" label={t(pickedBusy.length === 1 ? "ctx.cancel_download" : "ctx.cancel_downloads")} onclick={cancelPickedDownloads} />
+      {:else}
+        <IconButton name="arrow-down-to-line" size={16} box={32} disabled={!pickedN} label={t("pick.download")} onclick={downloadPicked} />
+      {/if}
     {/if}
     {#if list.kind === "liked"}
       <Button kind="text" icon="trash-2" onclick={() => app.clearLiked()}>{t("liked.clear")}</Button>

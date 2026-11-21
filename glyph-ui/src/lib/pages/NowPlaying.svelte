@@ -43,8 +43,9 @@
   const dl = $derived(key in app.downloading ? "busy" : cur && app.isDownloaded(cur) ? "done" : "none");
   const prog = $derived(app.downloading[key] ?? null);
   const dlTip = $derived(
-    dl === "busy" ? (prog == null ? t("tip.dl_song_prepare") : prog >= 0.995 ? t("tip.dl_song_finish") : tf("tip.dl_song_busy", { pct: Math.round(prog * 100) }))
-    : dl === "done" ? t("tip.dl_song_done") : (keyOf("download") ? tf("np.download.key", { key: keyLabel(keyOf("download")) }) : t("tip.download")),
+    dl === "busy"
+      ? `${prog == null ? t("tip.dl_song_prepare") : prog >= 0.995 ? t("tip.dl_song_finish") : tf("tip.dl_song_busy", { pct: Math.round(prog * 100) })} · ${t("ctx.cancel_download")}`
+      : dl === "done" ? t("tip.dl_song_done") : (keyOf("download") ? tf("np.download.key", { key: keyLabel(keyOf("download")) }) : t("tip.download")),
   );
   const zenKey = $derived(keyLabel(keyOf("zen")));
   const zenTip = $derived(zen ? (zenKey ? tf("np.zen.exit_key", { key: zenKey }) : t("np.zen.exit")) : (zenKey ? tf("np.zen.key", { key: zenKey }) : t("np.zen")));
@@ -119,8 +120,10 @@
           <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
           <ToggleButton name="timer" size={16} on={app.sleep != null || app.controlMenu?.menu === "sleep"} accent="var(--accent)" onclick={menu("sleep")} oncontextmenu={menu("sleep")} />
           {#if app.config.ui.np_download}
-            {#if dl !== "none"}
-              <button class="dl" use:tip={dlTip} onclick={() => dl === "done" || app.download([cur])}><DownloadBadge state={dl} progress={prog} size={16} arrow="arrow-down" /></button>
+            {#if dl === "busy"}
+              <button type="button" class="dl dl-cancel" use:tip={dlTip} aria-label={t("ctx.cancel_download")} onclick={() => app.cancelDownloads([cur])}><DownloadBadge state="busy" progress={prog} size={16} arrow="arrow-down" cancellable /></button>
+            {:else if dl === "done"}
+              <span class="dl" use:tip={dlTip}><DownloadBadge state="done" size={16} /></span>
             {:else}
               <IconButton name="download" size={16} label={dlTip} onclick={() => app.download([cur])} />
             {/if}

@@ -724,7 +724,20 @@ class App {
     return backend().call("follow", { artist: a, on });
   }
   isDownloaded(tr: Track) { return this.downloadedKeys.has(trackKey(tr)); }
-  download(tracks: Track[]) { for (const tr of tracks) this.downloading[trackKey(tr)] = null; return backend().call("download", { tracks }); }
+  download(tracks: Track[]) {
+    for (const tr of tracks) {
+      const k = trackKey(tr);
+      if (!this.isDownloaded(tr) && !(k in this.downloading)) this.downloading[k] = null;
+    }
+    return backend().call("download", { tracks });
+  }
+  cancelDownloads(tracks: Track[]) {
+    const busy = tracks.filter((tr) => trackKey(tr) in this.downloading);
+    const list = busy.length ? busy : tracks;
+    for (const tr of list) delete this.downloading[trackKey(tr)];
+    if (!list.length) return Promise.resolve();
+    return backend().call("download_cancel", { tracks: list });
+  }
   /** Shares a song or list: on phones the share menu opens, on the desktop the link is copied. */
   share(what: { track?: Track; list?: ListKey }) {
     if (this.compact) { this.shareSheet = what; return Promise.resolve(null); }

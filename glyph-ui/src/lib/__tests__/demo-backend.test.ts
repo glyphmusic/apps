@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DemoBackend } from "../api/demo";
-import type { Library, QueueState } from "../api/types";
+import { trackKey, type Library, type QueueState } from "../api/types";
 
 describe("demo backend core flows", () => {
   const prevWindow = (globalThis as { window?: unknown }).window;
@@ -48,6 +48,47 @@ describe("demo backend core flows", () => {
       expect(latestQueue).not.toBeNull();
       expect(latestQueue!.items.length).toBeGreaterThanOrEqual(2);
     } finally {
+      api.destroy();
+    }
+  });
+
+  it("cancels individual and playlist downloads without completing cancelled tracks", async () => {
+    const api = new DemoBackend();
+    try {
+      const snap = await api.snapshot();
+      const downloaded = new Set(snap.library.downloads.map(trackKey));
+      const candidates = snap.library.liked.filter((t) => !downloaded.has(trackKey(t))).slice(0, 3);
+      expect(candidates.length).toBe(3);
+
+      const events: { key: string; done: boolean }[] = [];
+      api.on("download", (e) => events.push({ key: e.key, done: e.done }));
+
+      vi.useFakeTimers();
+      const start = api.call("download", { tracks: candidates });
+      await vi.advanceTimersByTimeAsync(350);
+      await start;
+
+      // Cancel one individual song while the rest keep going.
+      const cancelOne = api.call("download_cancel", { tracks: [candidates[0]] });
+      await vi.advanceTimersByTimeAsync(100);
+      await cancelOne;
+      expect(events.some((e) => e.key === trackKey(candidates[0]) && e.done)).toBe(true);
+
+      // Cancel a second song as part of a batch, leaving candidates[2] to finish.
+      const cancelBatch = api.call("download_cancel", { tracks: [candidates[1]] });
+      await vi.advanceTimersByTimeAsync(100);
+      await cancelBatch;
+
+      await vi.advanceTimersByTimeAsync(2500);
+      vi.useRealTimers();
+
+      const after = await api.snapshot();
+      const afterKeys = new Set(after.library.downloads.map(trackKey));
+      expect(afterKeys.has(trackKey(candidates[0]))).toBe(false);
+      expect(afterKeys.has(trackKey(candidates[1]))).toBe(false);
+      expect(afterKeys.has(trackKey(candidates[2]))).toBe(true);
+    } finally {
+      vi.useRealTimers();
       api.destroy();
     }
   });

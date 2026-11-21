@@ -100,6 +100,8 @@
   $effect(() => {
     void barTracks.length;
     void app.view;
+    void viewKey;
+    void phone.listRevealH;
     untrack(() => syncBar());
   });
   // One update per frame, read in one go: scroll events can come faster

@@ -8,7 +8,6 @@
 //! playback line to the other devices of the account.
 
 use crate::controller::Core;
-use futures::StreamExt;
 use glyph_audio::Status;
 use glyph_core::account::{is_signed_out, Stored};
 use glyph_core::server_client::{server_error, PlaybackLive};
@@ -875,9 +874,14 @@ impl Acct {
             b.sync_pending(&glyph_core::sync::snapshot(&st.library, &b.sync_wanted_downloads()))
         };
         self.g().sync_pending = pending;
+        let debounce = if self.core.transfer().is_some_and(|tr| tr.running()) {
+            Duration::from_secs(15)
+        } else {
+            SYNC_DEBOUNCE
+        };
         let me = self.clone();
         crate::rt::spawn(async move {
-            tokio::time::sleep(SYNC_DEBOUNCE).await;
+            tokio::time::sleep(debounce).await;
             if me.g().sync_gen == generation {
                 me.sync_now().await;
             }
@@ -1744,35 +1748,7 @@ async fn adopt_config(core: &Arc<Core>, cfg: Config, providers_changed: bool) {
 
 /// Songs sync asks for offline use: fetched without a toast.
 fn download_silent(core: &Arc<Core>, tracks: Vec<Track>) {
-    let Some(b) = core.backend() else { return };
-    let have: HashSet<String> = b.downloaded_tracks().iter().map(track_key).collect();
-    let mut seen = HashSet::new();
-    let todo: Vec<Track> = tracks.into_iter().filter(|t| !have.contains(&track_key(t)) && seen.insert(track_key(t))).collect();
-    if todo.is_empty() {
-        return;
-    }
-    let core = core.clone();
-    crate::rt::spawn(async move {
-        for t in &todo {
-            core.emit("download", json!({ "key": track_key(t), "progress": null, "done": false }));
-        }
-        let mut pending = futures::stream::iter(todo)
-            .map(|t| {
-                let b = b.clone();
-                async move {
-                    let r = b.download(&t).await;
-                    (t, r)
-                }
-            })
-            .buffer_unordered(10);
-        while let Some((t, r)) = pending.next().await {
-            if let Err(e) = r {
-                tracing::warn!(title = %t.title, "download failed: {e:#}");
-            }
-            core.emit("download", json!({ "key": track_key(&t), "progress": null, "done": true }));
-        }
-        core.emit_library();
-    });
+    crate::storage::download_silent(core, tracks);
 }
 
 fn need_backend(core: &Core) -> Res<Arc<Backend>> {
