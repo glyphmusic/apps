@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1 - 2026-11-22
+
+### Added
+
+- **Music videos in Now Playing**: switch Now Playing to **Video** (or pick **Watch video** from a song's menu) to watch the music video across desktop, mobile and web. Filter between Official, Live and Lyric videos, search or switch videos, pick video quality (`Auto` or a specific resolution) and go fullscreen while song audio pauses automatically.
+- **Lyrics under cover toggle**: show or hide the live lyric line below the album cover in Now Playing (`Lyrics under cover`).
+
 ## 0.13.0 - 2026-11-21
 
 ### Added

@@ -191,6 +191,8 @@ fn main() {
             tauri_commands::wrong_song_preview,
             tauri_commands::wrong_song_preview_stop,
             tauri_commands::wrong_song_select,
+            tauri_commands::video_search,
+            tauri_commands::video_resolve,
             tauri_commands::playlist_storage,
             tauri_commands::playlist_auto_download,
             tauri_commands::liked_auto_download,

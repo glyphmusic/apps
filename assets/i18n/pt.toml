@@ -1763,3 +1763,4 @@
 "notify.release.body" = "{title} · {kind}"
 "notify.releases.title" = "{n} novos lançamentos"
 "notify.releases.body" = "De {artists}"
+"ctx.lyric_line" = "Letra abaixo da capa"

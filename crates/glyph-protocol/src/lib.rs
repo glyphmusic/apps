@@ -279,6 +279,9 @@ pub mod capability {
     /// Wrong-song alternatives and consensus reporting (`/v1/match/alternatives`,
     /// `/v1/match/report`).
     pub const WRONG_SONG: &str = "wrong_song";
+    /// Music video search and streaming (`/v1/video/search`, `/v1/video/resolve`,
+    /// `/v1/video/youtube/*`).
+    pub const VIDEO: &str = "video";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -410,6 +413,72 @@ pub struct WrongMatchReportResponse {
     /// Minimum distinct voters required before global promotion can happen.
     #[serde(default)]
     pub threshold: u32,
+}
+
+// ---------------------------------------------------------------- /v1/video
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoKind {
+    Official,
+    Live,
+    Lyric,
+    Topic,
+    Video,
+}
+
+impl Default for VideoKind {
+    fn default() -> Self {
+        Self::Video
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoCandidate {
+    pub id: String,
+    pub title: String,
+    pub channel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    #[serde(default)]
+    pub kind: VideoKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoSearchResponse {
+    pub query: String,
+    pub results: Vec<VideoCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoQuality {
+    pub label: String,
+    pub height: u32,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoResolveResponse {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qualities: Vec<VideoQuality>,
 }
 
 // ---------------------------------------------------------------- /v1/lyrics

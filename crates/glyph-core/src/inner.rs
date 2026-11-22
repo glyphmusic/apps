@@ -901,4 +901,39 @@ impl Inner {
         self.lyrics_cache.put(&key, found.as_ref());
         Ok(found)
     }
+
+    pub(super) async fn video_search(
+        &self,
+        track: &Track,
+        query: Option<String>,
+    ) -> Result<glyph_protocol::VideoSearchResponse> {
+        let explicit = query.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        if let Some(server) = self.live_server() {
+            if let Ok(resp) = server.video_search(explicit, &track.artist, &track.title).await {
+                if !resp.results.is_empty() {
+                    return Ok(resp);
+                }
+            }
+        }
+        let q = explicit
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::video::default_query(&track.artist, &track.title));
+        crate::video::search_native(&self.http, &q, &track.artist, &track.title, 12).await
+    }
+
+    pub(super) async fn video_resolve(&self, id: &str) -> Result<glyph_protocol::VideoResolveResponse> {
+        // Prefer direct home-IP resolution when local YouTube is enabled (zero
+        // server bandwidth + direct 720p/1080p HD), with server proxy fallback.
+        if self.local_youtube_on() || self.live_server().is_none() {
+            if let Ok(resp) = crate::video::resolve_native(&self.http, id).await {
+                return Ok(resp);
+            }
+        }
+        if let Some(server) = self.live_server() {
+            if let Ok(resp) = server.video_resolve(id).await {
+                return Ok(resp);
+            }
+        }
+        crate::video::resolve_native(&self.http, id).await
+    }
 }

@@ -370,7 +370,7 @@ export interface Config {
   desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
   /** Phone notifications (Android, notify.rs); missing in older configs. */
   notifications?: { app_updates: boolean; new_releases: boolean };
-  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
+  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; np_lyric_line?: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
   local: { folders: string[] };
   [k: string]: unknown;
 }
@@ -485,4 +485,39 @@ export interface WrongSongPreviewState {
   position: number;
   duration: number;
   error?: string | null;
+}
+
+export type VideoKind = "official" | "live" | "lyric" | "topic" | "video";
+
+export interface VideoCandidate {
+  id: string;
+  title: string;
+  channel: string;
+  duration_ms?: number | null;
+  thumbnail?: string | null;
+  kind: VideoKind;
+}
+
+export interface VideoSearchResponse {
+  query: string;
+  results: VideoCandidate[];
+}
+
+export interface VideoQuality {
+  label: string;
+  height: number;
+  url: string;
+  audio_url?: string | null;
+  mime?: string | null;
+}
+
+export interface VideoResolveResponse {
+  id: string;
+  title?: string | null;
+  channel?: string | null;
+  duration_ms?: number | null;
+  url: string;
+  audio_url?: string | null;
+  mime?: string | null;
+  qualities?: VideoQuality[];
 }

@@ -1763,3 +1763,4 @@
 "notify.release.body" = "{title} · {kind}"
 "notify.releases.title" = "Нових релізів: {n}"
 "notify.releases.body" = "Від {artists}"
+"ctx.lyric_line" = "Текст під обкладинкою"

@@ -25,6 +25,7 @@
   import PhoneSearch from "./PhoneSearch.svelte";
   import NowPlayingSheet from "./NowPlayingSheet.svelte";
   import LyricsView from "./LyricsView.svelte";
+  import VideoPickerSheet from "./VideoPickerSheet.svelte";
   import BottomSheet from "./BottomSheet.svelte";
   import SettingsScreen from "./SettingsScreen.svelte";
   import ShareSheet from "./ShareSheet.svelte";
@@ -43,7 +44,7 @@
       if (app.player.current) phone.npOpen = true;
     }
   });
-  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; } });
+  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoPickerOpen = false; } });
   $effect(() => { if (!app.settingsOpen) phone.settingsInPage = false; });
   // Leaving the phone layout (window made wide) closes the share menu.
   $effect(() => () => { app.shareSheet = null; });
@@ -290,6 +291,7 @@
 
 {#if phone.npOpen && app.player.current}<NowPlayingSheet />{/if}
 {#if phone.lyricsOpen && app.player.current}<LyricsView />{/if}
+{#if phone.videoPickerOpen && app.player.current}<VideoPickerSheet />{/if}
 {#if app.showQueue || app.showDevices}<BottomSheet />{/if}
 {#if phone.drawerOpen}<Drawer />{/if}
 {#if app.settingsOpen}<SettingsScreen />{/if}

@@ -333,6 +333,29 @@ export const server = {
       ...(wrongId ? { wrong_id: wrongId } : {}),
     }),
 
+  videoSearch: (track: Track, query?: string | null) => {
+    const qs = new URLSearchParams();
+    if (query?.trim()) qs.set("q", query.trim());
+    if (track.artist.trim()) qs.set("artist", track.artist.trim());
+    if (track.title.trim()) qs.set("title", track.title.trim());
+    return getJson<import("./types").VideoSearchResponse>(`/v1/video/search?${qs.toString()}`);
+  },
+
+  videoResolve: async (id: string) => {
+    const res = await getJson<import("./types").VideoResolveResponse>(`/v1/video/resolve?id=${encodeURIComponent(id)}`);
+    const abs = (u: string) => (u.startsWith("/") ? `${serverOrigin()}${u}` : u);
+    return {
+      ...res,
+      url: abs(res.url),
+      audio_url: res.audio_url ? abs(res.audio_url) : res.audio_url,
+      qualities: res.qualities?.map((q) => ({
+        ...q,
+        url: abs(q.url),
+        audio_url: q.audio_url ? abs(q.audio_url) : q.audio_url,
+      })),
+    };
+  },
+
   cover: (track: Track) =>
     sendJson<{ url?: string | null; album?: string | null }>("POST", "/v1/cover", wireTrack(track)),
 

@@ -65,7 +65,7 @@ export function webConfig(): Config {
     devices: { discovery: false },
     plugins: { auto_update: false, skip_install_warning: false, sort: "stars", disabled: [] },
     desktop: { autostart: false, start_in_tray: false },
-    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, keys: {}, reveal_downloads: false, text_scale: 1, recommendations: true },
+    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, np_lyric_line: true, keys: {}, reveal_downloads: false, text_scale: 1, recommendations: true },
     local: { folders: [] },
   };
 }
@@ -1722,6 +1722,13 @@ export class WebBackend implements Backend {
       device_connect: (a) => this.connect.connect(String(a.id ?? "")),
       device_use_local: () => this.connect.useLocal(),
       device_select: () => this.connect.devicesJson(),
+      // ---- music video ----
+      video_search: async (a) => {
+        const track = a.track as Track;
+        const query = (a.query as string | null) ?? null;
+        return server.videoSearch(track, query);
+      },
+      video_resolve: async (a) => server.videoResolve(String(a.id ?? "")),
       // ---- wrong song ("Not the right one") ----
       wrong_song_alternatives: async (a) => {
         const track = a.track as Track;

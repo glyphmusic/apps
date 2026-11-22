@@ -8,9 +8,32 @@
   import { app } from "../../state.svelte";
   import { t } from "../../i18n.svelte";
   const segs = $derived([
-    { icon: "layout-split", label: t("np.mode.split"), on: !app.lyricsOnly, run: () => (app.lyricsOnly = false) },
-    { icon: "text-center", label: t("np.mode.lyrics"), on: app.lyricsOnly, run: () => (app.lyricsOnly = true) },
-    { icon: "maximize-2", label: t("np.mode.zen"), on: false, run: () => (app.zen = true) },
+    {
+      icon: app.showLyrics ? "layout-split" : "music-2",
+      label: app.showLyrics ? t("np.mode.split") : t("np.mode.song"),
+      on: !app.lyricsOnly && !app.videoMode,
+      run: () => { app.videoMode = false; app.lyricsOnly = false; },
+    },
+    ...(app.showLyrics
+      ? [{
+          icon: "text-center",
+          label: t("np.mode.lyrics"),
+          on: app.lyricsOnly && !app.videoMode,
+          run: () => { app.videoMode = false; app.lyricsOnly = true; },
+        }]
+      : []),
+    {
+      icon: "tv",
+      label: t("np.mode.video"),
+      on: app.videoMode,
+      run: () => { app.lyricsOnly = false; app.videoMode = true; },
+    },
+    {
+      icon: "maximize-2",
+      label: t("np.mode.zen"),
+      on: false,
+      run: () => { app.videoMode = false; app.zen = true; },
+    },
   ]);
 </script>
 

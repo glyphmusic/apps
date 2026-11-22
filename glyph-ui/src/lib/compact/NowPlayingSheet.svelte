@@ -5,6 +5,7 @@
   // Cover carousel (swipe to skip), current lyric line, title 21 bold +
   // artist, like 24, seek, transport (68 px play), device / share / queue,
   // then the lyrics card (accent tile) and the "Next in queue" card.
+  import { onDestroy } from "svelte";
   import Cover from "../components/Cover.svelte";
   import SongTitle from "../components/SongTitle.svelte";
   import ThinBar from "../components/ThinBar.svelte";
@@ -14,6 +15,8 @@
   import PlayGlyph from "../components/PlayGlyph.svelte";
   import Skeleton from "../components/Skeleton.svelte";
   import IconAction from "./IconAction.svelte";
+  import VideoPlayer from "../pages/nowplaying/VideoPlayer.svelte";
+  import { videoState } from "../pages/nowplaying/video-state.svelte";
   import { app } from "../state.svelte";
   import { saveMenu } from "../pages/lists/actions";
   import { jam } from "../jam.svelte";
@@ -36,6 +39,7 @@
   let ax = $state(0);
   const cur = $derived(app.player.current!);
   const lines = $derived(app.lyrics.lyrics?.synced ? app.lyrics.lyrics.lines : []);
+  const showLyricLine = $derived(app.config.ui.np_lyric_line !== false);
   const active = $derived.by(() => {
     const ms = app.position * 1000 + (app.lyrics.lyrics?.offset_ms ?? 0);
     let a = -1;
@@ -49,7 +53,7 @@
   const lineMt = $derived(Math.round(lerp(18, 8, c)));
   const titleGapNoLine = $derived(Math.round(lerp(24, 12, c)));
   const titleGapWithLine = $derived(Math.round(lerp(10, 6, c)));
-  const titleMt = $derived(active >= 0 ? titleGapWithLine : titleGapNoLine);
+  const titleMt = $derived(showLyricLine && active >= 0 ? titleGapWithLine : titleGapNoLine);
   const seekMt = $derived(Math.round(lerp(16, 8, c)));
   const trMt = $derived(Math.round(lerp(10, 4, c)));
   const playBtn = $derived(Math.round(lerp(56, 46, c)));
@@ -58,7 +62,7 @@
   const hasNextCard = $derived(hasLyrics || app.upNext.length > 0);
   const cardMt = $derived(Math.round(hasLyrics ? lerp(22, 10, c) : lerp(12, 8, c)));
   const peek = $derived(Math.round(hasNextCard ? lerp(56, 40, c) : lerp(16, 8, c)));
-  const lineReserve = $derived(lines.length > 0 ? lineMt + 22 + titleGapWithLine - titleGapNoLine : 0);
+  const lineReserve = $derived(showLyricLine && lines.length > 0 ? lineMt + 22 + titleGapWithLine - titleGapNoLine : 0);
   const overhead = $derived(
     padTop + titleGapNoLine + 52 + lineReserve + seekMt + 34 + trMt + playBtn + toolsMt + 40 + (hasNextCard ? cardMt : 0) + peek
   );
@@ -71,8 +75,38 @@
   const next = $derived(app.upNext[0]?.track ?? (app.player.repeat === "all" && app.queue.items.length > 1 ? app.queue.items[0] : null));
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
   const tile = $derived(accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent));
-  const close = () => (phone.npOpen = false);
+  const close = () => {
+    if (phone.videoMode) {
+      videoState.leave(true);
+      phone.videoMode = false;
+      phone.videoPickerOpen = false;
+    }
+    phone.npOpen = false;
+  };
   const fromTarget = $derived(app.playingFromTarget());
+
+  function setVideoMode(on: boolean) {
+    if (phone.videoMode === on) return;
+    if (!on) {
+      videoState.leave(true);
+      phone.videoPickerOpen = false;
+    }
+    phone.videoMode = on;
+  }
+
+  $effect(() => {
+    if (phone.videoMode && cur) {
+      void videoState.ensureForTrack(cur);
+    }
+  });
+
+  onDestroy(() => {
+    if (phone.videoMode) {
+      videoState.leave(true);
+      phone.videoMode = false;
+      phone.videoPickerOpen = false;
+    }
+  });
   $effect(() => {
     void bodyH;
     if (!contentEl) return;
@@ -121,7 +155,7 @@
             {:else}<span class="pn">{t("nav.now_playing")}</span>{/if}
           </div>
         {/if}
-        <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: cur })} />
+        <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: cur, nowPlaying: true })} />
       </div>
     {:else}
       <button class="mb" style:opacity={sk * 2 - 1} onclick={() => scroller?.scrollTo({ top: 0, behavior: "smooth" })}>
@@ -138,15 +172,21 @@
   <div class="scroll body" bind:this={scroller} bind:clientWidth={vw} bind:clientHeight={bodyH} use:fadeEdges={{ top: 18, bottom: 18 }} onscroll={() => (scrolled = scroller?.scrollTop ?? 0)}
     use:drag={{ axis: "y", onlyAtTop: () => (scroller?.scrollTop ?? 0) <= 0, move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
     <div class="content" bind:this={contentEl} style:padding-top="{padTop}px">
-      <div class="car" style:width="{art}px" style:height="{art}px" use:drag={{ axis: "x", move: (dx) => (ax = (dx > 0 && !prev) || (dx < 0 && !next) ? dx * 0.35 : dx), end: carouselEnd }}>
-        <div class="strip" class:settle={ax === 0} style:transform="translateX({ax}px)">
-          {#if prev}<span class="c" style:left="{-slideStep}px"><Cover track={prev} size={art} radius={8} /></span>{/if}
-          <span class="c" style:left="0"><Cover track={cur} size={art} radius={8} /></span>
-          {#if next}<span class="c" style:left="{slideStep}px"><Cover track={next} size={art} radius={8} /></span>{/if}
+      {#if phone.videoMode}
+        <div class="vstage">
+          <VideoPlayer compact={true} onOpenPicker={() => (phone.videoPickerOpen = true)} />
         </div>
-      </div>
-      {#if active >= 0}<button class="line trunc" style:margin-top="{lineMt}px" onclick={() => (phone.lyricsOpen = true)}>{lines[active].text}</button>{/if}
-      <div class="title" style:margin-top="{titleMt}px">
+      {:else}
+        <div class="car" style:width="{art}px" style:height="{art}px" use:drag={{ axis: "x", move: (dx) => (ax = (dx > 0 && !prev) || (dx < 0 && !next) ? dx * 0.35 : dx), end: carouselEnd }}>
+          <div class="strip" class:settle={ax === 0} style:transform="translateX({ax}px)">
+            {#if prev}<span class="c" style:left="{-slideStep}px"><Cover track={prev} size={art} radius={8} /></span>{/if}
+            <span class="c" style:left="0"><Cover track={cur} size={art} radius={8} /></span>
+            {#if next}<span class="c" style:left="{slideStep}px"><Cover track={next} size={art} radius={8} /></span>{/if}
+          </div>
+        </div>
+      {/if}
+      {#if !phone.videoMode && showLyricLine && active >= 0}<button class="line trunc" style:margin-top="{lineMt}px" onclick={() => (phone.lyricsOpen = true)}>{lines[active].text}</button>{/if}
+      <div class="title" style:margin-top="{phone.videoMode ? 16 : titleMt}px">
         <span class="tc">
           <span class="tt"><SongTitle rating={rating(cur)}>{cur.title}</SongTitle></span>
           <button class="ar trunc" onclick={() => {
@@ -157,23 +197,34 @@
         </span>
         <ToggleButton name="heart" size={24} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
       </div>
-      <div class="seek" style:margin-top="{seekMt}px">
-        <ThinBar width="100%" value={frac} live={false} onpick={(f) => dur && app.seek(f * dur)} />
-        <div class="times mono"><span>{fmtTime(app.position)}</span><span>{dur ? fmtTime(dur) : ""}</span></div>
-      </div>
-      <div class="transport" style:margin-top="{trMt}px">
-        <button class="side" onclick={() => app.toggleShuffle()} aria-label={t("tip.shuffle")}><Icon name="shuffle" size={19} color={app.player.shuffle ? "var(--accent)" : "var(--dim)"} /></button>
-        <IconButton name="skip-back" size={22} box={46} color="var(--text)" notip onclick={() => app.previous()} />
-        <button class="big" style:width="{playBtn}px" style:height="{playBtn}px" onclick={() => app.togglePlay()} aria-label={t("common.play")}><PlayGlyph loading={app.loading} playing={app.playing} size={Math.round(playBtn * 0.39)} button={playBtn} /></button>
-        <IconButton name="skip-forward" size={22} box={46} color="var(--text)" notip onclick={() => app.next()} />
-        <button class="side" onclick={() => app.cycleRepeat()} aria-label={t("tip.repeat")}><Icon name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={19} color={app.player.repeat !== "off" ? "var(--accent)" : "var(--dim)"} /></button>
-      </div>
+      {#if phone.videoMode}
+        <div class="vactions">
+          <button type="button" class="vact" onclick={() => (phone.videoPickerOpen = true)}>
+            <Icon name="search" size={14} />{t("video.switch")}
+          </button>
+          <button type="button" class="vact ghost" onclick={() => setVideoMode(false)}>
+            <Icon name="music-2" size={14} />{t("video.back_to_song")}
+          </button>
+        </div>
+      {:else}
+        <div class="seek" style:margin-top="{seekMt}px">
+          <ThinBar width="100%" value={frac} live={false} onpick={(f) => dur && app.seek(f * dur)} />
+          <div class="times mono"><span>{fmtTime(app.position)}</span><span>{dur ? fmtTime(dur) : ""}</span></div>
+        </div>
+        <div class="transport" style:margin-top="{trMt}px">
+          <button class="side" onclick={() => app.toggleShuffle()} aria-label={t("tip.shuffle")}><Icon name="shuffle" size={19} color={app.player.shuffle ? "var(--accent)" : "var(--dim)"} /></button>
+          <IconButton name="skip-back" size={22} box={46} color="var(--text)" notip onclick={() => app.previous()} />
+          <button class="big" style:width="{playBtn}px" style:height="{playBtn}px" onclick={() => app.togglePlay()} aria-label={t("common.play")}><PlayGlyph loading={app.loading} playing={app.playing} size={Math.round(playBtn * 0.39)} button={playBtn} /></button>
+          <IconButton name="skip-forward" size={22} box={46} color="var(--text)" notip onclick={() => app.next()} />
+          <button class="side" onclick={() => app.cycleRepeat()} aria-label={t("tip.repeat")}><Icon name={app.player.repeat === "one" ? "repeat-1" : "repeat"} size={19} color={app.player.repeat !== "off" ? "var(--accent)" : "var(--dim)"} /></button>
+        </div>
+      {/if}
       <div class="tools" style:margin-top="{toolsMt}px">
         <button class="dv" class:on={!!remote || app.showDevices || app.jamOpen || !!jam.state} onclick={() => (app.showDevices = true)}><Icon name={jam.state ? "users" : remote ? "cast" : thisIcon()} size={16} /><span class="trunc">{remote?.name ?? (app.config.audio.output_device ?? thisName())}</span></button>
         <IconButton name="share-2" size={20} box={40} notip onclick={() => app.share({ track: cur })} />
         <IconButton name="list-music" size={20} box={40} color={app.showQueue ? "var(--accent)" : undefined} notip onclick={() => (app.showQueue = true)} />
       </div>
-      {#if hasLyrics}
+      {#if !phone.videoMode && hasLyrics}
         <div class="card ly" style:margin-top="{cardMt}px" style:background={tile} onclick={() => (phone.lyricsOpen = true)} onkeydown={() => {}} role="button" tabindex="-1">
           <div class="ch"><b>{t("np.mode.lyrics")}</b><span class="ex"><Icon name="maximize-2" size={15} color="#fff" /></span></div>
           <div class="ly-scroll scroll" bind:this={lyBox} use:fadeEdges={{ top: 20, bottom: 20, minOverflow: 8 }}>
@@ -190,7 +241,7 @@
         </div>
       {/if}
       {#if app.upNext.length}
-        <div class="card q" style:margin-top={hasLyrics ? undefined : `${cardMt}px`}>
+        <div class="card q" style:margin-top={!phone.videoMode && hasLyrics ? undefined : `${cardMt}px`}>
           <div class="ch"><b>{t("queue.next")}</b><button class="oq" onclick={() => (app.showQueue = true)}>{t("np.open_queue")}<Icon name="chevron-right" size={14} /></button></div>
           {#each app.upNext.slice(0, 4) as u}
             <button class="up" onclick={() => app.queueJump(u.index)}>
@@ -225,6 +276,30 @@
   .prog i { display: block; height: 100%; background: #fff; border-radius: inherit; }
   .body { flex: 1; min-height: 0; overscroll-behavior-y: contain; }
   .content { padding: 12px 24px calc(var(--safe-bottom, env(safe-area-inset-bottom)) + 32px); display: flex; flex-direction: column; }
+  .vstage { margin: 2px -8px 0; }
+  .vactions {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .vact {
+    flex: 1;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 9px;
+    background: #1b1b20;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background-color .14s ease-out;
+  }
+  .vact:active { background: #26262c; }
+  .vact.ghost { background: #141417; color: var(--dim); }
   .car { position: relative; flex: none; align-self: center; overflow: visible; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
   .strip { position: absolute; inset: 0; }
   .strip.settle { transition: transform .24s var(--ease); }

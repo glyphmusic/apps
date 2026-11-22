@@ -24,6 +24,7 @@
   import Lyrics from "./nowplaying/Lyrics.svelte";
   import ModeSwitch from "./nowplaying/ModeSwitch.svelte";
   import LyricsSource from "./nowplaying/LyricsSource.svelte";
+  import VideoView from "./nowplaying/VideoView.svelte";
   import { app, type ControlMenu } from "../state.svelte";
   import { saveMenu } from "./lists/actions";
   import { t, tf } from "../i18n.svelte";
@@ -86,13 +87,17 @@
   </div>
 {:else}
   <div class="page">
-    {#if !app.compact && app.showLyrics}
+    {#if !app.compact}
       <div class="top">
         <ModeSwitch />
-        <LyricsSource />
+        {#if app.showLyrics && !app.videoMode}
+          <LyricsSource />
+        {/if}
       </div>
     {/if}
-    {#if app.showLyrics && app.lyricsOnly}
+    {#if app.videoMode}
+      <VideoView />
+    {:else if app.showLyrics && app.lyricsOnly}
       <div class="root only"><div class="col"><Lyrics compact={app.compact} /></div></div>
     {:else}
       <div class="root">
@@ -119,6 +124,7 @@
           <ThinBar width={150} value={app.volume} onpick={(f) => app.setVolume(f)} label={(f) => `${Math.round(f * 100)}%`} onwheelstep={wheelVol} />
           <ToggleButton name="heart" size={16} on={app.isLiked(cur)} accent="var(--accent)" onclick={() => app.toggleLike(cur)} oncontextmenu={saveMenu(cur)} />
           <ToggleButton name="timer" size={16} on={app.sleep != null || app.controlMenu?.menu === "sleep"} accent="var(--accent)" onclick={menu("sleep")} oncontextmenu={menu("sleep")} />
+          <IconButton name="tv" size={16} label={t("np.mode.video")} onclick={() => { app.lyricsOnly = false; app.videoMode = true; }} />
           <IconButton name="arrow-right-left" size={15} label={t("tip.wrong_song")} onclick={() => app.openWrongSong(cur)} />
           {#if app.config.ui.np_download}
             {#if dl === "busy"}

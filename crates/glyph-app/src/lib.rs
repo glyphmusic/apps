@@ -23,6 +23,7 @@ pub mod storage;
 pub mod system;
 pub mod theme_icon;
 pub mod transfer;
+pub mod video;
 pub mod wrong_song;
 
 use std::sync::Arc;

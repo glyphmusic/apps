@@ -490,6 +490,68 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `GET /v1/video/search`: search YouTube for watchable music videos.
+    pub async fn video_search(
+        &self,
+        query: Option<&str>,
+        artist: &str,
+        title: &str,
+    ) -> Result<VideoSearchResponse> {
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
+            params.push(("q", q));
+        }
+        if !artist.trim().is_empty() {
+            params.push(("artist", artist.trim()));
+        }
+        if !title.trim().is_empty() {
+            params.push(("title", title.trim()));
+        }
+        let resp = Self::check(
+            self.member_request(self.get("/v1/video/search"))
+                .await
+                .query(&params)
+                .timeout(Duration::from_secs(12))
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `GET /v1/video/resolve`: resolve proxied stream URLs for a YouTube video id.
+    pub async fn video_resolve(&self, id: &str) -> Result<VideoResolveResponse> {
+        let resp = Self::check(
+            self.member_request(self.get("/v1/video/resolve"))
+                .await
+                .query(&[("id", id)])
+                .timeout(Duration::from_secs(15))
+                .send()
+                .await?,
+        )
+        .await?;
+        let mut out: VideoResolveResponse = resp.json().await?;
+        if out.url.starts_with('/') {
+            out.url = self.url(&out.url);
+        }
+        if let Some(a) = out.audio_url.as_mut() {
+            if a.starts_with('/') {
+                *a = self.url(a);
+            }
+        }
+        for q in &mut out.qualities {
+            if q.url.starts_with('/') {
+                q.url = self.url(&q.url);
+            }
+            if let Some(a) = q.audio_url.as_mut() {
+                if a.starts_with('/') {
+                    *a = self.url(a);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// `GET /v1/share/<id>`: the playlist behind a short link.
     pub async fn shared_playlist(&self, id: &str) -> Result<SharedPlaylist> {
         let resp = Self::check(self.member_request(self.get(&format!("/v1/share/{id}"))).await.timeout(Duration::from_secs(10)).send().await?).await?;

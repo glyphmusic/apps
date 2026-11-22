@@ -49,6 +49,8 @@ export interface CtxMenu {
   queueIndex?: number | null;
   /** Right-click on a heart: only the "Save to" picker (Liked Songs and playlists). */
   save?: boolean;
+  /** Opened from the mobile full-screen Now Playing sheet. */
+  nowPlaying?: boolean;
 }
 
 /** app.rs Toast: "Title · Sub" (sub shown in caps), check or info icon, optional undo. */
@@ -85,6 +87,7 @@ function normalizeConfig(c: Config): Config {
   c.lists.sort ??= {};
   c.mpd.address ??= "";
   c.ui.keys ??= {};
+  c.ui.np_lyric_line ??= true;
   c.local.folders ??= [];
   c.plugins.disabled ??= [];
   c.mcp.token ??= "";
@@ -167,6 +170,7 @@ class App {
   showDevices = $state(false);
   showLyrics = $state(true);
   lyricsOnly = $state(false);
+  videoMode = $state(false);
   zen = $state(false);
   miniShown = $state(inMiniWindow());
   compact = $state(false);

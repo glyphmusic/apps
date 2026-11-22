@@ -47,7 +47,7 @@ export function demoConfig(): Config {
     devices: { discovery: true },
     plugins: { auto_update: true, skip_install_warning: false, sort: "stars", disabled: [] },
     desktop: { autostart: false, start_in_tray: false },
-    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: true, np_lyrics: true, keys: {}, reveal_downloads: true, text_scale: 1, recommendations: true },
+    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: true, np_lyrics: true, np_lyric_line: true, keys: {}, reveal_downloads: true, text_scale: 1, recommendations: true },
     local: { folders: [] },
   };
 }

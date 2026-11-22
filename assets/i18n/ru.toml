@@ -1802,3 +1802,4 @@
 "admin.jams.dur_lt_min" = "< 1 мин"
 "admin.jams.dur_m" = "{m} мин"
 "admin.jams.dur_hm" = "{h} ч {m} мин"
+"ctx.lyric_line" = "Текст под обложкой"

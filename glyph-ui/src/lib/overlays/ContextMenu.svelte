@@ -30,7 +30,8 @@
   import { t, tf } from "../i18n.svelte";
   import { fadeEdges, outside } from "../ui.svelte";
   import { drag, phone, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
-  import { splitArtists, type ListKey, type Track } from "../api/types";
+  import { videoState } from "../pages/nowplaying/video-state.svelte";
+  import { splitArtists, trackKey, type ListKey, type Track } from "../api/types";
   import {
     artistPage, artistRadio, contextOf, copyArtistLink, deletePlaylist, hideSidebar, isDownloading, isHiddenArtist, lib, listRadio,
     openNameDialog, playNextAll, playShuffled, queueAll, recommendFeedback, removeDownloads, removeShown, restoreVersion,
@@ -169,6 +170,19 @@
     close();
     if (compact) phone.npOpen = false;
     app.openAlbum(albumName, artistName, [], song);
+  }
+  function openVideo(song: Track) {
+    close();
+    const isCurrent = app.player.current && trackKey(app.player.current) === trackKey(song);
+    if (!isCurrent) void app.play([song], 0);
+    if (compact) {
+      phone.npOpen = true;
+      phone.videoMode = true;
+    } else {
+      app.lyricsOnly = false;
+      app.videoMode = true;
+      app.navigate("now_playing");
+    }
   }
 </script>
 
@@ -445,6 +459,12 @@
       {#if !compact && subOpen("recommend")}<Flyout {flip}>{@render recommendBody(song)}</Flyout>{/if}
     </MenuItem>
     <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
+    {#if compact && m.nowPlaying && phone.videoMode}
+      <MenuItem icon="search" label={t("video.switch")} onenter={closesSub} onclick={run(() => (phone.videoPickerOpen = true))} />
+      <MenuItem icon="music-2" label={t("video.back_to_song")} onenter={closesSub} onclick={run(() => { videoState.leave(true); phone.videoMode = false; phone.videoPickerOpen = false; })} />
+    {:else}
+      <MenuItem icon="tv" label={t("ctx.watch_video")} onenter={closesSub} onclick={() => openVideo(song)} />
+    {/if}
     <MenuItem icon="arrow-right-left" label={t("ctx.wrong_song")} onenter={closesSub} onclick={run(() => app.openWrongSong(song))} />
     {#if !onWeb() && isDownloading(song)}
       <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />
@@ -465,6 +485,21 @@
         </Flyout>
       {/if}
     </MenuItem>
+  {/if}
+
+  {#if compact && m.nowPlaying && !m.save}
+    {@const lyricLine = app.config.ui.np_lyric_line !== false}
+    <Sep />
+    <button
+      class="sw-row"
+      role="switch"
+      aria-checked={lyricLine}
+      onclick={() => app.setConfig((c) => { c.ui.np_lyric_line = !(c.ui.np_lyric_line !== false); })}
+    >
+      <Icon name="mic-vocal" size={18} color="rgba(255,255,255,.7)" />
+      <span class="sw-lb trunc">{t("ctx.lyric_line")}</span>
+      <span class="sw-tog" class:on={lyricLine} aria-hidden="true"><span class="sw-knob"></span></span>
+    </button>
   {/if}
 
   {#if m.sidebar && !m.save}
@@ -597,4 +632,13 @@
   .art-row:active { background: rgba(255, 255, 255, .1); transform: scale(.975); }
   .art-nm { flex: 1; min-width: 0; font-size: var(--mi-fs, 13px); font-weight: 500; color: rgba(255, 255, 255, .95); }
   .bs-list .art-nm { font-size: 15.5px; }
+
+  .sw-row { flex: none; width: 100%; height: var(--mi-h, 42px); padding: 0 var(--mi-px, 14px); border-radius: var(--mi-r, 10px); display: flex; align-items: center; gap: var(--mi-gap, 13px); text-align: left; font-size: var(--mi-fs, 15.5px); color: rgba(255, 255, 255, .88); cursor: pointer; transition: background-color .12s ease-out, transform .16s var(--ease); }
+  .sw-row:hover { background: rgba(255, 255, 255, .07); }
+  .sw-row:active { background: rgba(255, 255, 255, .1); transform: scale(.975); }
+  .sw-lb { flex: 1; min-width: 0; }
+  .sw-tog { flex: none; width: 36px; height: 20px; padding: 2px; border-radius: 10px; display: flex; background: rgba(255, 255, 255, .14); transition: background-color .15s ease-out; }
+  .sw-knob { width: 16px; height: 16px; border-radius: 50%; background: rgba(255, 255, 255, .75); transition: transform .18s var(--ease), background-color .15s; }
+  .sw-tog.on { background: #fff; }
+  .sw-tog.on .sw-knob { background: #000; transform: translateX(16px); }
 </style>

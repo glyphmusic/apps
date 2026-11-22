@@ -1789,3 +1789,4 @@
 "notify.release.body" = "{title} · {kind}"
 "notify.releases.title" = "{n} nuwe vrystellings"
 "notify.releases.body" = "Van {artists}"
+"ctx.lyric_line" = "Lirieke onder omslag"

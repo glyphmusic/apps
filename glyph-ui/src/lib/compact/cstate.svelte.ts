@@ -11,6 +11,8 @@ export const phone = $state({
   npOpen: false,
   npPull: 0,
   lyricsOpen: false,
+  videoMode: false,
+  videoPickerOpen: false,
   drawerOpen: false,
   settingsInPage: false,
   settingsSub: 0,

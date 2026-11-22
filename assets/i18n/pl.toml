@@ -1763,3 +1763,4 @@
 "notify.release.body" = "{title} · {kind}"
 "notify.releases.title" = "Nowe wydania: {n}"
 "notify.releases.body" = "Od {artists}"
+"ctx.lyric_line" = "Tekst pod okładką"

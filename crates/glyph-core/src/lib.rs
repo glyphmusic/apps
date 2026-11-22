@@ -62,6 +62,7 @@ pub mod stats;
 pub mod storage;
 pub mod taste;
 pub mod updater;
+pub mod video;
 pub mod ytdlp;
 pub mod ytnative;
 
@@ -819,6 +820,25 @@ impl Backend {
             Ok::<_, anyhow::Error>(resp)
         })
         .await?
+    }
+
+    pub async fn video_search(
+        &self,
+        track: &Track,
+        query: Option<String>,
+    ) -> anyhow::Result<glyph_protocol::VideoSearchResponse> {
+        let (inner, track) = (self.cur(), track.clone());
+        self.spawn(async move { inner.video_search(&track, query).await })
+            .await?
+    }
+
+    pub async fn video_resolve(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<glyph_protocol::VideoResolveResponse> {
+        let (inner, id) = (self.cur(), id.to_string());
+        self.spawn(async move { inner.video_resolve(&id).await })
+            .await?
     }
 
     /// Saves a personal local override so `original` resolves & downloads from `chosen`

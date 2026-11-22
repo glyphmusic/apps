@@ -127,6 +127,11 @@
   <!-- right: the controls pill -->
   <div class="side r">
     <div class="pill">
+      <ToggleButton name="tv" label={t("np.mode.video")} on={app.view === "now_playing" && app.videoMode} accent="var(--accent)" onclick={() => {
+        if (!cur) return;
+        if (app.view === "now_playing" && app.videoMode) { app.videoMode = false; }
+        else { app.lyricsOnly = false; app.videoMode = true; app.navigate("now_playing"); }
+      }} />
       <ToggleButton name="monitor-speaker" on={app.showDevices || elsewhere} accent="var(--accent)" onclick={() => { app.showDevices = !app.showDevices; if (app.showDevices) app.showQueue = false; }} />
       {#if folded}
         <div class="vfold" role="group" onpointerenter={() => (volHover = true)} onpointerleave={() => (volHover = false)}>

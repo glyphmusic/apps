@@ -1,7 +1,7 @@
 use crate::controller::{Core, PlayFrom};
 use crate::jam::{Perms, Reaction};
 use crate::transfer::PickedFile;
-use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, wrong_song};
+use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, video, wrong_song};
 use glyph_core::{ListKey, SearchItem};
 use glyph_protocol::{ProviderId, Track};
 use serde::de::DeserializeOwned;
@@ -546,6 +546,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             transfer::migrate_cancel(core);
             Ok(Value::Null)
         }
+
+        // ---- music video ----
+        "video_search" => res(video::search(core, req(&args, "track")?, opt(&args, "query")?).await),
+        "video_resolve" => res(video::resolve(core, req(&args, "id")?).await),
 
         // ---- wrong song ("Not the right one") ----
         "wrong_song_alternatives" => res(wrong_song::alternatives(core, req(&args, "track")?, opt(&args, "query")?).await),
