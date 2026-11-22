@@ -12,6 +12,7 @@
   import { drag, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
 
   let pull = $state(0);
+  let sheetEl: HTMLDivElement | undefined = $state();
   let installing = $state(false);
   let copiedUrl = $state(false);
 
@@ -169,6 +170,7 @@
   {#if app.compact}
     <div
       class="sheet"
+      bind:this={sheetEl}
       style:transform="translateY({pull}px)"
       class:settle={pull === 0}
       in:sheetIn|global={{ duration: 260 }}
@@ -179,6 +181,7 @@
       tabindex="-1"
       use:drag={{
         axis: "y",
+        onlyAtTop: () => (sheetEl?.scrollTop ?? 0) <= 0,
         move: (_, dy) => (pull = Math.max(0, dy)),
         end: (_, dy, _vx, vy) => {
           if (shouldClose(dy, vy)) { close(); return; }

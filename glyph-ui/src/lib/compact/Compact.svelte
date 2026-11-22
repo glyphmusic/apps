@@ -165,7 +165,7 @@
   onMount(() => {
     let startX = 0, startY = 0, tracking = false;
     const onTouchStart = (e: TouchEvent) => {
-      if (!pwa.standalone || tabView || phone.npOpen || phone.drawerOpen || phone.lyricsOpen || app.settingsOpen || app.showQueue || app.showDevices || app.shareSheet || pwa.sheetOpen) return;
+      if (!pwa.standalone || tabView || phone.npOpen || phone.drawerOpen || phone.lyricsOpen || app.settingsOpen || app.showQueue || app.showDevices || app.shareSheet || app.feedbackOpen || pwa.sheetOpen) return;
       if (e.touches.length !== 1) return;
       const t = e.touches[0];
       if (t.clientX > 28) return;

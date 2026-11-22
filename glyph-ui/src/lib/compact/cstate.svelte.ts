@@ -31,6 +31,36 @@ export const scrollFx = typeof CSS !== "undefined" && typeof CSS.supports === "f
 /** Constants of compact.rs. */
 export const MINI_H = 64, TABS_H = 42, HEADER_H = 60, EDGE = 16, SIDE = 24, SWIPE_ACT = 72;
 
+/** Elements that own their own pointer/touch drag gestures inside sheets.
+ *  Because Svelte 5 delegates `onpointerdown` to the document root, calling
+ *  `e.stopPropagation()` inside a delegated handler runs AFTER native
+ *  `addEventListener("pointerdown", ...)` on ancestor sheets. Checking for
+ *  these descendants up front stops outer sheet drags from hijacking them. */
+const DRAG_IGNORE = "[data-drag-own], [data-no-sheet-drag], [role='slider'], input, textarea, select, [contenteditable='true']";
+
+/** Active pointer IDs currently claimed by a `drag()` instance, so nested
+ *  `use:drag` handlers (e.g. a horizontal row swipe inside a vertical sheet)
+ *  never compete for the same gesture. */
+const claimedPointers = new Map<number, HTMLElement>();
+
+function ignoredByChild(target: EventTarget | null, host: HTMLElement): boolean {
+  const node = target && typeof (target as Element).closest === "function" ? (target as Element) : null;
+  const hit = node?.closest(DRAG_IGNORE);
+  return !!hit && hit !== host && host.contains(hit);
+}
+
+function nestedScrollNotAtTop(target: EventTarget | null, host: HTMLElement): boolean {
+  let node = target && "parentElement" in (target as object) ? (target as HTMLElement) : null;
+  while (node && node !== host) {
+    if (node.scrollTop > 0) {
+      const oy = typeof getComputedStyle === "function" ? getComputedStyle(node).overflowY : (node.style?.overflowY ?? "");
+      if (oy === "auto" || oy === "scroll" || oy === "overlay") return true;
+    }
+    node = node.parentElement;
+  }
+  return false;
+}
+
 /**
  * A finger drag on `el`: `move(dx, dy)` while dragging, `end(dx, dy, vx, vy)` on
  * release (velocities in px/ms). `axis` claims only drags along it (the other axis scrolls).
@@ -41,8 +71,21 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   let touchStart: { x: number; y: number } | null = null;
   let claimed = false;
   let suppressClick = 0;
+  const releaseClaim = (id?: number) => {
+    if (id !== undefined) {
+      if (claimedPointers.get(id) === el) claimedPointers.delete(id);
+      return;
+    }
+    for (const [pid, owner] of claimedPointers) {
+      if (owner === el) claimedPointers.delete(pid);
+    }
+  };
   const down = (e: PointerEvent) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (ignoredByChild(e.target, el)) { start = null; return; }
+    if (o.axis === "y" && o.onlyAtTop && nestedScrollNotAtTop(e.target, el)) { start = null; return; }
+    const owner = claimedPointers.get(e.pointerId);
+    if (owner && owner !== el) { start = null; return; }
     suppressClick = 0;
     const now = performance.now();
     start = { x: e.clientX, y: e.clientY, id: e.pointerId, lx: e.clientX, ly: e.clientY, lt: now, vx: 0, vy: 0 };
@@ -50,6 +93,8 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   };
   const move = (e: PointerEvent) => {
     if (!start || e.pointerId !== start.id) return;
+    const owner = claimedPointers.get(e.pointerId);
+    if (owner && owner !== el) { start = null; touchStart = null; return; }
     const dx = e.clientX - start.x, dy = e.clientY - start.y;
     const now = performance.now();
     const dt = Math.max(1, now - start.lt);
@@ -60,28 +105,35 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
     if (!claimed) {
       if (Math.hypot(dx, dy) < 5) return;
       const horiz = Math.abs(dx) > Math.abs(dy) * 1.2;
+      const vert = Math.abs(dy) > Math.abs(dx) * 1.2;
       const axis = o.axis ?? "any";
-      if ((axis === "x" && !horiz) || (axis === "y" && horiz)) { start = null; return; }
-      if (axis === "y" && o.onlyAtTop && (!o.onlyAtTop() || dy < 0)) { start = null; return; }
+      if ((axis === "x" && !horiz) || (axis === "y" && !vert)) { start = null; touchStart = null; return; }
+      if (axis === "y" && o.onlyAtTop && (!o.onlyAtTop() || dy < 0)) { start = null; touchStart = null; return; }
       claimed = true;
-      el.setPointerCapture(e.pointerId);
+      claimedPointers.set(e.pointerId, el);
+      try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     }
     e.preventDefault();
+    e.stopPropagation();
     o.move?.(dx, dy);
   };
   const tstart = (e: TouchEvent) => {
     if (e.touches.length !== 1) return;
+    if (ignoredByChild(e.target, el)) { touchStart = null; return; }
+    if (o.axis === "y" && o.onlyAtTop && nestedScrollNotAtTop(e.target, el)) { touchStart = null; return; }
     touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   };
   const tmove = (e: TouchEvent) => {
-    if (claimed) { e.preventDefault(); return; }
+    if (claimed) { e.preventDefault(); e.stopPropagation(); return; }
+    if (claimedPointers.size > 0) return;
     if (!touchStart || e.touches.length !== 1) return;
     const dx = e.touches[0].clientX - touchStart.x, dy = e.touches[0].clientY - touchStart.y;
     if (Math.hypot(dx, dy) < 2) return;
     const horiz = Math.abs(dx) > Math.abs(dy) * 1.2;
+    const vert = Math.abs(dy) > Math.abs(dx) * 1.2;
     const axis = o.axis ?? "any";
     if (axis === "x" && horiz) e.preventDefault();
-    else if (axis === "y" && !horiz && (!o.onlyAtTop || (o.onlyAtTop() && dy > 0))) e.preventDefault();
+    else if (axis === "y" && vert && (!o.onlyAtTop || (o.onlyAtTop() && dy > 0))) e.preventDefault();
     else if (axis === "any") e.preventDefault();
   };
   const tend = () => { touchStart = null; };
@@ -92,6 +144,7 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
     const vx = stale ? 0 : start.vx, vy = stale ? 0 : start.vy;
     const was = claimed;
     start = null; claimed = false;
+    releaseClaim(e.pointerId);
     if (was) {
       if (e.type === "pointerup") suppressClick = performance.now();
       o.end?.(dx, dy, vx, vy);
@@ -127,6 +180,7 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   return {
     update(n: typeof opts) { o = n; },
     destroy() {
+      releaseClaim();
       el.removeEventListener("pointerdown", down); el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", up);
       el.removeEventListener("touchstart", tstart); el.removeEventListener("touchmove", tmove);
@@ -270,6 +324,7 @@ export function installCompactLongPress(holdMs = 360): () => void {
 export function installAndroidBack() {
   (window as unknown as { __glyphBack?: () => boolean }).__glyphBack = () => {
     if (pwa.sheetOpen) { pwa.sheetOpen = false; return true; }
+    if (app.feedbackOpen) { app.feedbackOpen = false; return true; }
     if (app.confirm) { app.confirm = null; return true; }
     if (app.shareSheet) { app.shareSheet = null; return true; }
     if (app.pickSongs) { app.pickSongs = null; return true; }

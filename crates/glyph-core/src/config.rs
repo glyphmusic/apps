@@ -237,6 +237,8 @@ pub struct UiConfig {
     /// Song suggestions: "Recommended" under your own playlists and the
     /// Recommended row on the home page. Off: both are hidden.
     pub recommendations: bool,
+    /// Shake the phone on mobile to open the quick feedback sheet.
+    pub shake_feedback: bool,
 }
 
 impl Default for UiConfig {
@@ -251,6 +253,7 @@ impl Default for UiConfig {
             reveal_downloads: true,
             text_scale: 1.0,
             recommendations: true,
+            shake_feedback: true,
         }
     }
 }
@@ -916,7 +919,7 @@ mod tests {
         let c = Config::from_toml("").unwrap();
         assert_eq!(c.ui, UiConfig::default());
         assert_eq!((c.ui.wheel_seek_s, c.ui.wheel_volume_pct), (5, 5));
-        assert!(c.ui.np_lyrics && c.ui.np_lyric_line && c.ui.np_download && c.ui.reveal_downloads);
+        assert!(c.ui.np_lyrics && c.ui.np_lyric_line && c.ui.np_download && c.ui.reveal_downloads && c.ui.shake_feedback);
         assert!(c.ui.keys.is_empty());
         assert!(c.local.folders.is_empty() && c.storage.download_dir.is_none());
         assert_eq!((c.audio.eq_bass_db, c.audio.eq_headroom_db), (0.0, 0.0));

@@ -4,9 +4,11 @@
   // keys, no personal data), the docs and the data folder.
   import { app } from "../state.svelte";
   import { backend } from "../api/backend";
-  import { t } from "../i18n.svelte";
+  import { t, tf } from "../i18n.svelte";
+  import { keyLabel, keyOf } from "../keys";
   import Icon from "../components/Icon.svelte";
   import Rows from "./Rows.svelte";
+  import Tog from "./Tog.svelte";
   import { sui } from "./settings.svelte";
   import { onWeb } from "../web";
   import { copyText, isMobile, openUrl } from "./util";
@@ -17,6 +19,26 @@
 
   let copied = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const mobile = $derived(isMobile());
+  const shakeOn = $derived(app.config?.ui.shake_feedback !== false);
+  const feedbackKey = $derived(keyLabel(keyOf("feedback")));
+  const feedbackDesc = $derived(
+    mobile
+      ? t("sp.support.feedback.desc_mobile")
+      : feedbackKey
+        ? tf("sp.support.feedback.desc_key", { key: feedbackKey })
+        : t("sp.support.feedback.desc"),
+  );
+
+  function openFeedback() {
+    app.feedbackOpen = true;
+  }
+
+  function setShake(on: boolean) {
+    app.setConfig((c) => {
+      c.ui.shake_feedback = on;
+    });
+  }
 
   async function diag() {
     const text = await backend().call<string>("diagnostics");
@@ -44,6 +66,17 @@
 {/snippet}
 
 <Rows>
+  {@render actionRow("message-square-more", t("feedback.title"), feedbackDesc, "chevron-right", openFeedback)}
+  {#if mobile}
+    <div class="srow item static">
+      <span class="ic"><Icon name="smartphone" size={16} color="rgba(255,255,255,.78)" /></span>
+      <span class="tx">
+        <span class="lb">{t("sp.support.shake")}</span>
+        <span class="ds">{t("sp.support.shake.desc")}</span>
+      </span>
+      <Tog on={shakeOn} label={t("sp.support.shake")} onchange={setShake} />
+    </div>
+  {/if}
   {@render actionRow("life-buoy", t("sp.support.issue"), t("sp.support.issue.desc"), "external-link", () => openUrl(ISSUES_URL))}
   {@render actionRow(copied ? "check" : "copy", t("sp.support.diag"), t("sp.support.diag.desc"), copied ? "check" : "copy", diag, copied)}
   {@render actionRow("book-open", t("sp.docs"), t("sp.support.docs.desc"), "external-link", () => openUrl(DOCS_URL))}
@@ -57,6 +90,7 @@
   .item { position: relative; width: 100%; display: flex; align-items: center; gap: 14px; padding: 14px 0; text-align: left; }
   .item::before { content: ""; position: absolute; inset: 4px -10px; border-radius: 10px; pointer-events: none; transition: background-color .12s; }
   .item:hover::before { background: rgba(255, 255, 255, .045); }
+  .item.static:hover::before { background: transparent; }
   .item.lit::before { animation: sflash 1.8s linear forwards; }
   @keyframes sflash { 0%, 39% { background: rgba(var(--accent-rgb, 255, 95, 210), .14); } 100% { background: transparent; } }
   .ic, .tx, .tr { position: relative; }

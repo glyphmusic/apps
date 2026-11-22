@@ -370,7 +370,7 @@ export interface Config {
   desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
   /** Phone notifications (Android, notify.rs); missing in older configs. */
   notifications?: { app_updates: boolean; new_releases: boolean };
-  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; np_lyric_line?: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
+  ui: { wheel_seek_s: number; wheel_volume_pct: number; np_download: boolean; np_lyrics: boolean; np_lyric_line?: boolean; shake_feedback?: boolean; keys: Record<string, string>; reveal_downloads: boolean; text_scale: number; recommendations?: boolean; zen?: boolean; reduce_motion?: boolean };
   local: { folders: string[] };
   [k: string]: unknown;
 }

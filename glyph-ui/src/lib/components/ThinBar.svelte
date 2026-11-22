@@ -50,7 +50,7 @@
   }
 </script>
 
-<div class="thin" class:hot class:vertical bind:this={el} style:width={vertical ? undefined : len} style:height={vertical ? len : undefined}
+<div class="thin" class:hot class:vertical data-drag-own bind:this={el} style:width={vertical ? undefined : len} style:height={vertical ? len : undefined}
   onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={() => (drag = null)} onpointerleave={() => (hoverAt = null)} onwheel={wheel}
   role="slider" aria-valuenow={Math.round(value * 100)} tabindex="-1">
   <div class="track"><div class="fill" style:width={vertical ? undefined : `${shown * 100}%`} style:height={vertical ? `${shown * 100}%` : undefined}></div></div>

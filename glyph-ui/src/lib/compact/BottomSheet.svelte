@@ -29,6 +29,7 @@
   let timerOpen = $state(false);
   let listEl: HTMLDivElement | undefined = $state();
   let dragRow = $state<{ from: number; slot: number; dy: number; h: number } | null>(null);
+  let rowDragActive = false;
   let queueCap = $state(30);
   /** The row being swiped sideways (its key) and how far. */
   let swipe = $state<{ key: string; dx: number } | null>(null);
@@ -100,8 +101,10 @@
     const h = row.getBoundingClientRect().height || 60;
     const startY = e.clientY;
     let started = false;
+    rowDragActive = true;
+    pull = 0;
     try { grip.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-    const blockTouch = (ev: TouchEvent) => ev.preventDefault();
+    const blockTouch = (ev: TouchEvent) => { ev.preventDefault(); ev.stopPropagation(); };
     const onMove = (ev: PointerEvent) => {
       const scrollDelta = container.scrollTop - startScroll;
       const dy = ev.clientY - startY + scrollDelta;
@@ -119,6 +122,7 @@
       dragRow = { from, slot, dy, h };
     };
     const cleanup = () => {
+      rowDragActive = false;
       removeEventListener("pointermove", onMove);
       removeEventListener("pointerup", onEnd);
       removeEventListener("pointercancel", onCancel);
@@ -228,7 +232,7 @@
     </div>
 
     <div class="scroll list" bind:this={listEl} onscroll={onListScroll} use:fadeEdges={{ top: 14, bottom: 14, minOverflow: 8 }}
-      use:drag={{ axis: "y", onlyAtTop: () => !dragRow && (listEl?.scrollTop ?? 0) <= 0, move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
+      use:drag={{ axis: "y", onlyAtTop: () => !rowDragActive && !dragRow && !swipe && (listEl?.scrollTop ?? 0) <= 0, move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
       {#if timerOpen}
         {@const onSong = !!app.sleep?.endOfSong}
         <div class="t-list" in:fly|local={{ x: 24, duration: 180, easing: cubicOut }}>
@@ -300,8 +304,8 @@
             style:transform={gone ? "translateX(-110%)" : sx ? `translateX(${sx}px)` : undefined}
             use:drag={{
               axis: "x",
-              move: (dx) => { if (!editing && !dragRow && !gone) swipe = { key, dx: dampSwipe(dx) }; },
-              end: (dx, _dy, vx) => { if (!editing && !dragRow && !gone) swipeEnd(u, dx, vx); else swipe = null; },
+              move: (dx) => { if (!editing && !rowDragActive && !dragRow && !gone) swipe = { key, dx: dampSwipe(dx) }; },
+              end: (dx, _dy, vx) => { if (!editing && !rowDragActive && !dragRow && !gone) swipeEnd(u, dx, vx); else swipe = null; },
             }}
             onclick={() => (editing ? toggleSel(u.index) : app.queueJump(u.index))}
             oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: u.track }); }}
@@ -322,7 +326,7 @@
                 <span class="trunc">{u.track.artist}</span>
               </span>
             </span>
-            <button class="grip" aria-label="Reorder" onpointerdown={(e) => startRowDrag(e, i, u)} onclick={(e) => e.stopPropagation()}>
+            <button class="grip" data-drag-own aria-label="Reorder" onpointerdown={(e) => startRowDrag(e, i, u)} onclick={(e) => e.stopPropagation()}>
               <svg width="18" height="14" viewBox="0 0 18 14" fill="none" aria-hidden="true">
                 <line x1="2" y1="2.5" x2="16" y2="2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
                 <line x1="2" y1="7" x2="16" y2="7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />

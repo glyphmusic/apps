@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.2 - 2026-11-22
+
+### Added
+
+- **Quick feedback & shake-to-feedback**: open the new **Send feedback** sheet from Settings > Support, via its keyboard shortcut, or by shaking your phone (Android and mobile web/PWA, with a **Don't show again** checkbox and a toggle in Settings > Support) to file a pre-filled GitHub issue with version and platform details.
+
+### Fixed
+
+- **Smoother mobile bottom sheets & lists**: refined bottom-sheet drag gestures (`BottomSheet`, `InstallSheet`), settings drag lists and progress bars across mobile and web.
+
 ## 0.13.1 - 2026-11-22
 
 ### Added

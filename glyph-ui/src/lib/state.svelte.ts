@@ -88,6 +88,7 @@ function normalizeConfig(c: Config): Config {
   c.mpd.address ??= "";
   c.ui.keys ??= {};
   c.ui.np_lyric_line ??= true;
+  c.ui.shake_feedback ??= true;
   c.local.folders ??= [];
   c.plugins.disabled ??= [];
   c.mcp.token ??= "";
@@ -194,6 +195,8 @@ class App {
   pickSongs = $state<PickSongs | null>(null);
   /** "Not the right one" alternative picker modal (overlays/WrongSongModal.svelte). */
   wrongSong = $state<Track | null>(null);
+  /** Quick feedback bottom sheet (mobile shake) / modal (desktop shortcut). */
+  feedbackOpen = $state(false);
   onboarding = $state(false);
   splash = $state(false);
   jamOpen = $state(false);

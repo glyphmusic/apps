@@ -65,7 +65,7 @@ export function webConfig(): Config {
     devices: { discovery: false },
     plugins: { auto_update: false, skip_install_warning: false, sort: "stars", disabled: [] },
     desktop: { autostart: false, start_in_tray: false },
-    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, np_lyric_line: true, keys: {}, reveal_downloads: false, text_scale: 1, recommendations: true },
+    ui: { wheel_seek_s: 5, wheel_volume_pct: 5, np_download: false, np_lyrics: true, np_lyric_line: true, shake_feedback: true, keys: {}, reveal_downloads: false, text_scale: 1, recommendations: true },
     local: { folders: [] },
   };
 }

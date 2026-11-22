@@ -13,6 +13,10 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -136,6 +140,59 @@ public class MainActivity extends AppCompatActivity {
 
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private SensorManager sensorManager;
+    private Sensor accelerometer;
+    private static final float SHAKE_THRESHOLD_G = 1.35f;
+    private static final long SHAKE_WINDOW_MS = 900L;
+    private static final long SHAKE_MIN_GAP_MS = 110L;
+    private static final long SHAKE_COOLDOWN_MS = 2500L;
+    private final long[] shakePeaks = new long[3];
+    private int shakePeakCount;
+    private long lastShakePeakMs;
+    private long lastShakeTriggerMs;
+    private final SensorEventListener shakeListener = new SensorEventListener() {
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            if (activityPaused || !pageReady || webView == null) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastShakeTriggerMs < SHAKE_COOLDOWN_MS) {
+                return;
+            }
+            float gx = event.values[0] / SensorManager.GRAVITY_EARTH;
+            float gy = event.values[1] / SensorManager.GRAVITY_EARTH;
+            float gz = event.values[2] / SensorManager.GRAVITY_EARTH;
+            float deltaG = Math.abs((float) Math.sqrt(gx * gx + gy * gy + gz * gz) - 1.0f);
+            if (deltaG < SHAKE_THRESHOLD_G || now - lastShakePeakMs < SHAKE_MIN_GAP_MS) {
+                return;
+            }
+            lastShakePeakMs = now;
+            int kept = 0;
+            for (int i = 0; i < shakePeakCount; i++) {
+                if (now - shakePeaks[i] <= SHAKE_WINDOW_MS) {
+                    shakePeaks[kept++] = shakePeaks[i];
+                }
+            }
+            shakePeakCount = kept;
+            if (shakePeakCount < shakePeaks.length) {
+                shakePeaks[shakePeakCount++] = now;
+            }
+            if (shakePeakCount >= shakePeaks.length) {
+                shakePeakCount = 0;
+                lastShakeTriggerMs = now;
+                runOnUiThread(() -> {
+                    if (webView != null && pageReady && !activityPaused) {
+                        webView.evaluateJavascript("window.__glyphShake&&window.__glyphShake();", null);
+                    }
+                });
+            }
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+    };
     private WebView webView;
     private boolean pageReady;
     private boolean showingFallbackError;
@@ -231,6 +288,13 @@ public class MainActivity extends AppCompatActivity {
             };
             connectivity.registerDefaultNetworkCallback(networkCallback);
             reportConnectivity();
+        }
+
+        if (!isSheet()) {
+            sensorManager = getSystemService(SensorManager.class);
+            if (sensorManager != null) {
+                accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+            }
         }
 
         setupWebView();
@@ -1026,6 +1090,9 @@ public class MainActivity extends AppCompatActivity {
         if (connectivity != null) {
             reportConnectivity();
         }
+        if (sensorManager != null && accelerometer != null) {
+            sensorManager.registerListener(shakeListener, accelerometer, SensorManager.SENSOR_DELAY_UI);
+        }
         if (pendingApk != null && getPackageManager().canRequestPackageInstalls()) {
             String path = pendingApk;
             pendingApk = null;
@@ -1035,6 +1102,10 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
+        if (sensorManager != null) {
+            sensorManager.unregisterListener(shakeListener);
+        }
+        shakePeakCount = 0;
         super.onPause();
     }
 

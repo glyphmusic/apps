@@ -39,7 +39,7 @@
 <div class="dl">
   {#each items as it, i (key(it))}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="r" class:lift={from === i} style:height="{pitch}px" style:transform="translateY({shift(i)}px)"
+    <div class="r" class:lift={from === i} data-drag-own style:height="{pitch}px" style:transform="translateY({shift(i)}px)"
       onpointerdown={(e) => down(e, i)} onpointermove={move} onpointerup={up} onpointercancel={() => { from = null; dy = 0; }}>
       {@render row(it, i)}
     </div>

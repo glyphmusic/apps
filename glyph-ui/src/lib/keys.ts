@@ -33,6 +33,7 @@ export const SHORTCUTS: Shortcut[] = [
   // Always reaches Settings > Plugins, where plugin looks are paused (a look
   // that hides the interface can be turned off from there).
   s("plugins", "sp.keys.plugins", "secondary-alt-p", "global", "app"),
+  s("feedback", "sp.keys.feedback", "secondary-shift-f", "global", "app"),
   s("quit", "sp.keys.quit", "secondary-q", "global", "app"),
 ];
 /** Keys that stay fixed (lists, sidebar, closing). */
@@ -94,6 +95,7 @@ function run(id: string, focusSearch: () => void) {
     case "queue": app.showQueue = !app.showQueue; if (app.showQueue) app.showDevices = false; return;
     case "settings": return app.navigate("settings");
     case "plugins": return app.openSettings("plugins");
+    case "feedback": app.feedbackOpen = !app.feedbackOpen; return;
     case "quit": return close();
   }
 }
@@ -110,6 +112,7 @@ export function installKeys(focusSearch: () => void): () => void {
     const k = eventKey(e);
     if (k === "escape") {
       if (app.ctx || app.controlMenu) return app.closeMenus();
+      if (app.feedbackOpen) return (app.feedbackOpen = false);
       if (app.nameDialog) return (app.nameDialog = null);
       if (app.confirm) return (app.confirm = null);
       if (app.settingsOpen) return (app.settingsOpen = false);
@@ -124,7 +127,7 @@ export function installKeys(focusSearch: () => void): () => void {
     if (nav) { e.preventDefault(); const v = views[+nav[1] - 1]; if (v) app.navigate(v); return; }
 
     // Track-list keyboard navigation (↑ / ↓ / Enter / Delete) when no overlay/input is active.
-    const listNav = !typing && !app.compact && !app.searchFocused && !app.settingsOpen && !app.nameDialog && !app.confirm && !app.ctx && !app.controlMenu
+    const listNav = !typing && !app.compact && !app.searchFocused && !app.settingsOpen && !app.nameDialog && !app.confirm && !app.feedbackOpen && !app.ctx && !app.controlMenu
       ? currentListNav()
       : null;
     if (listNav) {
@@ -170,7 +173,7 @@ export function installKeys(focusSearch: () => void): () => void {
       const key = keyOf(sc.id);
       if (!key || key !== k) continue;
       if (isBareShortcut(key) && typing) return;
-      if (sc.scope === "main" && (app.settingsOpen || app.nameDialog)) return;
+      if (sc.scope === "main" && (app.settingsOpen || app.nameDialog || app.feedbackOpen)) return;
       e.preventDefault();
       run(sc.id, focusSearch);
       return;

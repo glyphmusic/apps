@@ -17,6 +17,7 @@
   import Onboarding from "../overlays/Onboarding.svelte";
   import Splash from "../overlays/Splash.svelte";
   import InstallSheet from "../overlays/InstallSheet.svelte";
+  import FeedbackModal from "../overlays/FeedbackModal.svelte";
   import CropDialog from "../pages/profile/CropDialog.svelte";
 </script>
 
@@ -26,6 +27,7 @@
 {#if app.controlMenu}<ControlMenu />{/if}
 {#if app.pickSongs}<AddShared />{/if}
 {#if app.wrongSong}<WrongSongModal />{/if}
+{#if app.feedbackOpen}<FeedbackModal />{/if}
 {#if app.nameDialog}<NameDialog />{/if}
 {#if app.confirm}<ConfirmDialog />{/if}
 {#if app.jamOpen}<Jam />{/if}

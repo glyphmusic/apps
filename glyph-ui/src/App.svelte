@@ -12,6 +12,7 @@
   import { activeLooks, applyLooks } from "./lib/skin";
   import { fx, setUiSuspended, startRevealClock, suspendBackground } from "./lib/ui.svelte";
   import { installKeys } from "./lib/keys";
+  import { installShakeFeedback } from "./lib/feedback";
   import Background from "./lib/shell/Background.svelte";
   import Titlebar from "./lib/shell/Titlebar.svelte";
   import Sidebar from "./lib/shell/Sidebar.svelte";
@@ -198,6 +199,12 @@
     const rm = matchMedia("(prefers-reduced-motion: reduce)");
     fx.reduce = rm.matches;
     const offKeys = installKeys(() => search?.focus());
+    const offShake = installShakeFeedback(() => {
+      if (!app.ready || app.splash || app.onboarding || app.feedbackOpen) return;
+      if (!app.compact && app.platform !== "android" && app.platform !== "ios") return;
+      if (app.config?.ui.shake_feedback === false) return;
+      app.feedbackOpen = true;
+    });
     checkMcpConnectHash();
     const onHashChange = () => checkMcpConnectHash();
     window.addEventListener("hashchange", onHashChange);
@@ -210,6 +217,7 @@
       offPwa();
       mq.removeEventListener("change", sync);
       offKeys();
+      offShake();
       window.removeEventListener("hashchange", onHashChange);
     };
   });
