@@ -13,6 +13,7 @@
   import { admin } from "../admin/admin.svelte";
   import { phone, drag, sheetIn, sheetOut, shouldClose } from "./cstate.svelte";
   let sx = $state(0);
+  $effect(() => admin.onResume(app.account?.handle, app.backendState.kind === "ready"));
   const close = () => (phone.drawerOpen = false);
   function go(f: () => void) { close(); f(); }
   const rows = $derived([

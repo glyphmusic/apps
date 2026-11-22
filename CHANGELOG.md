@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.3 - 2026-11-22
+
+### Fixed
+
+- **Reliable music video playback & quality fallback**: added anonymous YouTube visitor bootstrap (`/sw.js_data` with watch-page fallback and larger HTTP/2 header limit) for native video resolution, skipped DRM/ciphered streams, fixed `<video>` mount timing so autoplay/metadata hooks are never missed, added automatic fallback across untried stream qualities (including audio stream errors), and paused the animated background while a video is playing.
+- **Server dashboard visibility for admins**: transient offline or startup connection errors during the `/admin/v1/me` check no longer hide the Server dashboard permanently; Glyph now retries automatically with backoff and re-checks on backend ready, reconnect, window focus and resume.
+
 ## 0.13.2 - 2026-11-22
 
 ### Added

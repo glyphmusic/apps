@@ -32,7 +32,7 @@
   ];
   const items = $derived(app.sidebarItems(5));
   // The server dashboard shows up only for accounts the server made admins.
-  $effect(() => admin.check(app.account?.handle));
+  $effect(() => admin.check(app.account?.handle, app.backendState.kind === "ready"));
   const active = (v: View | "settings") => (v === "settings" ? app.settingsOpen : app.view === v && !app.settingsOpen);
   function activeItem(it: SideItem) {
     if (it.kind === "list") return app.view === "list" && sameList(app.openList, it.list);

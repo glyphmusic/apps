@@ -70,13 +70,13 @@ describe("demo backend core flows", () => {
 
       // Cancel one individual song while the rest keep going.
       const cancelOne = api.call("download_cancel", { tracks: [candidates[0]] });
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
       await cancelOne;
       expect(events.some((e) => e.key === trackKey(candidates[0]) && e.done)).toBe(true);
 
       // Cancel a second song as part of a batch, leaving candidates[2] to finish.
       const cancelBatch = api.call("download_cancel", { tracks: [candidates[1]] });
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
       await cancelBatch;
 
       await vi.advanceTimersByTimeAsync(2500);

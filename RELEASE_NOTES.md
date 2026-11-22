@@ -1,6 +1,6 @@
-# Glyph 0.13.2 - 2026-11-22
+# Glyph 0.13.3 - 2026-11-22
 
-- **Quick feedback & shake-to-feedback**: open the **Send feedback** sheet from Settings > Support, with a keyboard shortcut, or by shaking your phone (Android and mobile web/PWA, toggleable under Settings > Support) to open a pre-filled GitHub issue.
-- **Smoother mobile bottom sheets & lists**: improved bottom-sheet drag gestures, settings drag lists and progress bars across mobile and web.
+- **Reliable music video playback & quality fallback**: added YouTube visitor bootstrap for native video resolution, improved `<video>` mount and autoplay handling, added automatic fallback across stream qualities on video/audio errors, and disabled the animated background during video playback.
+- **Server dashboard visibility for admins**: transient startup or offline errors no longer permanently suppress the Server dashboard; Glyph now retries automatically and re-checks on reconnect, focus and resume.
 
 See CHANGELOG.md for the complete changes.

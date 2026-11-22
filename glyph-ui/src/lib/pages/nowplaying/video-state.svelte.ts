@@ -134,6 +134,9 @@ class VideoState {
         seen.add(r.id);
         return true;
       });
+      // Release search skeleton immediately so the list renders and <video>
+      // mounts cleanly as soon as resolve() completes.
+      this.loading = false;
       if (autoSelect || !this.selected) {
         const savedId = !q ? this.picks[key] : undefined;
         const pick =

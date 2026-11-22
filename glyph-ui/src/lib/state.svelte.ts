@@ -241,7 +241,10 @@ class App {
     this.setPlayer(snap.player);
     this.backendState = snap.backend;
     this.account = snap.account;
-    if (this.account && !inSideWindow()) this.ensureOwnProfile();
+    if (this.account && !inSideWindow()) {
+      this.ensureOwnProfile();
+      admin.check(this.account.handle, this.backendState.kind === "ready");
+    }
     this.version = snap.version;
     this.platform = snap.platform;
     this.outputDevices = snap.output_devices;
@@ -268,7 +271,13 @@ class App {
     api.on("backend", (b) => {
       const was = this.backendState.kind;
       this.backendState = b;
-      if (b.kind === "ready" && was !== "ready" && !inSideWindow()) this.onBackendReady();
+      if (b.kind === "ready" && !inSideWindow()) {
+        if (was !== "ready") this.onBackendReady();
+        else if (this.account) {
+          this.ensureOwnProfile();
+          admin.refresh(this.account.handle);
+        }
+      }
     });
     api.on("search", (s) => {
       if (this.view === "search" && s.query === this.search.query) {
@@ -296,9 +305,13 @@ class App {
       if (!a) {
         this.ownAvatarUrl = null;
         this.ownProfileHandle = null;
-      } else if (a.handle !== prev || !this.ownAvatarUrl) {
-        this.ownProfileHandle = null;
-        if (!inSideWindow()) this.ensureOwnProfile();
+        admin.check(null);
+      } else {
+        if (a.handle !== prev || !this.ownAvatarUrl) {
+          this.ownProfileHandle = null;
+          if (!inSideWindow()) this.ensureOwnProfile();
+        }
+        if (!inSideWindow()) admin.check(a.handle, this.backendState.kind === "ready");
       }
     });
     api.on("update", (u) => (this.update = u));
@@ -330,9 +343,22 @@ class App {
     if (typeof document !== "undefined") {
       // Leaving the app (phone home button, window hidden): send waiting hearts now.
       addEventListener("pagehide", () => this.flushLikes());
+      addEventListener("online", () => {
+        if (!inSideWindow() && this.account) {
+          admin.onResume(this.account.handle, this.backendState.kind === "ready" || backend().kind === "web");
+        }
+      });
+      addEventListener("focus", () => {
+        if (!inSideWindow() && this.account) {
+          admin.onResume(this.account.handle, this.backendState.kind === "ready");
+        }
+      });
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) this.flushLikes();
         this.scheduleClock();
+        if (!document.hidden && !inSideWindow() && this.account) {
+          admin.onResume(this.account.handle, this.backendState.kind === "ready");
+        }
         // Back from the background: only the player and the queue can be
         // behind (the whole snapshot also rebuilt the library and listed
         // the audio outputs, which froze phones for a moment on return).
@@ -1093,7 +1119,10 @@ class App {
   /** The backend came up (or came back): what failed meanwhile loads again. */
   private onBackendReady() {
     this.loadHome();
-    if (this.account) this.ensureOwnProfile();
+    if (this.account) {
+      this.ensureOwnProfile();
+      admin.refresh(this.account.handle);
+    }
     if (this.player.current) this.loadLyrics();
     if (this.view === "search" && (this.search.error || this.search.errors.length) && this.search.query.trim()) this.runSearch(this.search.query);
     for (const [k, a] of Object.entries(this.artists)) if (a.loading) delete this.artists[k];

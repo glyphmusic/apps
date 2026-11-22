@@ -31,6 +31,7 @@
   let muted = $state(false);
   let vol = $state(0.85);
   let mediaError = $state<string | null>(null);
+  let failedUrls = $state<string[]>([]);
   let controlsShown = $state(true);
   let qualityOpen = $state(false);
   let pseudoFullscreen = $state(false);
@@ -39,16 +40,35 @@
   let hideTimer = 0;
   let demoRaf = 0;
   let demoLastTs = 0;
+  let pendingRestore: { pos: number; resume: boolean } | null = null;
+  let resumeOnFallback = false;
+  let lastStreamId = "";
 
   const isFullscreen = $derived(nativeFullscreen || pseudoFullscreen);
-  const activeQ = $derived(videoState.activeQuality);
+  const qualities = $derived(videoState.stream?.qualities ?? []);
+  const activeQ = $derived.by(() => {
+    const pref = videoState.activeQuality;
+    if (!qualities.length) return pref;
+    if (pref && !failedUrls.includes(pref.url)) return pref;
+    const untried = qualities.filter((q) => !failedUrls.includes(q.url));
+    if (!untried.length) return pref;
+    return untried.find((q) => !q.audio_url) ?? untried[0];
+  });
   const srcUrl = $derived(activeQ?.url ?? videoState.stream?.url ?? "");
   const audioUrl = $derived(activeQ?.audio_url ?? videoState.stream?.audio_url ?? null);
   const isDemo = $derived(srcUrl.startsWith("demo://"));
   const curTrack = $derived(app.player.current);
   const sel = $derived(videoState.selected);
-  const qualities = $derived(videoState.stream?.qualities ?? []);
   const frac = $derived(dur > 0 ? Math.min(1, Math.max(0, pos / dur)) : 0);
+
+  // Clear per-stream fallback failures whenever a new video is resolved.
+  $effect(() => {
+    const id = videoState.stream?.id ?? "";
+    if (id !== lastStreamId) {
+      lastStreamId = id;
+      failedUrls = [];
+    }
+  });
 
   function bumpControls() {
     controlsShown = true;
@@ -70,26 +90,42 @@
     }
   });
 
-  // Reset player state when switching stream / quality.
+  // Reset player state when switching stream / quality (and once <video> is mounted).
   let lastStreamKey = "";
   $effect(() => {
-    const key = `${videoState.stream?.id ?? ""}|${srcUrl}`;
-    if (key === lastStreamKey) return;
-    const sameVideo = lastStreamKey.startsWith(`${videoState.stream?.id ?? ""}|`) && !!videoState.stream?.id;
-    const keepPos = sameVideo ? pos : 0;
-    const shouldResume = sameVideo ? playing : true;
-    lastStreamKey = key;
-    mediaError = null;
-    qualityOpen = false;
+    const streamId = videoState.stream?.id ?? "";
+    const url = srcUrl;
+    const aUrl = audioUrl;
+    const demo = isDemo;
+    const v = videoEl;
+    const a = audioEl;
 
-    if (!srcUrl) {
+    if (!url) {
+      lastStreamKey = "";
+      pendingRestore = null;
       playing = false;
+      buffering = false;
       pos = 0;
       dur = 0;
       return;
     }
 
-    if (isDemo) {
+    // Wait until the real <video> element is actually mounted before consuming
+    // the stream transition so metadata & autoplay hooks can never be missed.
+    if (!demo && !v) return;
+
+    const key = `${streamId}|${url}|${aUrl ?? ""}`;
+    if (key === lastStreamKey) return;
+    const sameVideo = !!streamId && lastStreamKey.startsWith(`${streamId}|`);
+    const keepPos = sameVideo ? pos : 0;
+    const shouldResume = sameVideo ? (playing || resumeOnFallback) : true;
+    resumeOnFallback = false;
+    lastStreamKey = key;
+    mediaError = null;
+    qualityOpen = false;
+
+    if (demo) {
+      pendingRestore = null;
       dur = (videoState.stream?.duration_ms ?? sel?.duration_ms ?? 228_000) / 1000;
       pos = sameVideo ? keepPos : Math.min(dur * 0.18, 42);
       buffering = false;
@@ -98,32 +134,28 @@
       return;
     }
 
-    // Real video element load & optional quality-switch position restore.
-    queueMicrotask(() => {
-      const v = videoEl;
-      if (!v) return;
-      buffering = true;
+    // Real <video> element load & optional quality-switch position restore.
+    pendingRestore = { pos: keepPos, resume: shouldResume };
+    buffering = true;
+    playing = false;
+    if (!sameVideo) {
+      pos = 0;
+      dur = (videoState.stream?.duration_ms ?? sel?.duration_ms ?? 0) / 1000;
+    }
+    if (v) {
       v.volume = muted ? 0 : vol;
-      v.muted = !!audioUrl || muted;
-      if (audioEl) {
-        audioEl.volume = muted ? 0 : vol;
-        audioEl.muted = muted;
+      v.muted = !!aUrl || muted;
+      if (a) {
+        a.volume = muted ? 0 : vol;
+        a.muted = muted;
       }
-      const onLoaded = () => {
-        dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : (sel?.duration_ms ?? 0) / 1000;
-        if (keepPos > 0 && keepPos < dur) {
-          v.currentTime = keepPos;
-          if (audioEl) audioEl.currentTime = keepPos;
-        }
-        buffering = false;
-        if (shouldResume) {
-          void startPlayback();
-        }
-      };
-      v.addEventListener("loadedmetadata", onLoaded, { once: true });
-      v.load();
-      audioEl?.load();
-    });
+      if (v.currentSrc === url && v.readyState >= 1) {
+        onVideoLoadedMetadata();
+      } else {
+        v.load();
+        a?.load();
+      }
+    }
   });
 
   // Sync volume & mute to real media elements.
@@ -325,6 +357,35 @@
     }
   }
 
+  function onVideoLoadedMetadata() {
+    const v = videoEl;
+    if (!v || isDemo) return;
+    // Reject streams without a video track (e.g., audio-only MP4 returned by an outdated server).
+    if (v.videoWidth === 0 && v.videoHeight === 0) {
+      onVideoError();
+      return;
+    }
+    dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : (videoState.stream?.duration_ms ?? sel?.duration_ms ?? 0) / 1000;
+    const restore = pendingRestore;
+    pendingRestore = null;
+    if (restore && restore.pos > 0 && restore.pos < dur) {
+      v.currentTime = restore.pos;
+      if (audioEl && audioUrl) audioEl.currentTime = restore.pos;
+    }
+    buffering = false;
+    if (restore?.resume) {
+      void startPlayback();
+    }
+  }
+
+  function onVideoCanPlay() {
+    const v = videoEl;
+    if (!v || isDemo) return;
+    if (v.videoWidth === 0 && v.videoHeight === 0) return;
+    if (Number.isFinite(v.duration) && v.duration > 0) dur = v.duration;
+    buffering = false;
+  }
+
   async function startPlayback() {
     if (isDemo) {
       playing = true;
@@ -339,7 +400,15 @@
       await v.play();
       if (audioEl && audioUrl) {
         audioEl.currentTime = v.currentTime;
-        await audioEl.play().catch(() => {});
+        try {
+          await audioEl.play();
+        } catch {
+          // Browser autoplay policy blocked unmuted audio: pause video cleanly
+          // so one click starts both video and audio together instead of silent video.
+          v.pause();
+          playing = false;
+          return;
+        }
       }
       playing = true;
       videoState.notifyVideoPlaying();
@@ -380,8 +449,13 @@
     pos = v.currentTime || 0;
     if (Number.isFinite(v.duration) && v.duration > 0) dur = v.duration;
     // Keep adaptive HD audio stream tightly locked to video clock.
-    if (audioEl && audioUrl && !v.paused && Math.abs(audioEl.currentTime - v.currentTime) > 0.18) {
-      audioEl.currentTime = v.currentTime;
+    if (audioEl && audioUrl && !v.paused) {
+      if (Math.abs(audioEl.currentTime - v.currentTime) > 0.22) {
+        audioEl.currentTime = v.currentTime;
+      }
+      if (audioEl.paused && audioEl.readyState >= 2) {
+        void audioEl.play().catch(() => {});
+      }
     }
   }
 
@@ -400,18 +474,35 @@
     }
   }
 
+  function onAudioError() {
+    if (!audioUrl || isDemo) return;
+    onVideoError();
+  }
+
   function onVideoError() {
+    const wantsResume = playing || !!pendingRestore?.resume;
     buffering = false;
     playing = false;
-    // If HD dual-stream failed, fall back automatically to muxed 360p once.
-    if (audioUrl && qualities.some((q) => !q.audio_url)) {
-      const fallback = qualities.find((q) => !q.audio_url);
-      if (fallback && videoState.quality !== fallback.label) {
-        videoState.quality = fallback.label;
+    pendingRestore = null;
+    videoEl?.pause();
+    audioEl?.pause();
+    // Mark current quality URL as failed for this stream and try the next untried quality.
+    if (srcUrl && !failedUrls.includes(srcUrl)) {
+      const nextFailed = [...failedUrls, srcUrl];
+      if (qualities.some((q) => !nextFailed.includes(q.url))) {
+        resumeOnFallback = wantsResume;
+        failedUrls = nextFailed;
         return;
       }
+      failedUrls = nextFailed;
     }
     mediaError = t("video.error.sub");
+  }
+
+  function pickQuality(label: string) {
+    failedUrls = [];
+    videoState.quality = label;
+    qualityOpen = false;
   }
 
   async function toggleFullscreen() {
@@ -445,6 +536,8 @@
 
   function retry() {
     mediaError = null;
+    failedUrls = [];
+    lastStreamKey = "";
     if (sel) void videoState.resolve(sel);
   }
 
@@ -506,7 +599,9 @@
         bind:this={videoEl}
         src={srcUrl}
         playsinline
-        preload="metadata"
+        preload="auto"
+        onloadedmetadata={onVideoLoadedMetadata}
+        oncanplay={onVideoCanPlay}
         ontimeupdate={onVideoTimeUpdate}
         onwaiting={onVideoWaiting}
         onplaying={onVideoPlaying}
@@ -516,7 +611,7 @@
         onclick={() => (compact ? (controlsShown = !controlsShown) : togglePlay())}
       ></video>
       {#if audioUrl}
-        <audio bind:this={audioEl} src={audioUrl} preload="metadata"></audio>
+        <audio bind:this={audioEl} src={audioUrl} preload="auto" onerror={onAudioError}></audio>
       {/if}
     {/if}
 
@@ -599,7 +694,7 @@
                   class:on={qualityOpen}
                   onclick={() => (qualityOpen = !qualityOpen)}
                 >
-                  {videoState.quality === "auto" ? (activeQ?.label ?? t("video.quality.auto")) : videoState.quality}
+                  {activeQ?.label ?? (videoState.quality === "auto" ? t("video.quality.auto") : videoState.quality)}
                 </button>
                 {#if qualityOpen}
                   <div class="q-menu">
@@ -607,7 +702,7 @@
                       type="button"
                       class="q-item"
                       class:sel={videoState.quality === "auto"}
-                      onclick={() => { videoState.quality = "auto"; qualityOpen = false; }}
+                      onclick={() => pickQuality("auto")}
                     >
                       <span>{t("video.quality.auto")}</span>
                       {#if videoState.quality === "auto"}<Icon name="check" size={13} color="var(--accent)" />{/if}
@@ -617,7 +712,7 @@
                         type="button"
                         class="q-item"
                         class:sel={videoState.quality === q.label}
-                        onclick={() => { videoState.quality = q.label; qualityOpen = false; }}
+                        onclick={() => pickQuality(q.label)}
                       >
                         <span>{q.label}</span>
                         {#if videoState.quality === q.label}<Icon name="check" size={13} color="var(--accent)" />{/if}
@@ -650,6 +745,9 @@
     aspect-ratio: 16 / 9;
     border-radius: 12px;
     overflow: hidden;
+    isolation: isolate;
+    contain: paint;
+    transform: translateZ(0);
     background: #0c0c0e;
     display: flex;
     align-items: center;
@@ -666,6 +764,8 @@
     height: 100vh;
     aspect-ratio: auto;
     border-radius: 0;
+    contain: none;
+    transform: none;
     background: #050506;
   }
   .stage.idle { cursor: none; }

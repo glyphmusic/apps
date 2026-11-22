@@ -93,7 +93,7 @@
       loading = false;
     }
   }
-  $effect(() => admin.check(app.account?.handle));
+  $effect(() => admin.check(app.account?.handle, app.backendState.kind === "ready"));
   // `admin.reload` is bumped by the refresh button (also the phone's top bar).
   $effect(() => { void admin.reload; if (admin.on) void load(); });
 
@@ -586,12 +586,12 @@
       <SectionTitle heading title={t(SUB_TITLE[sub])} />
       <div class="hr">
         {#if admin.me}<span class="role">{admin.me.owner ? t("admin.role.owner") : tf("admin.role.admin", { handle: admin.me.handle ?? "" })}</span>{/if}
-        <IconButton name="refresh-cw" label={t("admin.refresh")} onclick={() => admin.reload++} disabled={loading} />
+        <IconButton name="refresh-cw" label={t("admin.refresh")} onclick={() => { if (!admin.on && app.account?.handle) admin.refresh(app.account.handle); else admin.reload++; }} disabled={loading} />
       </div>
     {/if}
   </div>
 
-  {#if !admin.on && admin.pending}
+  {#if !admin.on && (admin.pending || app.backendState.kind === "connecting")}
     <div class="tiles">{#each [0, 1, 2, 3] as i (i)}<div class="sk"><Skeleton w="100%" h={92} radius={12} id="admin-{i}" /></div>{/each}</div>
   {:else if !admin.on}
     <EmptyState icon="server" title={t("admin.err.not_admin")} sub={t("admin.err.not_admin.sub")} />

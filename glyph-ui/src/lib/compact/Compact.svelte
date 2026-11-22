@@ -33,7 +33,7 @@
   import { installCompactLongPress, phone } from "./cstate.svelte";
   import { admin } from "../admin/admin.svelte";
   // The drawer's "Server" entry is ready before the drawer opens.
-  $effect(() => admin.check(app.account?.handle));
+  $effect(() => admin.check(app.account?.handle, app.backendState.kind === "ready"));
 
   onMount(() => installCompactLongPress());
 

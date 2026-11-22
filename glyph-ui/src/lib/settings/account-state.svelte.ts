@@ -5,6 +5,7 @@
 // page is the default sign-in; on any other server sign-in stays in the app
 // (its own page only opens after a warning, it could read the password).
 import { backend } from "../api/backend";
+import { admin } from "../admin/admin.svelte";
 import { app } from "../state.svelte";
 import { t, tf } from "../i18n.svelte";
 import { errText, openUrl, saveText } from "./util";
@@ -62,6 +63,7 @@ export async function loadStatus() {
 export function pageOpened() {
   ac.notice = null;
   app.ensureOwnProfile();
+  if (app.account?.handle && app.backendState.kind === "ready") admin.refresh(app.account.handle);
   return loadStatus();
 }
 

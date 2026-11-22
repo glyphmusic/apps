@@ -7,6 +7,7 @@
   import { untrack } from "svelte";
   import { Glow, paletteFromImage, paletteFromSeed, presetFromSeed, hex, solidIsDarkInk, type GlowShape, type Palette, type RenderMode } from "../glow";
   import { app } from "../state.svelte";
+  import { phone } from "../compact/cstate.svelte";
   import { THEMES, solidBase, themeColors } from "../theme";
   import { backend } from "../api/backend";
   import { trackKey } from "../api/types";
@@ -87,7 +88,8 @@
     glow.setTheme(c.glow ? (c.glow.map(hex) as Palette) : null);
   });
 
-  $effect(() => { glow?.setPaused(app.splash || app.settingsOpen || app.onboarding); });
+  const videoActive = $derived((app.view === "now_playing" && app.videoMode) || phone.videoMode);
+  $effect(() => { glow?.setPaused(app.splash || app.settingsOpen || app.onboarding || videoActive); });
   $effect(() => { if (glow) glow.playing = app.playing; });
 
   // Shape and colours follow the song (skipped completely in solid mode).
@@ -123,13 +125,14 @@
   <div class="bg solid" style:background={baseCss}></div>
 {:else}
   {#key renderMode}
-    <canvas class="bg glow" class:blurred bind:this={glowEl}></canvas>
-    <canvas class="bg ascii" class:blurred bind:this={asciiEl}></canvas>
+    <canvas class="bg glow" class:blurred class:video-off={videoActive} bind:this={glowEl}></canvas>
+    <canvas class="bg ascii" class:blurred class:video-off={videoActive} bind:this={asciiEl}></canvas>
   {/key}
 {/if}
 
 <style>
   .bg { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; contain: strict; transition: filter .18s ease-out; }
+  .bg.video-off { display: none; }
   .bg.solid { z-index: 0; transition: none; }
   /* The picture fills the window; blur reaches past the edges so they stay sharp-free. */
   .bg.pic { z-index: 0; background-size: cover; background-position: center; filter: blur(var(--pic-blur, 0px)); transform: scale(var(--pic-scale, 1)); }
