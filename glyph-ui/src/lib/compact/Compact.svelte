@@ -131,6 +131,7 @@
   const barTitle = $derived(
     app.view === "list" && app.openList ? app.listTitle(app.openList)
     : app.view === "section" ? app.section?.title ?? ""
+    : app.view === "taste" ? t("taste.title")
     : app.view === "server" ? t({ "": "admin.title", people: "admin.people.title", settings: "admin.limits", versions: "admin.versions" }[admin.sub])
     : app.view === "artist" ? app.openArtist ?? ""
     : app.view === "releases" || app.view === "similar" ? `${app.openArtist} · ${t(app.view === "releases" ? "artist.albums" : "artist.similar")}`

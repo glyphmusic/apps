@@ -14,6 +14,7 @@
   import ArtistCard from "./home/ArtistCard.svelte";
   import ListCard from "./home/ListCard.svelte";
   import ReleaseCard from "./home/ReleaseCard.svelte";
+  import MixCard from "./home/MixCard.svelte";
   import CardSkeleton from "./home/CardSkeleton.svelte";
   import Icon from "../components/Icon.svelte";
   import { app } from "../state.svelte";
@@ -75,10 +76,12 @@
   const recentSongs = $derived(app.library.recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])));
   // Settings > Playback > Content "Song suggestions" off: no Recommended row.
   const showRecs = $derived(app.config.ui.recommendations !== false);
+  const tasteOn = $derived(app.config.taste?.enabled !== false);
   const recs = $derived(showRecs ? uniqBy(app.home.recs.filter((x) => app.allowed(x)), trackKey) : []);
+  const mixes = $derived(showRecs && tasteOn ? (app.home.mixes ?? []).filter((m) => m.tracks.length > 0) : []);
   const trending = $derived(uniqBy(app.home.trending.filter((x) => app.allowed(x)), trackKey));
   const releases = $derived(uniqBy(app.home.new_releases, (r) => r.id));
-  const loading = $derived(app.home.loading && !recs.length && !trending.length);
+  const loading = $derived(app.home.loading && !recs.length && !trending.length && !mixes.length);
 
   function playRecent(tr: Track) {
     const k = trackKey(tr);
@@ -150,6 +153,11 @@
       </div>
     {/snippet}
     <div class="feeds">
+      {#if mixes.length}
+        <HomeSection icon="sparkles" title={t("taste.home.mixes")} more={() => app.navigate("taste")} moreLabel={t("taste.title")}>
+          <HScroll>{#each mixes as mix (mix.id)}<MixCard {mix} />{/each}</HScroll>
+        </HomeSection>
+      {/if}
       {#if recs.length}
         <HomeSection icon="heart" title={t("home.recs")} more={showAll(t("home.recs"), "heart", recs)}>
           <HScroll>{#each recs as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(recs, i)} />{/each}</HScroll>

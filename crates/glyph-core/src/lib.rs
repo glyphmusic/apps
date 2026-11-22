@@ -404,6 +404,8 @@ struct Inner {
     server_rates: bool,
     /// The server supports wrong-song alternatives & reporting (`capability::WRONG_SONG`).
     server_wrong_song: bool,
+    /// The server supports taste tag enrichment & collaborative filtering (`capability::TASTE`).
+    server_taste: bool,
     covers: CoverCache,
     lyrics_cache: LyricsCache,
 }
@@ -838,6 +840,42 @@ impl Backend {
     ) -> anyhow::Result<glyph_protocol::VideoResolveResponse> {
         let (inner, id) = (self.cur(), id.to_string());
         self.spawn(async move { inner.video_resolve(&id).await })
+            .await?
+    }
+
+    /// Whether the connected server advertises `capability::TASTE`.
+    pub fn server_taste_available(&self) -> bool {
+        let inner = self.cur();
+        inner.server_taste && inner.live_server().is_some()
+    }
+
+    /// Fetches canonical genres, moods, tags and similar artists for `artists`.
+    pub async fn taste_tags(
+        &self,
+        artists: Vec<String>,
+        use_server: bool,
+    ) -> anyhow::Result<Vec<glyph_protocol::ArtistTags>> {
+        let inner = self.cur();
+        self.spawn(async move { inner.taste_tags(artists, use_server).await })
+            .await?
+    }
+
+    /// Queries optional server collaborative filtering (when enabled & supported).
+    pub async fn taste_collab(
+        &self,
+        req: glyph_protocol::TasteCollabRequest,
+    ) -> anyhow::Result<Option<glyph_protocol::TasteCollabResponse>> {
+        let inner = self.cur();
+        self.spawn(async move { inner.taste_collab(&req).await })
+            .await?
+    }
+
+    /// Fetches starter artists and tracks for onboarding taste calibration.
+    pub async fn taste_onboarding(
+        &self,
+    ) -> anyhow::Result<glyph_protocol::OnboardingCatalogResponse> {
+        let inner = self.cur();
+        self.spawn(async move { inner.taste_onboarding().await })
             .await?
     }
 

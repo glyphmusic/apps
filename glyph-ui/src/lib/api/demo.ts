@@ -6,6 +6,7 @@ import type { BackendEvents, Config, HomeFeeds, Library, ListKey, PlayerState, Q
 import { sameList, trackKey } from "./types";
 import { bgAdd, bgList, bgRemove } from "./bg-store";
 import { ARTIST_META, ARTISTS, DEMO_NEW_RELEASES, TRACKS, byArtist, demoCover, demoLyrics, findAlbumDef, hash } from "./demo-data";
+import { demoMixes } from "./demo/taste";
 
 export interface DemoCtx {
   config: Config;
@@ -42,6 +43,7 @@ export function demoConfig(): Config {
     playback: { shuffle: "smart", skip_unplayable: true, patient_search: false },
     lists: { sort: {} },
     stats: { enabled: true },
+    taste: { enabled: true, server_collab: true, metadata_enrichment: true },
     mcp: { enabled: false, mode: "read", port: 4917, token: "" },
     mpd: { enabled: false, address: "127.0.0.1:6600" },
     devices: { discovery: true },
@@ -274,6 +276,7 @@ export class DemoBackend implements Backend, DemoCtx {
         recs: [27, 28, 29, 19, 20, 21, 33, 37, 41, 14, 32, 24].map((i) => TRACKS[i % TRACKS.length]),
         trending: [17, 12, 14, 2, 3, 5, 38, 39, 43, 34, 25, 15].map((i) => TRACKS[i % TRACKS.length]),
         new_releases: DEMO_NEW_RELEASES,
+        mixes: demoMixes(this),
         loading: false,
       }),
       album: (_, a) => TRACKS.filter((t) => t.album?.toLowerCase() === String(a.title).toLowerCase() && t.artist.toLowerCase() === String(a.artist).toLowerCase()),

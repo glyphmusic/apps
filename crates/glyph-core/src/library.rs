@@ -313,6 +313,9 @@ pub struct Library {
     /// Opt-in listening statistics (empty while turned off).
     #[serde(default, skip_serializing_if = "crate::stats::Stats::is_empty")]
     pub stats: crate::stats::Stats,
+    /// Local music taste profile signals, onboarding favorites, and tag cache.
+    #[serde(default, skip_serializing_if = "crate::taste::TasteData::is_empty")]
+    pub taste: crate::taste::TasteData,
     /// Transient lookup index for `liked` so `is_liked` is O(1) during UI rendering.
     #[serde(skip)]
     liked_cache: LikedCache,
@@ -339,6 +342,8 @@ pub struct LibraryActivity {
     pub recent_artists: Vec<FollowedArtist>,
     #[serde(default, skip_serializing_if = "crate::stats::Stats::is_empty")]
     pub stats: crate::stats::Stats,
+    #[serde(default, skip_serializing_if = "crate::taste::TasteActivity::is_empty")]
+    pub taste: crate::taste::TasteActivity,
 }
 
 impl LibraryActivity {
@@ -398,6 +403,7 @@ impl Library {
             artist_skips: self.artist_skips.clone(),
             recent_artists: self.recent_artists.clone(),
             stats: self.stats.clone(),
+            taste: self.taste.activity_snapshot(),
         }
     }
 
@@ -413,6 +419,9 @@ impl Library {
         }
         if !act.stats.is_empty() {
             self.stats = act.stats;
+        }
+        if !act.taste.is_empty() {
+            self.taste.apply_activity(act.taste);
         }
     }
 

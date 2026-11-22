@@ -21,6 +21,7 @@ pub mod plugins;
 pub mod settings;
 pub mod storage;
 pub mod system;
+pub mod taste;
 pub mod theme_icon;
 pub mod transfer;
 pub mod video;

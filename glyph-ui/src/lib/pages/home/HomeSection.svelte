@@ -6,12 +6,12 @@
   import SectionTitle from "../../components/SectionTitle.svelte";
   import Button from "../../components/Button.svelte";
   import { t } from "../../i18n.svelte";
-  let { icon, title, more, children }: { icon: string; title: string; more?: () => void; children: Snippet } = $props();
+  let { icon, title, more, moreLabel, children }: { icon: string; title: string; more?: () => void; moreLabel?: string; children: Snippet } = $props();
 </script>
 
 <section class="sec">
   <SectionTitle {icon} {title}>
-    {#if more}<span class="all"><Button kind="text" onclick={more}>{t("home.show_all")}</Button></span>{/if}
+    {#if more}<span class="all"><Button kind="text" onclick={more}>{moreLabel ?? t("home.show_all")}</Button></span>{/if}
   </SectionTitle>
   {@render children()}
 </section>

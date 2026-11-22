@@ -63,6 +63,7 @@ pub struct Feeds {
     pub recs: Vec<Track>,
     pub trending: Vec<Track>,
     pub new_releases: Vec<glyph_core::providers::deezer::Release>,
+    pub mixes: Vec<glyph_core::taste::DailyMix>,
     pub loading: bool,
     /// Counts reloads: a load started before the last reload drops its result.
     pub epoch: u64,
@@ -1196,18 +1197,47 @@ impl Core {
             return;
         }
         let ps_now = self.player_state();
-        let skipped = !auto && ps_now.as_ref().is_some_and(|s| s.position < Duration::from_secs(30));
         let playing_track = ps_now
+            .as_ref()
             .filter(|s| !matches!(s.status, glyph_audio::Status::Ended | glyph_audio::Status::Idle))
-            .and_then(|s| s.track);
+            .and_then(|s| s.track.clone());
         let offline = crate::storage::is_offline();
         let relaxed = crate::account::controlling(self) || crate::jam::remote_on();
         let mut offline_blocked: Option<Track> = None;
+        let did_skip;
+        let did_manual_leave;
         let (next, preloaded) = {
             let mut st = self.st();
-            if skipped {
+            let active_ps = (!st.player_stale).then_some(ps_now.as_ref()).flatten();
+            let eff_pos_ms = active_ps
+                .map(|s| s.position.as_millis() as u64)
+                .or_else(|| st.restored_pos.map(|d| d.as_millis() as u64))
+                .unwrap_or(0);
+            let eff_dur_ms = active_ps
+                .and_then(|s| s.duration)
+                .or(st.restored_duration)
+                .map(|d| d.as_millis() as u64);
+            let has_active = active_ps.is_some() || (st.player_stale && st.resolving);
+            did_skip = !auto && has_active && eff_pos_ms < 30_000;
+            did_manual_leave = !auto && has_active;
+            if did_skip {
                 if let Some(cur) = st.current.clone() {
                     st.library.record_skip(&cur);
+                }
+            }
+            if did_manual_leave && st.config.taste.enabled {
+                if let Some(cur) = st.current.clone() {
+                    let hour = glyph_core::taste::local_hour();
+                    let now_s = glyph_core::paths::now_unix();
+                    st.library.taste.record_playback_outcome(
+                        &cur,
+                        eff_pos_ms,
+                        eff_dur_ms,
+                        true,
+                        false,
+                        hour,
+                        now_s,
+                    );
                 }
             }
             let preloaded = st.preloaded.take();
@@ -1264,7 +1294,7 @@ impl Core {
             (next, preloaded)
         };
         if offline_blocked.is_some() {
-            if skipped {
+            if did_skip {
                 crate::discover::on_skip(self);
                 self.library_changed();
             }
@@ -1278,8 +1308,10 @@ impl Core {
             self.emit_player();
             return;
         }
-        if skipped {
+        if did_skip {
             crate::discover::on_skip(self);
+            self.library_changed_soon();
+        } else if did_manual_leave {
             self.library_changed_soon();
         }
         match next {

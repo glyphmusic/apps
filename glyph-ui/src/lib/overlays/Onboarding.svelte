@@ -29,9 +29,11 @@
   import DevicesPage from "../pages/onboarding/DevicesPage.svelte";
   import ThemePage from "../pages/onboarding/ThemePage.svelte";
   import SpeedPage from "../pages/onboarding/SpeedPage.svelte";
+  import TastePage from "../pages/onboarding/TastePage.svelte";
   import { easeOut, k, ob, resetTour } from "../pages/onboarding/anim.svelte";
+  import type { TasteProfile, Track } from "../api/types";
 
-  const PAGES = ["welcome", "search", "library", "sound", "lyrics", "devices", "speed", "theme"] as const;
+  const PAGES = ["welcome", "search", "library", "sound", "lyrics", "devices", "speed", "taste", "theme"] as const;
   const CLOSE = 240;
 
   let page = $state(0), prev = $state(0), dir = $state(0);
@@ -40,6 +42,10 @@
   let closing = $state(0), thenMigrate = $state(false);
   let vw = $state(innerWidth), vh = $state(innerHeight);
   let swipe: number | null = null;
+  let tasteArtists = $state<string[]>([]);
+  let tasteTracks = $state<Track[]>([]);
+  let tasteGenres = $state<string[]>([]);
+  let tasteSaved = false;
 
   const still = $derived(fx.reduce);
   const touch = $derived(app.compact);
@@ -50,21 +56,52 @@
   const cardW = $derived(touch ? vw : Math.min(vw - 48, 640));
   const pad = $derived(touch ? 20 : 30);
   const stageW = $derived(cardW - pad * 2);
-  const stageH = $derived(touch ? Math.min(330, Math.max(220, vh * 0.36)) : Math.min(250, Math.max(200, vh - 400)));
+  const key = $derived(PAGES[page]);
+  const stageH = $derived(
+    key === "taste"
+      ? (touch ? Math.min(390, Math.max(260, vh * 0.45)) : Math.min(340, Math.max(245, vh - 330)))
+      : (touch ? Math.min(330, Math.max(220, vh * 0.36)) : Math.min(250, Math.max(200, vh - 400))),
+  );
   const open = $derived(still ? 1 : shownAt == null ? 0 : easeOut((now - shownAt) / 1000 / 0.32));
   const close = $derived(closing ? (still ? 0 : 1 - easeOut((now - closing) / CLOSE)) : 1);
   const vis = $derived(Math.min(open, close));
   const switchK = $derived(still ? 1 : easeOut(s / 0.3));
-  const key = $derived(PAGES[page]);
   const title = $derived(t(`onboarding.${key}.title`));
+
+  function commitTasteIfPicked() {
+    if (tasteSaved) return;
+    if (!tasteArtists.length && !tasteTracks.length && !tasteGenres.length) return;
+    tasteSaved = true;
+    backend()
+      .call("taste_onboarding_save", {
+        artists: $state.snapshot(tasteArtists),
+        tracks: $state.snapshot(tasteTracks),
+        genres: $state.snapshot(tasteGenres),
+        follow_artists: false,
+      })
+      .catch(() => {});
+  }
 
   onMount(() => {
     resetTour(performance.now());
+    backend()
+      .call<TasteProfile>("taste_profile")
+      .then((p) => {
+        if (!p) return;
+        if (!tasteArtists.length && p.onboarding_artists?.length) tasteArtists = [...p.onboarding_artists];
+        if (!tasteTracks.length && p.onboarding_tracks?.length) tasteTracks = [...p.onboarding_tracks];
+        if (!tasteGenres.length && p.onboarding_genres?.length) tasteGenres = [...p.onboarding_genres];
+      })
+      .catch(() => {});
     let raf = 0;
     const tick = () => { now = performance.now(); raf = requestAnimationFrame(tick); };
     raf = requestAnimationFrame(tick);
     const down = (e: KeyboardEvent) => {
       if (closing) return;
+      const active = document.activeElement as HTMLElement | null;
+      const tag = active?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "Enter" && tag === "BUTTON" && active?.closest(".stage")) return;
       const hit = () => { e.preventDefault(); e.stopImmediatePropagation(); };
       if (e.key === "ArrowRight" || e.key === "Enter") { hit(); next(); }
       else if (e.key === "ArrowLeft") { hit(); back(); }
@@ -106,12 +143,20 @@
   function escape() { if (touch && page > 0) back(); else finish(false); }
   function finish(migrate: boolean) {
     if (closing) return;
+    commitTasteIfPicked();
     closing = performance.now(); thenMigrate = migrate;
     backend().call("onboarding_seen").catch(() => {});
   }
 
   // Phones: a sideways swipe turns the page (a swipe never finishes the tour).
-  function pdown(e: PointerEvent) { if (touch) swipe = e.clientX; }
+  function pdown(e: PointerEvent) {
+    if (!touch) return;
+    if (key === "taste" && (e.target as HTMLElement | null)?.closest(".genres, .picked-pills, input, textarea")) {
+      swipe = null;
+      return;
+    }
+    swipe = e.clientX;
+  }
   function pup(e: PointerEvent) {
     if (!touch || swipe == null) return;
     const d = e.clientX - swipe;
@@ -132,6 +177,7 @@
     {:else if key === "lyrics"}<LyricsPage {now} {still} w={stageW} h={stageH} />
     {:else if key === "devices"}<DevicesPage {s} {now} {still} w={stageW} h={stageH} />
     {:else if key === "speed"}<SpeedPage {s} w={stageW} />
+    {:else if key === "taste"}<TastePage bind:selectedArtists={tasteArtists} bind:selectedTracks={tasteTracks} bind:selectedGenres={tasteGenres} />
     {:else}<ThemePage {s} {still} w={stageW} />{/if}
   {/snippet}
 

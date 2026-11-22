@@ -30,6 +30,7 @@ impl Inner {
         let mut server_providers = None;
         let mut server_rates = false;
         let mut server_wrong_song = false;
+        let mut server_taste = false;
         let url = server_client::normalize_base_url(config.effective_server_url());
         if !url.is_empty() {
             let key_url = url.clone();
@@ -42,6 +43,7 @@ impl Inner {
                     library::set_playlist_track_limit(h.playlist_max_tracks);
                     server_rates = h.supports(glyph_protocol::capability::RATINGS);
                     server_wrong_song = h.supports(glyph_protocol::capability::WRONG_SONG);
+                    server_taste = h.supports(glyph_protocol::capability::TASTE);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
                     server = Some(client);
@@ -64,7 +66,7 @@ impl Inner {
             }
         }
         let covers = covers.with_server(server.clone());
-        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, server_wrong_song, covers, lyrics_cache })
+        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, server_wrong_song, server_taste, covers, lyrics_cache })
     }
 
     /// The server, unless it is the official one and that is out (see
@@ -936,4 +938,215 @@ impl Inner {
         }
         crate::video::resolve_native(&self.http, id).await
     }
+
+    pub(super) async fn taste_tags(
+        &self,
+        artists: Vec<String>,
+        use_server: bool,
+    ) -> Result<Vec<glyph_protocol::ArtistTags>> {
+        if artists.is_empty() {
+            return Ok(Vec::new());
+        }
+        if use_server && self.server_taste {
+            if let Some(server) = self.live_server() {
+                if let Ok(resp) = server.taste_tags(artists.clone()).await {
+                    return Ok(resp.items);
+                }
+            }
+        }
+        // Direct / local fallback: keyless Deezer artist genre & related lookup.
+        let results = futures::future::join_all(
+            artists
+                .into_iter()
+                .take(8)
+                .map(|artist| async move { local_deezer_artist_tags(&self.http, &artist).await }),
+        )
+        .await;
+        Ok(results.into_iter().flatten().collect())
+    }
+
+    pub(super) async fn taste_collab(
+        &self,
+        req: &glyph_protocol::TasteCollabRequest,
+    ) -> Result<Option<glyph_protocol::TasteCollabResponse>> {
+        if !self.server_taste {
+            return Ok(None);
+        }
+        let Some(server) = self.live_server() else {
+            return Ok(None);
+        };
+        match server.taste_collab(req).await {
+            Ok(resp) => Ok(Some(resp)),
+            Err(e) => {
+                tracing::info!("server taste collab unavailable: {e:#}");
+                Ok(None)
+            }
+        }
+    }
+
+    pub(super) async fn taste_onboarding(
+        &self,
+    ) -> Result<glyph_protocol::OnboardingCatalogResponse> {
+        if self.server_taste {
+            if let Some(server) = self.live_server() {
+                if let Ok(resp) = server.taste_onboarding().await {
+                    if !resp.artists.is_empty() {
+                        return Ok(resp);
+                    }
+                }
+            }
+        }
+        let dz = match &self.providers.deezer {
+            Some(d) => d.clone(),
+            None => Arc::new(providers::deezer::Deezer::new(self.http.clone())),
+        };
+        let tracks = dz.chart(24).await.unwrap_or_default();
+        Ok(local_onboarding_catalog(tracks))
+    }
+}
+
+async fn local_deezer_artist_tags(
+    http: &reqwest::Client,
+    artist: &str,
+) -> Option<glyph_protocol::ArtistTags> {
+    #[derive(serde::Deserialize)]
+    struct DzArtists { #[serde(default)] data: Vec<DzArtist> }
+    #[derive(serde::Deserialize)]
+    struct DzArtist { id: Option<u64>, #[serde(default)] name: String, nb_fan: Option<u64> }
+    #[derive(serde::Deserialize)]
+    struct DzAlbums { #[serde(default)] data: Vec<DzAlbum> }
+    #[derive(serde::Deserialize)]
+    struct DzAlbum { genre_id: Option<i64> }
+    #[derive(serde::Deserialize)]
+    struct DzRelated { #[serde(default)] data: Vec<DzName> }
+    #[derive(serde::Deserialize)]
+    struct DzName { #[serde(default)] name: String }
+
+    let url = reqwest::Url::parse_with_params(
+        "https://api.deezer.com/search/artist",
+        &[("q", artist), ("limit", "5")],
+    ).ok()?;
+    let found: DzArtists = http.get(url).timeout(std::time::Duration::from_secs(4)).send().await.ok()?.json().await.ok()?;
+    let want = crate::dedupe::normalize_artist(artist);
+    let best = found
+        .data
+        .into_iter()
+        .filter(|a| crate::dedupe::normalize_artist(&a.name) == want)
+        .max_by_key(|a| a.nb_fan.unwrap_or(0))?;
+    let id = best.id?;
+    let alb_fut = async {
+        http.get(format!("https://api.deezer.com/artist/{id}/albums?limit=8"))
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+            .ok()?
+            .json::<DzAlbums>()
+            .await
+            .ok()
+    };
+    let rel_fut = async {
+        http.get(format!("https://api.deezer.com/artist/{id}/related?limit=10"))
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+            .ok()?
+            .json::<DzRelated>()
+            .await
+            .ok()
+    };
+    let (albums, related) = futures::join!(alb_fut, rel_fut);
+    let mut raw_tags = Vec::new();
+    if let Some(a) = albums {
+        for item in a.data {
+            let g = match item.genre_id.unwrap_or(0) {
+                2 => Some("afrobeats"),
+                16 => Some("j-pop"),
+                52 | 132 => Some("pop"),
+                84 => Some("country"),
+                85 => Some("alternative"),
+                98 => Some("classical"),
+                106 => Some("electronic"),
+                113 => Some("dance"),
+                116 => Some("hip-hop"),
+                129 => Some("jazz"),
+                144 => Some("reggae"),
+                152 => Some("rock"),
+                153 => Some("blues"),
+                165 => Some("r&b"),
+                169 => Some("soul"),
+                173 => Some("soundtrack"),
+                197 => Some("latin"),
+                464 => Some("metal"),
+                466 => Some("folk"),
+                _ => None,
+            };
+            if let Some(name) = g {
+                raw_tags.push(name.to_string());
+            }
+        }
+    }
+    let (genres, moods, tags) = glyph_protocol::taste::classify_tags(&raw_tags, artist);
+    let similar = related
+        .map(|r| r.data.into_iter().map(|x| x.name).filter(|n| !n.trim().is_empty()).collect())
+        .unwrap_or_default();
+    Some(glyph_protocol::ArtistTags {
+        artist: artist.to_string(),
+        genres,
+        moods,
+        tags,
+        similar,
+    })
+}
+
+pub(crate) fn local_onboarding_catalog(tracks: Vec<Track>) -> glyph_protocol::OnboardingCatalogResponse {
+    const STARTERS: &[(&str, &str)] = &[
+        ("Tame Impala", "Indie"),
+        ("Arctic Monkeys", "Indie Rock"),
+        ("Men I Trust", "Dream Pop"),
+        ("Daft Punk", "Electronic"),
+        ("Fred again..", "Electronic"),
+        ("Kaytranada", "House"),
+        ("Kendrick Lamar", "Hip-Hop"),
+        ("Tyler, The Creator", "Hip-Hop"),
+        ("Travis Scott", "Trap"),
+        ("Frank Ocean", "R&B"),
+        ("SZA", "R&B"),
+        ("The Weeknd", "Pop"),
+        ("Billie Eilish", "Pop"),
+        ("Dua Lipa", "Pop"),
+        ("Radiohead", "Alternative"),
+        ("Linkin Park", "Rock"),
+        ("Metallica", "Metal"),
+        ("Deftones", "Metal"),
+        ("Miles Davis", "Jazz"),
+        ("Nujabes", "Lo-Fi"),
+        ("Lana Del Rey", "Dream Pop"),
+        ("Bon Iver", "Folk & Acoustic"),
+        ("Bad Bunny", "Latin"),
+        ("Burna Boy", "Afrobeats"),
+        ("Hans Zimmer", "Soundtrack"),
+        ("Ludovico Einaudi", "Classical"),
+        ("Gorillaz", "Alternative"),
+        ("Flume", "Electronic"),
+    ];
+    let mut artists = Vec::with_capacity(STARTERS.len());
+    let mut genres = Vec::new();
+    for &(name, genre) in STARTERS {
+        if !genres.iter().any(|g: &String| g == genre) {
+            genres.push(genre.to_string());
+        }
+        let norm = crate::dedupe::normalize_artist(name);
+        let sample_track = tracks
+            .iter()
+            .find(|t| crate::dedupe::normalize_artist(&t.artist) == norm)
+            .cloned();
+        let photo = sample_track.as_ref().and_then(|t| t.cover_url.clone());
+        artists.push(glyph_protocol::OnboardingArtist {
+            name: name.to_string(),
+            genre: genre.to_string(),
+            photo,
+            sample_track,
+        });
+    }
+    glyph_protocol::OnboardingCatalogResponse { genres, artists, tracks }
 }

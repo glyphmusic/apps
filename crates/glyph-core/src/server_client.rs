@@ -490,6 +490,44 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `POST /v1/taste/tags`: batch genre, mood, and related-artist lookup from server cache.
+    pub async fn taste_tags(&self, artists: Vec<String>) -> Result<TasteTagsResponse> {
+        let body = TasteTagsRequest { artists };
+        let resp = Self::check(
+            self.member_request(self.post("/v1/taste/tags"))
+                .await
+                .timeout(Duration::from_secs(12))
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `POST /v1/taste/collab`: anonymized collaborative artist recommendations.
+    pub async fn taste_collab(&self, req: &TasteCollabRequest) -> Result<TasteCollabResponse> {
+        let resp = Self::check(
+            self.member_request(self.post("/v1/taste/collab"))
+                .await
+                .timeout(Duration::from_secs(12))
+                .json(req)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// `GET /v1/taste/onboarding`: genre-diverse starter artists and songs for onboarding.
+    pub async fn taste_onboarding(&self) -> Result<OnboardingCatalogResponse> {
+        let req = self
+            .member_request(self.get("/v1/taste/onboarding"))
+            .await
+            .timeout(Duration::from_secs(10));
+        Self::read_json_with_retry(req).await
+    }
+
     /// `GET /v1/video/search`: search YouTube for watchable music videos.
     pub async fn video_search(
         &self,

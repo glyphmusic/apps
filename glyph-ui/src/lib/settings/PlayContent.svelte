@@ -9,6 +9,7 @@
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
   import Icon from "../components/Icon.svelte";
+  import Button from "../components/Button.svelte";
   import { tip } from "../ui.svelte";
   import Row from "./Row.svelte";
   import Rows from "./Rows.svelte";
@@ -31,6 +32,23 @@
     loadHidden();
   }
   function setRadio(on: boolean) { radio.on = on; backend().call("set_radio", { on }); }
+  const tasteOn = $derived(app.config.taste?.enabled !== false);
+  const serverCollab = $derived(app.config.taste?.server_collab !== false);
+  const metaEnrich = $derived(app.config.taste?.metadata_enrichment !== false);
+  function setTaste(patch: Partial<{ enabled: boolean; server_collab: boolean; metadata_enrichment: boolean }>) {
+    app.setConfig((c) => {
+      c.taste = {
+        enabled: c.taste?.enabled ?? true,
+        server_collab: c.taste?.server_collab ?? true,
+        metadata_enrichment: c.taste?.metadata_enrichment ?? true,
+        ...patch,
+      };
+    });
+  }
+  function openTasteProfile() {
+    app.settingsOpen = false;
+    app.navigate("taste");
+  }
 </script>
 
 <PluginHost page="playback.content">
@@ -56,6 +74,18 @@
       </Row>
       <Row label={t("sp.recommendations")} info={t("sp.recommendations.desc")}>
         <Tog on={app.config.ui.recommendations !== false} onchange={(v) => app.setConfig((c) => { c.ui.recommendations = v; })} label={t("sp.recommendations")} />
+      </Row>
+      <Row label={t("sp.taste")} info={t("sp.taste.desc")}>
+        <Tog on={tasteOn} onchange={(v) => setTaste({ enabled: v })} label={t("sp.taste")} />
+      </Row>
+      <Row label={t("sp.taste_server")} info={t("sp.taste_server.desc")}>
+        <Tog on={serverCollab} disabled={!tasteOn} why={t("sp.taste.off_why")} onchange={(v) => setTaste({ server_collab: v })} label={t("sp.taste_server")} />
+      </Row>
+      <Row label={t("sp.taste_meta")} info={t("sp.taste_meta.desc")}>
+        <Tog on={metaEnrich} disabled={!tasteOn} why={t("sp.taste.off_why")} onchange={(v) => setTaste({ metadata_enrichment: v })} label={t("sp.taste_meta")} />
+      </Row>
+      <Row label={t("sp.taste_profile")} info={t("sp.taste_profile.desc")}>
+        <Button icon="sparkles" onclick={openTasteProfile}>{t("taste.title")}</Button>
       </Row>
     </Rows>
     <div class="hid">

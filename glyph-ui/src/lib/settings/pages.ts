@@ -40,7 +40,7 @@ export const GROUPS: { label: string; pages: SettingsPage[] }[] = [
 /** Extra words the nav search finds a page by (nav.rs `groups`). */
 export const PAGE_WORDS: Record<SettingsPage, string> = {
   overview: "overview übersicht schnell quick wichtig important home allgemein general",
-  playback: "sources source quelle youtube soundcloud priority radio quality qualität audio player mausrad wheel zen hotkey",
+  playback: "sources source quelle youtube soundcloud priority radio quality qualität audio player mausrad wheel zen hotkey taste geschmack mixes recommendations empfehlungen collaborative server",
   audio: "equalizer eq bass treble höhen tiefen klang sound preset teilen share import export code datei file",
   appearance: "language sprache theme ascii cover glow visualizer textgröße text size",
   account: "account konto login sign in anmelden sync devices geräte handle passkey profile profil privacy privatsphäre picture bild banner public öffentlich",
@@ -144,6 +144,9 @@ export const OPTIONS: [SettingsPage, number, string, string][] = [
   ["playback", 2, "sp.search.mode", "search suche lokal local server rate limit ban quellen sources"],
   ["playback", 1, "sp.explicit", "explicit explizit"],
   ["playback", 1, "sp.radio", "radio autoplay"],
+  ["playback", 1, "sp.taste", "taste geschmack algorithmus algorithm personalization personalisierung mixes daily mix"],
+  ["playback", 1, "sp.taste_server", "collaborative server taste geschmack privacy datenschutz opt out local lokal"],
+  ["playback", 1, "sp.taste_meta", "genre mood stimmung tags metadata enrichment"],
   ["playback", 1, "sp.hidden", "hidden ausgeblendet blocked artists künstler"],
   ["playback", 2, "settings.sources.fallback", "youtube soundcloud embed fallback"],
   ["playback", 2, "ytdlp.title", "yt-dlp ytdlp youtube"],

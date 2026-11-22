@@ -66,7 +66,7 @@ export function rating(t: Track): Rating {
 export function splitArtists(s: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const part of s.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b|\band\b|\bи\b)\s*/i)) {
+  for (const part of s.split(/\s*(?:,(?!\s*the\s+creator\b)|&|\bfeat\.?|\bft\.?|\bx\b|\band\b|\bи\b)\s*/i)) {
     const name = part.trim();
     const key = name.toLowerCase();
     if (name && !seen.has(key)) {
@@ -169,6 +169,8 @@ export interface Library {
   playlist_versions?: { revision: string; id: string; saved_at: string }[];
   /** "Don't show this artist". */
   hidden_artists?: string[];
+  /** Track keys explicitly marked "Not interested". */
+  disliked_tracks?: string[];
   /** Liked Songs download new songs automatically. */
   liked_auto_download?: boolean;
   /** Artist pages opened lately (sidebar), newest first. */
@@ -253,11 +255,108 @@ export interface ArtistPage {
   releases: Release[];
 }
 
+export interface DailyMix {
+  id: string;
+  kind: "genre" | "time" | "discovery" | string;
+  title: string;
+  subtitle: string;
+  tags?: string[];
+  accent_hue: number;
+  tracks: Track[];
+}
+
 export interface HomeFeeds {
   recs: Track[];
   trending: Track[];
   new_releases: Release[];
+  mixes?: DailyMix[];
   loading: boolean;
+}
+
+export interface TasteConfig {
+  enabled: boolean;
+  server_collab: boolean;
+  metadata_enrichment: boolean;
+}
+
+export interface WeightedTag {
+  name: string;
+  score: number;
+  share_pct: number;
+  feedback: number;
+}
+
+export interface VersionInsight {
+  style: string;
+  score: number;
+  plays: number;
+  skips: number;
+  feedback: number;
+}
+
+export interface ListeningHabits {
+  time_of_day: [number, number, number, number];
+  peak_period: "morning" | "afternoon" | "evening" | "night";
+  completion_rate: number;
+  early_skip_rate: number;
+  variety_score: number;
+  total_plays: number;
+  total_skips: number;
+  versions: VersionInsight[];
+}
+
+export interface ArtistAffinityInsight {
+  name: string;
+  score: number;
+  reasons: string[];
+  genres: string[];
+}
+
+export interface ArtistDislikeInsight {
+  name: string;
+  kind: "hidden" | "blocked" | "less" | "high_skips" | string;
+  skips: number;
+}
+
+export interface CollabArtistRec {
+  artist: string;
+  score: number;
+  because_of: string[];
+  genres: string[];
+  collaborative: boolean;
+}
+
+export interface TasteProfile {
+  mode: "hybrid" | "local" | "off";
+  confidence: number;
+  signals_count: number;
+  onboarding_done: boolean;
+  top_genres: WeightedTag[];
+  avoided_genres: WeightedTag[];
+  moods: WeightedTag[];
+  habits: ListeningHabits;
+  liked_artists: ArtistAffinityInsight[];
+  disliked_artists: ArtistDislikeInsight[];
+  disliked_tracks: Track[];
+  onboarding_artists: string[];
+  onboarding_tracks: Track[];
+  onboarding_genres?: string[];
+  collab_recs: CollabArtistRec[];
+  collab_contributors: number;
+  collab_model_ready: boolean;
+}
+
+export interface OnboardingArtist {
+  name: string;
+  genre: string;
+  photo?: string | null;
+  sample_track?: Track | null;
+}
+
+export interface OnboardingCatalogResponse {
+  genres: string[];
+  artists: OnboardingArtist[];
+  tracks: Track[];
 }
 
 export interface SearchResults {
@@ -363,6 +462,7 @@ export interface Config {
   playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; autoplay?: boolean; gapless?: boolean };
   lists: { sort: Record<string, string> };
   stats: { enabled: boolean };
+  taste?: TasteConfig;
   mcp: { enabled: boolean; mode: string; port: number; token: string; access?: Partial<Record<"playback" | "library" | "stats" | "settings" | "plugins", "none" | "read" | "write">> };
   mpd: { enabled: boolean; address: string };
   devices: { discovery: boolean };

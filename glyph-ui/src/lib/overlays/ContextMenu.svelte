@@ -239,6 +239,13 @@
 {/snippet}
 
 {#snippet recommendBody(song: Track)}
+  {@const disliked = app.isDislikedTrack(song)}
+  <MenuItem
+    icon={disliked ? "rotate-ccw" : "circle-minus"}
+    label={t(disliked ? "taste.ctx.restore_song" : "taste.ctx.dislike_song")}
+    onclick={run(() => app.toggleDislikeTrack(song))}
+  />
+  <Sep />
   {#each [["recommend.more", 1, "thumbs-up"], ["recommend.less", -1, "thumbs-down"], ["recommend.block", -2, "ban"], ["recommend.reset", null, "rotate-ccw"]] as const as [key, pref, icon]}
     <MenuItem {icon} label={t(key)} onclick={run(() => recommendFeedback(song.artist, pref))} />
   {/each}

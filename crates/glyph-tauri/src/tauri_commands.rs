@@ -3,7 +3,7 @@
 use glyph_app::controller::{Core, PlayFrom};
 use glyph_app::jam::{Perms, Reaction};
 use glyph_app::transfer::PickedFile;
-use glyph_app::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, video, wrong_song};
+use glyph_app::{account, commands, discover, jam, mcp_tools, plugins, storage, system, taste, transfer, video, wrong_song};
 use glyph_core::{ListKey, SearchItem};
 use glyph_protocol::mcp::{Approval, Session as McpSession};
 use glyph_protocol::{
@@ -359,6 +359,64 @@ pub async fn add_suggestions(core: C<'_>, id: String) -> Res<Vec<Track>> {
 #[tauri::command(rename_all = "snake_case")]
 pub fn recommend_feedback(core: C, artist: String, preference: Option<i8>) {
     discover::recommend_feedback(&core, artist, preference)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_profile(core: C) -> Value {
+    taste::taste_profile(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_mixes(core: C) -> Value {
+    taste::taste_mixes(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn taste_refresh(core: C<'_>) -> Res<Value> {
+    taste::taste_refresh(&core).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn taste_onboarding_catalog(core: C<'_>) -> Res<Value> {
+    taste::taste_onboarding_catalog(&core).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn taste_onboarding_save(
+    core: C<'_>,
+    artists: Vec<String>,
+    tracks: Option<Vec<Track>>,
+    genres: Option<Vec<String>>,
+    follow_artists: Option<bool>,
+) -> Res<Value> {
+    taste::taste_onboarding_save(
+        &core,
+        artists,
+        tracks.unwrap_or_default(),
+        genres.unwrap_or_default(),
+        follow_artists,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_dislike_track(core: C, track: Track, disliked: bool) -> Value {
+    taste::taste_dislike_track(&core, track, disliked)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_tag_feedback(core: C, tag: String, preference: Option<i8>) -> Value {
+    taste::taste_tag_feedback(&core, tag, preference)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_version_feedback(core: C, style: String, preference: Option<i8>) -> Value {
+    taste::taste_version_feedback(&core, style, preference)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn taste_reset(core: C) -> Value {
+    taste::taste_reset(&core)
 }
 
 #[tauri::command(rename_all = "snake_case")]

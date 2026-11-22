@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod release;
+pub mod taste;
 pub mod trust;
+pub use taste::{
+    ArtistTags, CollabArtistRec, OnboardingArtist, OnboardingCatalogResponse, TasteArtistSignal,
+    TasteCollabRequest, TasteCollabResponse, TasteTagsRequest, TasteTagsResponse,
+};
 pub use trust::{cover_cache_allowed, valid_video_id, VideoId};
 
 /// Wire protocol version. The app refuses servers with a different major value.
@@ -282,6 +287,9 @@ pub mod capability {
     /// Music video search and streaming (`/v1/video/search`, `/v1/video/resolve`,
     /// `/v1/video/youtube/*`).
     pub const VIDEO: &str = "video";
+    /// Hybrid music taste enrichment, collaborative filtering and onboarding
+    /// starter catalog (`/v1/taste/tags`, `/v1/taste/collab`, `/v1/taste/onboarding`).
+    pub const TASTE: &str = "taste";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }

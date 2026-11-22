@@ -249,7 +249,24 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
         let hide = hide_explicit(&core);
         {
             let st = core.st();
-            found.retain(|(t, _)| !st.library.is_hidden(&t.artist) && !(hide && t.maybe_explicit()));
+            let taste_on = st.config.taste.enabled;
+            let taste = if taste_on {
+                glyph_core::taste::Taste::from_library(&st.library)
+            } else {
+                glyph_core::taste::Taste::default()
+            };
+            let bucket = glyph_core::taste::TimeBucket::now();
+            found.retain(|(t, _)| {
+                !st.library.is_hidden(&t.artist)
+                    && !st.library.taste.is_disliked_track(t)
+                    && !(hide && t.maybe_explicit())
+            });
+            if taste_on {
+                for (t, w) in &mut found {
+                    *w = taste.score_recommendation(t, *w, bucket, false);
+                }
+                found.retain(|(_, w)| w.is_finite());
+            }
         }
         found.sort_by(|a, b| b.1.total_cmp(&a.1));
         let tracks = spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect());
@@ -437,14 +454,32 @@ pub async fn add_suggestions(core: C<'_>, id: String) -> Res<Vec<Track>> {
             }
         }
     }
-    found.sort_by(|a, b| b.1.total_cmp(&a.1));
     let have: HashSet<String> = own.iter().map(track_key).collect();
     let st = core.st();
+    let taste_on = st.config.taste.enabled;
+    let taste = if taste_on {
+        glyph_core::taste::Taste::from_library(&st.library)
+    } else {
+        glyph_core::taste::Taste::default()
+    };
+    let bucket = glyph_core::taste::TimeBucket::now();
+    if taste_on {
+        for (t, w) in &mut found {
+            *w = taste.score_recommendation(t, *w, bucket, false);
+        }
+        found.retain(|(_, w)| w.is_finite());
+    }
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut per: HashMap<String, usize> = HashMap::new();
     Ok(found
         .into_iter()
         .map(|(t, _)| t)
-        .filter(|t| !(hide && t.maybe_explicit()) && !st.library.is_hidden(&t.artist) && !have.contains(&track_key(t)))
+        .filter(|t| {
+            !(hide && t.maybe_explicit())
+                && !st.library.is_hidden(&t.artist)
+                && !st.library.taste.is_disliked_track(t)
+                && !have.contains(&track_key(t))
+        })
         .filter(|t| {
             let n = per.entry(normalize_artist(&t.artist)).or_default();
             *n += 1;
@@ -456,6 +491,7 @@ pub async fn add_suggestions(core: C<'_>, id: String) -> Res<Vec<Track>> {
 
 pub fn recommend_feedback(core: C, artist: String, preference: Option<i8>) {
     let key = artist.trim().to_lowercase();
+    let norm = normalize_artist(&artist);
     {
         let mut st = core.st();
         match preference {
@@ -463,7 +499,24 @@ pub fn recommend_feedback(core: C, artist: String, preference: Option<i8>) {
                 st.library.recommendation_feedback.insert(key, p);
             }
             None => {
-                st.library.recommendation_feedback.remove(&key);
+                st.library.recommendation_feedback.retain(|k, _| {
+                    k != &key && (norm.is_empty() || normalize_artist(k) != norm)
+                });
+                if !norm.is_empty() {
+                    st.library.artist_skips.remove(&norm);
+                    let remove_sig = if let Some(sig) = st.library.taste.artist_signals.get_mut(&norm) {
+                        sig.instant_skips = 0;
+                        sig.early_skips = 0;
+                        sig.mid_abandons = 0;
+                        sig.consecutive_skips = 0;
+                        sig.plays == 0 && sig.completions == 0
+                    } else {
+                        false
+                    };
+                    if remove_sig {
+                        st.library.taste.artist_signals.remove(&norm);
+                    }
+                }
             }
         }
     }
@@ -854,6 +907,27 @@ pub fn sleep_blocks_preload(core: &Arc<Core>) -> bool {
 /// `core.next(true)`. With "end of song" set, the next song starts and waits
 /// paused at its start.
 pub fn on_song_ended(core: &Arc<Core>) {
+    {
+        let mut st = core.st();
+        if st.config.taste.enabled {
+            if let Some(cur) = st.current.clone() {
+                let dur = cur.duration_ms.unwrap_or(180_000);
+                let hour = glyph_core::taste::local_hour();
+                let now_s = glyph_core::paths::now_unix();
+                st.library.taste.record_playback_outcome(
+                    &cur,
+                    dur,
+                    cur.duration_ms,
+                    false,
+                    true,
+                    hour,
+                    now_s,
+                );
+                drop(st);
+                core.library_changed_soon();
+            }
+        }
+    }
     let Some(d) = core.discover() else { return };
     let has_next = core.st().queue.peek_next().is_some();
     let mut g = d.g();

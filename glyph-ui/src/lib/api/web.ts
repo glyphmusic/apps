@@ -22,6 +22,14 @@ import { PREFIX as SHARE_PREFIX, decodeShare, encodeShare, shareLinkId } from ".
 import { SETTINGS_FILE_NAME, applySharedSettings, decodeSettings, encodeSettings, isSettingsCode, settingsToJson } from "./settings-share";
 import { WebEngine, serverAudio } from "./web-player";
 import { WebStats } from "./web-stats";
+import {
+  buildLocalDailyMixes,
+  computeTasteProfile,
+  detectVersions,
+  emptyTasteStore,
+  fallbackOnboardingCatalog,
+  type LocalTasteStore,
+} from "./web-taste";
 import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
 import { bgAdd, bgList, bgRemove } from "./bg-store";
 import { filterTrackByEnabled } from "../settings/sources";
@@ -60,6 +68,7 @@ export function webConfig(): Config {
     playback: { shuffle: "smart", skip_unplayable: true, patient_search: false },
     lists: { sort: {} },
     stats: { enabled: false },
+    taste: { enabled: true, server_collab: true, metadata_enrichment: true },
     mcp: { enabled: false, mode: "server", port: 0, token: "", access: { playback: "write", library: "read", stats: "none", settings: "write" } },
     mpd: { enabled: false, address: "" },
     devices: { discovery: false },
@@ -165,6 +174,7 @@ export class WebBackend implements Backend {
   private artists = new Map<string, ArtistPage>();
   private lyricsOffsets: Record<string, number>;
   private stats: WebStats;
+  private tasteStore: LocalTasteStore;
   private account: WebAccountManager;
   private connect: WebConnectManager;
   private mcp: WebMcpManager;
@@ -193,6 +203,12 @@ export class WebBackend implements Backend {
 
   constructor() {
     this.config = { ...webConfig(), ...(load<Config>("config") ?? {}) };
+    this.config.taste = {
+      enabled: this.config.taste?.enabled ?? true,
+      server_collab: this.config.taste?.server_collab ?? true,
+      metadata_enrichment: this.config.taste?.metadata_enrichment ?? true,
+    };
+    this.tasteStore = { ...emptyTasteStore(), ...(load<Partial<LocalTasteStore>>("taste") ?? {}) };
     this.config.mcp = {
       enabled: Boolean(this.config.mcp?.enabled),
       mode: "server",
@@ -295,6 +311,17 @@ export class WebBackend implements Backend {
               if (!this.playTrackState.countedPlay && this.playTrackState.listenedMs >= threshMs) {
                 this.playTrackState.countedPlay = true;
                 this.stats.addPlay(p.current);
+                if (this.tasteCfg().enabled) {
+                  const ak = norm(primaryArtist(p.current.artist));
+                  if (ak) this.tasteStore.artist_plays[ak] = (this.tasteStore.artist_plays[ak] ?? 0) + 1;
+                  const h = new Date().getHours();
+                  const bi = h >= 5 && h < 11 ? 0 : h >= 11 && h < 17 ? 1 : h >= 17 && h < 22 ? 2 : 3;
+                  this.tasteStore.time_buckets[bi] += 1;
+                  for (const st of detectVersions(p.current.title)) {
+                    this.tasteStore.version_plays[st] = (this.tasteStore.version_plays[st] ?? 0) + 1;
+                  }
+                  this.saveTaste();
+                }
               }
             }
           }
@@ -967,9 +994,17 @@ export class WebBackend implements Backend {
   private advance(back: boolean, auto = false) {
     const q = this.queue, p = this.player;
     if (q.index == null || !q.items.length) return;
-    if (!auto && !back && this.config.stats.enabled && this.playTrackState) {
+    if (!auto && !back && this.playTrackState) {
       if (this.playTrackState.listenedMs > 1000 && this.playTrackState.listenedMs < 30_000 && !this.playTrackState.countedPlay) {
-        this.stats.addSkip();
+        if (this.config.stats.enabled) this.stats.addSkip();
+        if (this.tasteCfg().enabled && p.current) {
+          const ak = norm(primaryArtist(p.current.artist));
+          if (ak) this.tasteStore.artist_skips[ak] = (this.tasteStore.artist_skips[ak] ?? 0) + 1;
+          for (const st of detectVersions(p.current.title)) {
+            this.tasteStore.version_skips[st] = (this.tasteStore.version_skips[st] ?? 0) + 1;
+          }
+          this.saveTaste();
+        }
       }
     }
     if (auto && p.repeat === "one" && p.current) {
@@ -1277,31 +1312,91 @@ export class WebBackend implements Backend {
     return all.filter((t) => norm(t.album ?? "") === al && (norm(primaryArtist(t.artist)) === a || norm(t.artist).includes(a)));
   }
 
+  private saveTaste() {
+    saveSoon("taste", () => this.tasteStore);
+    this.library.disliked_tracks = Object.keys(this.tasteStore.disliked_tracks);
+  }
+
+  private tasteCfg() {
+    return this.config.taste ?? { enabled: true, server_collab: true, metadata_enrichment: true };
+  }
+
+  private async refreshTasteOnline() {
+    const cfg = this.tasteCfg();
+    if (!cfg.enabled) return;
+    const prof = computeTasteProfile(this.library, this.tasteStore, cfg, true);
+    if (cfg.metadata_enrichment && cfg.server_collab) {
+      const missing = prof.liked_artists
+        .map((a) => a.name)
+        .filter((name) => !this.tasteStore.artist_tags[norm(name)])
+        .slice(0, 15);
+      if (missing.length) {
+        const res = await server.tasteTags(missing).catch(() => null);
+        if (res?.items) {
+          for (const it of res.items) {
+            this.tasteStore.artist_tags[norm(it.artist)] = {
+              genres: it.genres ?? [],
+              moods: it.moods ?? [],
+              similar: it.similar ?? [],
+            };
+          }
+        }
+      }
+    }
+    if (cfg.server_collab && prof.liked_artists.length) {
+      const collab = await server
+        .tasteCollab({
+          positive: prof.liked_artists.map((a) => ({ artist: a.name, weight: a.score })),
+          negative: prof.disliked_artists.map((d) => d.name),
+          avoided_tags: prof.avoided_genres.map((g) => g.name),
+          limit: 15,
+          contribute: true,
+        })
+        .catch(() => null);
+      if (collab && this.tasteCfg().server_collab) {
+        this.tasteStore.collab_recs = collab.recommendations ?? [];
+        this.tasteStore.collab_contributors = collab.contributors ?? 0;
+        this.tasteStore.collab_model_ready = Boolean(collab.model_ready);
+      }
+    } else if (!cfg.server_collab) {
+      this.tasteStore.collab_recs = [];
+      this.tasteStore.collab_contributors = 0;
+      this.tasteStore.collab_model_ready = false;
+    }
+    this.saveTaste();
+  }
+
   private async homeFeeds(): Promise<HomeFeeds> {
     if (this.home && Date.now() - this.home.at < HOME_TTL) return this.home.feeds;
+    const cfg = this.tasteCfg();
+    void this.refreshTasteOnline();
     const seeds: Track[] = [];
     for (const r of this.library.recent) if (r.kind === "song" && seeds.length < 2 && !seeds.some((s) => s.artist === r.track.artist)) seeds.push(r.track);
-    for (const t of this.library.liked) if (seeds.length < 2 && !seeds.some((s) => s.artist === t.artist)) seeds.push(t);
+    for (const t of [...this.tasteStore.onboarding_tracks, ...this.library.liked]) if (seeds.length < 4 && !seeds.some((s) => s.artist === t.artist)) seeds.push(t);
     const [trending, ...similar] = await Promise.all([
       server.chart(),
       ...seeds.map((s) => server.similar(primaryArtist(s.artist), s.title).catch(() => [] as Track[])),
     ]);
+    const hidden = new Set((this.library.hidden_artists ?? []).map(norm));
+    const disliked = new Set(Object.keys(this.tasteStore.disliked_tracks));
     const known = new Set([...this.library.liked, ...seeds].map(trackKey));
     const per = new Map<string, number>();
     const recs: Track[] = [];
     for (let i = 0; recs.length < 24 && similar.some((l) => i < l.length); i++) {
       for (const l of similar) {
         const t = l[i];
-        if (!t || known.has(trackKey(t))) continue;
+        if (!t || known.has(trackKey(t)) || disliked.has(trackKey(t))) continue;
         const a = norm(primaryArtist(t.artist));
-        if ((per.get(a) ?? 0) >= 3) continue;
+        if (hidden.has(a) || (this.tasteStore.artist_feedback[a] ?? 0) < 0) continue;
+        if ((per.get(a) ?? 0) >= 2) continue;
         per.set(a, (per.get(a) ?? 0) + 1);
         known.add(trackKey(t));
         recs.push(t);
       }
     }
-    const feeds: HomeFeeds = { recs, trending, new_releases: [], loading: false };
-    if (trending.length || recs.length) this.home = { at: Date.now(), feeds };
+    const mixes = cfg.enabled ? buildLocalDailyMixes(this.library, this.tasteStore, [...recs, ...trending], cfg) : [];
+    const feeds: HomeFeeds = { recs, trending, new_releases: [], mixes, loading: false };
+    if (trending.length || recs.length || mixes.length) this.home = { at: Date.now(), feeds };
     return feeds;
   }
 
@@ -1519,7 +1614,91 @@ export class WebBackend implements Backend {
       toggle_hidden_artist: (a) => this.handlers.hide_artist({ artist: a.name, on: !(lib().hidden_artists ?? []).some((x) => norm(x) === norm(a.name)) }),
       search_history_add: (a) => { lib().search_history = [a.item, ...lib().search_history.filter((x) => JSON.stringify(x) !== JSON.stringify(a.item))].slice(0, 20); this.saveLibrary(); },
       search_history_remove: (a) => { lib().search_history.splice(a.index, 1); this.saveLibrary(); },
-      recommend_feedback: () => undefined,
+      recommend_feedback: (a) => {
+        const k = norm(String(a.artist ?? ""));
+        if (k) {
+          if (a.preference == null) {
+            delete this.tasteStore.artist_feedback[k];
+            delete this.tasteStore.artist_skips[k];
+          } else {
+            this.tasteStore.artist_feedback[k] = Number(a.preference);
+          }
+          this.saveTaste();
+          this.home = null;
+          void this.homeFeeds().then((f) => this.emit("home", f));
+        }
+      },
+      taste_profile: () => computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true),
+      taste_mixes: () => buildLocalDailyMixes(this.library, this.tasteStore, [...(this.home?.feeds.recs ?? []), ...(this.home?.feeds.trending ?? [])], this.tasteCfg()),
+      taste_refresh: async () => {
+        await this.refreshTasteOnline();
+        this.home = null;
+        void this.homeFeeds().then((f) => this.emit("home", f));
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
+      taste_onboarding_catalog: async () => {
+        const remote = await server.tasteOnboarding().catch(() => null);
+        if (remote?.artists?.length) return remote;
+        const chart = await server.chart().catch(() => [] as Track[]);
+        return fallbackOnboardingCatalog(chart);
+      },
+      taste_onboarding_save: async (a) => {
+        this.tasteStore.onboarding_artists = Array.isArray(a.artists) ? a.artists.map(String) : [];
+        this.tasteStore.onboarding_tracks = Array.isArray(a.tracks) ? (a.tracks as Track[]) : [];
+        this.tasteStore.onboarding_genres = Array.isArray(a.genres) ? a.genres.map(String) : [];
+        this.tasteStore.onboarding_done = true;
+        if (a.follow_artists === true) {
+          for (const name of this.tasteStore.onboarding_artists) {
+            if (!lib().followed.some((f) => norm(f) === norm(name))) lib().followed = [name, ...lib().followed];
+          }
+          this.saveLibrary();
+        }
+        this.saveTaste();
+        this.home = null;
+        void this.refreshTasteOnline().then(() => this.homeFeeds()).then((f) => this.emit("home", f));
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
+      taste_dislike_track: (a) => {
+        const tr = a.track as Track;
+        const k = trackKey(tr);
+        if (a.disliked) this.tasteStore.disliked_tracks[k] = tr;
+        else delete this.tasteStore.disliked_tracks[k];
+        this.saveTaste();
+        this.saveLibrary();
+        this.home = null;
+        void this.homeFeeds().then((f) => this.emit("home", f));
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
+      taste_tag_feedback: (a) => {
+        const k = norm(String(a.tag ?? ""));
+        if (k) {
+          if (a.preference == null || a.preference === 0) delete this.tasteStore.tag_feedback[k];
+          else this.tasteStore.tag_feedback[k] = Math.max(-1, Math.min(1, Number(a.preference)));
+          this.saveTaste();
+          this.home = null;
+          void this.homeFeeds().then((f) => this.emit("home", f));
+        }
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
+      taste_version_feedback: (a) => {
+        const k = norm(String(a.style ?? ""));
+        if (k) {
+          if (a.preference == null || a.preference === 0) delete this.tasteStore.version_feedback[k];
+          else this.tasteStore.version_feedback[k] = Math.max(-1, Math.min(1, Number(a.preference)));
+          this.saveTaste();
+          this.home = null;
+          void this.homeFeeds().then((f) => this.emit("home", f));
+        }
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
+      taste_reset: () => {
+        this.tasteStore = emptyTasteStore();
+        this.saveTaste();
+        this.saveLibrary();
+        this.home = null;
+        void this.homeFeeds().then((f) => this.emit("home", f));
+        return computeTasteProfile(this.library, this.tasteStore, this.tasteCfg(), true);
+      },
       // ---- data ----
       search: (a) => this.runSearch(String(a.query), 0, true),
       search_more: (a) => this.runSearch(String(a.query), (this.search && this.search.query === a.query ? this.search.page : 0) + 1, true),

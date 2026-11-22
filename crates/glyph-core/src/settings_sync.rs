@@ -151,6 +151,7 @@ pub fn items(cfg: &Config, vault: Option<&Vault>) -> Vec<(Key, Value)> {
         (setting("integrations"), json(&cfg.integrations)),
         (setting("sharing"), json(&cfg.sharing)),
         (setting("stats"), json(&cfg.stats)),
+        (setting("taste"), json(&cfg.taste)),
         (setting("playback"), json(&cfg.playback)),
         (setting("lists"), json(&cfg.lists)),
         (
@@ -258,6 +259,10 @@ pub fn apply(cfg: &mut Config, state: &mut SyncState, items_in: &[SyncItem], vau
             (kind::SETTING, "stats") => {
                 let Some(x) = parse::<crate::config::StatsConfig>(v) else { continue };
                 cfg.stats = x;
+            }
+            (kind::SETTING, "taste") => {
+                let Some(x) = parse::<crate::config::TasteConfig>(v) else { continue };
+                cfg.taste = x;
             }
             (kind::SETTING, "playback") => {
                 let Some(x) = parse::<crate::config::PlaybackConfig>(v) else { continue };

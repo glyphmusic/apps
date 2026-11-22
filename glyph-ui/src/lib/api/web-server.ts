@@ -377,6 +377,29 @@ export const server = {
   artist: (name: string, lang = "en") =>
     getJson<ServerArtistResponse>("/v1/artist", { name, lang }),
 
+  tasteTags: (artists: string[]) =>
+    sendJson<{ items: { artist: string; genres?: string[]; moods?: string[]; tags?: string[]; similar?: string[] }[] }>(
+      "POST",
+      "/v1/taste/tags",
+      { artists },
+    ),
+
+  tasteCollab: (req: {
+    positive: { artist: string; weight: number }[];
+    negative: string[];
+    avoided_tags: string[];
+    limit?: number;
+    contribute?: boolean;
+  }) =>
+    sendJson<{ recommendations: import("./types").CollabArtistRec[]; contributors: number; model_ready: boolean }>(
+      "POST",
+      "/v1/taste/collab",
+      req,
+    ),
+
+  tasteOnboarding: () =>
+    getJson<import("./types").OnboardingCatalogResponse>("/v1/taste/onboarding"),
+
   // ---- Account & Auth ----
   loginStart: (device_name: string, platform: string, pake?: string) =>
     sendJson<LoginStartResponse>("POST", "/v1/account/login/start", { device_name, platform, ...(pake ? { pake } : {}) }, undefined, undefined, false),

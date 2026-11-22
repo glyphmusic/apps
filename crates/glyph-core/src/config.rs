@@ -42,6 +42,9 @@ pub struct Config {
     /// Opt-in listening statistics (listening time, top artists), synced
     /// across the user's devices when signed in.
     pub stats: StatsConfig,
+    /// Personalized music taste engine: local profile, Daily Mixes, and
+    /// optional server-side collaborative filtering (opt-out in Settings).
+    pub taste: TasteConfig,
     /// Model Context Protocol server: lets AI assistants control Glyph.
     pub mcp: McpConfig,
     /// Play on an MPD (Music Player Daemon) server instead of this computer.
@@ -279,6 +282,25 @@ pub struct LocalConfig {
 pub struct StatsConfig {
     /// Off until the user turns it on.
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TasteConfig {
+    /// Learn taste locally for recommendations, Radio, Search ranking,
+    /// Daily Mixes, and the Taste Profile page.
+    pub enabled: bool,
+    /// Optional server-side collaborative filtering & anonymized co-occurrence.
+    /// Turn off to keep your taste profile 100% local on this device.
+    pub server_collab: bool,
+    /// Enrich local artist affinities with genre & mood metadata tags.
+    pub metadata_enrichment: bool,
+}
+
+impl Default for TasteConfig {
+    fn default() -> Self {
+        Self { enabled: true, server_collab: true, metadata_enrichment: true }
+    }
 }
 
 /// Where AI assistants reach Glyph's MCP server.

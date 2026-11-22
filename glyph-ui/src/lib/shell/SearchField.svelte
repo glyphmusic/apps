@@ -46,6 +46,7 @@
       { id: "library", label: t("nav.library"), keywords: ["library", "bibliothek"], icon: "library" },
       { id: "now_playing", label: t("nav.now_playing"), keywords: ["now playing", "lyrics", "player"], icon: "disc-3" },
       { id: "stats", label: t("stats.title"), keywords: ["stats", "statistiken", "recap"], icon: "chart-column" },
+      { id: "taste", label: t("taste.title"), keywords: ["taste", "geschmack", "mixes", "genres", "moods", "empfehlungen"], icon: "sparkles" },
       { id: "settings", label: t("nav.settings"), keywords: ["settings", "einstellungen", "config"], icon: "settings" },
     ];
     if (!onWeb()) {

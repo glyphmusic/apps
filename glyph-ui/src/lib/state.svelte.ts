@@ -23,7 +23,7 @@ import {
 import { pickRangeKeys, selectedTracksOf, toggleAllKeys, togglePickedKey } from "./state/pick";
 
 export type View =
-  | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "local" | "server";
+  | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "taste" | "local" | "server";
 
 export type SettingsPage =
   | "overview" | "playback" | "audio" | "appearance" | "server" | "account" | "storage" | "transfer" | "migrate" | "integrations" | "plugins" | "about" | "system" | "notifications";
@@ -33,7 +33,7 @@ export type SearchFilter = "all" | "tracks" | "albums" | "artists";
 export type ControlMenu = "sleep" | "sort" | "mini" | "repeat" | "shuffle" | "back" | "forward" | "volume" | "account";
 
 export interface Route { view: View; list: ListKey | null; artist: string | null; profile: string | null; section: Section | null }
-export interface Section { title: string; icon: string; tracks: Track[] }
+export interface Section { title: string; icon: string; tracks: Track[]; subtitle?: string; tags?: string[]; canSavePlaylist?: boolean }
 
 export interface CtxMenu {
   x: number; y: number;
@@ -96,6 +96,10 @@ function normalizeConfig(c: Config): Config {
   c.audio.eq_user_presets ??= [];
   c.audio.output_device ??= null;
   c.storage.download_dir ??= null;
+  c.taste ??= { enabled: true, server_collab: true, metadata_enrichment: true };
+  c.taste.enabled ??= true;
+  c.taste.server_collab ??= true;
+  c.taste.metadata_enrichment ??= true;
   return c;
 }
 
@@ -136,9 +140,10 @@ class App {
   version = $state("0.0.0");
   config = $state<Config>(null as unknown as Config);
   library = $state<Library>(emptyLibrary());
-  /** Keys of liked / downloaded songs: every song row asks, so a set instead of a walk through the whole list. */
+  /** Keys of liked / downloaded / disliked songs: O(1) lookup for rows & menus. */
   private likedKeys = $derived(new Set(this.library.liked.map(trackKey)));
   private downloadedKeys = $derived(new Set(this.library.downloads.map(trackKey)));
+  private dislikedKeys = $derived(new Set(this.library.disliked_tracks ?? []));
   queue = $state<QueueState>({ items: [], index: null, user: 0 });
   player = $state<PlayerState>(emptyPlayer());
   backendState = $state<BackendState>({ kind: "connecting" });
@@ -197,6 +202,8 @@ class App {
   wrongSong = $state<Track | null>(null);
   /** Quick feedback bottom sheet (mobile shake) / modal (desktop shortcut). */
   feedbackOpen = $state(false);
+  /** Standalone Taste Picker modal (opened from Taste Profile to retrain picks). */
+  tastePickerOpen = $state(false);
   onboarding = $state(false);
   splash = $state(false);
   jamOpen = $state(false);
@@ -207,7 +214,7 @@ class App {
   searchQuery = $state("");
   searchFilter = $state<SearchFilter>("all");
   searchFocused = $state(false);
-  home = $state<HomeFeeds>({ recs: [], trending: [], new_releases: [], loading: true });
+  home = $state<HomeFeeds>({ recs: [], trending: [], new_releases: [], mixes: [], loading: true });
   artists = $state<Record<string, ArtistPage>>({});
   lyrics = $state<{ key: string | null; lyrics: Lyrics | null; loading: boolean }>({ key: null, lyrics: null, loading: false });
   downloading = $state<Record<string, number | null>>({});
@@ -581,6 +588,26 @@ class App {
 
   // ---- library ----
   isLiked(t: Track) { return this.likedKeys.has(trackKey(t)); }
+  isDislikedTrack(track: Track) { return this.dislikedKeys.has(trackKey(track)); }
+  toggleDislikeTrack(track: Track) {
+    const on = !this.isDislikedTrack(track);
+    const k = trackKey(track);
+    const cur = this.library.disliked_tracks ?? [];
+    this.library.disliked_tracks = on ? (cur.includes(k) ? cur : [...cur, k]) : cur.filter((x) => x !== k);
+    if (on) {
+      this.home.recs = this.home.recs.filter((x) => trackKey(x) !== k);
+      if (this.home.mixes) {
+        this.home.mixes = this.home.mixes
+          .map((m) => ({ ...m, tracks: m.tracks.filter((x) => trackKey(x) !== k) }))
+          .filter((m) => m.tracks.length > 0);
+      }
+      if (this.section?.canSavePlaylist) {
+        this.section = { ...this.section, tracks: this.section.tracks.filter((x) => trackKey(x) !== k) };
+      }
+    }
+    this.toast(t(on ? "taste.toast.track_disliked" : "taste.toast.track_restored"), "info");
+    return backend().call("taste_dislike_track", { track, disliked: on }).catch(() => {});
+  }
   toggleLike(t: Track) {
     const on = !this.isLiked(t);
     this.library.liked = on ? [t, ...this.library.liked] : this.library.liked.filter((x) => trackKey(x) !== trackKey(t));

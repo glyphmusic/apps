@@ -197,6 +197,12 @@ pub fn library(lib: &Library, downloads: &[Track]) -> Value {
     v["followed"] = json!(lib.followed.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
     v["hidden_sidebar"] = json!(lib.sidebar_hidden);
     v["hidden_artists"] = json!(lib.hidden_artists);
+    v["disliked_tracks"] = json!(lib
+        .taste
+        .disliked_tracks
+        .values()
+        .map(|t| format!("{}|{}", t.title.trim().to_lowercase(), t.artist.trim().to_lowercase()))
+        .collect::<Vec<_>>());
     v["home_top"] = lib.home_top(now);
     v
 }

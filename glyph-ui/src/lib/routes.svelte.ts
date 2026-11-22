@@ -64,6 +64,7 @@ function pathOf(r: Route, query: string): string | null {
       if (statsState.recap) sp.set("recap", statsState.recap);
       return withQuery("/stats", sp);
     }
+    case "taste": return "/taste";
     case "server": return admin.sub ? `/server/${admin.sub}` : "/server";
     case "local": {
       const sp = new URLSearchParams();
@@ -152,7 +153,7 @@ function applyParams(view: View, list: ListKey | null, search: string) {
 function open(path: string, search: string) {
   const parts = path.split("/").filter(Boolean).map((s) => { try { return decodeURIComponent(s); } catch { return s; } });
   const [head, a, b] = parts;
-  const simple: Record<string, View> = { library: "library", playing: "now_playing", stats: "stats", local: "local", releases: "releases" };
+  const simple: Record<string, View> = { library: "library", playing: "now_playing", stats: "stats", taste: "taste", local: "local", releases: "releases" };
   if (!head) return;
   if (head === "search") {
     const q = new URLSearchParams(search).get("q") ?? "";

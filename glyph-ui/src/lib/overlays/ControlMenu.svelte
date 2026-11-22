@@ -153,6 +153,7 @@
           plain("user-round", t("menu.account"), () => { setTab("account", 0); app.openSettings("account"); });
           plain("eye", t("menu.profile"), () => app.openProfilePage(acc.handle));
           plain("history", t("menu.recent"), () => app.openListView({ kind: "recent" }));
+          plain("sparkles", t("taste.title"), () => app.navigate("taste"));
           plain("chart-column", t("menu.stats"), () => app.navigate("stats"));
           out.push({ kind: "sep" });
           plain("life-buoy", t("menu.support"), () => { setTab("about", 1); app.openSettings("about"); });
@@ -163,6 +164,7 @@
           plain("user-round", t("menu.signin"), () => { setTab("account", 0); app.openSettings("account"); });
           out.push({ kind: "sep" });
           plain("history", t("menu.recent"), () => app.openListView({ kind: "recent" }));
+          plain("sparkles", t("taste.title"), () => app.navigate("taste"));
           plain("chart-column", t("menu.stats"), () => app.navigate("stats"));
           plain("life-buoy", t("menu.support"), () => { setTab("about", 1); app.openSettings("about"); });
           plain("settings", t("menu.settings"), () => app.openSettings());

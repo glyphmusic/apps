@@ -18,11 +18,12 @@
   import Releases from "../pages/Releases.svelte";
   import Similar from "../pages/Similar.svelte";
   import Stats from "../pages/Stats.svelte";
+  import Taste from "../pages/Taste.svelte";
   import Server from "../pages/Server.svelte";
   import Local from "../pages/Local.svelte";
   import NowPlaying from "../pages/NowPlaying.svelte";
 
-  const pages = { home: Home, search: Search, library: Library, list: ListView, artist: Artist, profile: Profile, section: Section, releases: Releases, similar: Similar, stats: Stats, local: Local, now_playing: NowPlaying, server: Server };
+  const pages = { home: Home, search: Search, library: Library, list: ListView, artist: Artist, profile: Profile, section: Section, releases: Releases, similar: Similar, stats: Stats, taste: Taste, local: Local, now_playing: NowPlaying, server: Server };
   const key = $derived(JSON.stringify([app.view, app.openList ? listId(app.openList) : null, app.openArtist, app.openProfile, app.section?.title]));
   const Current = $derived(pages[app.view]);
   let scroller: HTMLDivElement | undefined = $state();

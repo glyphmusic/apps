@@ -1,7 +1,7 @@
 use crate::controller::{Core, PlayFrom};
 use crate::jam::{Perms, Reaction};
 use crate::transfer::PickedFile;
-use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, transfer, video, wrong_song};
+use crate::{account, commands, discover, jam, mcp_tools, plugins, storage, system, taste, transfer, video, wrong_song};
 use glyph_core::{ListKey, SearchItem};
 use glyph_protocol::{ProviderId, Track};
 use serde::de::DeserializeOwned;
@@ -318,6 +318,34 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             discover::recommend_feedback(core, req(&args, "artist")?, opt(&args, "preference")?);
             Ok(Value::Null)
         }
+        "taste_profile" => Ok(taste::taste_profile(core)),
+        "taste_mixes" => Ok(taste::taste_mixes(core)),
+        "taste_refresh" => res(taste::taste_refresh(core).await),
+        "taste_onboarding_catalog" => res(taste::taste_onboarding_catalog(core).await),
+        "taste_onboarding_save" => res(taste::taste_onboarding_save(
+            core,
+            req(&args, "artists")?,
+            opt(&args, "tracks")?.unwrap_or_default(),
+            opt(&args, "genres")?.unwrap_or_default(),
+            opt(&args, "follow_artists")?,
+        )
+        .await),
+        "taste_dislike_track" => Ok(taste::taste_dislike_track(
+            core,
+            req(&args, "track")?,
+            req(&args, "disliked")?,
+        )),
+        "taste_tag_feedback" => Ok(taste::taste_tag_feedback(
+            core,
+            req(&args, "tag")?,
+            opt(&args, "preference")?,
+        )),
+        "taste_version_feedback" => Ok(taste::taste_version_feedback(
+            core,
+            req(&args, "style")?,
+            opt(&args, "preference")?,
+        )),
+        "taste_reset" => Ok(taste::taste_reset(core)),
         "lyrics_alternatives" => res(discover::lyrics_alternatives(core, req(&args, "track")?).await),
         "lyrics_pick" => res(discover::lyrics_pick(core, req(&args, "track")?, req(&args, "lyrics")?).await),
         "stats_summary" => Ok(discover::stats_summary(core, req(&args, "range")?)),

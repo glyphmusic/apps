@@ -90,11 +90,12 @@
     phone.libFilter = next;
   };
 
-  type LibAction = "local" | "migrate" | "stats" | "new";
+  type LibAction = "local" | "migrate" | "stats" | "taste" | "new";
   const actionOptions = $derived.by(() => {
     const opts: { value?: LibAction; label?: string; icon?: string; sep?: boolean }[] = [];
     if (!touch && !onWeb()) opts.push({ value: "local", label: t("local.title"), icon: "hard-drive" });
     if (!onWeb()) opts.push({ value: "migrate", label: t("library.migrate"), icon: "arrow-right-left" });
+    opts.push({ value: "taste", label: t("taste.title"), icon: "sparkles" });
     opts.push({ value: "stats", label: t("stats.title"), icon: "chart-column" });
     opts.push({ sep: true });
     opts.push({ value: "new", label: t("library.playlist.new"), icon: "plus" });
@@ -103,6 +104,7 @@
   function pickAction(v: LibAction | null) {
     if (v === "local") app.navigate("local");
     else if (v === "migrate") app.openSettings("migrate");
+    else if (v === "taste") app.navigate("taste");
     else if (v === "stats") app.navigate("stats");
     else if (v === "new") app.nameDialog = { tracks: [], rename: null, initial: "" };
   }

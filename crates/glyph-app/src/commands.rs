@@ -618,7 +618,14 @@ async fn run_search(core: &Arc<Core>, query: &str, page: usize) -> Res<Value> {
     let b = core.backend_or_err()?;
     let ops = glyph_core::search_ops::SearchOps::parse(query);
     let (plain, phrases) = glyph_core::taste::parse_query(&ops.query());
-    let taste = glyph_core::taste::Taste::from_library(&core.st().library);
+    let taste = {
+        let st = core.st();
+        if st.config.taste.enabled {
+            glyph_core::taste::Taste::from_library(&st.library)
+        } else {
+            glyph_core::taste::Taste::default()
+        }
+    };
     // Lines of lyrics also find songs (a separate section, its own request).
     let lq = glyph_core::search_ops::SearchOps::parse(query).text;
     if glyph_core::lyricsearch::looks_like_lyrics(&lq) {
@@ -882,7 +889,9 @@ fn feeds_json(core: &Core) -> Value {
     let st = core.st();
     json!({
         "recs": st.feeds.recs, "trending": st.feeds.trending,
-        "new_releases": st.feeds.new_releases.iter().map(dto::release).collect::<Vec<_>>(), "loading": st.feeds.loading,
+        "new_releases": st.feeds.new_releases.iter().map(dto::release).collect::<Vec<_>>(),
+        "mixes": st.feeds.mixes,
+        "loading": st.feeds.loading,
     })
 }
 
@@ -1012,12 +1021,29 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
             return feeds_json(core);
         }
     }
-    // Seeds: one song for each of the user's top artists, then liked songs.
-    let (seeds, taste, recent, feedback) = {
+    // Refresh genre/mood tags & optional server collaborative filtering in background.
+    crate::taste::enrich_and_sync(core, false).await;
+    if stale(core) {
+        return feeds_json(core);
+    }
+    // Seeds: one song for each of the user's top artists, onboarding picks, then liked songs.
+    let (seeds, taste, taste_on, recent, feedback, collab_artists) = {
         let st = core.st();
-        let taste = glyph_core::taste::Taste::from_library(&st.library);
+        let taste_on = st.config.taste.enabled;
+        let taste = if taste_on {
+            glyph_core::taste::Taste::from_library(&st.library)
+        } else {
+            glyph_core::taste::Taste::default()
+        };
         let mut seeds: Vec<Track> = Vec::new();
-        let pool: Vec<Track> = st.library.liked.iter().chain(st.library.recent_tracks()).cloned().collect();
+        let pool: Vec<Track> = st
+            .library
+            .liked
+            .iter()
+            .chain(st.library.taste.onboarding_tracks.iter())
+            .chain(st.library.recent_tracks())
+            .cloned()
+            .collect();
         for a in taste.top_artists(4) {
             if let Some(t) = pool.iter().find(|t| glyph_core::taste::credited(&t.artist).contains(&a)) {
                 if !seeds.iter().any(|s| s.id == t.id && s.source == t.source) {
@@ -1025,17 +1051,64 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
                 }
             }
         }
-        for t in st.library.liked.iter().take(2) {
+        for t in st.library.taste.onboarding_tracks.iter().take(2).chain(st.library.liked.iter().take(2)) {
             if !seeds.iter().any(|s| s.id == t.id && s.source == t.source) {
                 seeds.push(t.clone());
             }
         }
-        seeds.truncate(5);
+        seeds.truncate(6);
         let recent: HashSet<String> = st.library.recent_tracks().take(30).map(glyph_core::dedupe::track_key).collect();
-        (seeds, taste, recent, st.library.recommendation_feedback.clone())
+        let collab_artists: Vec<(String, f32)> = if taste_on && st.config.taste.server_collab {
+            st.library
+                .taste
+                .collab_cache
+                .as_ref()
+                .map(|c| {
+                    c.recommendations
+                        .iter()
+                        .take(5)
+                        .map(|r| (r.artist.clone(), r.score.clamp(0.0, 2.5)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (seeds, taste, taste_on, recent, st.library.recommendation_feedback.clone(), collab_artists)
     };
-    // Popular songs and the similar songs of every seed side by side.
-    let (trending, similar) = futures::join!(b.trending(30), futures::future::join_all(seeds.iter().map(|s| b.similar(s))));
+    // Also fetch top tracks for top onboarding/collaborative artists that lack local seed tracks.
+    let mut extra_artists: Vec<String> = collab_artists.iter().take(3).map(|(a, _)| a.clone()).collect();
+    if seeds.len() < 3 && taste_on {
+        let st = core.st();
+        for a in &st.library.taste.onboarding_artists {
+            if !extra_artists.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+                extra_artists.push(a.clone());
+            }
+            if extra_artists.len() >= 5 {
+                break;
+            }
+        }
+    }
+    let lang_str = core.st().config.resolved_language().to_string();
+    let extra_fut = futures::future::join_all(extra_artists.iter().map(|a| {
+        let b = b.clone();
+        let a = a.clone();
+        let lang = lang_str.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(4), b.artist_server(&a, &lang))
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.top.into_iter().take(5).collect::<Vec<Track>>())
+                .unwrap_or_default()
+        }
+    }));
+    // Popular songs, similar songs of every seed, and collaborative/onboarding artist tracks side by side.
+    let (trending, similar, extra_tracks) = futures::join!(
+        b.trending(30),
+        futures::future::join_all(seeds.iter().map(|s| b.similar(s))),
+        extra_fut
+    );
     let trending = trending.unwrap_or_default();
     if stale(core) {
         return feeds_json(core);
@@ -1044,12 +1117,12 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
         let mut st = core.st();
         // Offline: keep what is on screen instead of an empty row.
         if !trending.is_empty() || st.feeds.trending.is_empty() {
-            let list: Vec<Track> = trending.into_iter().filter(|t| feed_ok(&st, t)).take(20).collect();
+            let list: Vec<Track> = trending.iter().filter(|t| feed_ok(&st, t)).take(20).cloned().collect();
             st.feeds.trending = list;
         }
     }
     emit_feeds(core);
-    // Songs suggested by several seeds and by liked artists come first.
+    // Songs suggested by several seeds, onboarding picks, and collaborative artists.
     let mut found: Vec<(Track, f32)> = Vec::new();
     for sim in similar {
         for (i, t) in sim.unwrap_or_default().into_iter().take(25).enumerate() {
@@ -1061,19 +1134,57 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
             }
         }
     }
+    for tracks in extra_tracks {
+        for (i, t) in tracks.into_iter().enumerate() {
+            let w = 0.9 - i as f32 * 0.12;
+            let key = glyph_core::dedupe::track_key(&t);
+            match found.iter_mut().find(|(x, _)| glyph_core::dedupe::track_key(x) == key) {
+                Some(f) => f.1 += w,
+                None => found.push((t, w)),
+            }
+        }
+    }
     if stale(core) {
         return feeds_json(core);
     }
+    let collab_map: std::collections::HashMap<String, f32> = collab_artists
+        .into_iter()
+        .map(|(a, s)| (glyph_core::dedupe::normalize_artist(&a), s))
+        .collect();
+    let bucket = glyph_core::taste::TimeBucket::now();
+    let hour = glyph_core::taste::local_hour();
+    let date_key = crate::taste::today_key();
     {
         let mut st = core.st();
+        let all_candidates: Vec<Track> = found
+            .iter()
+            .map(|(t, _)| t.clone())
+            .chain(trending.iter().cloned())
+            .collect();
         let mut v: Vec<(Track, f32)> = found
             .into_iter()
-            .filter(|(t, _)| feed_ok(&st, t) && !taste.is_hidden(&t.artist) && !taste.is_liked(t) && !recent.contains(&glyph_core::dedupe::track_key(t)))
+            .filter(|(t, _)| {
+                feed_ok(&st, t)
+                    && !taste.is_hidden(&t.artist)
+                    && !taste.is_disliked_track(t)
+                    && !taste.is_liked(t)
+                    && !recent.contains(&glyph_core::dedupe::track_key(t))
+            })
             .map(|(t, w)| {
-                let preference = feedback.get(&t.artist.trim().to_lowercase()).copied().unwrap_or(0);
-                let sc = w + taste.artist_weight(&t.artist) * 0.8 + preference as f32 * 2.0;
+                let sc = if taste_on {
+                    let cb = glyph_core::taste::credited(&t.artist)
+                        .iter()
+                        .filter_map(|a| collab_map.get(a))
+                        .cloned()
+                        .fold(0.0f32, f32::max);
+                    taste.score_recommendation(&t, w + cb * 0.65, bucket, false)
+                } else {
+                    let preference = feedback.get(&t.artist.trim().to_lowercase()).copied().unwrap_or(0);
+                    w + preference as f32 * 2.0
+                };
                 (t, sc)
             })
+            .filter(|(_, sc)| sc.is_finite())
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if !(v.is_empty() && !st.feeds.recs.is_empty()) {
@@ -1092,6 +1203,19 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
             st.feeds.recs = list;
             save_feeds_cache(&scope, &st.feeds.trending, &st.feeds.recs);
         }
+        if taste_on {
+            let hide = st.config.audio.hide_explicit;
+            st.feeds.mixes = glyph_core::taste::build_daily_mixes(
+                &st.library,
+                &taste,
+                &all_candidates,
+                &date_key,
+                hour,
+                hide,
+            );
+        } else {
+            st.feeds.mixes.clear();
+        }
         st.feeds.loading = false;
     }
     emit_feeds(core);
@@ -1106,6 +1230,7 @@ pub fn reload_feeds(core: &Arc<Core>) {
         st.feeds.recs.clear();
         st.feeds.trending.clear();
         st.feeds.new_releases.clear();
+        st.feeds.mixes.clear();
         // A load still running belongs to the old state: let this one start.
         st.feeds.epoch += 1;
         st.feeds.loading = false;
@@ -1558,9 +1683,9 @@ pub async fn track_album(core: C<'_>, track: Track) -> Res<Option<String>> {
 
 /// Applies `cfg` to in-memory state, player, theme icon, disk, UI events, and backend sync.
 pub(crate) async fn commit_config(core: &Arc<Core>, mut cfg: Config, preserve_player_controls: bool) -> Res {
-    let (stats_was, shuffle_was) = {
+    let (stats_was, shuffle_was, taste_was) = {
         let mut st = core.st();
-        let was = (st.config.stats.enabled, st.config.playback.shuffle);
+        let was = (st.config.stats.enabled, st.config.playback.shuffle, st.config.taste.clone());
         if preserve_player_controls {
             // Volume, shuffle and repeat are the player's own: the UI's copy may be older.
             cfg.player.volume = st.config.player.volume;
@@ -1575,6 +1700,9 @@ pub(crate) async fn commit_config(core: &Arc<Core>, mut cfg: Config, preserve_pl
     }
     if stats_was != cfg.stats.enabled {
         crate::discover::on_stats_toggle(core, cfg.stats.enabled);
+    }
+    if taste_was != cfg.taste {
+        crate::taste::on_taste_config_changed(core, &taste_was, &cfg.taste);
     }
     crate::settings::apply_to_player(core, &cfg);
     core.config_changed();

@@ -17,6 +17,7 @@
   const close = () => (phone.drawerOpen = false);
   function go(f: () => void) { close(); f(); }
   const rows = $derived([
+    { icon: "sparkles", label: t("taste.title"), run: () => app.navigate("taste") },
     { icon: "chart-column", label: t("stats.title"), run: () => app.navigate("stats") },
     { icon: "history", label: t("home.recent"), run: () => app.openListView({ kind: "recent" }) },
     ...(app.library.downloads.length ? [{ icon: "arrow-down-to-line", label: t("library.downloads"), run: () => app.openListView({ kind: "downloads" }) }] : []),
