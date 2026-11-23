@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.5 - 2026-11-24
+
+### Fixed
+
+- **Black screen on startup (Android, desktop and web)**: version 0.13.4 could stop at a black screen right after launch because the music video player was set up too early. It is now set up only when needed. Update to 0.13.5 to fix it.
+
 ## 0.13.4 - 2026-11-23
 
 ### Added

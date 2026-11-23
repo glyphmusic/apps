@@ -77,7 +77,8 @@ export class VideoState {
   private picks: Record<string, string> = typeof localStorage !== "undefined" ? loadPicks() : {};
   private searchSeq = 0;
   private resolveSeq = 0;
-  private audio: VideoAudioBridge;
+  private explicitAudio: VideoAudioBridge | null;
+  private bound = false;
   private now: () => number;
   private controller: VideoPlaybackController | null = null;
   private awaitingAudioPause = false;
@@ -86,16 +87,30 @@ export class VideoState {
   private pauseRetries = 0;
 
   constructor(
-    audio: VideoAudioBridge = app,
+    audio: VideoAudioBridge | null = null,
     now: () => number = () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
   ) {
-    this.audio = audio;
+    this.explicitAudio = audio;
     this.now = now;
+    // The shared pp is resolved lazily: this module is part of an import cycle with
+    // state.svelte.ts, so pp is not yet initialised while this file is evaluated
+    // (reading it here crashed startup with a blank screen).
+    if (audio) this.bind();
+  }
+
+  private get audio(): VideoAudioBridge {
+    return this.explicitAudio ?? app;
+  }
+
+  private bind() {
+    if (this.bound) return;
+    this.bound = true;
     this.audio.onBackendPlayerStatus((status) => this.handleBackendAudioStatus(status));
     this.audio.onExplicitAudioPlay(() => this.handleExplicitAudioPlay());
   }
 
   registerController(ctrl: VideoPlaybackController): () => void {
+    this.bind();
     this.controller = ctrl;
     return () => {
       if (this.controller === ctrl) this.controller = null;
