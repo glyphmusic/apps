@@ -57,6 +57,7 @@ jobs:
         run: |
           npm --prefix glyph-ui ci
           npm --prefix glyph-ui run check
+          npm --prefix glyph-ui run test
           npm --prefix glyph-ui run build
       - name: Check Tauri app
         run: cargo check -p glyph-tauri

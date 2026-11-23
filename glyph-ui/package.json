@@ -10,7 +10,7 @@
     "dev:web": "vite --mode web",
     "build:web": "vite build --mode web",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "check": "svelte-check --tsconfig ./tsconfig.json && vitest run src/lib/__tests__/i18n.test.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

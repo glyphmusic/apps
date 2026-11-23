@@ -136,13 +136,24 @@
     if (v >= 0.4) return t("taste.variety.medium");
     return t("taste.variety.focused");
   });
+  const isServerMode = $derived(profile?.mode === "server" || profile?.mode === "hybrid");
   const modeLabel = $derived(
-    profile?.mode === "hybrid"
-      ? t("taste.mode.hybrid")
+    isServerMode
+      ? t("taste.mode.server")
       : profile?.mode === "off"
         ? t("taste.mode.off")
         : t("taste.mode.local"),
   );
+  function toggleLocalOptOut() {
+    app.setConfig((c) => {
+      c.taste = {
+        enabled: c.taste?.enabled ?? true,
+        server_collab: !(c.taste?.server_collab ?? true),
+        metadata_enrichment: c.taste?.metadata_enrichment ?? true,
+      };
+    });
+  }
+  const intentMode = $derived(profile?.intent?.mode ?? "balanced");
   const empty = $derived(
     !!profile &&
       profile.signals_count === 0 &&
@@ -160,8 +171,8 @@
     <div class="hl">
       {#if !app.compact}<SectionTitle heading title={t("taste.title")} />{/if}
       {#if profile}
-        <button type="button" class="mode-pill" class:hybrid={profile.mode === "hybrid"} onclick={() => app.openSettings("playback")}>
-          <Icon name={profile.mode === "hybrid" ? "globe" : profile.mode === "off" ? "eye-off" : "lock"} size={12} color={profile.mode === "hybrid" ? "var(--accent)" : "var(--dim)"} />
+        <button type="button" class="mode-pill" class:hybrid={isServerMode} onclick={toggleLocalOptOut}>
+          <Icon name={isServerMode ? "globe" : profile.mode === "off" ? "eye-off" : "lock"} size={12} color={isServerMode ? "var(--accent)" : "var(--dim)"} />
           <span>{modeLabel}</span>
         </button>
       {/if}
@@ -222,6 +233,41 @@
             />
           </div>
 
+          <!-- Active Session Intention -->
+          {#if profile.intent}
+            <section class="sec">
+              <SectionTitle icon="activity" title={t("taste.intent.title")} />
+              <div class="card intent-card">
+                <div class="intent-main">
+                  <div class="intent-head">
+                    <span class="intent-pill">{t(`taste.intent.mode.${intentMode}`)}</span>
+                    {#if profile.intent.vibe_pivot}
+                      <span class="intent-pivot">{t("taste.intent.vibe_pivot")}</span>
+                    {/if}
+                  </div>
+                  <div class="intent-desc">{t(`taste.intent.desc.${intentMode}`)}</div>
+                  {#if profile.intent.focus_genres.length || profile.intent.focus_moods.length}
+                    <div class="intent-tags">
+                      {#each [...profile.intent.focus_genres, ...profile.intent.focus_moods].slice(0, 5) as tag (tag)}
+                        <span class="itag">{tag}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+                <div class="intent-meters">
+                  <div class="meter">
+                    <div class="mlbl"><span>{t("taste.intent.energy")}</span><span class="mono">{Math.round(profile.intent.energy * 100)}%</span></div>
+                    <span class="track"><span class="fill" style:width="{Math.max(8, Math.round(profile.intent.energy * 100))}%"></span></span>
+                  </div>
+                  <div class="meter">
+                    <div class="mlbl"><span>{t("taste.intent.novelty")}</span><span class="mono">{Math.round(profile.intent.novelty * 100)}%</span></div>
+                    <span class="track"><span class="fill" style:width="{Math.max(8, Math.round(profile.intent.novelty * 100))}%"></span></span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          {/if}
+
           <!-- Top Genres & Moods -->
           <div class="two">
             <section class="sec">
@@ -271,6 +317,14 @@
                   </div>
                 {/if}
                 <div class="subnote">{t("taste.moods.hint")}</div>
+                {#if profile.top_eras?.length}
+                  <div class="eras">
+                    <span class="eralbl">{t("taste.eras.title")}</span>
+                    {#each profile.top_eras as era (era.name)}
+                      <span class="itag">{era.name} · {era.share_pct}%</span>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             </section>
           </div>
@@ -421,8 +475,13 @@
           </section>
 
           <div class="footer">
-            <div class="note">{t(serverCollab ? "taste.note.hybrid" : "taste.note.local")}</div>
-            <Button kind="text" onclick={confirmReset}>{t("taste.reset.button")}</Button>
+            <div class="note">{t(serverCollab ? "taste.note.server" : "taste.note.local")}</div>
+            <div class="factions">
+              <Button kind="text" onclick={toggleLocalOptOut}>
+                {t(serverCollab ? "taste.switch_local" : "taste.switch_server")}
+              </Button>
+              <Button kind="text" onclick={confirmReset}>{t("taste.reset.button")}</Button>
+            </div>
           </div>
         </div>
       {/if}
@@ -560,5 +619,54 @@
   }
   .ccard:hover { background: var(--card-hover); }
   .footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
-  .note { font-size: var(--xs); color: var(--faint); }
+  .factions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .note { font-size: var(--xs); color: var(--faint); flex: 1; min-width: 240px; }
+  .intent-card {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .intent-main { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 220px; }
+  .intent-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .intent-pill {
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 20%, rgba(255, 255, 255, .05));
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+  }
+  .intent-pivot {
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .08);
+    color: var(--dim);
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .intent-desc { font-size: var(--sm); color: var(--dim); }
+  .intent-tags { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+  .itag {
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .06);
+    color: var(--dim);
+    font-size: 11.5px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .intent-meters { display: flex; flex-direction: column; gap: 10px; width: 210px; flex: none; }
+  .meter { display: flex; flex-direction: column; gap: 5px; }
+  .mlbl { display: flex; justify-content: space-between; font-size: var(--xs); color: var(--dim); }
+  .eras { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, .06); }
+  .eralbl { font-size: var(--xs); color: var(--faint); margin-right: 4px; }
 </style>

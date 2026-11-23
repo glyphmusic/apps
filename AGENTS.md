@@ -10,6 +10,11 @@
 - Skip cleanup while Cargo/Rustc is running. Do not stop another build or app to clean it. Refuse paths outside `target` and directory links.
 - A cleanup failure must be reported, never silently presented as successful. Do not bypass tool/policy rejections with a different deletion mechanism.
 
+# Translations (i18n)
+
+- Whenever you add, change, or remove UI strings, update `assets/i18n/en.toml` **and every other language file** in `assets/i18n/*.toml` (`af`, `de`, `es`, `fr`, `it`, `pl`, `pt`, `ru`, `tr`, `uk`) — never update only `en.toml` and `de.toml`.
+- Verify all languages have exact key and `{placeholder}` parity via `npm --prefix glyph-ui run check` (runs `svelte-check` and `i18n.test.ts`) and `cargo test -p glyph-core`.
+
 # Pull requests
 
 Before opening a pull request, read https://docs.glyph.my/contributing/pull-requests

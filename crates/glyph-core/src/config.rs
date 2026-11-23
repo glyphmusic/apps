@@ -287,14 +287,29 @@ pub struct StatsConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TasteConfig {
-    /// Learn taste locally for recommendations, Radio, Search ranking,
-    /// Daily Mixes, and the Taste Profile page.
+    /// Master switch for music taste learning, recommendations, Radio, Search
+    /// ranking, Daily Mixes, and the Taste Profile page. Default: `true`.
     pub enabled: bool,
-    /// Optional server-side collaborative filtering & anonymized co-occurrence.
-    /// Turn off to keep your taste profile 100% local on this device.
+    /// Server-first Taste Engine (default `true`): runs intent-aware
+    /// recommendations, Daily Mixes, Radio continuation, tag caching, and
+    /// collaborative filtering on the Glyph server. Turn off (opt-out) to keep
+    /// Taste 100 % local on this device.
     pub server_collab: bool,
-    /// Enrich local artist affinities with genre & mood metadata tags.
+    /// Enrich artist affinities with genre, mood, and era tags (via server
+    /// cache when server mode is on, or direct local lookup when opted out).
     pub metadata_enrichment: bool,
+}
+
+impl TasteConfig {
+    /// True when the server-first Taste Engine is enabled (the default).
+    pub fn is_server_mode(&self) -> bool {
+        self.enabled && self.server_collab
+    }
+
+    /// True when the user opted out of server Taste and runs strictly locally.
+    pub fn is_local_only(&self) -> bool {
+        self.enabled && !self.server_collab
+    }
 }
 
 impl Default for TasteConfig {
@@ -1085,5 +1100,112 @@ youtube = \"abc\"").unwrap();
         cfg.save_to(&p).unwrap();
         let again = Config::load_from(&p).unwrap();
         assert_eq!(again.keys.lastfm.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn i18n_tables_are_complete_for_all_languages() {
+        use std::collections::BTreeMap;
+
+        fn parse_table(text: &str, name: &str) -> BTreeMap<String, String> {
+            let mut map = BTreeMap::new();
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let rest = line
+                    .strip_prefix('"')
+                    .unwrap_or_else(|| panic!("{name}:{} missing leading quote: {line}", idx + 1));
+                let (key, val_part) = rest
+                    .split_once("\" = \"")
+                    .unwrap_or_else(|| panic!("{name}:{} invalid entry format: {line}", idx + 1));
+                let val = val_part
+                    .strip_suffix('"')
+                    .unwrap_or_else(|| panic!("{name}:{} missing trailing quote: {line}", idx + 1));
+                assert!(!val.trim().is_empty(), "{name}:{} empty value for key {key}", idx + 1);
+                assert!(
+                    map.insert(key.to_string(), val.to_string()).is_none(),
+                    "{name}:{} duplicate key {key}",
+                    idx + 1
+                );
+            }
+            map
+        }
+
+        fn placeholders(s: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let bytes = s.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'{' {
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                        j += 1;
+                    }
+                    if j > start && j < bytes.len() && bytes[j] == b'}' {
+                        out.push(s[start..j].to_string());
+                        i = j + 1;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            out.sort();
+            out
+        }
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/i18n");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("toml"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 2, "expected multiple locale files in {}", dir.display());
+
+        let en_text = std::fs::read_to_string(dir.join("en.toml")).expect("read en.toml");
+        let en = parse_table(&en_text, "en.toml");
+        assert!(!en.is_empty(), "en.toml must not be empty");
+
+        for path in files {
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let code = path.file_stem().unwrap().to_string_lossy().to_string();
+            assert_eq!(
+                Config::language_from_locale(Some(&code)),
+                code.as_str(),
+                "{file_name} is not registered in Config::language_from_locale"
+            );
+            if code == "en" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read locale file");
+            let table = parse_table(&text, &file_name);
+
+            let missing: Vec<&String> = en.keys().filter(|k| !table.contains_key(*k)).collect();
+            let extra: Vec<&String> = table.keys().filter(|k| !en.contains_key(*k)).collect();
+            assert!(
+                missing.is_empty(),
+                "{file_name} is missing {} keys from en.toml (first 10: {:?})",
+                missing.len(),
+                &missing[..missing.len().min(10)]
+            );
+            assert!(
+                extra.is_empty(),
+                "{file_name} has {} extra keys not in en.toml (first 10: {:?})",
+                extra.len(),
+                &extra[..extra.len().min(10)]
+            );
+
+            for (key, en_val) in &en {
+                let val = &table[key];
+                assert_eq!(
+                    placeholders(val),
+                    placeholders(en_val),
+                    "{file_name} placeholder mismatch for key {key}"
+                );
+            }
+        }
     }
 }

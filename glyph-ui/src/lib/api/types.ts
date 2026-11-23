@@ -302,7 +302,27 @@ export interface ListeningHabits {
   variety_score: number;
   total_plays: number;
   total_skips: number;
+  total_replays?: number;
   versions: VersionInsight[];
+}
+
+export type ListeningMode =
+  | "balanced"
+  | "discovery"
+  | "comfort"
+  | "deep_focus"
+  | "artist_dive"
+  | "vibe_reset"
+  | "high_energy"
+  | "late_night_wind_down";
+
+export interface InferredIntent {
+  mode: ListeningMode;
+  focus_genres: string[];
+  focus_moods: string[];
+  energy: number;
+  novelty: number;
+  vibe_pivot: boolean;
 }
 
 export interface ArtistAffinityInsight {
@@ -327,13 +347,15 @@ export interface CollabArtistRec {
 }
 
 export interface TasteProfile {
-  mode: "hybrid" | "local" | "off";
+  mode: "server" | "hybrid" | "local" | "off";
   confidence: number;
   signals_count: number;
   onboarding_done: boolean;
   top_genres: WeightedTag[];
   avoided_genres: WeightedTag[];
   moods: WeightedTag[];
+  top_eras?: WeightedTag[];
+  intent?: InferredIntent;
   habits: ListeningHabits;
   liked_artists: ArtistAffinityInsight[];
   disliked_artists: ArtistDislikeInsight[];
@@ -344,6 +366,15 @@ export interface TasteProfile {
   collab_recs: CollabArtistRec[];
   collab_contributors: number;
   collab_model_ready: boolean;
+}
+
+export interface TasteRecommendResponse {
+  recommendations: { track: Track; score: number; reason: string; because_of?: string[] }[];
+  mixes?: DailyMix[];
+  collab?: { recommendations: CollabArtistRec[]; contributors: number; model_ready: boolean };
+  artist_tags?: { artist: string; genres?: string[]; moods?: string[]; eras?: string[]; tags?: string[]; similar?: string[] }[];
+  intent?: InferredIntent;
+  engine?: string;
 }
 
 export interface OnboardingArtist {

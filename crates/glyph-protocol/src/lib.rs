@@ -14,8 +14,11 @@ pub mod release;
 pub mod taste;
 pub mod trust;
 pub use taste::{
-    ArtistTags, CollabArtistRec, OnboardingArtist, OnboardingCatalogResponse, TasteArtistSignal,
-    TasteCollabRequest, TasteCollabResponse, TasteTagsRequest, TasteTagsResponse,
+    ArtistTags, CollabArtistRec, DailyMix, InferredIntent, ListeningMode, OnboardingArtist,
+    OnboardingCatalogResponse, RecommendedTrack, SessionEventContext, SessionEventOutcome,
+    SessionEventSignal, TasteArtistSignal, TasteCollabRequest, TasteCollabResponse, TastePurpose,
+    TasteRecommendRequest, TasteRecommendResponse, TasteSeedTrack, TasteSessionContext,
+    TasteTagSignal, TasteTagsRequest, TasteTagsResponse,
 };
 pub use trust::{cover_cache_allowed, valid_video_id, VideoId};
 
@@ -290,6 +293,9 @@ pub mod capability {
     /// Hybrid music taste enrichment, collaborative filtering and onboarding
     /// starter catalog (`/v1/taste/tags`, `/v1/taste/collab`, `/v1/taste/onboarding`).
     pub const TASTE: &str = "taste";
+    /// Full server-side intent-aware music taste & recommendation engine
+    /// (`/v1/taste/recommend` for Home feeds, Daily Mixes, and Radio).
+    pub const TASTE_ENGINE: &str = "taste_engine";
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }

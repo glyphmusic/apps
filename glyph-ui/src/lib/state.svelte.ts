@@ -227,6 +227,8 @@ class App {
   private clockUntil = 0;
   private clockTimer = 0;
   private artistLru: string[] = [];
+  private backendPlayerListeners = new Set<(status: PlayerState["status"]) => void>();
+  private explicitAudioPlayListeners = new Set<() => void>();
 
   private searchTimer = 0;
   private toastSeq = 0;
@@ -263,7 +265,11 @@ class App {
     this.onboarding = snap.first_run && !inSideWindow();
     if (snap.first_run && !inSideWindow()) this.tuneVisuals();
 
-    api.on("player", (p) => this.setPlayer({ ...this.player, ...p }));
+    api.on("player", (p) => {
+      const next = { ...this.player, ...p };
+      this.setPlayer(next);
+      for (const fn of this.backendPlayerListeners) fn(next.status);
+    });
     api.on("queue", (q) => (this.queue = q));
     // The core sends only the parts that changed (`{ __patch: {..} }`); the
     // rest stays the same object, so lists that did not change do not redraw.
@@ -372,7 +378,10 @@ class App {
         if (!document.hidden && this.ready && backend().kind === "tauri") {
           void backend().call<Pick<Snapshot, "player" | "queue">>("resume_state").then((s) => {
             if (!s) return;
-            if (s.player) this.setPlayer(s.player);
+            if (s.player) {
+              this.setPlayer(s.player);
+              for (const fn of this.backendPlayerListeners) fn(s.player.status);
+            }
             if (s.queue) this.queue = s.queue;
           }).catch(() => {});
         }
@@ -490,9 +499,24 @@ class App {
 
   isCurrent(t: Track) { return this.currentKey === trackKey(t); }
 
+  onBackendPlayerStatus(fn: (status: PlayerState["status"]) => void): () => void {
+    this.backendPlayerListeners.add(fn);
+    return () => this.backendPlayerListeners.delete(fn);
+  }
+
+  onExplicitAudioPlay(fn: () => void): () => void {
+    this.explicitAudioPlayListeners.add(fn);
+    return () => this.explicitAudioPlayListeners.delete(fn);
+  }
+
+  private notifyExplicitAudioPlay() {
+    for (const fn of this.explicitAudioPlayListeners) fn();
+  }
+
   play(tracks: Track[], index = 0, context?: string) {
     const t0 = tracks[index];
     if (!t0) return;
+    this.notifyExplicitAudioPlay();
     this.optimistic({ current: t0, status: "loading", position: 0, duration: t0.duration_ms ? t0.duration_ms / 1000 : null });
     // Started from an open list or artist page: counts for Home Recently played & sidebar.
     const l = this.view === "list" ? this.openList : null;
@@ -543,9 +567,24 @@ class App {
   }
   playOne(t: Track) { return this.play([t], 0); }
   togglePlay() {
-    if (!this.player.current) return backend().call("play_recent");
-    this.optimistic({ status: this.playing ? "paused" : "playing" });
+    if (!this.player.current) {
+      this.notifyExplicitAudioPlay();
+      return backend().call("play_recent");
+    }
+    const willPlay = !this.playing && !this.loading;
+    if (willPlay) this.notifyExplicitAudioPlay();
+    this.optimistic({ status: willPlay ? "playing" : "paused" });
     return backend().call("toggle_play");
+  }
+  pause() {
+    if (!this.player.current) return Promise.resolve();
+    if (this.playing || this.loading) this.optimistic({ status: "paused" });
+    return backend().call("pause");
+  }
+  resume() {
+    if (!this.player.current) return Promise.resolve();
+    if (!this.playing) this.optimistic({ status: "playing" });
+    return backend().call("resume");
   }
   next() { return backend().call("next"); }
   previous() { return backend().call("previous"); }

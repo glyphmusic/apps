@@ -211,6 +211,8 @@ export class DemoBackend implements Backend, DemoCtx {
       },
       play_recent: () => { const songs = lib().recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])); if (songs.length) this.handlers.play(this, { tracks: songs, index: 0 }); },
       toggle_play: () => { const pl = p(); if (!pl.current) return; pl.status = pl.status === "playing" ? "paused" : "playing"; this.emit("player", { status: pl.status, position: pl.position }); },
+      pause: () => { const pl = p(); if (!pl.current || pl.status === "paused") return; pl.status = "paused"; this.emit("player", { status: "paused", position: pl.position }); },
+      resume: () => { const pl = p(); if (!pl.current || pl.status === "playing") return; pl.status = "playing"; this.emit("player", { status: "playing", position: pl.position }); },
       next: () => this.advance(false),
       previous: () => { if (p().position > 3) { p().position = 0; this.emit("player", { position: 0 }); } else this.advance(true); },
       seek: (_, a) => { p().position = a.position; this.emit("player", { position: a.position }); },

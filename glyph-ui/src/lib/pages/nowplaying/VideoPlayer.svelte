@@ -43,6 +43,12 @@
   let pendingRestore: { pos: number; resume: boolean } | null = null;
   let resumeOnFallback = false;
   let lastStreamId = "";
+  let destroyed = false;
+
+  const unregisterController = videoState.registerController({
+    pause: () => pausePlayback(),
+    togglePlay: () => togglePlay(),
+  });
 
   const isFullscreen = $derived(nativeFullscreen || pseudoFullscreen);
   const qualities = $derived(videoState.stream?.qualities ?? []);
@@ -107,6 +113,9 @@
       buffering = false;
       pos = 0;
       dur = 0;
+      v?.pause();
+      a?.pause();
+      videoState.notifyVideoPaused();
       return;
     }
 
@@ -156,6 +165,24 @@
         a?.load();
       }
     }
+  });
+
+  function releaseMedia(el: HTMLMediaElement | undefined) {
+    if (!el) return;
+    el.pause();
+    el.removeAttribute("src");
+    el.load();
+  }
+
+  // Always pause & release detached <video>/<audio> elements when switching between
+  // dual-stream HD and muxed qualities or when entering loading/error states.
+  $effect(() => {
+    const el = videoEl;
+    return () => releaseMedia(el);
+  });
+  $effect(() => {
+    const el = audioEl;
+    return () => releaseMedia(el);
   });
 
   // Sync volume & mute to real media elements.
@@ -358,6 +385,7 @@
   }
 
   function onVideoLoadedMetadata() {
+    if (destroyed) return;
     const v = videoEl;
     if (!v || isDemo) return;
     // Reject streams without a video track (e.g., audio-only MP4 returned by an outdated server).
@@ -379,6 +407,7 @@
   }
 
   function onVideoCanPlay() {
+    if (destroyed) return;
     const v = videoEl;
     if (!v || isDemo) return;
     if (v.videoWidth === 0 && v.videoHeight === 0) return;
@@ -387,6 +416,7 @@
   }
 
   async function startPlayback() {
+    if (destroyed) return;
     if (isDemo) {
       playing = true;
       videoState.notifyVideoPlaying();
@@ -398,6 +428,10 @@
     mediaError = null;
     try {
       await v.play();
+      if (destroyed) {
+        v.pause();
+        return;
+      }
       if (audioEl && audioUrl) {
         audioEl.currentTime = v.currentTime;
         try {
@@ -407,14 +441,21 @@
           // so one click starts both video and audio together instead of silent video.
           v.pause();
           playing = false;
+          videoState.notifyVideoPaused();
           return;
         }
+      }
+      if (destroyed) {
+        v.pause();
+        audioEl?.pause();
+        return;
       }
       playing = true;
       videoState.notifyVideoPlaying();
       bumpControls();
     } catch {
       playing = false;
+      videoState.notifyVideoPaused();
     }
   }
 
@@ -444,6 +485,7 @@
   }
 
   function onVideoTimeUpdate() {
+    if (destroyed) return;
     const v = videoEl;
     if (!v || isDemo) return;
     pos = v.currentTime || 0;
@@ -460,11 +502,13 @@
   }
 
   function onVideoWaiting() {
+    if (destroyed) return;
     buffering = true;
     if (audioEl && audioUrl) audioEl.pause();
   }
 
   function onVideoPlaying() {
+    if (destroyed) return;
     buffering = false;
     playing = true;
     videoState.notifyVideoPlaying();
@@ -475,17 +519,19 @@
   }
 
   function onAudioError() {
-    if (!audioUrl || isDemo) return;
+    if (destroyed || !audioEl?.isConnected || !audioUrl || isDemo) return;
     onVideoError();
   }
 
   function onVideoError() {
+    if (destroyed || !videoEl?.isConnected) return;
     const wantsResume = playing || !!pendingRestore?.resume;
     buffering = false;
     playing = false;
     pendingRestore = null;
     videoEl?.pause();
     audioEl?.pause();
+    videoState.notifyVideoPaused();
     // Mark current quality URL as failed for this stream and try the next untried quality.
     if (srcUrl && !failedUrls.includes(srcUrl)) {
       const nextFailed = [...failedUrls, srcUrl];
@@ -542,10 +588,12 @@
   }
 
   onDestroy(() => {
+    destroyed = true;
+    unregisterController();
     clearTimeout(hideTimer);
     cancelAnimationFrame(demoRaf);
-    videoEl?.pause();
-    audioEl?.pause();
+    releaseMedia(videoEl);
+    releaseMedia(audioEl);
   });
 </script>
 
@@ -598,6 +646,7 @@
         class="media"
         bind:this={videoEl}
         src={srcUrl}
+        muted={!!audioUrl || muted}
         playsinline
         preload="auto"
         onloadedmetadata={onVideoLoadedMetadata}
@@ -605,8 +654,8 @@
         ontimeupdate={onVideoTimeUpdate}
         onwaiting={onVideoWaiting}
         onplaying={onVideoPlaying}
-        onpause={() => { playing = false; audioEl?.pause(); videoState.notifyVideoPaused(); }}
-        onended={() => { playing = false; audioEl?.pause(); videoState.notifyVideoPaused(); }}
+        onpause={() => { if (destroyed || !videoEl?.isConnected) return; playing = false; audioEl?.pause(); videoState.notifyVideoPaused(); }}
+        onended={() => { if (destroyed || !videoEl?.isConnected) return; playing = false; audioEl?.pause(); videoState.notifyVideoPaused(); }}
         onerror={onVideoError}
         onclick={() => (compact ? (controlsShown = !controlsShown) : togglePlay())}
       ></video>

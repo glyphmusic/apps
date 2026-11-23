@@ -105,6 +105,10 @@ pub struct State {
     pub pending_recent_artist: Option<(String, Option<Track>)>,
     /// The listen of the current song was counted for `playing_from`.
     pub listen_counted: bool,
+    /// The playback outcome (completion or skip) of `current` was already recorded for Taste.
+    pub outcome_recorded: bool,
+    /// Last unix timestamp a replay/rewind intent was logged for `current` (debounce).
+    pub last_replay_s: u64,
     /// Incremented whenever the active track changes (guards position sidecar merges).
     pub playback_seq: u64,
     /// Position restored from disk while playback is still paused and unresolved.
@@ -210,6 +214,8 @@ impl Core {
                 recent_artist_ctx: None,
                 pending_recent_artist: None,
                 listen_counted: false,
+                outcome_recorded: false,
+                last_replay_s: 0,
                 playback_seq: 0,
                 restored_pos: None,
                 restored_duration: None,
@@ -779,8 +785,50 @@ impl Core {
         }
         crate::jam::on_track_changed(self);
         crate::discover::on_track_started(self, &track);
+        let ps_prev = if adopted.is_none() { self.player_state() } else { None };
         {
             let mut st = self.st();
+            // Record the outgoing track's playback outcome when the user manually
+            // switches to a different song (instead of pressing Next or letting it end).
+            if adopted.is_none() && !st.outcome_recorded && st.config.taste.enabled {
+                if let Some(prev) = st.current.clone() {
+                    let same_song = glyph_core::dedupe::track_key(&prev) == glyph_core::dedupe::track_key(&track);
+                    let active_ps = (!st.player_stale).then_some(ps_prev.as_ref()).flatten();
+                    let pos_ms = active_ps
+                        .map(|s| s.position.as_millis() as u64)
+                        .unwrap_or(0);
+                    let dur_ms = active_ps
+                        .and_then(|s| s.duration)
+                        .map(|d| d.as_millis() as u64)
+                        .or(prev.duration_ms);
+                    let now_s = glyph_core::paths::now_unix();
+                    let ctx = crate::taste::play_context_from_state(
+                        st.playing_from.as_ref(),
+                        st.context.as_deref(),
+                        st.queue.current_is_manual(),
+                    );
+                    if same_song && pos_ms >= 15_000 {
+                        st.library.taste.record_intent_action(
+                            &prev,
+                            glyph_core::taste::IntentAction::Replayed,
+                            ctx,
+                            now_s,
+                        );
+                    } else if !same_song && pos_ms >= 1_500 {
+                        st.library.taste.record_playback_outcome_ctx(
+                            &prev,
+                            pos_ms,
+                            dur_ms,
+                            true,
+                            false,
+                            ctx,
+                            glyph_core::taste::local_hour(),
+                            glyph_core::taste::local_is_weekend(),
+                            now_s,
+                        );
+                    }
+                }
+            }
             if adopted.is_none() {
                 st.preloaded = None;
             }
@@ -797,6 +845,8 @@ impl Core {
             st.error = None;
             st.loop_ab = None;
             st.listen_counted = false;
+            st.outcome_recorded = false;
+            st.last_replay_s = 0;
             st.retried_expired = None;
             st.repaired_file = None;
             st.pending_start = false;
@@ -805,6 +855,19 @@ impl Core {
             // played" stands for their songs (no row per song on top of it).
             let from_artist = st.recent_artist_ctx.as_ref().is_some_and(|a| glyph_core::dedupe::by_artist(&track.artist, a))
                 && !st.queue.current_is_manual();
+            if adopted.is_none() && st.config.taste.enabled && (st.queue.current_is_manual() || from_artist) {
+                let ctx = crate::taste::play_context_from_state(
+                    st.playing_from.as_ref(),
+                    st.context.as_deref(),
+                    st.queue.current_is_manual(),
+                );
+                st.library.taste.record_intent_action(
+                    &track,
+                    glyph_core::taste::IntentAction::DeliberatePick,
+                    ctx,
+                    glyph_core::paths::now_unix(),
+                );
+            }
             if !from_artist {
                 let from_list = (!st.queue.current_is_manual())
                     .then(|| st.playing_from.clone())
@@ -1225,19 +1288,28 @@ impl Core {
                     st.library.record_skip(&cur);
                 }
             }
-            if did_manual_leave && st.config.taste.enabled {
+            if did_manual_leave && st.config.taste.enabled && !st.outcome_recorded {
                 if let Some(cur) = st.current.clone() {
                     let hour = glyph_core::taste::local_hour();
+                    let is_weekend = glyph_core::taste::local_is_weekend();
                     let now_s = glyph_core::paths::now_unix();
-                    st.library.taste.record_playback_outcome(
+                    let ctx = crate::taste::play_context_from_state(
+                        st.playing_from.as_ref(),
+                        st.context.as_deref(),
+                        st.queue.current_is_manual(),
+                    );
+                    st.library.taste.record_playback_outcome_ctx(
                         &cur,
                         eff_pos_ms,
                         eff_dur_ms,
                         true,
                         false,
+                        ctx,
                         hour,
+                        is_weekend,
                         now_s,
                     );
+                    st.outcome_recorded = true;
                 }
             }
             let preloaded = st.preloaded.take();
@@ -1350,7 +1422,30 @@ impl Core {
         if crate::jam::route_previous(self) {
             return;
         }
-        if Duration::from_secs_f64(self.player_dto().position) > RESTART_AFTER {
+        let pos_s = self.player_dto().position;
+        if Duration::from_secs_f64(pos_s) > RESTART_AFTER {
+            if pos_s >= 15.0 {
+                let now_s = glyph_core::paths::now_unix();
+                let mut st = self.st();
+                if st.config.taste.enabled && now_s.saturating_sub(st.last_replay_s) >= 15 {
+                    if let Some(cur) = st.current.clone() {
+                        let ctx = crate::taste::play_context_from_state(
+                            st.playing_from.as_ref(),
+                            st.context.as_deref(),
+                            st.queue.current_is_manual(),
+                        );
+                        st.library.taste.record_intent_action(
+                            &cur,
+                            glyph_core::taste::IntentAction::Replayed,
+                            ctx,
+                            now_s,
+                        );
+                        st.last_replay_s = now_s;
+                        drop(st);
+                        self.library_changed_soon();
+                    }
+                }
+            }
             self.seek(0.0);
             return;
         }
@@ -1434,6 +1529,109 @@ impl Core {
             if was_playing {
                 self.playback_pos_changed();
             }
+            return;
+        }
+        self.emit_player();
+    }
+
+    /// Idempotently pauses playback (or holds a resolving song paused).
+    pub fn pause(self: &Arc<Self>) {
+        if crate::account::controlling(self) {
+            if crate::account::control(self, glyph_protocol::playback::Command::Pause) {
+                return;
+            }
+        }
+        if crate::jam::route_pause(self) {
+            return;
+        }
+        let resolving = {
+            let mut st = self.st();
+            if st.resolving {
+                st.hold_play = true;
+            }
+            st.resolving
+        };
+        if resolving {
+            if let Some(p) = &self.player {
+                p.pause();
+            }
+            self.emit_player();
+            return;
+        }
+        let stale = self.st().player_stale;
+        let was_active = !stale
+            && self
+                .player_state()
+                .is_some_and(|s| matches!(s.status, glyph_audio::Status::Playing | glyph_audio::Status::Loading));
+        if let Some(p) = &self.player {
+            p.pause();
+            if was_active {
+                self.playback_pos_changed();
+                return;
+            }
+        }
+        self.emit_player();
+    }
+
+    /// Idempotently resumes playback of the current song when paused.
+    pub fn resume(self: &Arc<Self>) {
+        if crate::account::controlling(self) {
+            if crate::account::control(self, glyph_protocol::playback::Command::Play) {
+                return;
+            }
+        }
+        if crate::jam::route_resume(self) {
+            return;
+        }
+        if self.st().current.is_none() {
+            return;
+        }
+        let (resume, resolving) = {
+            let mut st = self.st();
+            if let Some(pos) = st.restored_pos.take() {
+                st.resume_at = (pos > Duration::ZERO).then_some(pos);
+                st.resolving = true;
+                st.hold_play = false;
+                st.error = None;
+                (st.current.clone(), false)
+            } else {
+                if st.resolving {
+                    st.hold_play = false;
+                }
+                (None, st.resolving)
+            }
+        };
+        if let Some(t) = resume {
+            self.emit_player();
+            self.load_current(t);
+            return;
+        }
+        if resolving {
+            self.emit_player();
+            return;
+        }
+        let (stale, has_err) = {
+            let st = self.st();
+            (st.player_stale, st.error.is_some())
+        };
+        let was_playing = !stale && self.player_state().is_some_and(|s| s.status == glyph_audio::Status::Playing);
+        if let Some(p) = &self.player {
+            let idle = stale
+                || has_err
+                || self
+                    .player_state()
+                    .map_or(true, |s| matches!(s.status, glyph_audio::Status::Idle | glyph_audio::Status::Ended));
+            if idle {
+                let cur = self.st().current.clone();
+                if let Some(t) = cur {
+                    self.start_track(t);
+                }
+                return;
+            }
+            p.play();
+            if !was_playing {
+                return;
+            }
         }
         self.emit_player();
     }
@@ -1464,10 +1662,32 @@ impl Core {
             self.emit_player();
             return;
         }
+        let dto = self.player_dto();
+        let prev_pos = dto.position;
+        let dur = dto.duration;
         let handled = {
-            let dur = self.player_dto().duration;
             let clamped = Duration::from_secs_f64(dur.map_or(secs, |d| secs.min(d.max(0.0))));
             let mut st = self.st();
+            // Jumping backward by >= 20 s to re-hear a section is a strong replay intent signal.
+            if prev_pos - secs >= 20.0 && st.config.taste.enabled {
+                let now_s = glyph_core::paths::now_unix();
+                if now_s.saturating_sub(st.last_replay_s) >= 15 {
+                    if let Some(cur) = st.current.clone() {
+                        let ctx = crate::taste::play_context_from_state(
+                            st.playing_from.as_ref(),
+                            st.context.as_deref(),
+                            st.queue.current_is_manual(),
+                        );
+                        st.library.taste.record_intent_action(
+                            &cur,
+                            glyph_core::taste::IntentAction::Replayed,
+                            ctx,
+                            now_s,
+                        );
+                        st.last_replay_s = now_s;
+                    }
+                }
+            }
             if st.restored_pos.is_some() {
                 st.restored_pos = Some(clamped);
                 true
@@ -1610,6 +1830,17 @@ impl Core {
         }
         {
             let mut st = self.st();
+            if st.config.taste.enabled {
+                let now_s = glyph_core::paths::now_unix();
+                for t in tracks.iter().take(5) {
+                    st.library.taste.record_intent_action(
+                        t,
+                        glyph_core::taste::IntentAction::Queued,
+                        glyph_core::taste::SessionEventContext::Explicit,
+                        now_s,
+                    );
+                }
+            }
             if next {
                 for t in tracks.into_iter().rev() {
                     st.queue.play_next(t);

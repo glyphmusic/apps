@@ -109,6 +109,8 @@ fn main() {
             tauri_commands::play_shuffled,
             tauri_commands::play_recent,
             tauri_commands::toggle_play,
+            tauri_commands::pause,
+            tauri_commands::resume,
             tauri_commands::next,
             tauri_commands::previous,
             tauri_commands::seek,

@@ -55,6 +55,16 @@ pub fn toggle_play(core: C) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn pause(core: C) {
+    commands::pause(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn resume(core: C) {
+    commands::resume(&core)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn next(core: C) {
     commands::next(&core)
 }

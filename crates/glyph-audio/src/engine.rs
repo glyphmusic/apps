@@ -818,6 +818,9 @@ impl Engine {
                     return;
                 }
                 self.want_play = true;
+                if self.cur.is_none() && self.pending_cur.is_some() {
+                    self.set_status(Status::Loading);
+                }
                 if self.pause_gain < 1.0 || self.pause_fade.is_some() {
                     self.pause_fade = Some((Instant::now(), self.pause_gain, true));
                     self.apply_native_volume();
@@ -840,6 +843,10 @@ impl Engine {
     fn pause(&mut self) {
         let was_playing = self.want_play;
         self.want_play = false;
+        if !was_playing && self.pause_fade.is_some_and(|(_, _, fade_in)| !fade_in) {
+            self.set_status(Status::Paused);
+            return;
+        }
         let audible = was_playing
             && self.backend() == Some(BackendKind::Native)
             && self.cur.as_ref().is_some_and(|c| c.shared.started.load(Ordering::Relaxed));
@@ -866,7 +873,7 @@ impl Engine {
                 if let Some(p) = &self.player {
                     p.pause();
                 }
-                if self.cur.is_some() {
+                if self.cur.is_some() || self.pending_cur.is_some() {
                     self.set_status(Status::Paused);
                 }
             }

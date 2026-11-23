@@ -225,29 +225,78 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
     toast(core, "toast.radio", Some(json!({ "title": title })), None, "ok");
     let core = core.clone();
     crate::rt::spawn(async move {
-        let mut found: Vec<(Track, f32)> = Vec::new();
+        let hide = hide_explicit(&core);
+        let server_radio = {
+            let st = core.st();
+            st.config.taste.is_server_mode() && b.server_taste_engine_available()
+        };
+        let mut tracks: Vec<Track> = Vec::new();
         let mut error = None;
-        let answers = futures::future::join_all(picked.iter().map(|s| b.similar(s))).await;
-        for answer in answers {
-            match answer {
-                Ok(sim) => {
-                    for (i, t) in sim.into_iter().take(40).enumerate() {
-                        let key = track_key(&t);
-                        if skip.contains(&key) {
-                            continue;
-                        }
-                        let w = 1.0 - i as f32 / 50.0;
-                        match found.iter_mut().find(|(x, _)| track_key(x) == key) {
-                            Some(f) => f.1 += w,
-                            None => found.push((t, w)),
-                        }
-                    }
-                }
-                Err(e) => error = Some(e.to_string()),
+
+        // Server-first Radio (default ON): uses server intent, collaborative graph,
+        // cached artist top tracks & MMR diversity in a single round-trip.
+        if server_radio {
+            let seed_reqs: Vec<glyph_core::taste::TasteSeedTrack> = picked
+                .iter()
+                .enumerate()
+                .map(|(i, s)| glyph_core::taste::TasteSeedTrack {
+                    title: s.title.clone(),
+                    artist: s.artist.clone(),
+                    album: s.album.clone(),
+                    weight: (1.0 - i as f32 * 0.1).max(0.5),
+                    is_session: true,
+                })
+                .collect();
+            let exclude_song_keys: Vec<String> = picked
+                .iter()
+                .map(glyph_core::taste::song_key)
+                .collect();
+            if let Some(resp) = crate::taste::run_server_recommend(
+                &core,
+                glyph_core::taste::TastePurpose::Radio,
+                seed_reqs,
+                &exclude_song_keys,
+                Some(45),
+            )
+            .await
+            {
+                let st = core.st();
+                tracks = resp
+                    .recommendations
+                    .into_iter()
+                    .map(|r| r.track)
+                    .filter(|t| {
+                        !skip.contains(&track_key(t))
+                            && !st.library.is_hidden(&t.artist)
+                            && !st.library.taste.is_disliked_track(t)
+                            && !(hide && t.maybe_explicit())
+                    })
+                    .collect();
             }
         }
-        let hide = hide_explicit(&core);
-        {
+
+        // Local fallback (local-only opt-out, offline, or server returned empty).
+        if tracks.is_empty() {
+            let mut found: Vec<(Track, f32)> = Vec::new();
+            let answers = futures::future::join_all(picked.iter().map(|s| b.similar(s))).await;
+            for answer in answers {
+                match answer {
+                    Ok(sim) => {
+                        for (i, t) in sim.into_iter().take(40).enumerate() {
+                            let key = track_key(&t);
+                            if skip.contains(&key) {
+                                continue;
+                            }
+                            let w = 1.0 - i as f32 / 50.0;
+                            match found.iter_mut().find(|(x, _)| track_key(x) == key) {
+                                Some(f) => f.1 += w,
+                                None => found.push((t, w)),
+                            }
+                        }
+                    }
+                    Err(e) => error = Some(e.to_string()),
+                }
+            }
             let st = core.st();
             let taste_on = st.config.taste.enabled;
             let taste = if taste_on {
@@ -267,9 +316,13 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
                 }
                 found.retain(|(_, w)| w.is_finite());
             }
+            found.sort_by(|a, b| b.1.total_cmp(&a.1));
+            tracks = if taste_on {
+                taste.mmr_rank_tracks(&found, 50, 3)
+            } else {
+                spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect())
+            };
         }
-        found.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let tracks = spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect());
         let label = tr(lang(&core), "queue.radio_from", &[("title", &title)]);
         match (tracks.is_empty(), error) {
             (false, _) if append => {
@@ -909,20 +962,38 @@ pub fn sleep_blocks_preload(core: &Arc<Core>) -> bool {
 pub fn on_song_ended(core: &Arc<Core>) {
     {
         let mut st = core.st();
-        if st.config.taste.enabled {
+        if st.config.taste.enabled && !st.outcome_recorded {
             if let Some(cur) = st.current.clone() {
                 let dur = cur.duration_ms.unwrap_or(180_000);
                 let hour = glyph_core::taste::local_hour();
+                let is_weekend = glyph_core::taste::local_is_weekend();
                 let now_s = glyph_core::paths::now_unix();
-                st.library.taste.record_playback_outcome(
+                let ctx = crate::taste::play_context_from_state(
+                    st.playing_from.as_ref(),
+                    st.context.as_deref(),
+                    st.queue.current_is_manual(),
+                );
+                let repeat_one = st.queue.repeat() == glyph_core::RepeatMode::One;
+                st.library.taste.record_playback_outcome_ctx(
                     &cur,
                     dur,
                     cur.duration_ms,
                     false,
                     true,
+                    ctx,
                     hour,
+                    is_weekend,
                     now_s,
                 );
+                if repeat_one {
+                    st.library.taste.record_intent_action(
+                        &cur,
+                        glyph_core::taste::IntentAction::Replayed,
+                        ctx,
+                        now_s,
+                    );
+                }
+                st.outcome_recorded = true;
                 drop(st);
                 core.library_changed_soon();
             }

@@ -1,12 +1,13 @@
-// Lightweight local Taste Engine for the Web Player & Demo backend.
-// Mirrors glyph-core's TasteData / TasteProfile / DailyMix semantics and
-// respects `config.taste.enabled`, `config.taste.server_collab`, and
-// `config.taste.metadata_enrichment`.
+// Local Taste Engine & Server Taste payload builder for the Web Player & Demo backend.
+// Mirrors glyph-core's server-first Taste Engine (server ON by default, with strict
+// local-only opt-out via `config.taste.server_collab = false`).
 
 import type {
   CollabArtistRec,
   DailyMix,
+  InferredIntent,
   Library,
+  ListeningMode,
   OnboardingCatalogResponse,
   TasteConfig,
   TasteProfile,
@@ -65,6 +66,12 @@ const BUILTIN_GENRES: Record<string, string[]> = {
   "khruangbin": ["Psychedelic", "Funk", "Soul"],
   "crumb": ["Psychedelic", "Indie", "Jazz"],
   "beach house": ["Dream Pop", "Shoegaze", "Indie"],
+  "slowdive": ["Shoegaze", "Dream Pop"],
+  "justice": ["Electronic", "House", "Disco"],
+  "apache 207": ["Rap", "Pop"],
+  "kraftklub": ["Indie Rock", "Rock"],
+  "annenmaykantereit": ["Indie", "Pop", "Rock"],
+  "paul kalkbrenner": ["Techno", "Electronic"],
 };
 
 function lookupBuiltinGenres(k: string): string[] {
@@ -86,6 +93,8 @@ const GENRE_MOODS: Record<string, string[]> = {
   "Psychedelic": ["Dreamy", "Groovy"],
   "Electronic": ["Energetic", "Atmospheric"],
   "House": ["Groovy", "Energetic"],
+  "Techno": ["Energetic", "Dark"],
+  "UK Garage": ["Groovy", "Late Night"],
   "Indie": ["Chill", "Nostalgic"],
   "Indie Rock": ["Nostalgic", "Energetic"],
   "Indie Pop": ["Dreamy", "Upbeat"],
@@ -107,6 +116,15 @@ const GENRE_MOODS: Record<string, string[]> = {
   "Afrobeats": ["Groovy", "Upbeat"],
 };
 
+export interface WebSessionEvent {
+  title: string;
+  artist: string;
+  album?: string | null;
+  outcome: "played" | "completed" | "replayed" | "queued" | "liked" | "unliked" | "skipped_early" | "skipped_mid";
+  context: "unknown" | "explicit" | "library" | "radio" | "search";
+  ts_ms: number;
+}
+
 export interface LocalTasteStore {
   onboarding_artists: string[];
   onboarding_tracks: Track[];
@@ -118,13 +136,18 @@ export interface LocalTasteStore {
   version_feedback: Record<string, number>;
   artist_plays: Record<string, number>;
   artist_skips: Record<string, number>;
+  artist_replays?: Record<string, number>;
   time_buckets: [number, number, number, number];
   version_plays: Record<string, number>;
   version_skips: Record<string, number>;
-  artist_tags: Record<string, { genres: string[]; moods: string[]; similar: string[] }>;
+  artist_tags: Record<string, { genres: string[]; moods: string[]; eras?: string[]; similar: string[] }>;
   collab_recs: CollabArtistRec[];
   collab_contributors: number;
   collab_model_ready: boolean;
+  session_events?: WebSessionEvent[];
+  session_pairs?: [string, string][];
+  last_server_intent?: InferredIntent | null;
+  server_mixes?: DailyMix[];
 }
 
 export function emptyTasteStore(): LocalTasteStore {
@@ -139,6 +162,7 @@ export function emptyTasteStore(): LocalTasteStore {
     version_feedback: {},
     artist_plays: {},
     artist_skips: {},
+    artist_replays: {},
     time_buckets: [0, 0, 0, 0],
     version_plays: {},
     version_skips: {},
@@ -146,7 +170,34 @@ export function emptyTasteStore(): LocalTasteStore {
     collab_recs: [],
     collab_contributors: 0,
     collab_model_ready: false,
+    session_events: [],
+    session_pairs: [],
+    last_server_intent: null,
+    server_mixes: [],
   };
+}
+
+export function recordWebSessionEvent(store: LocalTasteStore, ev: Omit<WebSessionEvent, "ts_ms">) {
+  const now = Date.now();
+  const list = (store.session_events ??= []);
+  const artistDisp = primaryArtist(ev.artist).trim();
+  const artistNorm = artistDisp.toLowerCase();
+  if ((ev.outcome === "completed" || ev.outcome === "played" || ev.outcome === "replayed") && artistNorm) {
+    const prev = list.find(
+      (x) => (x.outcome === "completed" || x.outcome === "played" || x.outcome === "replayed") && now - x.ts_ms <= 30 * 60_000,
+    );
+    if (prev) {
+      const prevNorm = primaryArtist(prev.artist).trim().toLowerCase();
+      if (prevNorm && prevNorm !== artistNorm) {
+        const pairs = (store.session_pairs ??= []);
+        const filtered = pairs.filter(([a, b]) => !(a.toLowerCase() === prevNorm && b.toLowerCase() === artistNorm));
+        filtered.unshift([primaryArtist(prev.artist).trim(), artistDisp]);
+        store.session_pairs = filtered.slice(0, 16);
+      }
+    }
+  }
+  list.unshift({ ...ev, artist: artistDisp || ev.artist, ts_ms: now });
+  if (list.length > 24) list.length = 24;
 }
 
 export function timeBucketOf(hour = new Date().getHours()): "morning" | "afternoon" | "evening" | "night" {
@@ -192,16 +243,70 @@ export function fallbackOnboardingCatalog(tracks: Track[] = []): OnboardingCatal
   return { genres, artists, tracks: tracks.slice(0, 24) };
 }
 
+function sublinearPos(v: number): number {
+  return v <= 0 ? 0 : Math.pow(Math.log1p(v), 1.15);
+}
+
+export function inferWebIntent(
+  store: LocalTasteStore,
+  topGenres: WeightedTag[],
+  moods: WeightedTag[],
+  variety: number,
+): InferredIntent {
+  const now = Date.now();
+  const active = (store.session_events ?? []).filter((e) => now - e.ts_ms <= 3 * 3600_000).slice(0, 14);
+  let skipStreak = 0;
+  for (const e of active) {
+    if (e.outcome === "skipped_early" || e.outcome === "skipped_mid") skipStreak++;
+    else break;
+  }
+  const earlyRecent = active.slice(0, 4).filter((e) => e.outcome === "skipped_early" && now - e.ts_ms <= 20 * 60_000).length;
+  const replays = active.filter((e) => e.outcome === "replayed" || e.outcome === "liked").length;
+  const posEvents = active
+    .filter((e) => e.outcome === "completed" || e.outcome === "played" || e.outcome === "replayed")
+    .map((e) => ({ a: primaryArtist(e.artist).toLowerCase(), t: e.title.trim().toLowerCase() }));
+  const counts = new Map<string, number>();
+  const titles = new Map<string, Set<string>>();
+  for (const { a, t } of posEvents.slice(0, 5)) {
+    counts.set(a, (counts.get(a) ?? 0) + 1);
+    const set = titles.get(a) ?? new Set<string>();
+    set.add(t);
+    titles.set(a, set);
+  }
+  const isDive = posEvents.length >= 3 && [...counts.entries()].some(([a, c]) => c >= 3 && (titles.get(a)?.size ?? 0) >= 2);
+  const vibePivot = skipStreak >= 2 || earlyRecent >= 2;
+  const hour = new Date().getHours();
+
+  let mode: ListeningMode = "balanced";
+  if (vibePivot) mode = "vibe_reset";
+  else if (isDive && earlyRecent === 0) mode = "artist_dive";
+  else if (replays >= 2) mode = "comfort";
+  else if (active.some((e) => e.context === "radio" || e.context === "search") || variety >= 0.68) mode = "discovery";
+  else if (hour >= 22 || hour <= 4) mode = "late_night_wind_down";
+
+  const energy = mode === "late_night_wind_down" ? 0.35 : mode === "vibe_reset" ? 0.55 : hour >= 11 && hour <= 18 ? 0.65 : 0.48;
+  const novelty = mode === "discovery" ? 0.78 : mode === "comfort" ? 0.32 : mode === "vibe_reset" ? 0.62 : Math.max(0.25, Math.min(0.8, variety));
+
+  return {
+    mode,
+    focus_genres: topGenres.slice(0, 3).map((g) => g.name),
+    focus_moods: moods.slice(0, 3).map((m) => m.name),
+    energy,
+    novelty,
+    vibe_pivot: vibePivot,
+  };
+}
+
 export function computeTasteProfile(
   lib: Library,
   store: LocalTasteStore,
   cfg: TasteConfig,
   serverAvailable: boolean,
 ): TasteProfile {
-  const mode: "hybrid" | "local" | "off" = !cfg.enabled
+  const mode: "server" | "local" | "off" = !cfg.enabled
     ? "off"
     : cfg.server_collab && serverAvailable
-      ? "hybrid"
+      ? "server"
       : "local";
 
   const weights = new Map<string, { name: string; w: number; reasons: Set<string> }>();
@@ -215,7 +320,13 @@ export function computeTasteProfile(
     weights.set(k, e);
   };
 
-  for (const t of lib.liked) add(t.artist, 3.0, "liked");
+  const likedPer = new Map<string, number>();
+  for (const t of lib.liked) {
+    const k = primaryArtist(t.artist).trim().toLowerCase();
+    const c = (likedPer.get(k) ?? 0) + 1;
+    likedPer.set(k, c);
+    add(t.artist, 3.0 / (1 + (c - 1) * 0.22), "liked");
+  }
   for (const f of lib.followed) add(f, 6.0, "followed");
   for (const a of store.onboarding_artists) add(a, 6.5, "onboarding");
   for (const t of store.onboarding_tracks) add(t.artist, 4.0, "onboarding");
@@ -223,7 +334,8 @@ export function computeTasteProfile(
     if (r.kind === "song") add(r.track.artist, 1.3, "recent");
     else if (r.kind === "artist") add(r.name, 1.5, "recent");
   }
-  for (const [a, n] of Object.entries(store.artist_plays)) add(a, Math.log1p(n) * 1.2, n >= 3 ? "frequent" : undefined);
+  for (const [a, n] of Object.entries(store.artist_plays)) add(a, Math.log1p(n) * 1.3, n >= 3 ? "frequent" : undefined);
+  for (const [a, n] of Object.entries(store.artist_replays ?? {})) add(a, Math.log1p(n) * 2.2, n >= 2 ? "replayed" : undefined);
   for (const [a, n] of Object.entries(store.artist_skips)) add(a, -Math.min(10, n) * 1.0, n >= 2 ? "high_skips" : undefined);
   for (const [a, p] of Object.entries(store.artist_feedback)) add(a, p > 0 ? 8 : -12, p > 0 ? "more" : "less");
 
@@ -231,18 +343,21 @@ export function computeTasteProfile(
   for (const h of hidden) weights.delete(h);
 
   const pos = [...weights.entries()].filter(([, v]) => v.w > 0).sort((a, b) => b[1].w - a[1].w);
-  const maxW = Math.max(1, pos[0]?.[1].w ?? 1);
+  const maxComp = Math.max(1, pos[0] ? sublinearPos(pos[0][1].w) : 1);
 
   const genreRaw = new Map<string, number>();
   const moodRaw = new Map<string, number>();
-  for (const g of store.onboarding_genres) genreRaw.set(g, (genreRaw.get(g) ?? 0) + 1.2);
+  const eraRaw = new Map<string, number>();
+  for (const g of store.onboarding_genres) genreRaw.set(g, (genreRaw.get(g) ?? 0) + 1.25);
   for (const [k, v] of weights) {
-    const normAff = v.w >= 0 ? v.w / maxW : Math.max(-1, v.w / 6);
+    const normAff = v.w >= 0 ? sublinearPos(v.w) / maxComp : Math.max(-1, v.w / 6);
     const meta = store.artist_tags[k];
     const gs = meta?.genres?.length ? meta.genres : lookupBuiltinGenres(k);
     const ms = meta?.moods?.length ? meta.moods : gs.flatMap((g) => GENRE_MOODS[g] ?? []);
+    const es = meta?.eras ?? [];
     gs.forEach((g, i) => genreRaw.set(g, (genreRaw.get(g) ?? 0) + normAff / (1 + i * 0.35)));
     ms.forEach((m, i) => moodRaw.set(m, (moodRaw.get(m) ?? 0) + normAff / (1 + i * 0.35)));
+    es.forEach((e) => eraRaw.set(e, (eraRaw.get(e) ?? 0) + normAff * 0.7));
   }
   for (const [tag, pref] of Object.entries(store.tag_feedback)) {
     const delta = pref > 0 ? 2.5 : -3.5;
@@ -290,8 +405,19 @@ export function computeTasteProfile(
     feedback: store.tag_feedback[name.toLowerCase()] ?? 0,
   }));
 
+  const posEras = [...eraRaw.entries()].filter(([, v]) => v > 0.08).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxE = Math.max(1, posEras[0]?.[1] ?? 1);
+  const sumE = Math.max(0.001, posEras.reduce((s, [, v]) => s + v, 0));
+  const top_eras: WeightedTag[] = posEras.map(([name, v]) => ({
+    name,
+    score: Math.min(1, v / maxE),
+    share_pct: Math.max(1, Math.round((v / sumE) * 100)),
+    feedback: 0,
+  }));
+
   const totalPlays = Object.values(store.artist_plays).reduce((a, b) => a + b, 0) + lib.recent.filter((r) => r.kind === "song").length;
   const totalSkips = Object.values(store.artist_skips).reduce((a, b) => a + b, 0);
+  const totalReplays = Object.values(store.artist_replays ?? {}).reduce((a, b) => a + b, 0);
   const outcomes = totalPlays + totalSkips;
   const bSum = store.time_buckets.reduce((a, b) => a + b, 0);
   const time_of_day: [number, number, number, number] = bSum > 0
@@ -318,7 +444,7 @@ export function computeTasteProfile(
     const gs = tagged?.length ? tagged : lookupBuiltinGenres(k);
     return {
       name: v.name,
-      score: Math.min(1, v.w / maxW),
+      score: Math.min(1, sublinearPos(v.w) / maxComp),
       reasons: [...v.reasons],
       genres: gs.slice(0, 2),
     };
@@ -347,8 +473,12 @@ export function computeTasteProfile(
     }
   }
 
-  const signals_count = lib.liked.length + lib.followed.length + store.onboarding_artists.length + store.onboarding_tracks.length + Object.keys(store.disliked_tracks).length + totalPlays + totalSkips;
+  const signals_count = lib.liked.length + lib.followed.length + store.onboarding_artists.length + store.onboarding_tracks.length + Object.keys(store.disliked_tracks).length + totalPlays + totalSkips + totalReplays;
   const variety = pos.length <= 1 ? 0 : Math.min(1, Math.log(pos.length) / Math.log(12));
+  const localIntent = inferWebIntent(store, top_genres, moods, variety);
+  const intent = mode === "server" && store.last_server_intent && !(store.session_events?.length)
+    ? store.last_server_intent
+    : localIntent;
 
   return {
     mode,
@@ -358,6 +488,8 @@ export function computeTasteProfile(
     top_genres,
     avoided_genres,
     moods,
+    top_eras,
+    intent,
     habits: {
       time_of_day,
       peak_period,
@@ -366,6 +498,7 @@ export function computeTasteProfile(
       variety_score: variety,
       total_plays: totalPlays,
       total_skips: totalSkips,
+      total_replays: totalReplays,
       versions,
     },
     liked_artists,
@@ -374,9 +507,93 @@ export function computeTasteProfile(
     onboarding_artists: store.onboarding_artists,
     onboarding_tracks: store.onboarding_tracks,
     onboarding_genres: store.onboarding_genres,
-    collab_recs: mode === "hybrid" ? store.collab_recs : [],
-    collab_contributors: mode === "hybrid" ? store.collab_contributors : 0,
-    collab_model_ready: mode === "hybrid" ? store.collab_model_ready : false,
+    collab_recs: mode === "server" ? store.collab_recs : [],
+    collab_contributors: mode === "server" ? store.collab_contributors : 0,
+    collab_model_ready: mode === "server" ? store.collab_model_ready : false,
+  };
+}
+
+/** Builds a compact payload for `POST /v1/taste/recommend` from the Web Player library. */
+export function buildServerRecommendPayload(
+  lib: Library,
+  store: LocalTasteStore,
+  cfg: TasteConfig,
+  purpose: "home" | "radio" | "discovery",
+  seeds: Track[],
+  extraExcludeKeys: string[] = [],
+  limit = 20,
+  hideExplicit = false,
+): Record<string, unknown> {
+  const prof = computeTasteProfile(lib, store, cfg, true);
+  const now = Date.now();
+  const d = new Date();
+  const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+
+  const recentEvents = (store.session_events ?? [])
+    .filter((e) => now - e.ts_ms <= 3 * 3600_000)
+    .slice(0, 14)
+    .map((e) => ({
+      title: e.title,
+      artist: e.artist,
+      album: e.album ?? undefined,
+      outcome: e.outcome,
+      context: e.context,
+      age_mins: Math.min(720, Math.floor((now - e.ts_ms) / 60_000)),
+    }));
+  let skipStreak = 0;
+  for (const e of recentEvents) {
+    if (e.outcome === "skipped_early" || e.outcome === "skipped_mid") skipStreak++;
+    else break;
+  }
+
+  const normSongKey = (t: Track) => `${t.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}|${primaryArtist(t.artist).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`;
+  const familiar = purpose === "home"
+    ? [...lib.liked, ...store.onboarding_tracks].slice(0, 28)
+    : [];
+  const known = [...new Set([
+    ...extraExcludeKeys,
+    ...lib.liked.slice(0, 50).map(normSongKey),
+    ...lib.recent.filter((r) => r.kind === "song").slice(0, 30).map((r) => normSongKey(r.track)),
+  ])].slice(0, 100);
+  const disliked = Object.values(store.disliked_tracks).map(normSongKey).slice(0, 60);
+
+  const versionScores: Record<string, number> = {};
+  for (const v of prof.habits.versions) {
+    if (Math.abs(v.score) > 0.05) versionScores[v.style] = v.score;
+  }
+
+  return {
+    purpose,
+    positive_artists: prof.liked_artists.map((a) => ({ artist: a.name, weight: a.score })),
+    negative_artists: prof.disliked_artists.map((x) => x.name),
+    seed_tracks: seeds.slice(0, 6).map((s, i) => ({
+      title: s.title,
+      artist: s.artist,
+      album: s.album ?? undefined,
+      weight: Math.max(0.5, 1.0 - i * 0.1),
+      is_session: purpose === "radio" || i < 2,
+    })),
+    familiar_tracks: familiar,
+    known_track_keys: known,
+    disliked_track_keys: disliked,
+    genre_scores: prof.top_genres.map((g) => ({ tag: g.name, score: g.score })),
+    mood_scores: prof.moods.map((m) => ({ tag: m.name, score: m.score })),
+    era_scores: (prof.top_eras ?? []).map((e) => ({ tag: e.name, score: e.score })),
+    avoided_tags: prof.avoided_genres.map((g) => g.name),
+    version_scores: versionScores,
+    session_pairs: (store.session_pairs ?? []).slice(0, 12),
+    session: {
+      recent_events: recentEvents,
+      recent_skip_streak: skipStreak,
+      hour: d.getHours(),
+      is_weekend: isWeekend,
+    },
+    variety_preference: prof.habits.variety_score,
+    date_key: dateKey,
+    hide_explicit: hideExplicit,
+    limit,
+    contribute: true,
   };
 }
 

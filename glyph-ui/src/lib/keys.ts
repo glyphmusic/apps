@@ -2,6 +2,7 @@
 // written like the app's config: "secondary-k" = Ctrl on Windows/Linux,
 // Cmd on macOS. The user's own keys come from config.ui.keys.
 import { app } from "./state.svelte";
+import { videoState } from "./pages/nowplaying/video-state.svelte";
 import { trackKey } from "./api/types";
 import { currentListNav, stepRowIndex } from "./state/list-nav.svelte";
 import { isMac, close } from "./window";
@@ -70,7 +71,7 @@ export function keyLabel(key: string): string {
 
 function run(id: string, focusSearch: () => void) {
   switch (id) {
-    case "play": return app.togglePlay();
+    case "play": return videoState.handlePlayPauseShortcut() ? undefined : app.togglePlay();
     case "seek_back": return app.seekRelative(-5);
     case "seek_forward": return app.seekRelative(5);
     case "prev": return app.previous();

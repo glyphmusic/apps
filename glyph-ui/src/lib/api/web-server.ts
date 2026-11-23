@@ -378,16 +378,19 @@ export const server = {
     getJson<ServerArtistResponse>("/v1/artist", { name, lang }),
 
   tasteTags: (artists: string[]) =>
-    sendJson<{ items: { artist: string; genres?: string[]; moods?: string[]; tags?: string[]; similar?: string[] }[] }>(
+    sendJson<{ items: { artist: string; genres?: string[]; moods?: string[]; eras?: string[]; tags?: string[]; similar?: string[] }[] }>(
       "POST",
       "/v1/taste/tags",
       { artists },
     ),
 
   tasteCollab: (req: {
-    positive: { artist: string; weight: number }[];
+    positive: { artist: string; weight: number; recent_weight?: number }[];
     negative: string[];
     avoided_tags: string[];
+    genre_scores?: { tag: string; score: number }[];
+    mood_scores?: { tag: string; score: number }[];
+    session_pairs?: [string, string][];
     limit?: number;
     contribute?: boolean;
   }) =>
@@ -396,6 +399,9 @@ export const server = {
       "/v1/taste/collab",
       req,
     ),
+
+  tasteRecommend: (req: Record<string, unknown>) =>
+    sendJson<import("./types").TasteRecommendResponse>("POST", "/v1/taste/recommend", req),
 
   tasteOnboarding: () =>
     getJson<import("./types").OnboardingCatalogResponse>("/v1/taste/onboarding"),

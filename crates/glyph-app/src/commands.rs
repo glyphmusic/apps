@@ -48,6 +48,14 @@ pub fn toggle_play(core: C) {
     core.toggle_play();
 }
 
+pub fn pause(core: C) {
+    core.pause();
+}
+
+pub fn resume(core: C) {
+    core.resume();
+}
+
 pub fn next(core: C) {
     core.next(false);
 }
@@ -112,13 +120,27 @@ fn lib<R>(core: &Core, f: impl FnOnce(&mut glyph_core::Library) -> R) -> R {
 }
 
 pub fn like(core: C, track: Track, on: bool) {
+    let taste_on = core.st().config.taste.enabled;
     lib(&core, |l| {
         if l.is_liked(&track) != on {
+            let now_s = glyph_core::paths::now_unix();
             // Liking counts a little for the Liked Songs place in the sidebar.
             if on {
-                l.record_list_use(&ListKey::Liked, 0.3, glyph_core::paths::now_unix());
+                l.record_list_use(&ListKey::Liked, 0.3, now_s);
             }
             l.toggle_like(&track);
+            if taste_on {
+                l.taste.record_intent_action(
+                    &track,
+                    if on {
+                        glyph_core::taste::IntentAction::Liked
+                    } else {
+                        glyph_core::taste::IntentAction::Unliked
+                    },
+                    glyph_core::taste::SessionEventContext::Explicit,
+                    now_s,
+                );
+            }
         }
     });
 }
@@ -207,9 +229,25 @@ pub fn playlist_add(core: C, id: String, tracks: Vec<Track>) -> usize {
         core.toast_vars("toast.playlist_limit", json!({ "n": limit }), "info");
         return 0;
     }
+    let taste_on = core.st().config.taste.enabled;
     lib(&core, |l| {
-        l.record_list_use(&ListKey::Playlist { id: id.clone() }, 0.5, glyph_core::paths::now_unix());
-        tracks.into_iter().filter(|t| l.add_to_playlist(&id, t.clone())).count()
+        let now_s = glyph_core::paths::now_unix();
+        l.record_list_use(&ListKey::Playlist { id: id.clone() }, 0.5, now_s);
+        let mut added = 0usize;
+        for t in tracks {
+            if l.add_to_playlist(&id, t.clone()) {
+                if taste_on && added < 5 {
+                    l.taste.record_intent_action(
+                        &t,
+                        glyph_core::taste::IntentAction::PlaylistAdd,
+                        glyph_core::taste::SessionEventContext::Explicit,
+                        now_s,
+                    );
+                }
+                added += 1;
+            }
+        }
+        added
     })
 }
 
@@ -1021,7 +1059,122 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
             return feeds_json(core);
         }
     }
-    // Refresh genre/mood tags & optional server collaborative filtering in background.
+    // Server-first Home Taste Engine (default ON): runs multi-channel discovery,
+    // hub-demoted collaborative filtering, real-time intent inference, MMR diversity
+    // re-ranking, tag enrichment, and Daily Mix generation on the server in ONE call!
+    let try_server_engine = {
+        let st = core.st();
+        st.config.taste.is_server_mode() && b.server_taste_engine_available()
+    };
+    if try_server_engine {
+        let seed_reqs: Vec<glyph_core::taste::TasteSeedTrack> = {
+            let st = core.st();
+            let taste = glyph_core::taste::Taste::from_library(&st.library);
+            let mut out = Vec::new();
+            let mut seen_k = HashSet::new();
+            // Prioritize recent completed/replayed session tracks as active seeds.
+            for ev in st.library.taste.session_events.iter().take(6) {
+                if matches!(
+                    ev.outcome,
+                    glyph_core::taste::SessionEventOutcome::Completed
+                        | glyph_core::taste::SessionEventOutcome::Replayed
+                        | glyph_core::taste::SessionEventOutcome::Liked
+                ) {
+                    let k = format!("{}|{}", ev.title.to_lowercase(), ev.artist.to_lowercase());
+                    if seen_k.insert(k) {
+                        out.push(glyph_core::taste::TasteSeedTrack {
+                            title: ev.title.clone(),
+                            artist: ev.artist.clone(),
+                            album: ev.album.clone(),
+                            weight: 1.15,
+                            is_session: true,
+                        });
+                        if out.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+            let pool: Vec<Track> = st
+                .library
+                .liked
+                .iter()
+                .chain(st.library.taste.onboarding_tracks.iter())
+                .chain(st.library.recent_tracks())
+                .cloned()
+                .collect();
+            for a in taste.top_artists(4) {
+                if let Some(t) = pool.iter().find(|t| glyph_core::taste::credited(&t.artist).contains(&a)) {
+                    let k = format!("{}|{}", t.title.to_lowercase(), t.artist.to_lowercase());
+                    if seen_k.insert(k) {
+                        out.push(glyph_core::taste::TasteSeedTrack {
+                            title: t.title.clone(),
+                            artist: t.artist.clone(),
+                            album: t.album.clone(),
+                            weight: 1.0,
+                            is_session: false,
+                        });
+                    }
+                }
+            }
+            out.truncate(6);
+            out
+        };
+        let (trending, server_resp) = futures::join!(
+            b.trending(30),
+            crate::taste::run_server_recommend(
+                core,
+                glyph_core::taste::TastePurpose::Home,
+                seed_reqs,
+                &[],
+                Some(20),
+            ),
+        );
+        let trending = trending.unwrap_or_default();
+        if stale(core) {
+            return feeds_json(core);
+        }
+        if let Some(resp) = server_resp {
+            if !resp.recommendations.is_empty() || !resp.mixes.is_empty() {
+                let hour = glyph_core::taste::local_hour();
+                let date_key = crate::taste::today_key();
+                {
+                    let mut st = core.st();
+                    if !trending.is_empty() || st.feeds.trending.is_empty() {
+                        st.feeds.trending = trending.iter().filter(|t| feed_ok(&st, t)).take(20).cloned().collect();
+                    }
+                    let recs: Vec<Track> = resp
+                        .recommendations
+                        .into_iter()
+                        .map(|r| r.track)
+                        .filter(|t| {
+                            feed_ok(&st, t)
+                                && !st.library.is_hidden(&t.artist)
+                                && !st.library.taste.is_disliked_track(t)
+                        })
+                        .take(16)
+                        .collect();
+                    if !(recs.is_empty() && !st.feeds.recs.is_empty()) {
+                        st.feeds.recs = recs;
+                        save_feeds_cache(&scope, &st.feeds.trending, &st.feeds.recs);
+                    }
+                    if !resp.mixes.is_empty() {
+                        st.feeds.mixes = resp.mixes;
+                    } else {
+                        let taste = glyph_core::taste::Taste::from_library(&st.library);
+                        let hide = st.config.audio.hide_explicit;
+                        let cand: Vec<Track> = st.feeds.recs.iter().chain(trending.iter()).cloned().collect();
+                        st.feeds.mixes = glyph_core::taste::build_daily_mixes(&st.library, &taste, &cand, &date_key, hour, hide);
+                    }
+                    st.feeds.loading = false;
+                }
+                emit_feeds(core);
+                return feeds_json(core);
+            }
+        }
+    }
+
+    // Local fallback (local-only opt-out, older server without TASTE_ENGINE, or server miss).
     crate::taste::enrich_and_sync(core, false).await;
     if stale(core) {
         return feeds_json(core);
@@ -1188,18 +1341,20 @@ pub async fn load_feeds(core: &Arc<Core>) -> Value {
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if !(v.is_empty() && !st.feeds.recs.is_empty()) {
-            // At most two songs per artist, so it does not become one artist's page.
-            let mut per: std::collections::HashMap<String, usize> = Default::default();
-            let list: Vec<Track> = v
-                .into_iter()
-                .filter(|(t, _)| {
-                    let n = per.entry(glyph_core::dedupe::normalize_artist(&t.artist)).or_default();
-                    *n += 1;
-                    *n <= 2
-                })
-                .map(|(t, _)| t)
-                .take(16)
-                .collect();
+            let list: Vec<Track> = if taste_on {
+                taste.mmr_rank_tracks(&v, 16, 2)
+            } else {
+                let mut per: std::collections::HashMap<String, usize> = Default::default();
+                v.into_iter()
+                    .filter(|(t, _)| {
+                        let n = per.entry(glyph_core::dedupe::normalize_artist(&t.artist)).or_default();
+                        *n += 1;
+                        *n <= 2
+                    })
+                    .map(|(t, _)| t)
+                    .take(16)
+                    .collect()
+            };
             st.feeds.recs = list;
             save_feeds_cache(&scope, &st.feeds.trending, &st.feeds.recs);
         }

@@ -3,6 +3,7 @@
 // handoff between Glyph's native audio player and the video player.
 import { backend } from "../../api/backend";
 import type {
+  PlayerState,
   Track,
   VideoCandidate,
   VideoKind,
@@ -14,6 +15,24 @@ import { trackKey } from "../../api/types";
 import { app } from "../../state.svelte";
 
 export type VideoFilter = "all" | "official" | "live" | "lyric";
+
+export interface VideoAudioBridge {
+  readonly playing: boolean;
+  readonly loading: boolean;
+  pause(): unknown;
+  resume(): unknown;
+  onBackendPlayerStatus(fn: (status: PlayerState["status"]) => void): () => void;
+  onExplicitAudioPlay(fn: () => void): () => void;
+}
+
+export interface VideoPlaybackController {
+  pause(): void;
+  togglePlay(): void;
+}
+
+const PAUSE_GRACE_MS = 1500;
+const PAUSE_DEDUPE_MS = 150;
+const MAX_PAUSE_RETRIES = 3;
 
 const PICKS_KEY = "glyph.video.picks.v1";
 
@@ -37,7 +56,7 @@ function savePicks(picks: Record<string, string>) {
   }
 }
 
-class VideoState {
+export class VideoState {
   forTrackKey = $state<string | null>(null);
   query = $state("");
   filter = $state<VideoFilter>("all");
@@ -58,6 +77,37 @@ class VideoState {
   private picks: Record<string, string> = typeof localStorage !== "undefined" ? loadPicks() : {};
   private searchSeq = 0;
   private resolveSeq = 0;
+  private audio: VideoAudioBridge;
+  private now: () => number;
+  private controller: VideoPlaybackController | null = null;
+  private awaitingAudioPause = false;
+  private pauseGraceUntil = 0;
+  private lastPauseSentAt = -Infinity;
+  private pauseRetries = 0;
+
+  constructor(
+    audio: VideoAudioBridge = app,
+    now: () => number = () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
+  ) {
+    this.audio = audio;
+    this.now = now;
+    this.audio.onBackendPlayerStatus((status) => this.handleBackendAudioStatus(status));
+    this.audio.onExplicitAudioPlay(() => this.handleExplicitAudioPlay());
+  }
+
+  registerController(ctrl: VideoPlaybackController): () => void {
+    this.controller = ctrl;
+    return () => {
+      if (this.controller === ctrl) this.controller = null;
+    };
+  }
+
+  /** Handles play/pause keyboard shortcut when a video stream is mounted. */
+  handlePlayPauseShortcut(): boolean {
+    if (!this.controller || !this.stream) return false;
+    this.controller.togglePlay();
+    return true;
+  }
 
   get filtered(): VideoCandidate[] {
     if (this.filter === "all") return this.results;
@@ -74,12 +124,67 @@ class VideoState {
     return qs.find((q) => q.height === 720) ?? qs[0] ?? null;
   }
 
-  /** Pause Glyph's audio engine whenever the video starts playing. */
+  private sendAudioPause(force = false) {
+    const t = this.now();
+    this.awaitingAudioPause = true;
+    this.pauseGraceUntil = Math.max(this.pauseGraceUntil, t + PAUSE_GRACE_MS);
+    if (!force && t - this.lastPauseSentAt < PAUSE_DEDUPE_MS && !this.audio.playing && !this.audio.loading) {
+      return;
+    }
+    this.lastPauseSentAt = t;
+    void this.audio.pause();
+  }
+
+  private handleBackendAudioStatus(status: PlayerState["status"]) {
+    if (status === "paused" || status === "idle" || status === "error") {
+      this.awaitingAudioPause = false;
+      this.pauseRetries = 0;
+      return;
+    }
+    if (!this.playing) return;
+    if (status === "loading") {
+      this.pausedAudioForVideo = true;
+      if (!this.awaitingAudioPause) {
+        this.pauseRetries = 0;
+        this.sendAudioPause(true);
+      }
+      return;
+    }
+    // status === "playing" while video is playing:
+    if (this.awaitingAudioPause || this.now() < this.pauseGraceUntil) {
+      // Stale backend tick or in-flight load from before pause landed: re-enforce pause.
+      this.pausedAudioForVideo = true;
+      if (this.pauseRetries < MAX_PAUSE_RETRIES) {
+        this.pauseRetries++;
+        this.sendAudioPause(true);
+      }
+      return;
+    }
+    // Audio was already confirmed paused and resumed externally (media keys, Connect, etc.):
+    // pause the video so both audio streams never play simultaneously.
+    this.pausedAudioForVideo = false;
+    this.controller?.pause();
+  }
+
+  private handleExplicitAudioPlay() {
+    this.awaitingAudioPause = false;
+    this.pauseGraceUntil = 0;
+    this.pauseRetries = 0;
+    this.pausedAudioForVideo = false;
+    if (this.playing) {
+      this.controller?.pause();
+    }
+  }
+
+  /** Idempotently pauses Glyph's audio engine whenever the video starts playing. */
   notifyVideoPlaying() {
     this.playing = true;
-    if (app.playing) {
+    if (this.audio.playing || this.audio.loading) {
       this.pausedAudioForVideo = true;
-      void app.togglePlay();
+      this.pauseRetries = 0;
+      this.sendAudioPause(true);
+    } else if (this.awaitingAudioPause) {
+      this.sendAudioPause(false);
     }
   }
 
@@ -90,12 +195,14 @@ class VideoState {
   /** Called when leaving video mode back to Song / Cover / Lyrics. */
   leave(resumeAudioIfPaused = true) {
     const wasPlaying = this.playing;
+    const shouldResume = resumeAudioIfPaused && this.pausedAudioForVideo && wasPlaying && !this.audio.playing;
     this.playing = false;
-    if (resumeAudioIfPaused && this.pausedAudioForVideo && wasPlaying && !app.playing) {
-      this.pausedAudioForVideo = false;
-      void app.togglePlay();
-    } else {
-      this.pausedAudioForVideo = false;
+    this.awaitingAudioPause = false;
+    this.pauseGraceUntil = 0;
+    this.pauseRetries = 0;
+    this.pausedAudioForVideo = false;
+    if (shouldResume) {
+      void this.audio.resume();
     }
   }
 

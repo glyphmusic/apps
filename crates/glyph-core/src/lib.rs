@@ -406,6 +406,8 @@ struct Inner {
     server_wrong_song: bool,
     /// The server supports taste tag enrichment & collaborative filtering (`capability::TASTE`).
     server_taste: bool,
+    /// The server supports the full server-side Taste Engine (`capability::TASTE_ENGINE`).
+    server_taste_engine: bool,
     covers: CoverCache,
     lyrics_cache: LyricsCache,
 }
@@ -846,7 +848,13 @@ impl Backend {
     /// Whether the connected server advertises `capability::TASTE`.
     pub fn server_taste_available(&self) -> bool {
         let inner = self.cur();
-        inner.server_taste && inner.live_server().is_some()
+        (inner.server_taste || inner.server_taste_engine) && inner.live_server().is_some()
+    }
+
+    /// Whether the connected server advertises `capability::TASTE_ENGINE` (`POST /v1/taste/recommend`).
+    pub fn server_taste_engine_available(&self) -> bool {
+        let inner = self.cur();
+        inner.server_taste_engine && inner.live_server().is_some()
     }
 
     /// Fetches canonical genres, moods, tags and similar artists for `artists`.
@@ -860,13 +868,23 @@ impl Backend {
             .await?
     }
 
-    /// Queries optional server collaborative filtering (when enabled & supported).
+    /// Queries server collaborative filtering (when enabled & supported).
     pub async fn taste_collab(
         &self,
         req: glyph_protocol::TasteCollabRequest,
     ) -> anyhow::Result<Option<glyph_protocol::TasteCollabResponse>> {
         let inner = self.cur();
         self.spawn(async move { inner.taste_collab(&req).await })
+            .await?
+    }
+
+    /// Runs the server-side intent-aware music taste engine (`POST /v1/taste/recommend`).
+    pub async fn taste_recommend(
+        &self,
+        req: glyph_protocol::TasteRecommendRequest,
+    ) -> anyhow::Result<Option<glyph_protocol::TasteRecommendResponse>> {
+        let inner = self.cur();
+        self.spawn(async move { inner.taste_recommend(&req).await })
             .await?
     }
 

@@ -31,6 +31,7 @@ impl Inner {
         let mut server_rates = false;
         let mut server_wrong_song = false;
         let mut server_taste = false;
+        let mut server_taste_engine = false;
         let url = server_client::normalize_base_url(config.effective_server_url());
         if !url.is_empty() {
             let key_url = url.clone();
@@ -44,6 +45,7 @@ impl Inner {
                     server_rates = h.supports(glyph_protocol::capability::RATINGS);
                     server_wrong_song = h.supports(glyph_protocol::capability::WRONG_SONG);
                     server_taste = h.supports(glyph_protocol::capability::TASTE);
+                    server_taste_engine = h.supports(glyph_protocol::capability::TASTE_ENGINE);
                     server_providers = Some(h.providers);
                     mode = BackendMode::Server { url, server_version: h.server_version };
                     server = Some(client);
@@ -66,7 +68,7 @@ impl Inner {
             }
         }
         let covers = covers.with_server(server.clone());
-        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, server_wrong_song, server_taste, covers, lyrics_cache })
+        Ok(Inner { config: Arc::new(config), mode, http, providers, cooldowns, resolver, server, server_providers, server_rates, server_wrong_song, server_taste, server_taste_engine, covers, lyrics_cache })
     }
 
     /// The server, unless it is the official one and that is out (see
@@ -984,6 +986,25 @@ impl Inner {
         }
     }
 
+    pub(super) async fn taste_recommend(
+        &self,
+        req: &glyph_protocol::TasteRecommendRequest,
+    ) -> Result<Option<glyph_protocol::TasteRecommendResponse>> {
+        if !self.server_taste_engine {
+            return Ok(None);
+        }
+        let Some(server) = self.live_server() else {
+            return Ok(None);
+        };
+        match server.taste_recommend(req).await {
+            Ok(resp) => Ok(Some(resp)),
+            Err(e) => {
+                tracing::info!("server taste engine unavailable: {e:#}");
+                Ok(None)
+            }
+        }
+    }
+
     pub(super) async fn taste_onboarding(
         &self,
     ) -> Result<glyph_protocol::OnboardingCatalogResponse> {
@@ -1085,7 +1106,7 @@ async fn local_deezer_artist_tags(
             }
         }
     }
-    let (genres, moods, tags) = glyph_protocol::taste::classify_tags(&raw_tags, artist);
+    let (genres, moods, eras, tags) = glyph_protocol::taste::classify_tags_full(&raw_tags, artist);
     let similar = related
         .map(|r| r.data.into_iter().map(|x| x.name).filter(|n| !n.trim().is_empty()).collect())
         .unwrap_or_default();
@@ -1093,6 +1114,7 @@ async fn local_deezer_artist_tags(
         artist: artist.to_string(),
         genres,
         moods,
+        eras,
         tags,
         similar,
     })

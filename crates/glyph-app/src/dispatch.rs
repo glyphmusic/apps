@@ -138,6 +138,14 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             commands::toggle_play(core);
             Ok(Value::Null)
         }
+        "pause" => {
+            commands::pause(core);
+            Ok(Value::Null)
+        }
+        "resume" => {
+            commands::resume(core);
+            Ok(Value::Null)
+        }
         "next" => {
             commands::next(core);
             Ok(Value::Null)

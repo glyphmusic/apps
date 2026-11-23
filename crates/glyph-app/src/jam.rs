@@ -364,6 +364,49 @@ pub fn route_toggle_play(core: &Core) -> bool {
     remote_send(Cmd::Pause(playing))
 }
 
+/// `pause`, first thing. `true` = handled.
+pub fn route_pause(core: &Core) -> bool {
+    if control(core, Control::Pause) {
+        return true;
+    }
+    let (resolving, changed) = {
+        let mut st = core.st();
+        let was = st.hold_play;
+        if st.resolving {
+            st.hold_play = true;
+        }
+        (st.resolving, !was)
+    };
+    if resolving {
+        let was_rt = rt().hold.swap(true, Ordering::Relaxed);
+        if changed || !was_rt {
+            core.emit_player();
+        }
+        return true;
+    }
+    remote_send(Cmd::Pause(true))
+}
+
+/// `resume`, first thing. `true` = handled.
+pub fn route_resume(core: &Core) -> bool {
+    if control(core, Control::Play) {
+        return true;
+    }
+    let resolving = {
+        let mut st = core.st();
+        if st.resolving {
+            st.hold_play = false;
+        }
+        st.resolving
+    };
+    if resolving {
+        rt().hold.store(false, Ordering::Relaxed);
+        core.emit_player();
+        return true;
+    }
+    remote_send(Cmd::Pause(false))
+}
+
 /// `seek`, first thing. `true` = handled.
 pub fn route_seek(core: &Core, secs: f64) -> bool {
     let secs = secs.max(0.0);

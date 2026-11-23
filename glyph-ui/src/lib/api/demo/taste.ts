@@ -19,6 +19,7 @@ function storeOf(ctx: DemoCtx): LocalTasteStore {
   if (!s) {
     s = emptyTasteStore();
     s.artist_plays = { "tame impala": 8, "men i trust": 6, gorillaz: 5, "daft punk": 4 };
+    s.artist_replays = { "tame impala": 2 };
     s.artist_skips = { "skip demo": 3 };
     s.time_buckets = [12, 24, 38, 26];
     s.version_plays = { acoustic: 4 };

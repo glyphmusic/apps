@@ -12,17 +12,19 @@
 
   const tiles = $derived(mix.tracks.slice(0, 4));
   const kindLabel = $derived(
-    mix.kind === "time"
-      ? t("taste.mix.time_pill")
-      : mix.kind === "discovery"
-        ? t("taste.mix.discovery_pill")
-        : (mix.tags?.[0] ?? t("taste.mix.daily_pill")),
+    mix.kind === "intent"
+      ? (mix.tags?.[0] ?? t("taste.mix.intent_pill"))
+      : mix.kind === "time"
+        ? t("taste.mix.time_pill")
+        : mix.kind === "discovery"
+          ? t("taste.mix.discovery_pill")
+          : (mix.tags?.[0] ?? t("taste.mix.daily_pill")),
   );
 
   function openMix() {
     app.openSection({
       title: mix.title,
-      icon: mix.kind === "time" ? "clock" : mix.kind === "discovery" ? "sparkles" : "disc-3",
+      icon: mix.kind === "time" ? "clock" : mix.kind === "discovery" || mix.kind === "intent" ? "sparkles" : "disc-3",
       tracks: mix.tracks,
       subtitle: mix.subtitle,
       tags: mix.tags,

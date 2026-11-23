@@ -3,9 +3,12 @@ import { DemoBackend } from "../api/demo";
 import { TRACKS } from "../api/demo-data";
 import {
   buildLocalDailyMixes,
+  buildServerRecommendPayload,
   computeTasteProfile,
   detectVersions,
   emptyTasteStore,
+  inferWebIntent,
+  recordWebSessionEvent,
 } from "../api/web-taste";
 import type { OnboardingCatalogResponse, TasteProfile, DailyMix, HomeFeeds } from "../api/types";
 import { primaryArtist, trackKey } from "../api/types";
@@ -40,14 +43,16 @@ describe("taste engine (web & demo)", () => {
     store.collab_contributors = 15;
     store.collab_model_ready = true;
 
-    const hybrid = computeTasteProfile(backend.library, store, { enabled: true, server_collab: true, metadata_enrichment: true }, true);
-    expect(hybrid.mode).toBe("hybrid");
-    expect(hybrid.collab_recs).toHaveLength(1);
-    expect(hybrid.top_genres.length).toBeGreaterThan(0);
+    const serverMode = computeTasteProfile(backend.library, store, { enabled: true, server_collab: true, metadata_enrichment: true }, true);
+    expect(serverMode.mode).toBe("server");
+    expect(serverMode.collab_recs).toHaveLength(1);
+    expect(serverMode.top_genres.length).toBeGreaterThan(0);
+    expect(serverMode.intent).toBeDefined();
 
     const localOnly = computeTasteProfile(backend.library, store, { enabled: true, server_collab: false, metadata_enrichment: true }, true);
     expect(localOnly.mode).toBe("local");
     expect(localOnly.collab_recs).toEqual([]);
+    expect(localOnly.intent).toBeDefined();
 
     const off = computeTasteProfile(backend.library, store, { enabled: false, server_collab: true, metadata_enrichment: true }, true);
     expect(off.mode).toBe("off");
@@ -152,5 +157,43 @@ describe("taste engine (web & demo)", () => {
     await backend.call("recommend_feedback", { artist: "Skip Demo", preference: null });
     const after = await backend.call<TasteProfile>("taste_profile");
     expect(after.disliked_artists.some((d) => d.name.toLowerCase() === "skip demo")).toBe(false);
+  });
+
+  it("infers real-time session intent (vibe reset, comfort, artist dive) and builds server recommend payload", () => {
+    const backend = new DemoBackend();
+    const store = emptyTasteStore();
+
+    // Two consecutive early skips trigger vibe_reset + vibe_pivot
+    recordWebSessionEvent(store, { title: "A", artist: "Tame Impala", outcome: "skipped_early", context: "radio" });
+    recordWebSessionEvent(store, { title: "B", artist: "Gorillaz", outcome: "skipped_early", context: "radio" });
+    const resetIntent = inferWebIntent(store, [], [], 0.5);
+    expect(resetIntent.mode).toBe("vibe_reset");
+    expect(resetIntent.vibe_pivot).toBe(true);
+
+    // Replays trigger comfort mode
+    const comfortStore = emptyTasteStore();
+    recordWebSessionEvent(comfortStore, { title: "Let It Happen", artist: "Tame Impala", outcome: "replayed", context: "library" });
+    recordWebSessionEvent(comfortStore, { title: "Let It Happen", artist: "Tame Impala", outcome: "replayed", context: "library" });
+    const comfortIntent = inferWebIntent(comfortStore, [], [], 0.35);
+    expect(comfortIntent.mode).toBe("comfort");
+    expect(comfortIntent.vibe_pivot).toBe(false);
+
+    // Transition pairs are recorded across distinct positive artists and included in server payload
+    const pairStore = emptyTasteStore();
+    recordWebSessionEvent(pairStore, { title: "Song 1", artist: "Daft Punk", outcome: "completed", context: "library" });
+    recordWebSessionEvent(pairStore, { title: "Song 2", artist: "Justice", outcome: "completed", context: "library" });
+    expect(pairStore.session_pairs).toEqual([["Daft Punk", "Justice"]]);
+
+    const payload = buildServerRecommendPayload(
+      backend.library,
+      pairStore,
+      { enabled: true, server_collab: true, metadata_enrichment: true },
+      "home",
+      [TRACKS[0]],
+    );
+    expect(payload.purpose).toBe("home");
+    expect(Array.isArray(payload.positive_artists)).toBe(true);
+    expect((payload.session as { recent_events: unknown[] }).recent_events.length).toBe(2);
+    expect(payload.session_pairs).toEqual([["Daft Punk", "Justice"]]);
   });
 });

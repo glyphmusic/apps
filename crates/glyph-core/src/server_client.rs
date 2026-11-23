@@ -519,6 +519,24 @@ impl ServerClient {
         Ok(resp.json().await?)
     }
 
+    /// `POST /v1/taste/recommend`: server-side intent-aware music taste engine
+    /// (recommendations, Daily Mixes, Radio, collaborative filtering & tags).
+    pub async fn taste_recommend(
+        &self,
+        req: &TasteRecommendRequest,
+    ) -> Result<TasteRecommendResponse> {
+        let resp = Self::check(
+            self.member_request(self.post("/v1/taste/recommend"))
+                .await
+                .timeout(Duration::from_secs(14))
+                .json(req)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(resp.json().await?)
+    }
+
     /// `GET /v1/taste/onboarding`: genre-diverse starter artists and songs for onboarding.
     pub async fn taste_onboarding(&self) -> Result<OnboardingCatalogResponse> {
         let req = self
