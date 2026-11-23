@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.4 - 2026-11-23
+
+### Added
+
+- **Music taste profile & Daily Mixes**: Glyph learns what you like and offers personalised Daily Mixes, smarter Radio and search ranking, a new Taste profile page and a short onboarding picker. It is on by default and can be switched off, or kept fully on your device, in Settings.
+
+### Fixed
+
+- **Works with every server version**: Taste features only use the Glyph server when it announces support for them; older servers, offline use and the local-only option fall back to on-device recommendations, and existing settings keep working unchanged.
+- **Music video player and translations**: smoother video state handling in Now Playing, and all languages are now checked for missing or mismatched texts.
+
 ## 0.13.3 - 2026-11-22
 
 ### Fixed
