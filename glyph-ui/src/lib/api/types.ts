@@ -499,7 +499,7 @@ export interface Config {
   mcp: { enabled: boolean; mode: string; port: number; token: string; access?: Partial<Record<"playback" | "library" | "stats" | "settings" | "plugins", "none" | "read" | "write">> };
   mpd: { enabled: boolean; address: string };
   devices: { discovery: boolean };
-  plugins: { auto_update: boolean; skip_install_warning: boolean; sort: string; disabled: string[] };
+  plugins: { auto_update: boolean; skip_install_warning: boolean; sort: string; disabled: string[]; held?: string[] };
   desktop: { autostart: boolean; start_in_tray: boolean; close_to_tray?: boolean; clipboard_links?: boolean };
   /** Phone notifications (Android, notify.rs); missing in older configs. */
   notifications?: { app_updates: boolean; new_releases: boolean };

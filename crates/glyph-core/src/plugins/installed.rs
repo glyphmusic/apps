@@ -38,18 +38,51 @@ pub struct Installed {
 impl Installed {
     /// The catalog's listing of this plugin when it is newer (same repo).
     pub fn update_in<'a>(&self, catalog: &'a Catalog) -> Option<&'a Listing> {
-        let l = catalog.find(&self.manifest.id)?;
-        if !l.repo.eq_ignore_ascii_case(&self.origin.repo) {
-            return None;
-        }
+        let l = self.listing_in(catalog)?;
         (is_newer(&l.manifest.version, &self.manifest.version) && l.installable().is_ok()).then_some(l)
+    }
+
+    /// When the newest version does not fit this Glyph: the newest earlier
+    /// one that does and is newer than this (or, for a plugin this Glyph
+    /// paused, any that fits).
+    pub fn fitting_update_in<'a>(&self, catalog: &'a Catalog) -> Option<(&'a Listing, &'a VersionRef)> {
+        let l = self.listing_in(catalog)?;
+        let v = l.fitting_version()?;
+        let paused = !self.fits();
+        (paused || is_newer(&v.version, &self.manifest.version)).then_some((l, v))
+    }
+
+    fn listing_in<'a>(&self, catalog: &'a Catalog) -> Option<&'a Listing> {
+        catalog.find(&self.manifest.id).filter(|l| l.repo.eq_ignore_ascii_case(&self.origin.repo))
+    }
+
+    /// Fits this Glyph's version (see [`installed_unfit`] for those that do not).
+    pub fn fits(&self) -> bool {
+        self.manifest.validate(app_version()).is_ok()
     }
 }
 
 /// Installed plugins that are still valid for this Glyph, sorted by name.
 pub fn installed() -> Vec<Installed> {
+    scan().into_iter().filter_map(|(p, ok)| ok.is_ok().then_some(p)).collect()
+}
+
+/// Installed plugins this Glyph's version does not fit (`min_app` or
+/// `max_app`), with why: kept but paused until an update (of Glyph or of
+/// the plugin) fits.
+pub fn installed_unfit() -> Vec<(Installed, Invalid)> {
+    scan()
+        .into_iter()
+        .filter_map(|(p, ok)| match ok {
+            Err(e @ (Invalid::NeedsNewerApp | Invalid::NeedsOlderApp)) => Some((p, e)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn scan() -> Vec<(Installed, Result<(), Invalid>)> {
     let Ok(dir) = std::fs::read_dir(plugins_dir()) else { return Vec::new() };
-    let mut out: Vec<Installed> = dir
+    let mut out: Vec<(Installed, Result<(), Invalid>)> = dir
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {
@@ -58,11 +91,14 @@ pub fn installed() -> Vec<Installed> {
             // No origin.json: copied in by hand to try it out (local).
             let origin: Origin = paths::read_json(&p.join("origin.json")).unwrap_or_else(Origin::local);
             // The folder name is the id; anything else was tampered with.
-            let ok = e.file_name().to_str() == Some(manifest.id.as_str()) && manifest.validate(app_version()).is_ok();
-            ok.then_some(Installed { manifest, origin })
+            if e.file_name().to_str() != Some(manifest.id.as_str()) {
+                return None;
+            }
+            let ok = manifest.validate(app_version());
+            Some((Installed { manifest, origin }, ok))
         })
         .collect();
-    out.sort_by(|a, b| a.manifest.name.to_lowercase().cmp(&b.manifest.name.to_lowercase()));
+    out.sort_by_key(|a| a.0.manifest.name.to_lowercase());
     out
 }
 

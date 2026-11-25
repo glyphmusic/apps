@@ -1782,6 +1782,12 @@ impl Backend {
         self.spawn(async move { plugins::catalog(&inner.http, force).await }).await?
     }
 
+    /// An earlier version of a checked plugin (its manifest read at that commit).
+    pub async fn plugin_listing_at(&self, listing: plugins::Listing, version: plugins::VersionRef) -> anyhow::Result<plugins::Listing> {
+        let inner = self.cur();
+        self.spawn(async move { plugins::listing_at(&inner.http, &listing, &version).await }).await?
+    }
+
     /// Code of a plugin (its WebAssembly module from GitHub); `None` when it
     /// has none.
     pub async fn plugin_code(&self, listing: plugins::Listing) -> anyhow::Result<Option<Vec<u8>>> {

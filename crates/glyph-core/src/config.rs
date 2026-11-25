@@ -354,11 +354,15 @@ pub struct PluginsConfig {
     /// hidden rows, menus and settings are gone until switched on).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled: Vec<String>,
+    /// Installed plugins kept at their version: no automatic updates and
+    /// none from "Update all" (set when going back to an earlier version).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
 }
 
 impl Default for PluginsConfig {
     fn default() -> Self {
-        Self { auto_update: true, skip_install_warning: false, sort: crate::plugins::Sort::default(), disabled: Vec::new() }
+        Self { auto_update: true, skip_install_warning: false, sort: crate::plugins::Sort::default(), disabled: Vec::new(), held: Vec::new() }
     }
 }
 

@@ -8,6 +8,7 @@
 - **Plugins can change the app icon and the whole font**: a plugin's look can bring its own app icon (window, taskbar, tray, Dock, and the app overview on Android), its own font file for all text, and its own monospaced font. Turn the plugin off and Glyph's icon and fonts come back.
 - **Plugins can rearrange the home page, sidebar and tabs**: a plugin's look can put the sections of the home page, the sidebar entries and the tabs on phones in a new order, or hide some. Settings always stays in the sidebar.
 - **Plugins can move the sidebar and change the startup animation**: a plugin's look can put the sidebar on the right (the queue and lyrics panel then opens on the left) and bring its own ASCII picture for the startup animation, shown from the next start.
+- **Better plugin versions**: a plugin can say up to which Glyph version it works (`max_app`). If your Glyph is too new or too old for a plugin, it stays installed but pauses until an update fits, and Settings > Plugins shows it under "Paused". If the newest version does not fit your Glyph, Glyph offers the newest one that does. Each plugin's page lists its earlier versions to go back to, with "Keep this version" to stop updates for it, and shows what changed in an update.
 
 ### Changed
 

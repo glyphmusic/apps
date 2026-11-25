@@ -8,7 +8,7 @@ import { setOverrides, t, tf } from "../i18n.svelte";
 import { setPluginThemes, type Theme } from "../theme";
 import { loadBackgrounds } from "../backgrounds.svelte";
 import { errText } from "./util";
-import type { PluginCatalog, PluginInstalled, PluginListing, PluginUiState } from "./types";
+import type { PluginCatalog, PluginInstalled, PluginListing, PluginUiState, PluginVersion } from "./types";
 
 export const THEME_PREFIX = "plugin:";
 export const themeId = (id: string) => `${THEME_PREFIX}${id}`;
@@ -18,6 +18,8 @@ const emptyUi = (): PluginUiState => ({ hidden: [], sections: [], pages: [], str
 export const pl = $state({
   loaded: false,
   installed: [] as PluginInstalled[],
+  /** Installed but paused: this Glyph's version does not fit them. */
+  unfit: [] as PluginInstalled[],
   catalog: null as PluginCatalog | null,
   loading: false,
   error: null as string | null,
@@ -30,14 +32,17 @@ export const pl = $state({
   /** First install waiting for the user to accept the warning. */
   confirm: null as PluginListing | null,
   confirmSkip: false,
+  /** The waiting install is an earlier version picked by hand (kept afterwards). */
+  confirmHold: false,
   ui: emptyUi(),
 });
 
 /** Reads the installed plugins and what they add; publishes themes and texts. */
 export async function loadPlugins() {
-  const st = await backend().call<{ installed: PluginInstalled[]; ui: PluginUiState } | undefined>("plugins_state");
+  const st = await backend().call<{ installed: PluginInstalled[]; unfit?: PluginInstalled[]; ui: PluginUiState } | undefined>("plugins_state");
   if (!st) return;
   pl.installed = st.installed;
+  pl.unfit = st.unfit ?? [];
   pl.ui = st.ui;
   pl.loaded = true;
   const themes: Theme[] = st.installed.filter((p) => p.theme).map((p) => ({ id: themeId(p.id), name: p.name, ...p.theme! }));
@@ -70,9 +75,33 @@ export function findListing(id: string): PluginListing | undefined {
   return pl.catalog?.checked.find((l) => l.id === id) ?? pl.catalog?.community.find((l) => l.id === id);
 }
 
-/** Installed plugins with a newer version in the catalog. */
+/** An installed plugin, running or paused. */
+export function findInstalled(id: string): PluginInstalled | undefined {
+  return pl.installed.find((p) => p.id === id) ?? pl.unfit.find((p) => p.id === id);
+}
+
+/** `a` is a higher version than `b` (numbers only, like 1.2.0). */
+export function newer(a: string, b: string): boolean {
+  const pa = a.split(".").map((x) => parseInt(x, 10) || 0), pb = b.split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  return false;
+}
+
+/** Kept at its version: no automatic updates, none from "Update all". */
+export function isHeld(id: string): boolean { return (app.config.plugins.held ?? []).includes(id); }
+export function setHeld(id: string, on: boolean) {
+  if (isHeld(id) === on) return;
+  app.setConfig((c) => { c.plugins.held = (c.plugins.held ?? []).filter((x) => x !== id).concat(on ? [id] : []); });
+}
+
+/** Installed plugins (paused ones too) with an update to take, except kept ones. */
 export function pluginUpdates(): PluginListing[] {
-  return pl.installed.flatMap((p) => (p.update ? [p.update] : []));
+  return [...pl.installed, ...pl.unfit].flatMap((p) => (p.update && !isHeld(p.id) ? [p.update] : []));
+}
+
+/** `base` (a listing or an installed plugin) as its earlier version `v`. */
+export function atVersion(base: PluginListing, v: PluginVersion): PluginListing {
+  return { ...base, version: v.version, rev: v.rev, min_app: v.min_app, max_app: v.max_app, changes: v.changes, code: v.code, permissions: v.permissions, installable: v.fits ? "ok" : "needs_newer_app", versions: [], fitting: null };
 }
 
 /** Permissions as the warning lists them: `code`, then each permission. */
@@ -86,24 +115,25 @@ function newPermissions(l: PluginListing, old: PluginListing): string[] {
 }
 
 function silentUpdates(): PluginListing[] {
-  return pluginUpdates().filter((l) => { const o = pl.installed.find((p) => p.id === l.id); return o && newPermissions(l, o).length === 0; });
+  return pluginUpdates().filter((l) => { const o = findInstalled(l.id); return o && newPermissions(l, o).length === 0; });
 }
 
 /** Installs or updates `l`. A first install shows the warning first (plugins
  *  are made by other people, installed at your own risk), unless turned off;
  *  plugins with code always show it. Updates go straight through unless they
  *  ask for more permissions. */
-export function installPlugin(l: PluginListing) {
-  const old = pl.installed.find((p) => p.id === l.id);
+export function installPlugin(l: PluginListing, hold = false) {
+  const old = findInstalled(l.id);
   const fresh = !old;
   const asksMore = old ? newPermissions(l, old).length > 0 : l.code;
   if (asksMore || (fresh && !app.config.plugins.skip_install_warning)) {
     pl.detail = l.id;
     pl.confirm = l;
     pl.confirmSkip = false;
+    pl.confirmHold = hold;
     return;
   }
-  return installNow(l);
+  return installNow(l, hold);
 }
 
 /** "Install anyway" on the warning. */
@@ -112,17 +142,20 @@ export function acceptWarning() {
   if (!l) return;
   pl.confirm = null;
   if (pl.confirmSkip && !l.code) app.setConfig((c) => { c.plugins.skip_install_warning = true; });
-  return installNow(l);
+  return installNow(l, pl.confirmHold);
 }
 export function cancelWarning() { pl.confirm = null; }
 
-async function installNow(l: PluginListing) {
+/** Installs `l`; `hold` keeps it at that version afterwards (an earlier
+ *  version picked by hand), otherwise a kept plugin takes updates again. */
+async function installNow(l: PluginListing, hold = false) {
   if (pl.busy[l.id]) return;
   pl.busy[l.id] = true;
   delete pl.failed[l.id];
-  const fresh = !pl.installed.some((p) => p.id === l.id);
+  const fresh = !findInstalled(l.id);
   try {
     await backend().call("plugin_install", { id: l.id, repo: l.repo, path: l.path, rev: l.rev });
+    setHeld(l.id, hold);
     await loadPlugins();
     const id = themeId(l.id);
     if (l.kind === "theme" && (fresh || app.config.visuals.theme === id)) app.setConfig((c) => { c.visuals.theme = id; });
@@ -135,7 +168,7 @@ async function installNow(l: PluginListing) {
 /** Asks for confirmation, then removes an installed plugin; its theme goes back to the default. */
 export function uninstallPlugin(id: string) {
   if (pl.busy[id]) return;
-  const name = pl.installed.find((p) => p.id === id)?.name ?? id;
+  const name = findInstalled(id)?.name ?? id;
   app.ask({
     title: tf("plugins.remove.confirm.title", { name }),
     body: t("plugins.remove.confirm.body"),
@@ -152,6 +185,7 @@ async function removePlugin(id: string, name: string) {
   if (app.config.visuals.bg_image?.startsWith(`plugin:${id}/`)) app.setConfig((c) => { c.visuals.bg_image = ""; });
   try {
     await backend().call("plugin_uninstall", { id });
+    setHeld(id, false);
     await loadPlugins();
     app.toast(tf("plugins.removed_toast", { name }));
   } catch (e) { app.toastInfo(errText(e)); }

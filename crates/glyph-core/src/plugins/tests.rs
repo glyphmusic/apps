@@ -10,6 +10,8 @@ fn theme(id: &str, version: &str) -> Manifest {
         description: String::new(),
         license: "MIT".into(),
         min_app: None,
+        max_app: None,
+        changes: String::new(),
         kind: "theme".into(),
         theme: Some(ThemeSpec { accent: "#ff8a3d".into(), glow: Some(["#3a1206".into(), "#ff6516".into(), "#ffc04a".into()]), base: Some("#050302".into()) }),
         main: None,
@@ -44,7 +46,7 @@ fn extension(id: &str) -> Manifest {
 }
 
 fn listing(m: Manifest, repo: &str, checked: bool) -> Listing {
-    Listing { repo: repo.into(), path: String::new(), rev: "HEAD".into(), checked, stars: None, updated: None, manifest: m }
+    Listing { repo: repo.into(), path: String::new(), rev: "HEAD".into(), checked, stars: None, updated: None, manifest: m, versions: Vec::new() }
 }
 
 #[test]
@@ -317,7 +319,7 @@ fn item_values() {
 
 #[test]
 fn index_drops_bad_and_duplicate_entries() {
-    let entry = |repo: &str, id: &str| IndexEntry { repo: repo.into(), path: String::new(), rev: "abc".into(), stars: None, updated: None, manifest: theme(id, "1.0.0") };
+    let entry = |repo: &str, id: &str| IndexEntry { repo: repo.into(), path: String::new(), rev: "abc".into(), stars: None, updated: None, manifest: theme(id, "1.0.0"), versions: Vec::new() };
     let index = Index { plugins: vec![entry("a/b", "sunset"), entry("c/d", "sunset"), entry("bad", "other"), entry("e/f", "mint")] };
     let l = listings_from_index(index);
     assert_eq!(l.len(), 2);
@@ -432,4 +434,71 @@ fn install_and_uninstall_roundtrip() {
     assert!(inst.look_file("../origin.json").is_none());
     uninstall("neon").unwrap();
     std::env::remove_var("GLYPH_DATA_DIR");
+}
+
+#[test]
+fn max_app_pauses_on_a_newer_glyph() {
+    assert_eq!(fits_app(None, Some("0.14.2"), "0.14.2"), Ok(()));
+    assert_eq!(fits_app(None, Some("0.14.2"), "0.14.3"), Err(Invalid::NeedsOlderApp));
+    // A whole minor line: every patch of it.
+    assert_eq!(fits_app(None, Some("0.14"), "0.14.9"), Ok(()));
+    assert_eq!(fits_app(None, Some("0.14.x"), "0.14.9"), Ok(()));
+    assert_eq!(fits_app(None, Some("0.14.x"), "0.15.0"), Err(Invalid::NeedsOlderApp));
+    // A pre-release of 0.14.3 counts as 0.14.3.
+    assert_eq!(fits_app(None, Some("0.14.2"), "0.14.3-beta.1"), Err(Invalid::NeedsOlderApp));
+    assert_eq!(fits_app(Some("0.12.0"), Some("0.14"), "0.11.0"), Err(Invalid::NeedsNewerApp));
+    assert!(matches!(fits_app(None, Some("0.14.y"), "0.14.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(fits_app(None, Some("latest"), "0.14.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(fits_app(Some("0.15.0"), Some("0.14"), "0.14.0"), Err(Invalid::Bad(_))));
+    let mut m = theme("sunset", "1.0.0");
+    m.max_app = Some("0.5".into());
+    assert_eq!(m.validate("0.6.1"), Err(Invalid::NeedsOlderApp));
+    assert_eq!(m.validate("0.5.7"), Ok(()));
+    m.changes = "x".repeat(MAX_CHANGES + 1);
+    assert!(matches!(m.validate("0.5.7"), Err(Invalid::Bad(_))));
+}
+
+fn vref(version: &str, rev: char, max_app: Option<&str>) -> VersionRef {
+    VersionRef { version: version.into(), rev: rev.to_string().repeat(40), min_app: None, max_app: max_app.map(Into::into), changes: String::new(), code: false, permissions: Vec::new() }
+}
+
+#[test]
+fn index_keeps_older_versions_newest_first() {
+    let e = IndexEntry {
+        repo: "a/b".into(),
+        path: String::new(),
+        rev: "abc".into(),
+        stars: None,
+        updated: None,
+        manifest: theme("sunset", "2.0.0"),
+        versions: vec![vref("1.0.0", 'a', None), vref("2.0.0", 'b', None), vref("1.5.0", 'c', None), vref("1.5.0", 'd', None), VersionRef { rev: "short".into(), ..vref("1.2.0", 'e', None) }],
+    };
+    let l = listings_from_index(Index { plugins: vec![e] });
+    let v: Vec<&str> = l[0].versions.iter().map(|v| v.version.as_str()).collect();
+    assert_eq!(v, ["1.5.0", "1.0.0"]);
+}
+
+#[test]
+fn an_earlier_version_fits_when_the_newest_does_not() {
+    let mut newest = theme("sunset", "2.0.0");
+    newest.min_app = Some("99.0.0".into());
+    let mut l = listing(newest, "a/b", true);
+    l.versions = vec![vref("1.5.0", 'a', Some("0.1")), vref("1.4.0", 'b', None), vref("1.0.0", 'c', None)];
+    assert_eq!(l.fitting_version().unwrap().version, "1.4.0");
+    let c = Catalog { checked: vec![l.clone()], ..Default::default() };
+    let at = |v: &str| Installed {
+        manifest: theme("sunset", v),
+        origin: Origin { repo: "a/b".into(), path: String::new(), rev: "x".into(), checked: true, installed_at: 0 },
+    };
+    assert!(at("1.0.0").update_in(&c).is_none());
+    assert_eq!(at("1.0.0").fitting_update_in(&c).unwrap().1.version, "1.4.0");
+    assert!(at("1.4.0").fitting_update_in(&c).is_none());
+    // A paused plugin may also go back to a fitting version.
+    let mut paused = at("1.5.0");
+    paused.manifest.max_app = Some("0.1".into());
+    assert!(!paused.fits());
+    assert_eq!(paused.fitting_update_in(&c).unwrap().1.version, "1.4.0");
+    // The newest fits: nothing earlier is offered.
+    l.manifest.min_app = None;
+    assert!(l.fitting_version().is_none());
 }

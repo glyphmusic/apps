@@ -106,7 +106,7 @@
 //   update_restart      {}                                   -> void
 import type { DemoCtx, DemoHandler } from "../demo";
 import type {
-  AccountDevice, AccountStatus, MigrateCollection, MigrateOverview, MigrateProgress, MigrateResume, PluginCatalog, PluginInstalled, PluginListing,
+  AccountDevice, AccountStatus, MigrateCollection, MigrateOverview, MigrateProgress, MigrateResume, PluginCatalog, PluginInstalled, PluginListing, PluginVersion,
   PluginSection, PluginUiState, PrivacyReport, ProfileSettingsData, StorageStats, YtDlpStatus,
 } from "../../settings/types";
 
@@ -144,6 +144,7 @@ const st = {
   resume: { service: "spotify", done: 3, all: 8, account: "demo_user" } as MigrateResume | null,
   run: null as null | { start: number; selected: MigrateCollection[]; service: string; cancelled: boolean },
   plugins: [] as PluginInstalled[],
+  unfit: [] as PluginInstalled[],
   pluginValues: {} as Record<string, unknown>,
 };
 
@@ -156,7 +157,10 @@ const CATALOG: PluginCatalog = {
   partial: false,
   checked: [
     L({ id: "sunset-palette", name: "Sunset Palette", kind: "theme", description: "A warm orange and rose colour theme.", stars: 120, theme: { accent: 0xff7a59, glow: [0x3a1206, 0xe8553a, 0xffc9a0], base: 0x050302 } }),
-    L({ id: "lyrics-tidy", name: "Lyrics Tidy", version: "1.2.0", description: "Cleans up lyric lines and adds a small option page.", stars: 64, strings: 4, sections: ["Lyrics (own page)"] }),
+    L({ id: "lyrics-tidy", name: "Lyrics Tidy", version: "1.2.0", description: "Cleans up lyric lines and adds a small option page.", stars: 64, strings: 4, sections: ["Lyrics (own page)"], changes: "Keeps blank lines between verses.",
+      versions: [V("1.1.0", "a", "Faster on long songs."), V("1.0.0", "b", "")] }),
+    L({ id: "pixel-skin", name: "Pixel Skin", kind: "theme", version: "2.0.0", min_app: "0.99.0", installable: "needs_newer_app", description: "Chunky pixel corners and a green glow.", stars: 22, theme: { accent: 0x5cff8a, glow: [0x04220e, 0x1fa34a, 0xb6ffcb], base: 0x020403 },
+      versions: [V("1.4.0", "c", "Last version for Glyph 0.13.")], fitting: "1.4.0" }),
     L({ id: "gig-alerts", name: "Gig Alerts", description: "Tells you when followed artists announce a show.", stars: 31, code: true, permissions: ["library", "network:api.example.org"], setup: ["Gig service API key"] }),
   ],
   community: [
@@ -164,13 +168,17 @@ const CATALOG: PluginCatalog = {
     L({ id: "mono-paper", name: "Mono Paper", kind: "theme", description: "Black and white with one grey glow.", checked: false, stars: 8, theme: { accent: 0xd8d8d8, glow: null, base: 0x030303 } }),
   ],
 };
+function V(version: string, ch: string, changes: string): PluginVersion {
+  return { version, rev: ch.repeat(40), min_app: "0.11.0", max_app: null, changes, code: false, permissions: [], fits: true };
+}
 const findL = (id: string) => [...CATALOG.checked, ...CATALOG.community].find((l) => l.id === id);
 const newer = (a: string, b: string) => { const x = a.split(".").map(Number), y = b.split(".").map(Number); for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0); return false; };
 function asInstalled(l: PluginListing, extra: Partial<PluginInstalled> = {}): PluginInstalled {
   const cat = findL(l.id);
   return { ...l, local: false, enabled: true, has_page: l.sections.length > 0, missing_credentials: false, stopped: null, log: [], update: cat && newer(cat.version, l.version) ? cat : null, ...extra };
 }
-st.plugins = [asInstalled(L({ id: "lyrics-tidy", name: "Lyrics Tidy", version: "1.1.0", stars: 64, strings: 4, sections: ["Lyrics (own page)"] }))];
+st.plugins = [asInstalled(L({ id: "lyrics-tidy", name: "Lyrics Tidy", version: "1.1.0", stars: 64, strings: 4, sections: ["Lyrics (own page)"] }), { installed_at: 1793000000, latest: "1.2.0" })];
+st.unfit = [asInstalled(L({ id: "classic-bar", name: "Classic Bar", version: "1.0.0", max_app: "0.12", installable: "needs_older_app", description: "The old sidebar look.", stars: 5, strings: 2 }), { enabled: false, installed_at: 1780000000 })];
 
 function pluginUi(): PluginUiState {
   const active = st.plugins.filter((p) => p.enabled);
@@ -400,15 +408,18 @@ export const handlers: Record<string, DemoHandler> = {
   migrate_progress: () => migrateProgress(),
   migrate_cancel: () => { if (st.run) st.run.cancelled = true; },
 
-  plugins_state: () => ({ installed: st.plugins, ui: pluginUi() }),
+  plugins_state: () => ({ installed: st.plugins, unfit: st.unfit, ui: pluginUi() }),
   plugins_catalog: async (_, a) => { await lag(a.force ? 700 : 300); return CATALOG; },
   plugin_install: async (_, a) => {
     await lag(1000);
-    const l = findL(String(a.id));
-    if (!l) return fail("Plugin not found");
-    st.plugins = [...st.plugins.filter((p) => p.id !== l.id), asInstalled(l)];
+    const top = findL(String(a.id));
+    if (!top) return fail("Plugin not found");
+    // An earlier version by its commit, else the newest.
+    const v = top.versions?.find((x) => x.rev === a.rev);
+    const l: PluginListing = v ? { ...top, version: v.version, rev: v.rev, changes: v.changes, min_app: v.min_app, max_app: v.max_app, installable: "ok", versions: [], fitting: null } : top;
+    st.plugins = [...st.plugins.filter((p) => p.id !== l.id), asInstalled(l, { installed_at: Math.floor(Date.now() / 1000), latest: top.version, update: v && top.installable === "ok" && newer(top.version, v.version) ? top : null })];
   },
-  plugin_uninstall: async (_, a) => { await lag(400); st.plugins = st.plugins.filter((p) => p.id !== a.id); },
+  plugin_uninstall: async (_, a) => { await lag(400); st.plugins = st.plugins.filter((p) => p.id !== a.id); st.unfit = st.unfit.filter((p) => p.id !== a.id); },
   plugin_enable: (_, a) => { const p = st.plugins.find((x) => x.id === a.id); if (p) p.enabled = !!a.on; },
   plugins_reload: () => {},
   plugins_folder: () => {},

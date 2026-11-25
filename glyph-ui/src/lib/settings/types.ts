@@ -8,6 +8,10 @@ export interface PluginThemeColors { accent: number; glow: [number, number, numb
 export interface PluginListing {
   id: string; name: string; author: string; description: string; version: string; license: string;
   min_app: string | null;
+  /** Newest Glyph it works with ("0.14.2", "0.14" or "0.14.x"). */
+  max_app?: string | null;
+  /** What changed in this version. */
+  changes?: string;
   /** "theme" or "extension". */
   kind: string;
   repo: string; path: string; rev: string;
@@ -16,7 +20,7 @@ export interface PluginListing {
   /** ISO date of the last update. */
   updated?: string | null;
   /** Listing::installable(). */
-  installable: "ok" | "needs_newer_app" | "broken";
+  installable: "ok" | "needs_newer_app" | "needs_older_app" | "broken";
   /** Has code (not data_only). */
   code: boolean;
   /** Permissions without "code": `playback`, `library`, ... and `network:<host>`. */
@@ -32,6 +36,17 @@ export interface PluginListing {
     font: string; mono?: string; app_icon?: boolean; layout?: boolean; splash?: boolean;
     radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number;
   } | null;
+  /** Earlier checked versions, newest first (glyph_core::plugins::VersionRef). */
+  versions?: PluginVersion[];
+  /** The newest earlier version that fits this Glyph when the newest does not. */
+  fitting?: string | null;
+}
+
+export interface PluginVersion {
+  version: string; rev: string; min_app: string | null; max_app: string | null; changes: string;
+  code: boolean; permissions: string[];
+  /** Fits this Glyph's version. */
+  fits: boolean;
 }
 
 export interface PluginInstalled extends PluginListing {
@@ -45,8 +60,12 @@ export interface PluginInstalled extends PluginListing {
   stopped: string | null;
   /** Last lines the code logged (local plugins). */
   log: string[];
-  /** A newer version is in the catalog. */
+  /** A newer version is in the catalog (or a newer earlier one that fits). */
   update: PluginListing | null;
+  /** Newest version in the catalog. */
+  latest?: string | null;
+  /** Unix seconds; 0 for local plugins. */
+  installed_at?: number;
 }
 
 export interface PluginCatalog { checked: PluginListing[]; community: PluginListing[]; partial: boolean }

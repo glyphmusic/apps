@@ -23,13 +23,40 @@
   import Tog from "./Tog.svelte";
   import PluginPreview from "./PluginPreview.svelte";
   import RiskNote from "./RiskNote.svelte";
-  import { acceptWarning, allPermissions, cancelWarning, closeDetail, findListing, installPlugin, pl, refreshCatalog, setEnabled, uninstallPlugin, themeId } from "./plugins-state.svelte";
+  import { acceptWarning, allPermissions, atVersion, cancelWarning, closeDetail, findInstalled, findListing, installPlugin, isHeld, pl, refreshCatalog, setEnabled, setHeld, uninstallPlugin, themeId } from "./plugins-state.svelte";
+  import type { PluginVersion } from "./types";
   import { openUrl } from "./util";
   import { setTab } from "./settings.svelte";
   let { id }: { id: string } = $props();
 
   const listing = $derived(findListing(id));
-  const installed = $derived(pl.installed.find((p) => p.id === id));
+  const installed = $derived(findInstalled(id));
+  /** Installed, but this Glyph's version does not fit it. */
+  const paused = $derived(!!installed && !pl.installed.some((p) => p.id === id));
+  const held = $derived(isHeld(id));
+  const sameRepo = $derived(!listing || !installed || installed.repo.toLowerCase() === listing.repo.toLowerCase());
+  /** The newest version, then the earlier ones the index keeps. */
+  const versions = $derived.by(() => {
+    if (!listing || !sameRepo) return [] as PluginVersion[];
+    const top: PluginVersion = { version: listing.version, rev: listing.rev, min_app: listing.min_app, max_app: listing.max_app ?? null, changes: listing.changes ?? "", code: listing.code, permissions: listing.permissions, fits: listing.installable === "ok" };
+    return [top, ...(listing.versions ?? [])];
+  });
+  const fit = $derived(!installed && listing?.fitting ? listing.versions?.find((v) => v.version === listing!.fitting) : undefined);
+  const update = $derived(installed?.update && !held ? installed.update : null);
+  function versionStatus(v: PluginVersion) {
+    const p: string[] = [];
+    if (installed?.version === v.version) p.push(t("plugins.version.current"));
+    else if (v.version === listing?.version) p.push(t("plugins.version.newest"));
+    if (!v.fits) p.push(t("plugins.version.no_fit"));
+    if (v.changes.trim()) p.push(v.changes);
+    return p.join(" · ");
+  }
+  /** Picks a version from the list; an earlier one is kept afterwards. */
+  function pickVersion(v: PluginVersion) {
+    if (!listing) return;
+    const isTop = v.version === listing.version;
+    installPlugin(isTop ? listing : atVersion(listing, v), !isTop);
+  }
   const m = $derived(listing ?? installed);
   const confirming = $derived(pl.confirm?.id === id);
   const busy = $derived(!!pl.busy[id]);
@@ -47,7 +74,7 @@
   const source = $derived(m ? (m.path ? `${m.repo}/${m.path}` : m.repo) : "");
   const pinned = $derived(m && m.rev.length === 40 ? `${source} @ ${m.rev.slice(0, 7)}` : source);
   const canSkip = $derived(!!m && !m.code && !installed);
-  const newer = $derived(!!listing && !!installed && installed.update?.id === id);
+  const newer = $derived(!!update);
   const ownPage = $derived(pl.ui.pages.findIndex((p) => p.id === id));
   const ICON = "rgba(255,255,255,.7)";
   const sub = $derived(m ? [`v${m.version}`, ...(m.author.trim() ? [m.author] : []), ...(stars != null ? [`★ ${compact(stars)}`] : [])].join(" · ") : "");
@@ -90,21 +117,24 @@
           {#if busy}
             <Spin />
           {:else}
-            {#if listing}
-              {#if listing.installable === "needs_newer_app"}<Chip kind="kind">{t("plugins.needs_update")}</Chip>
+            {#if update}<Button kind="primary" onclick={() => installPlugin(update!)}>{tf("plugins.update_to", { v: update.version })}</Button>
+            {:else if fit}<Button kind="primary" onclick={() => installPlugin(atVersion(listing!, fit!))}>{tf("plugins.install_version", { v: fit.version })}</Button>
+            {:else if listing}
+              {#if !sameRepo}<Chip kind="kind">{t("plugins.id_taken")}</Chip>
+              {:else if listing.installable === "needs_newer_app" && !installed}<Chip kind="kind">{t("plugins.needs_update")}</Chip>
+              {:else if listing.installable === "needs_older_app" && !installed}<Chip kind="kind">{t("plugins.needs_older")}</Chip>
               {:else if listing.installable === "broken"}<Chip kind="kind">{t("plugins.broken")}</Chip>
-              {:else if installed && installed.repo.toLowerCase() !== listing.repo.toLowerCase()}<Chip kind="kind">{t("plugins.id_taken")}</Chip>
-              {:else if newer}<Button kind="primary" onclick={() => installPlugin(listing!)}>{tf("plugins.update_to", { v: listing!.version })}</Button>
               {:else if !installed}<Button kind="primary" onclick={() => installPlugin(listing!)}>{t("plugins.install")}</Button>{/if}
             {/if}
-            {#if installed}
+            {#if paused}<Chip kind="kind">{t("plugins.paused")}</Chip>{/if}
+            {#if installed && !paused}
               {#if installed.theme}
                 {#if curTheme === themeId(id)}<Chip kind="kind">{t("plugins.in_use")}</Chip>{:else}<Button kind="primary" onclick={() => app.setConfig((c) => { c.visuals.theme = themeId(id); })}>{t("plugins.use")}</Button>{/if}
               {/if}
               {#if ownPage >= 0}<IconButton name="sliders-horizontal" size={15} color={ICON} label={t("plugins.settings")} onclick={() => setTab("plugins", 2 + ownPage)} />{/if}
               {#if installed.kind !== "theme"}<Tog on={installed.enabled} onchange={(v) => setEnabled(id, v)} label={installed.enabled ? t("plugins.turn_off") : t("plugins.turn_on")} />{/if}
-              <IconButton name="trash-2" size={15} color={ICON} label={t("plugins.remove")} onclick={() => uninstallPlugin(id)} />
             {/if}
+            {#if installed}<IconButton name="trash-2" size={15} color={ICON} label={t("plugins.remove")} onclick={() => uninstallPlugin(id)} />{/if}
             <IconButton name="github" size={15} color={ICON} label={t("plugins.repo")} onclick={() => openUrl(`https://github.com/${m.repo}`)} />
           {/if}
         </div>
@@ -113,6 +143,8 @@
     {#if m.description.trim()}<div class="desc">{m.description}</div>{/if}
     {#if m.setup.length}<div class="req">{tf("plugins.setup.requires", { items: m.setup.join(", ") })}</div>{/if}
     {#if installed?.missing_credentials}<div class="wn">{t("plugins.setup.missing")}</div>{/if}
+    {#if paused}<div class="wn">{t("plugins.paused.desc")}</div>{/if}
+    {#if update?.changes?.trim()}<div class="req"><b>{t("plugins.changes")} ({update.version}):</b> {update.changes}</div>{/if}
 
     {#if confirming && pl.confirm}
       <!-- Shown before a first install (and an update that asks for more). -->
@@ -144,10 +176,26 @@
       <div class="srow"><RowBase label={t("plugins.author")}><span class="v">{dash(m.author)}</span></RowBase></div>
       <div class="srow"><RowBase label={t("plugins.license")}><span class="v">{dash(m.license)}</span></RowBase></div>
       <div class="srow"><RowBase label={t("plugins.min_app")}><span class="v">{dash(m.min_app)}</span></RowBase></div>
+      {#if m.max_app}<div class="srow"><RowBase label={t("plugins.max_app")}><span class="v">{m.max_app}</span></RowBase></div>{/if}
+      {#if m.changes?.trim()}<div class="srow"><RowBase label={t("plugins.changes")}><span class="v">{m.changes}</span></RowBase></div>{/if}
+      {#if installed?.installed_at}<div class="srow"><RowBase label={t("plugins.installed_on")}><span class="v">{new Date(installed.installed_at * 1000).toLocaleDateString()}</span></RowBase></div>{/if}
       <div class="srow"><RowBase label={t("plugins.repo_source")}><button class="repo-link mono v2" onclick={() => openUrl(`https://github.com/${m.repo}`)}><span>{pinned}</span><Icon name="external-link" size={12} color="rgba(255,255,255,.45)" /></button></RowBase></div>
       {#if stars != null}<div class="srow"><RowBase label={t("plugins.stars")} info={t("plugins.stars.desc")}><span class="v">{stars}</span></RowBase></div>{/if}
       {#if listing?.updated}<div class="srow"><RowBase label={t("plugins.updated")}><span class="v">{listing.updated.slice(0, 10)}</span></RowBase></div>{/if}
     </Rows>
+
+    {#if installed && !installed.local && (versions.length > 1 || held)}
+      <SectionLabel text={t("plugins.versions")} />
+      <Rows>
+        <div class="srow"><RowBase label={t("plugins.held")} info={t("plugins.held.desc")}><Tog on={held} onchange={(v) => setHeld(id, v)} label={t("plugins.held")} /></RowBase></div>
+        {#each versions as v (v.rev)}
+          <div class="srow"><RowBase label={`v${v.version}`} status={versionStatus(v)}>
+            {#if busy}<Spin />
+            {:else if installed.version !== v.version && v.fits}<Button onclick={() => pickVersion(v)}>{t("plugins.install")}</Button>{/if}
+          </RowBase></div>
+        {/each}
+      </Rows>
+    {/if}
 
     {#if allPermissions(m).length || m.sections.length || m.menus.length || m.strings || m.hide.length || m.look}
       <SectionLabel text={t("plugins.does")} />
