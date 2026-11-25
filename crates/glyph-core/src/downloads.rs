@@ -264,6 +264,32 @@ fn digest_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+/// Covers of downloaded songs, kept apart from the cover cache (which drops
+/// old pictures when it is full), so a saved song keeps its cover offline.
+pub fn kept_covers_dir() -> PathBuf {
+    paths::data_dir().join("download-covers")
+}
+
+/// Where the kept cover of a downloaded song lives (may not exist yet).
+pub fn kept_cover_path(t: &Track) -> PathBuf {
+    kept_covers_dir().join(format!("{}.jpg", paths::hash_hex(&track_key(t))))
+}
+
+/// Copies a cover into [`kept_covers_dir`] for `t`.
+pub fn keep_cover(t: &Track, src: &Path) -> Result<()> {
+    std::fs::create_dir_all(kept_covers_dir())?;
+    let dest = kept_cover_path(t);
+    let part = dest.with_extension("part");
+    std::fs::copy(src, &part)?;
+    std::fs::rename(&part, &dest)?;
+    Ok(())
+}
+
+/// Drops the kept cover of `t` (its download was removed).
+pub fn forget_cover(t: &Track) {
+    let _ = std::fs::remove_file(kept_cover_path(t));
+}
+
 /// One downloaded song.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -558,6 +584,47 @@ impl Downloads {
             revision: Revision { sha256: Some(digest_file(&path)?), checked_at: now(), hashed_at: now(), quality: job_quality(), ..Default::default() } };
         self.map.lock().unwrap().insert(track_key(t), entry);
         Ok(path)
+    }
+
+    /// Fills in the album and cover link found after `t` was saved. The key
+    /// stays the same, so lookups with the original song still match.
+    /// `true` if something changed.
+    pub fn update_meta(&self, t: &Track, album: Option<&str>, cover_url: Option<&str>) -> bool {
+        let album = album.map(str::trim).filter(|a| !a.is_empty());
+        let cover_url = cover_url.map(str::trim).filter(|u| !u.is_empty());
+        let changed = {
+            let mut map = self.map.lock().unwrap();
+            let Some(e) = map.get_mut(&track_key(t)) else { return false };
+            let mut changed = false;
+            if let Some(a) = album {
+                if e.track.album.as_deref().is_none_or(|x| x.trim().is_empty()) {
+                    e.track.album = Some(a.to_string());
+                    changed = true;
+                }
+            }
+            if let Some(u) = cover_url {
+                let weak = e.track.cover_url.as_deref().is_none_or(|x| x.trim().is_empty() || crate::cover::is_youtube_cover(x));
+                if weak && !crate::cover::is_youtube_cover(u) {
+                    e.track.cover_url = Some(u.to_string());
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed {
+            self.save();
+        }
+        changed
+    }
+
+    /// Saved songs that still miss their kept cover or album, oldest first.
+    pub fn missing_extras(&self, limit: usize) -> Vec<Track> {
+        let mut v: Vec<Entry> = self.map.lock().unwrap().values()
+            .filter(|e| e.track.album.as_deref().is_none_or(|a| a.trim().is_empty()) || !kept_cover_path(&e.track).is_file())
+            .cloned()
+            .collect();
+        v.sort_by_key(|e| e.ts);
+        v.into_iter().take(limit).map(|e| e.track).collect()
     }
 
     /// Persists batched index updates (see [`Self::store_file_unflushed`]).
@@ -1022,6 +1089,25 @@ mod tests {
         assert!(downloads.tracks_snapshot().is_empty());
         // A previously handed-out snapshot remains immutable.
         assert_eq!(saved.len(), 1);
+    }
+
+    #[test]
+    fn found_album_and_cover_are_kept_in_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = super::Downloads::load(dir.path().to_path_buf());
+        let src = dir.path().join("src.mp3");
+        std::fs::write(&src, b"abc").unwrap();
+        let song = crate::dedupe::test_track(glyph_protocol::ProviderId::Archive, "1", "Song", "Band", Some(200));
+        downloads.store_file(&song, glyph_protocol::ProviderId::Archive, &src, "mp3").unwrap();
+        assert!(downloads.update_meta(&song, Some("Album"), Some("https://e-cdns-images.dzcdn.net/images/cover/x/500x500.jpg")));
+        // A YouTube thumbnail never replaces a real cover; nothing new: no change.
+        assert!(!downloads.update_meta(&song, Some("Other"), Some("https://i.ytimg.com/vi/abc/hqdefault.jpg")));
+        let again = super::Downloads::load(dir.path().to_path_buf());
+        let t = again.tracks().pop().unwrap();
+        assert_eq!(t.album.as_deref(), Some("Album"));
+        assert!(t.cover_url.unwrap().contains("dzcdn"));
+        // Lookups with the original song (no album) still find it.
+        assert!(again.contains(&song));
     }
 
     #[test]
