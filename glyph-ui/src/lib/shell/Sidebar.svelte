@@ -13,6 +13,7 @@
   import { sameList } from "../api/types";
   import { admin } from "../admin/admin.svelte";
   import { mg, migrateRunning, serviceOf } from "../settings/migrate-state.svelte";
+  import { arrange, layout } from "../layout.svelte";
 
   const trRun = $derived(migrateRunning());
   const trTip = $derived(
@@ -24,12 +25,17 @@
   let { width = app.leftSidebarW }: { width?: number } = $props();
   const expanded = $derived(width >= 112);
 
-  const nav: { view: View | "settings"; icon: string; label: string; motion: string }[] = [
-    { view: "home", icon: "house", label: "nav.home", motion: "hop" },
-    { view: "search", icon: "search", label: "nav.search", motion: "wiggle" },
-    { view: "library", icon: "library", label: "nav.library", motion: "grow" },
-    { view: "now_playing", icon: "disc-3", label: "nav.now_playing", motion: "spin" },
-  ];
+  type NavPart = "home" | "search" | "library" | "now_playing";
+  const nav: Record<NavPart, { view: View; icon: string; label: string; motion: string }> = {
+    home: { view: "home", icon: "house", label: "nav.home", motion: "hop" },
+    search: { view: "search", icon: "search", label: "nav.search", motion: "wiggle" },
+    library: { view: "library", icon: "library", label: "nav.library", motion: "grow" },
+    now_playing: { view: "now_playing", icon: "disc-3", label: "nav.now_playing", motion: "spin" },
+  };
+  // Plugin looks can put these in order or hide them (layout.svelte.ts);
+  // "lists" is the block of recent lists and artists. Settings always stays.
+  const PARTS = ["home", "search", "library", "now_playing", "lists"] as const;
+  const parts = $derived(arrange(PARTS, layout.areas.sidebar));
   const items = $derived(app.sidebarItems(5));
   // The server dashboard shows up only for accounts the server made admins.
   $effect(() => admin.check(app.account?.handle, app.backendState.kind === "ready"));
@@ -47,14 +53,15 @@
 </script>
 
 <nav class="sb" class:wide={expanded} style:width="{width}px" data-part="sidebar">
-  {#each nav as n}
-    <button class="it {n.motion}" class:on={active(n.view)} onclick={() => app.navigate(n.view)} use:tip={{ label: expanded ? "" : t(n.label), side: "right" }} aria-label={t(n.label)}>
-      <span class="ico"><Icon name={n.icon} size={20} color={active(n.view) ? "var(--text)" : "var(--dim)"} /></span>
-      {#if expanded}<span class="lab trunc">{t(n.label)}</span>{/if}
-    </button>
-  {/each}
-  {#if items.length}
-    <span class="rule"></span>
+  {#each parts as part, pi (part)}
+    {#if part !== "lists"}
+      {@const n = nav[part]}
+      <button class="it {n.motion}" class:on={active(n.view)} onclick={() => app.navigate(n.view)} use:tip={{ label: expanded ? "" : t(n.label), side: "right" }} aria-label={t(n.label)} data-item={part}>
+        <span class="ico"><Icon name={n.icon} size={20} color={active(n.view) ? "var(--text)" : "var(--dim)"} /></span>
+        {#if expanded}<span class="lab trunc">{t(n.label)}</span>{/if}
+      </button>
+    {:else if items.length}
+    {#if pi > 0}<span class="rule"></span>{/if}
     {#each items as it}
       {@const title = it.kind === "list" ? app.listTitle(it.list) : it.name}
       <button class="it" class:on={activeItem(it)} onclick={() => openItem(it)} oncontextmenu={(e) => menu(e, it)}
@@ -65,7 +72,9 @@
         {#if expanded}<span class="lab trunc">{title}</span>{/if}
       </button>
     {/each}
-  {/if}
+    {#if pi < parts.length - 1}<span class="rule"></span>{/if}
+    {/if}
+  {/each}
   <span class="flex1"></span>
   {#if admin.on}
     <button class="it pulse" class:on={active("server")} onclick={() => { admin.sub = ""; app.navigate("server"); }} use:tip={{ label: expanded ? "" : t("admin.title"), side: "right" }} aria-label={t("admin.title")}>

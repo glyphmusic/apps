@@ -1896,6 +1896,7 @@
 "plugins.does.mono" = "Ändert die Festbreitenschrift"
 "plugins.does.app_icon" = "Ändert das App-Symbol"
 "plugins.does.app_icon.desc" = "Ein eigenes Symbol für Fenster, Taskleiste, Infobereich und Dock (unter Android in der App-Übersicht). Wenn du das Plugin abschaltest, kommt das Glyph-Symbol zurück."
+"plugins.does.layout" = "Ordnet Startseite, Seitenleiste oder Tabs neu"
 "plugins.font.file" = "Eigene Schrift"
 "sp.keys.plugins" = "Plugins öffnen (klappt mit jedem Look)"
 "share.kind.artist" = "Künstler"

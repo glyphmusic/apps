@@ -1896,6 +1896,7 @@
 "plugins.does.mono" = "Changes the monospaced font"
 "plugins.does.app_icon" = "Changes the app icon"
 "plugins.does.app_icon.desc" = "Its own icon for the window, taskbar, tray and Dock (on Android in the app overview). It goes back to Glyph's icon when you turn the plugin off."
+"plugins.does.layout" = "Rearranges the home page, sidebar or tabs"
 "plugins.font.file" = "Its own font"
 "sp.keys.plugins" = "Open plugins (works with any look)"
 "share.kind.artist" = "Artist"

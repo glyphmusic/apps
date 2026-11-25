@@ -1864,6 +1864,7 @@
 "plugins.does.mono" = "Sabit genişlikli yazı tipini değiştirir"
 "plugins.does.app_icon" = "Uygulama simgesini değiştirir"
 "plugins.does.app_icon.desc" = "Pencere, görev çubuğu, sistem tepsisi ve Dock için kendi simgesi (Android'de uygulama genel bakışında). Eklentiyi kapattığında Glyph simgesi geri gelir."
+"plugins.does.layout" = "Ana sayfayı, kenar çubuğunu veya sekmeleri yeniden düzenler"
 "plugins.font.file" = "Kendi yazı tipi"
 "sp.keys.plugins" = "Eklentileri aç (her görünümde çalışır)"
 "share.kind.artist" = "Sanatçı"

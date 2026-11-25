@@ -87,6 +87,55 @@ pub struct LookSpec {
     /// .svg file. Drawn as a mask in the text colour, like Glyph's own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub icons: BTreeMap<String, String>,
+    /// Sections of the home page to put in order or hide ([`HOME_PARTS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<LayoutSpec>,
+    /// Entries of the sidebar to put in order or hide ([`SIDEBAR_PARTS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar: Option<LayoutSpec>,
+    /// Tabs at the bottom on phones to put in order or hide ([`TAB_PARTS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<LayoutSpec>,
+}
+
+/// Order and hidden parts of one area (home page, sidebar, tabs). Parts not
+/// in `order` follow in Glyph's order; names this Glyph does not know are
+/// skipped (they come from a newer Glyph).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LayoutSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hide: Vec<String>,
+}
+
+/// Home page sections a look can order and hide.
+pub const HOME_PARTS: &[&str] = &["greeting", "cards", "recent", "new_releases", "mixes", "recs", "trending"];
+/// Sidebar entries a look can order and hide (Settings always stays).
+pub const SIDEBAR_PARTS: &[&str] = &["home", "search", "library", "now_playing", "lists"];
+/// Phone tabs a look can order and hide.
+pub const TAB_PARTS: &[&str] = &["home", "search", "library"];
+/// Names per list of a layout.
+pub const MAX_LAYOUT_PARTS: usize = 30;
+
+impl LayoutSpec {
+    fn validate(&self, area: &str) -> std::result::Result<(), String> {
+        for (key, list) in [("order", &self.order), ("hide", &self.hide)] {
+            if list.len() > MAX_LAYOUT_PARTS {
+                return Err(format!("{area}.{key} takes up to {MAX_LAYOUT_PARTS} names"));
+            }
+            if list.iter().any(|n| !valid_icon_name(&n.replace('_', "-"))) {
+                return Err(format!("{area}.{key} names are 1-40 of a-z, 0-9, - and _"));
+            }
+            let mut seen = list.clone();
+            seen.sort();
+            seen.dedup();
+            if seen.len() != list.len() {
+                return Err(format!("{area}.{key} names each only once"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Fonts a look can pick (from the system, nothing is downloaded).
@@ -256,7 +305,7 @@ pub(super) fn valid_icon_name(n: &str) -> bool {
 
 impl LookSpec {
     fn is_empty(&self) -> bool {
-        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
+        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.home.is_none() && self.sidebar.is_none() && self.tabs.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
     }
 
     /// Every file the look needs from the repo, each once.
@@ -299,7 +348,14 @@ impl LookSpec {
     fn validate(&self) -> Result<(), Invalid> {
         let bad = |s: &str| Err(Invalid::Bad(format!("look: {s}")));
         if self.is_empty() {
-            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets or icons");
+            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets, icons, home, sidebar or tabs");
+        }
+        for (area, l) in [("home", &self.home), ("sidebar", &self.sidebar), ("tabs", &self.tabs)] {
+            if let Some(l) = l {
+                if let Err(e) = l.validate(area) {
+                    return bad(&e);
+                }
+            }
         }
         for (key, f) in [("font", &self.font), ("mono", &self.mono)] {
             if f.is_empty() || FONTS.contains(&f.as_str()) {

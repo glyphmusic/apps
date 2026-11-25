@@ -1864,6 +1864,7 @@
 "plugins.does.mono" = "Change la police à chasse fixe"
 "plugins.does.app_icon" = "Change l'icône de l'app"
 "plugins.does.app_icon.desc" = "Une icône à lui pour la fenêtre, la barre des tâches, la zone de notification et le Dock (sur Android, dans l'aperçu des apps). L'icône de Glyph revient quand tu désactives le plugin."
+"plugins.does.layout" = "Réorganise l'accueil, la barre latérale ou les onglets"
 "plugins.font.file" = "Police à lui"
 "sp.keys.plugins" = "Ouvrir les plugins (marche avec tout style)"
 "share.kind.artist" = "Artiste"

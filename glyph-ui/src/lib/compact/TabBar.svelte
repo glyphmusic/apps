@@ -5,11 +5,14 @@
   import { app, type View } from "../state.svelte";
   import { t } from "../i18n.svelte";
   import { press } from "../ui.svelte";
-  const tabs: { view: View; icon: string; label: string }[] = [
-    { view: "home", icon: "house", label: "nav.home" },
-    { view: "search", icon: "search", label: "nav.search" },
-    { view: "library", icon: "library", label: "nav.library" },
-  ];
+  import { arrange, layout } from "../layout.svelte";
+  const ALL = {
+    home: { view: "home" as View, icon: "house", label: "nav.home" },
+    search: { view: "search" as View, icon: "search", label: "nav.search" },
+    library: { view: "library" as View, icon: "library", label: "nav.library" },
+  };
+  // Plugin looks can put the tabs in order or hide some (never all).
+  const tabs = $derived(arrange(["home", "search", "library"] as const, layout.areas.tabs, true).map((k) => ALL[k]));
   function go(v: View) { app.settingsOpen = false; if (app.view === v) { document.getElementById("main-scroll")?.scrollTo({ top: 0, behavior: "smooth" }); return; } app.navigate(v); }
 </script>
 
