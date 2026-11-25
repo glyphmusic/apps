@@ -1,5 +1,10 @@
-# Glyph 0.13.5 - 2026-11-24
+# Glyph 0.13.6 - 2026-11-25
 
-- **Black screen on startup (Android, desktop and web)**: version 0.13.4 could stop at a black screen right after launch because the music video player was set up too early. It is now set up only when needed.
+- **Glyph Drift (beta)**: a radio that keeps playing when the queue ends, built on your own taste. Turn it on in Settings > Playback > Content.
+- **Smarter taste and search**: better artist suggestions, typo-tolerant search and playlist "Add songs" that match the playlist.
+- **Downloads keep their info**: album, cover and lyrics are saved with every download.
+- **More plugin looks**: plugins can change the app icon, fonts, the order of home, sidebar and tabs, the sidebar side and the startup animation.
+- **Better plugin versions**: plugins that do not fit your Glyph pause instead of breaking, you can go back to earlier versions and keep one.
+- **Fixes**: one ban row per person in the server dashboard.
 
 See CHANGELOG.md for the complete changes.
