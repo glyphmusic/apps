@@ -1,8 +1,7 @@
-# Glyph 0.13.7 - 2026-11-25
+# Glyph 0.13.8 - 2026-11-25
 
-- **Plugins**: see a plugin's look before you use it, pick which plugin wins a conflict, see which of your settings a plugin replaces, corner roundness now works everywhere, and plugins installed with an older Glyph are repaired.
-- **First start**: asks what you like and helps you make your first playlist.
-- **Tidier app**: clearer song selection, tidier song menus, profiles on phones that look like artist pages, less empty space and clearer settings on phones.
-- **Fixes**: covers in long playlists keep loading when the server is busy, tapping beside a sheet no longer taps what is under it, smoother lists and top bar on phones.
+- **Radio**: a radio started from a song now sounds like that song (same genre and mood), finds many more similar songs and starts right away when the queue ends.
+- **Android**: Glyph pauses when another app plays sound and plays on afterwards.
+- **Plugins**: a plugin's app icon can go on the Android home screen, broken look parts are listed, big app icons work on the desktop and corners round everywhere.
 
 See CHANGELOG.md for the complete changes.

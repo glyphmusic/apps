@@ -46,6 +46,9 @@ struct Inner {
     drift_loading: bool,
     /// Radio answer, when it was asked and for which backend (its address).
     radio_ok: Option<(bool, Instant, usize)>,
+    /// Radio songs found ahead for the last song of the queue (its key;
+    /// `None` while they are still being found).
+    radio_ready: Option<(String, Option<Vec<Track>>)>,
     /// The list the queue was started from (its listening counts for the sidebar).
     playing_from: Option<ListKey>,
     /// Volume the sleep fade set last (a different one was set by hand).
@@ -104,6 +107,7 @@ pub fn setup(core: &Arc<Core>) {
             drift: None,
             drift_loading: false,
             radio_ok: None,
+            radio_ready: None,
             playing_from,
             fade_last: None,
             sleep: None,
@@ -207,17 +211,280 @@ fn spread_artists(mut rest: Vec<Track>) -> Vec<Track> {
     out
 }
 
+/// Song radio: ranks `found` by how close each song sounds to `seed` (its
+/// genres and moods). The listener's overall taste only nudges the order.
+async fn focus_on_song(core: &Arc<Core>, b: &glyph_core::Backend, seed: &Track, mut found: Vec<(Track, f32)>) -> Vec<Track> {
+    // Genres come from the artists' tags: fetch the ones Glyph does not know yet.
+    let (missing, use_server, enrich, taste_on) = {
+        let st = core.st();
+        let mut seen = HashSet::new();
+        let missing: Vec<String> = std::iter::once(seed)
+            .chain(found.iter().map(|(t, _)| t))
+            .map(|t| primary_artist(&t.artist))
+            .filter(|a| {
+                let k = normalize_artist(a);
+                !k.is_empty() && seen.insert(k.clone()) && !st.library.taste.artist_tags.contains_key(&k)
+            })
+            .take(30)
+            .collect();
+        let cfg = &st.config.taste;
+        (missing, cfg.server_collab, cfg.metadata_enrichment, cfg.enabled)
+    };
+    if enrich && !missing.is_empty() {
+        if let Ok(Ok(items)) = tokio::time::timeout(Duration::from_secs(6), b.taste_tags(missing, use_server)).await {
+            if !items.is_empty() {
+                core.st().library.taste.merge_artist_tags(&items, glyph_core::paths::now_unix());
+            }
+        }
+    }
+    let st = core.st();
+    let taste = glyph_core::taste::Taste::from_library(&st.library);
+    drop(st);
+    let vibe = glyph_core::drift::Vibe::of_tracks(std::slice::from_ref(seed), &taste);
+    let bucket = glyph_core::taste::TimeBucket::now();
+    for (t, w) in &mut found {
+        let fit = vibe.fit(t, &taste);
+        let mut s = *w + fit * 2.0;
+        // Known genres, none close to the song's: another kind of music.
+        if !vibe.genres.is_empty() && fit <= 0.05 && !taste.track_tags(t).0.is_empty() {
+            s -= 1.2;
+        }
+        if taste_on {
+            let personal = taste.score_recommendation(t, *w, bucket, false);
+            if !personal.is_finite() {
+                *w = f32::NEG_INFINITY;
+                continue;
+            }
+            s += (personal - *w) * 0.3;
+        }
+        *w = s;
+    }
+    found.retain(|(_, w)| w.is_finite());
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut per_artist: HashMap<String, usize> = HashMap::new();
+    let top: Vec<Track> = found
+        .into_iter()
+        .map(|(t, _)| t)
+        .filter(|t| {
+            let n = per_artist.entry(normalize_artist(&primary_artist(&t.artist))).or_default();
+            *n += 1;
+            *n <= 3
+        })
+        .take(50)
+        .collect();
+    spread_artists(top)
+}
+
+/// Picks up to five seeds, spread over the list.
+fn pick_seeds(seeds: &[Track]) -> Vec<Track> {
+    const SEEDS: usize = 5;
+    let step = (seeds.len() as f32 / SEEDS as f32).max(1.0);
+    (0..SEEDS.min(seeds.len())).map(|i| seeds[(i as f32 * step) as usize].clone()).collect()
+}
+
+/// Drops hidden artists, disliked songs and (when asked) explicit songs.
+fn drop_unwanted(core: &Core, found: &mut Vec<(Track, f32)>) {
+    let hide = hide_explicit(core);
+    let st = core.st();
+    found.retain(|(t, _)| {
+        !st.library.is_hidden(&t.artist) && !st.library.taste.is_disliked_track(t) && !(hide && t.maybe_explicit())
+    });
+}
+
+/// Adds the first `n` songs of `sim` to `found`; higher up the list counts more.
+/// A song that is similar to several seeds adds up.
+fn add_similar(found: &mut Vec<(Track, f32)>, sim: Vec<Track>, skip: &HashSet<String>, scale: f32, n: usize) {
+    for (i, t) in sim.into_iter().take(n).enumerate() {
+        let key = track_key(&t);
+        if skip.contains(&key) {
+            continue;
+        }
+        let w = (1.0 - i as f32 / (n as f32 + 10.0)) * scale;
+        match found.iter_mut().find(|(x, _)| track_key(x) == key) {
+            Some(f) => f.1 += w,
+            None => found.push((t, w)),
+        }
+    }
+}
+
+/// Songs similar to `seeds`. `deep` (song radio) also asks for the songs
+/// similar to the best few matches, so the station has far more to pick from.
+async fn similar_pool(b: &glyph_core::Backend, seeds: &[Track], skip: &HashSet<String>, deep: bool) -> (Vec<(Track, f32)>, Option<String>) {
+    let mut found: Vec<(Track, f32)> = Vec::new();
+    let mut error = None;
+    let n = if deep { 60 } else { 40 };
+    for answer in futures::future::join_all(seeds.iter().map(|s| b.similar(s))).await {
+        match answer {
+            Ok(sim) => add_similar(&mut found, sim, skip, 1.0, n),
+            Err(e) => error = Some(e.to_string()),
+        }
+    }
+    if deep && !found.is_empty() {
+        let mut top = found.clone();
+        top.sort_by(|a, b| b.1.total_cmp(&a.1));
+        top.truncate(5);
+        let more = tokio::time::timeout(
+            Duration::from_secs(8),
+            futures::future::join_all(top.iter().map(|(t, _)| b.similar(t))),
+        )
+        .await
+        .unwrap_or_default();
+        for sim in more.into_iter().flatten() {
+            add_similar(&mut found, sim, skip, 0.55, 40);
+        }
+    }
+    (found, error)
+}
+
+/// The songs of a radio station from `picked` seeds. One seed (song radio)
+/// keeps the station close to that song's sound.
+async fn radio_tracks(core: &Arc<Core>, b: &glyph_core::Backend, picked: &[Track], skip: &HashSet<String>) -> (Vec<Track>, Option<String>) {
+    let focus = picked.len() == 1;
+    let server_radio = {
+        let st = core.st();
+        st.config.taste.is_server_mode() && b.server_taste_engine_available()
+    };
+
+    // Server-first Radio (default ON): uses server intent, collaborative graph,
+    // cached artist top tracks & MMR diversity in a single round-trip.
+    let mut server_found: Vec<(Track, f32)> = Vec::new();
+    if server_radio {
+        let seed_reqs: Vec<glyph_core::taste::TasteSeedTrack> = picked
+            .iter()
+            .enumerate()
+            .map(|(i, s)| glyph_core::taste::TasteSeedTrack {
+                title: s.title.clone(),
+                artist: s.artist.clone(),
+                album: s.album.clone(),
+                weight: (1.0 - i as f32 * 0.1).max(0.5),
+                is_session: true,
+            })
+            .collect();
+        let exclude_song_keys: Vec<String> = picked.iter().map(glyph_core::taste::song_key).collect();
+        if let Some(resp) = crate::taste::run_server_recommend(
+            core,
+            glyph_core::taste::TastePurpose::Radio,
+            seed_reqs,
+            &exclude_song_keys,
+            Some(45),
+        )
+        .await
+        {
+            let recs: Vec<Track> = resp.recommendations.into_iter().map(|r| r.track).filter(|t| !skip.contains(&track_key(t))).collect();
+            let n = recs.len().max(1) as f32;
+            server_found = recs.into_iter().enumerate().map(|(i, t)| (t, 1.2 - i as f32 / n)).collect();
+            drop_unwanted(core, &mut server_found);
+        }
+    }
+
+    // Song radio: the server's songs and a deep search of similar songs
+    // together, then sorted by how close they sound to the song.
+    if focus {
+        let (mut found, error) = similar_pool(b, picked, skip, true).await;
+        for (t, w) in server_found {
+            let key = track_key(&t);
+            match found.iter_mut().find(|(x, _)| track_key(x) == key) {
+                Some(f) => f.1 += w,
+                None => found.push((t, w)),
+            }
+        }
+        drop_unwanted(core, &mut found);
+        return (focus_on_song(core, b, &picked[0], found).await, error);
+    }
+    if !server_found.is_empty() {
+        return (server_found.into_iter().map(|(t, _)| t).collect(), None);
+    }
+
+    // Local fallback (local-only opt-out, offline, or server returned empty).
+    let (mut found, error) = similar_pool(b, picked, skip, false).await;
+    drop_unwanted(core, &mut found);
+    let st = core.st();
+    let taste_on = st.config.taste.enabled;
+    let taste = if taste_on {
+        glyph_core::taste::Taste::from_library(&st.library)
+    } else {
+        glyph_core::taste::Taste::default()
+    };
+    drop(st);
+    let bucket = glyph_core::taste::TimeBucket::now();
+    if taste_on {
+        // The station should sound like its seeds, not only like the
+        // listener's overall taste.
+        let vibe = glyph_core::drift::Vibe::of_tracks(picked, &taste);
+        for (t, w) in &mut found {
+            *w = taste.score_recommendation(t, *w, bucket, false) + vibe.fit(t, &taste) * 0.8;
+        }
+        found.retain(|(_, w)| w.is_finite());
+    }
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let tracks = if taste_on {
+        taste.mmr_rank_tracks(&found, 50, 3)
+    } else {
+        spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect())
+    };
+    (tracks, error)
+}
+
+/// Plays the radio songs. `append`: they go on after the ended queue
+/// (`ended_on`) instead of replacing it.
+fn finish_radio(core: &Arc<Core>, tracks: Vec<Track>, error: Option<String>, title: &str, append: bool, ended_on: Option<String>) {
+    let label = tr(lang(core), "queue.radio_from", &[("title", title)]);
+    match (tracks.is_empty(), error) {
+        (false, _) if append => {
+            // Something else started meanwhile: that wins.
+            let first = {
+                let mut st = core.st();
+                st.radio_loading = false;
+                let still_ended = st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none();
+                if still_ended {
+                    st.queue.append(tracks);
+                    let f = st.queue.skip_next().cloned();
+                    if f.is_some() {
+                        st.context = Some(label);
+                    }
+                    f
+                } else {
+                    None
+                }
+            };
+            if let Some(t) = first {
+                core.start_track(t);
+            } else {
+                core.emit_player();
+            }
+        }
+        (false, _) => core.play_list(tracks, 0, Some(label)),
+        (true, e) => {
+            let err_msg = e.as_deref().unwrap_or("radio_empty").to_string();
+            if append {
+                let mut st = core.st();
+                st.radio_loading = false;
+                if st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none() {
+                    st.error = Some(err_msg.clone());
+                }
+            }
+            if let Some(e) = e {
+                toast(core, "toast.radio_error", Some(json!({ "e": e })), None, "info");
+            } else {
+                toast(core, "toast.radio_empty", None, None, "info");
+            }
+            if append {
+                core.emit_player();
+            }
+        }
+    }
+}
+
 /// Plays songs similar to `seeds` (up to five, spread over the list).
 /// `append`: the songs go on after the ended queue instead of replacing it.
+/// One seed (song radio) keeps the station close to that song's sound.
 fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String>, title: String, append: bool) {
-    const SEEDS: usize = 5;
     let Some(b) = core.backend() else { return };
     if seeds.is_empty() {
         toast(core, "toast.radio_empty", None, None, "info");
         return;
     }
-    let step = (seeds.len() as f32 / SEEDS as f32).max(1.0);
-    let picked: Vec<Track> = (0..SEEDS.min(seeds.len())).map(|i| seeds[(i as f32 * step) as usize].clone()).collect();
+    let picked = pick_seeds(&seeds);
     let mut skip = exclude;
     skip.extend(seeds.iter().map(track_key));
     let ended_on = core.st().current.as_ref().map(track_key);
@@ -231,151 +498,51 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
     toast(core, "toast.radio", Some(json!({ "title": title })), None, "ok");
     let core = core.clone();
     crate::rt::spawn(async move {
-        let hide = hide_explicit(&core);
-        let server_radio = {
-            let st = core.st();
-            st.config.taste.is_server_mode() && b.server_taste_engine_available()
-        };
-        let mut tracks: Vec<Track> = Vec::new();
-        let mut error = None;
+        let (tracks, error) = radio_tracks(&core, &b, &picked, &skip).await;
+        finish_radio(&core, tracks, error, &title, append, ended_on);
+    });
+}
 
-        // Server-first Radio (default ON): uses server intent, collaborative graph,
-        // cached artist top tracks & MMR diversity in a single round-trip.
-        if server_radio {
-            let seed_reqs: Vec<glyph_core::taste::TasteSeedTrack> = picked
-                .iter()
-                .enumerate()
-                .map(|(i, s)| glyph_core::taste::TasteSeedTrack {
-                    title: s.title.clone(),
-                    artist: s.artist.clone(),
-                    album: s.album.clone(),
-                    weight: (1.0 - i as f32 * 0.1).max(0.5),
-                    is_session: true,
-                })
-                .collect();
-            let exclude_song_keys: Vec<String> = picked
-                .iter()
-                .map(glyph_core::taste::song_key)
-                .collect();
-            if let Some(resp) = crate::taste::run_server_recommend(
-                &core,
-                glyph_core::taste::TastePurpose::Radio,
-                seed_reqs,
-                &exclude_song_keys,
-                Some(45),
-            )
-            .await
-            {
-                let st = core.st();
-                tracks = resp
-                    .recommendations
-                    .into_iter()
-                    .map(|r| r.track)
-                    .filter(|t| {
-                        !skip.contains(&track_key(t))
-                            && !st.library.is_hidden(&t.artist)
-                            && !st.library.taste.is_disliked_track(t)
-                            && !(hide && t.maybe_explicit())
-                    })
-                    .collect();
-            }
-        }
+/// Seeds and songs to leave out for the radio after the queue ends on `current`.
+fn end_seeds(current: &Track, played: &[Track]) -> (Vec<Track>, HashSet<String>) {
+    let exclude = played.iter().map(track_key).collect();
+    let seeds = std::iter::once(current.clone()).chain(played.iter().rev().take(4).cloned()).collect();
+    (seeds, exclude)
+}
 
-        // Local fallback (local-only opt-out, offline, or server returned empty).
-        if tracks.is_empty() {
-            let mut found: Vec<(Track, f32)> = Vec::new();
-            let answers = futures::future::join_all(picked.iter().map(|s| b.similar(s))).await;
-            for answer in answers {
-                match answer {
-                    Ok(sim) => {
-                        for (i, t) in sim.into_iter().take(40).enumerate() {
-                            let key = track_key(&t);
-                            if skip.contains(&key) {
-                                continue;
-                            }
-                            let w = 1.0 - i as f32 / 50.0;
-                            match found.iter_mut().find(|(x, _)| track_key(x) == key) {
-                                Some(f) => f.1 += w,
-                                None => found.push((t, w)),
-                            }
-                        }
-                    }
-                    Err(e) => error = Some(e.to_string()),
-                }
-            }
-            let st = core.st();
-            let taste_on = st.config.taste.enabled;
-            let taste = if taste_on {
-                glyph_core::taste::Taste::from_library(&st.library)
-            } else {
-                glyph_core::taste::Taste::default()
-            };
-            let bucket = glyph_core::taste::TimeBucket::now();
-            found.retain(|(t, _)| {
-                !st.library.is_hidden(&t.artist)
-                    && !st.library.taste.is_disliked_track(t)
-                    && !(hide && t.maybe_explicit())
-            });
-            if taste_on {
-                // The station should sound like its seeds, not only like the
-                // listener's overall taste.
-                let vibe = glyph_core::drift::Vibe::of_tracks(&picked, &taste);
-                for (t, w) in &mut found {
-                    *w = taste.score_recommendation(t, *w, bucket, false) + vibe.fit(t, &taste) * 0.8;
-                }
-                found.retain(|(_, w)| w.is_finite());
-            }
-            found.sort_by(|a, b| b.1.total_cmp(&a.1));
-            tracks = if taste_on {
-                taste.mmr_rank_tracks(&found, 50, 3)
-            } else {
-                spread_artists(found.into_iter().map(|(t, _)| t).take(60).collect())
-            };
+/// The last song of the queue started: finds its radio songs now, in the
+/// background, so the radio starts right away when the song ends.
+fn prefetch_radio(core: &Arc<Core>, d: &Discover) {
+    let (current, played) = {
+        let st = core.st();
+        if st.queue.peek_next().is_some() || st.config.taste.is_drift() {
+            return;
         }
-        let label = tr(lang(&core), "queue.radio_from", &[("title", &title)]);
-        match (tracks.is_empty(), error) {
-            (false, _) if append => {
-                // Something else started meanwhile: that wins.
-                let first = {
-                    let mut st = core.st();
-                    st.radio_loading = false;
-                    let still_ended = st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none();
-                    if still_ended {
-                        st.queue.append(tracks);
-                        let f = st.queue.skip_next().cloned();
-                        if f.is_some() {
-                            st.context = Some(label);
-                        }
-                        f
-                    } else {
-                        None
-                    }
-                };
-                if let Some(t) = first {
-                    core.start_track(t);
-                } else {
-                    core.emit_player();
-                }
-            }
-            (false, _) => core.play_list(tracks, 0, Some(label)),
-            (true, e) => {
-                let err_msg = e.as_deref().unwrap_or("radio_empty").to_string();
-                if append {
-                    let mut st = core.st();
-                    st.radio_loading = false;
-                    if st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none() {
-                        st.error = Some(err_msg.clone());
-                    }
-                }
-                if let Some(e) = e {
-                    toast(&core, "toast.radio_error", Some(json!({ "e": e })), None, "info");
-                } else {
-                    toast(&core, "toast.radio_empty", None, None, "info");
-                }
-                if append {
-                    core.emit_player();
-                }
-            }
+        (st.current.clone(), st.queue.history().into_iter().cloned().collect::<Vec<Track>>())
+    };
+    let Some(current) = current else { return };
+    if !d.g().radio_on || crate::storage::is_offline() {
+        return;
+    }
+    let Some(b) = core.backend() else { return };
+    let key = track_key(&current);
+    {
+        let mut g = d.g();
+        if g.radio_ready.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        g.radio_ready = Some((key.clone(), None));
+    }
+    let (seeds, mut skip) = end_seeds(&current, &played);
+    skip.extend(seeds.iter().map(track_key));
+    let picked = pick_seeds(&seeds);
+    let core = core.clone();
+    crate::rt::spawn(async move {
+        let (tracks, _) = radio_tracks(&core, &b, &picked, &skip).await;
+        let Some(d) = core.discover() else { return };
+        let mut g = d.g();
+        if g.radio_ready.as_ref().is_some_and(|(k, _)| *k == key) {
+            g.radio_ready = Some((key, Some(tracks)));
         }
     });
 }
@@ -409,8 +576,23 @@ pub fn on_queue_end(core: &Arc<Core>) -> bool {
         drift_start(core, current, played);
         return true;
     }
-    let exclude: HashSet<String> = played.iter().map(track_key).collect();
-    let seeds: Vec<Track> = std::iter::once(current.clone()).chain(played.into_iter().rev().take(4)).collect();
+    // Found in the background while the song played: start right away.
+    let key = track_key(&current);
+    let ready = match d.g().radio_ready.take() {
+        Some((k, Some(v))) if k == key && !v.is_empty() => Some(v),
+        _ => None,
+    };
+    if let Some(mut tracks) = ready {
+        // Disliked or hidden while the song played.
+        let mut scored: Vec<(Track, f32)> = tracks.drain(..).map(|t| (t, 0.0)).collect();
+        drop_unwanted(core, &mut scored);
+        if !scored.is_empty() {
+            toast(core, "toast.radio", Some(json!({ "title": current.title })), None, "ok");
+            finish_radio(core, scored.into_iter().map(|(t, _)| t).collect(), None, &current.title, true, Some(key));
+            return true;
+        }
+    }
+    let (seeds, exclude) = end_seeds(&current, &played);
     radio_from_seeds(core, seeds, exclude, current.title, true);
     true
 }
@@ -1309,6 +1491,7 @@ pub fn on_track_started(core: &Arc<Core>, _track: &Track) {
         add_time(core, &t, ms);
     }
     drift_on_track_started(core, &d);
+    prefetch_radio(core, &d);
 }
 
 fn add_time(core: &Arc<Core>, t: &Track, ms: u64) {

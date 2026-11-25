@@ -141,7 +141,7 @@ impl LastFm {
     /// Similar tracks (radio).
     pub async fn similar(&self, artist: &str, title: &str) -> Result<Vec<Track>> {
         let v = self
-            .call("track.getsimilar", &[("artist", artist), ("track", title), ("limit", "30"), ("autocorrect", "1")])
+            .call("track.getsimilar", &[("artist", artist), ("track", title), ("limit", "60"), ("autocorrect", "1")])
             .await?;
         Ok(track_list(&v["similartracks"]["track"]).iter().filter_map(convert).collect())
     }
