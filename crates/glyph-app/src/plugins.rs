@@ -6,7 +6,7 @@
 
 use crate::controller::Core;
 use glyph_core::plugin_host::{self, HostCall, Running};
-use glyph_core::plugins::{self, Catalog, Installed, Invalid, Listing, SettingItem};
+use glyph_core::plugins::{self, Catalog, Installed, Invalid, Listing, SettingItem, VersionRef};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -60,6 +60,8 @@ const MCP_FUNCS: &[(&str, &str)] = &[
 
 struct Rt {
     installed: Vec<Installed>,
+    /// Installed but paused: this Glyph's version does not fit them.
+    unfit: Vec<(Installed, Invalid)>,
     catalog: Option<Catalog>,
     /// Running plugins with the version and install time they started at
     /// (a change restarts them).
@@ -115,6 +117,7 @@ pub fn setup(core: &Arc<Core>) {
     let st = Arc::new(PluginState {
         rt: Mutex::new(Rt {
             installed: Vec::new(),
+            unfit: Vec::new(),
             catalog: None,
             running: HashMap::new(),
             values: HashMap::new(),
@@ -161,6 +164,7 @@ fn may_run(p: &Installed, disabled: &[String]) -> bool {
 fn load(st: &PluginState) {
     let mut rt = st.lock();
     rt.installed = plugins::installed();
+    rt.unfit = plugins::installed_unfit();
     if rt.catalog.is_none() {
         rt.catalog = plugins::cached_catalog();
     }
@@ -308,7 +312,7 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
         .collect();
     json!({
         "id": m.id, "name": m.name, "author": m.author, "description": m.description, "version": m.version,
-        "license": m.license, "min_app": m.min_app, "kind": m.kind,
+        "license": m.license, "min_app": m.min_app, "max_app": m.max_app, "changes": m.changes, "kind": m.kind,
         "repo": l.repo, "path": l.path, "rev": l.rev, "checked": l.checked,
         "stars": l.stars, "updated": l.updated,
         "installable": installable, "code": !m.data_only(),
@@ -316,7 +320,35 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
         "sections": sections, "menus": menus,
         "strings": m.strings.values().map(|s| s.len()).max().unwrap_or(0),
         "hide": m.hide, "setup": setup, "look": look_json(m),
+        "versions": l.versions.iter().map(version_json).collect::<Vec<_>>(),
+        "fitting": l.fitting_version().map(|v| v.version.clone()),
     })
+}
+
+fn version_json(v: &VersionRef) -> Value {
+    json!({
+        "version": v.version, "rev": v.rev, "min_app": v.min_app, "max_app": v.max_app,
+        "changes": v.changes, "code": v.code, "permissions": v.permissions, "fits": v.fits(),
+    })
+}
+
+/// `l` as its earlier version `v` would look (for the update button; the
+/// install reads the real manifest at that commit).
+fn version_listing_json(core: &Core, l: &Listing, v: &VersionRef) -> Value {
+    let mut out = listing_json(core, l, "ok");
+    let o = out.as_object_mut().expect("object");
+    for (k, val) in [
+        ("version", json!(v.version)),
+        ("rev", json!(v.rev)),
+        ("min_app", json!(v.min_app)),
+        ("max_app", json!(v.max_app)),
+        ("changes", json!(v.changes)),
+        ("code", json!(v.code)),
+        ("permissions", json!(v.permissions)),
+    ] {
+        o.insert(k.into(), val);
+    }
+    out
 }
 
 /// What a plugin's look changes (for its card), or null.
@@ -379,8 +411,15 @@ pub fn look_backgrounds(core: &Core) -> Vec<(String, std::path::PathBuf, String)
 fn installable_of(l: &Listing) -> &'static str {
     match l.installable() {
         Ok(()) => "ok",
-        Err(Invalid::NeedsNewerApp) => "needs_newer_app",
-        Err(Invalid::Bad(_)) => "broken",
+        Err(e) => invalid_str(&e),
+    }
+}
+
+fn invalid_str(e: &Invalid) -> &'static str {
+    match e {
+        Invalid::NeedsNewerApp => "needs_newer_app",
+        Invalid::NeedsOlderApp => "needs_older_app",
+        Invalid::Bad(_) => "broken",
     }
 }
 
@@ -389,38 +428,58 @@ fn catalog_json(core: &Core, c: &Catalog) -> Value {
     json!({ "checked": f(&c.checked), "community": f(&c.community), "partial": c.partial })
 }
 
+/// An installed plugin as a listing, with its update (newest, or the
+/// newest earlier version that fits this Glyph) or null.
+fn installed_base(core: &Core, rt: &Rt, p: &Installed) -> Value {
+    let m = &p.manifest;
+    let cat = rt.catalog.as_ref();
+    let from_cat = cat.and_then(|c| c.find(&m.id)).filter(|l| l.repo.eq_ignore_ascii_case(&p.origin.repo));
+    let listing = Listing {
+        repo: p.origin.repo.clone(),
+        path: p.origin.path.clone(),
+        rev: p.origin.rev.clone(),
+        checked: p.origin.checked,
+        stars: from_cat.and_then(|l| l.stars),
+        updated: from_cat.and_then(|l| l.updated.clone()),
+        manifest: m.clone(),
+        versions: from_cat.map(|l| l.versions.clone()).unwrap_or_default(),
+    };
+    let installable = match m.validate(plugins::app_version()) {
+        Ok(()) => "ok",
+        Err(e) => invalid_str(&e),
+    };
+    let mut v = listing_json(core, &listing, installable);
+    let update = match cat.and_then(|c| p.update_in(c)) {
+        Some(l) => listing_json(core, l, installable_of(l)),
+        None => cat.and_then(|c| p.fitting_update_in(c)).map(|(l, ver)| version_listing_json(core, l, ver)).unwrap_or(Value::Null),
+    };
+    let o = v.as_object_mut().expect("object");
+    o.insert("update".into(), update);
+    // The newest listed version (for the versions list in the detail view).
+    o.insert("latest".into(), json!(from_cat.map(|l| l.manifest.version.clone())));
+    o.insert("local".into(), json!(p.origin.is_local()));
+    o.insert("installed_at".into(), json!(p.origin.installed_at));
+    v
+}
+
+/// Installed plugins this Glyph's version does not fit (paused).
+fn unfit_json(core: &Core, rt: &Rt) -> Vec<Value> {
+    rt.unfit.iter().map(|(p, _)| installed_base(core, rt, p)).collect()
+}
+
 fn installed_json(core: &Core, rt: &Rt, dis: &[String]) -> Vec<Value> {
     rt.installed
         .iter()
         .map(|p| {
             let m = &p.manifest;
-            let cat = rt.catalog.as_ref();
-            let from_cat = cat.and_then(|c| c.find(&m.id));
-            let listing = Listing {
-                repo: p.origin.repo.clone(),
-                path: p.origin.path.clone(),
-                rev: p.origin.rev.clone(),
-                checked: p.origin.checked,
-                stars: from_cat.and_then(|l| l.stars),
-                updated: from_cat.and_then(|l| l.updated.clone()),
-                manifest: m.clone(),
-            };
-            let installable = match m.validate(plugins::app_version()) {
-                Ok(()) => "ok",
-                Err(Invalid::NeedsNewerApp) => "needs_newer_app",
-                Err(Invalid::Bad(_)) => "broken",
-            };
-            let mut v = listing_json(core, &listing, installable);
+            let mut v = installed_base(core, rt, p);
             let has_page = m.main.is_some() && !dis.contains(&m.id) && (p.origin.checked || p.origin.is_local()) && m.sections_on("own").next().is_some();
             let o = v.as_object_mut().expect("object");
-            o.insert("local".into(), json!(p.origin.is_local()));
             o.insert("enabled".into(), json!(!dis.contains(&m.id)));
             o.insert("has_page".into(), json!(has_page));
             o.insert("missing_credentials".into(), json!(rt.missing_credentials.contains_key(&m.id)));
             o.insert("stopped".into(), json!(rt.stopped.get(&m.id)));
             o.insert("log".into(), json!(rt.running.get(&m.id).map(|(r, _, _)| r.log_lines()).unwrap_or_default()));
-            let update = cat.and_then(|c| p.update_in(c)).map(|l| listing_json(core, l, installable_of(l)));
-            o.insert("update".into(), update.unwrap_or(Value::Null));
             v
         })
         .collect()
@@ -516,14 +575,14 @@ fn need_plugins(core: &Core) -> Res<Arc<PluginState>> {
 
 pub fn plugins_state(core: C<'_>) -> Value {
     let Some(st) = core.plugins() else {
-        return json!({ "installed": [], "ui": {} });
+        return json!({ "installed": [], "unfit": [], "ui": {} });
     };
     let (dis, lang) = {
         let s = core.st();
         (s.config.plugins.disabled.clone(), s.config.resolved_language())
     };
     let rt = st.lock();
-    json!({ "installed": installed_json(&core, &rt, &dis), "ui": ui_json(&rt, &dis, lang) })
+    json!({ "installed": installed_json(&core, &rt, &dis), "unfit": unfit_json(&core, &rt), "ui": ui_json(&rt, &dis, lang) })
 }
 
 pub async fn plugins_catalog(core: C<'_>, force: Option<bool>) -> Res<Value> {
@@ -542,14 +601,25 @@ pub async fn plugin_install(core: C<'_>, id: String, repo: String, path: Option<
     // Only what the catalog lists can be installed.
     let known = st.lock().catalog.clone();
     let find = |c: &Catalog| c.all().find(|l| l.manifest.id == id && l.repo.eq_ignore_ascii_case(&repo) && path.as_ref().is_none_or(|p| *p == l.path) && rev.as_ref().is_none_or(|r| *r == l.rev)).cloned();
-    let listing = match known.as_ref().and_then(find) {
-        Some(l) => l,
+    // Or one of its earlier versions (checked by the index too).
+    let earlier = |c: &Catalog| {
+        let r = rev.as_ref()?;
+        let l = c.all().find(|l| l.manifest.id == id && l.repo.eq_ignore_ascii_case(&repo) && path.as_ref().is_none_or(|p| *p == l.path))?;
+        Some((l.clone(), l.version_at(r)?.clone()))
+    };
+    let pick = |c: &Catalog| find(c).map(Ok).or_else(|| earlier(c).map(Err));
+    let picked = match known.as_ref().and_then(pick) {
+        Some(p) => p,
         None => {
             let c = crate::guard::guard_async(b.plugin_catalog(true)).await?;
-            let l = find(&c);
+            let p = pick(&c);
             st.lock().catalog = Some(c);
-            l.ok_or_else(|| crate::i18n::tr(&core, "plugins.err.not_found"))?
+            p.ok_or_else(|| crate::i18n::tr(&core, "plugins.err.not_found"))?
         }
+    };
+    let listing = match picked {
+        Ok(l) => l,
+        Err((l, v)) => crate::guard::guard_async(b.plugin_listing_at(l, v)).await?,
     };
     // Code and the look's files come from GitHub first (the same commit as the manifest).
     let code = crate::guard::guard_async(b.plugin_code(listing.clone())).await?;

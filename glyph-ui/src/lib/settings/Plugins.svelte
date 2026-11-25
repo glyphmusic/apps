@@ -28,7 +28,7 @@
   import RiskNote from "./RiskNote.svelte";
   import { tip } from "../ui.svelte";
   import { sui } from "./settings.svelte";
-  import { pl, loadPlugins, refreshCatalog, pluginUpdates, installPlugin, uninstallPlugin, setEnabled, reloadPlugins, showPlugin, themeId } from "./plugins-state.svelte";
+  import { pl, loadPlugins, refreshCatalog, pluginUpdates, installPlugin, uninstallPlugin, setEnabled, reloadPlugins, showPlugin, themeId, findInstalled, newer, isHeld, atVersion } from "./plugins-state.svelte";
   import { setTab } from "./settings.svelte";
   import { isMobile, openUrl } from "./util";
   import type { PluginListing, PluginInstalled } from "./types";
@@ -65,11 +65,6 @@
   const checkedHits = $derived(filterSort(pl.catalog?.checked ?? []));
   const communityHits = $derived(filterSort(pl.catalog?.community ?? []));
 
-  const newer = (a: string, b: string) => {
-    const pa = a.split(".").map((x) => parseInt(x, 10) || 0), pb = b.split(".").map((x) => parseInt(x, 10) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
-    return false;
-  };
   function metaLine(m: PluginListing, showUnchecked: boolean, stars?: number | null) {
     const p = [`v${m.version}`];
     if (m.author.trim()) p.push(m.author);
@@ -81,10 +76,16 @@
   function installedStatus(p: PluginInstalled) {
     let s = metaLine(p, !p.checked && !p.local);
     if (p.local) s += ` · ${t("plugins.local")}`;
+    if (isHeld(p.id)) s += ` · ${t("plugins.held.short")}`;
     if (p.missing_credentials) s = `${t("plugins.setup.needed")} · ${s}`;
     if (p.stopped && p.enabled) s = `${t("plugins.stopped_short")} · ${s}`;
     else if (!p.enabled && p.kind !== "theme") s = `${t("plugins.off")} · ${s}`;
     return s;
+  }
+  /** Why a paused plugin waits: the Glyph versions it fits. */
+  function pausedStatus(p: PluginInstalled) {
+    const why = p.installable === "needs_older_app" && p.max_app ? tf("plugins.paused.older", { v: p.max_app }) : p.min_app ? tf("plugins.paused.newer", { v: p.min_app }) : t("plugins.needs_update");
+    return `${why} · ${metaLine(p, !p.checked && !p.local)}`;
   }
   const catalogStatus = $derived(pl.loading ? t("plugins.loading") : pl.error ? tf("plugins.error", { e: pl.error }) : pl.catalog?.partial ? t("plugins.partial") : t("plugins.source"));
   const ownPlugin = $derived(ownIndex >= 0 ? pl.ui.pages[ownIndex] : undefined);
@@ -136,13 +137,17 @@
 {/snippet}
 
 {#snippet listingControls(l: PluginListing)}
-  {@const inst = pl.installed.find((p) => p.id === l.id)}
+  {@const inst = findInstalled(l.id)}
   {@const foreign = !!inst && inst.repo.toLowerCase() !== l.repo.toLowerCase()}
+  {@const fit = !inst && l.fitting ? l.versions?.find((v) => v.version === l.fitting) : undefined}
   {#if pl.busy[l.id]}<Spin />
+  {:else if fit}<Button onclick={() => installPlugin(atVersion(l, fit))}>{tf("plugins.install_version", { v: fit.version })}</Button>
+  {:else if inst?.update && !isHeld(l.id)}<Button kind="primary" onclick={() => installPlugin(inst.update!)}>{tf("plugins.update_to", { v: inst.update.version })}</Button>
   {:else if l.installable === "needs_newer_app"}<Chip kind="kind">{t("plugins.needs_update")}</Chip>
+  {:else if l.installable === "needs_older_app"}<Chip kind="kind">{t("plugins.needs_older")}</Chip>
   {:else if l.installable === "broken"}<Chip kind="kind">{t("plugins.broken")}</Chip>
   {:else if foreign}<Chip kind="kind">{t("plugins.id_taken")}</Chip>
-  {:else if inst && newer(l.version, inst.version)}<Button kind="primary" onclick={() => installPlugin(l)}>{tf("plugins.update_to", { v: l.version })}</Button>
+  {:else if inst && newer(l.version, inst.version) && !isHeld(l.id)}<Button kind="primary" onclick={() => installPlugin(l)}>{tf("plugins.update_to", { v: l.version })}</Button>
   {:else if inst}<span class="ins"><Icon name="check" size={14} color="rgba(255,255,255,.55)" />{t("plugins.installed")}</span>
   {:else}<IconButton name="download" size={15} color={ICON} label={t("plugins.install")} onclick={() => installPlugin(l)} />{/if}
 {/snippet}
@@ -196,7 +201,7 @@
   <!-- ---------------------------------------------------------- installed -->
   <PluginHost page="plugins">
     <div class="col">
-      {#if !pl.installed.length}
+      {#if !pl.installed.length && !pl.unfit.length}
         <div class="none">
           <Icon name="puzzle" size={28} color="rgba(255,255,255,.35)" />
           <div class="nt">{t("plugins.empty")}</div>
@@ -217,6 +222,27 @@
             {@render prow(p, installedStatus(p), true)}
           {/each}
         </Rows>
+        {#if pl.unfit.length}
+          <SectionLabel text={t("plugins.paused")} />
+          <div class="paused-desc">{t("plugins.paused.desc")}</div>
+          <Rows>
+            {#each pl.unfit as p (p.id)}
+              <div class="srow pr">
+                <button class="open" onclick={() => showPlugin(p.id)}>
+                  <PluginPreview theme={p.theme} size={28} />
+                  <span class="px"><span class="pn">{p.name}</span><span class="ps">{pausedStatus(p)}</span></span>
+                </button>
+                <div class="pc">
+                  {#if pl.busy[p.id]}<Spin />
+                  {:else}
+                    {#if p.update && !isHeld(p.id)}<Button kind="primary" onclick={() => installPlugin(p.update!)}>{tf("plugins.update_to", { v: p.update.version })}</Button>{/if}
+                    <IconButton name="trash-2" size={15} color={ICON} label={t("plugins.remove")} onclick={() => uninstallPlugin(p.id)} />
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </Rows>
+        {/if}
       {/if}
       {@render guide(true)}
     </div>
@@ -268,6 +294,7 @@
   .cat-msg { padding-top: 8px; font-size: 12px; color: rgba(255, 255, 255, .48); }
   .srch { flex: 1 1 200px; min-width: 200px; height: 34px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border-radius: 8px; background: rgba(255, 255, 255, .06); }
   .srch input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font-size: 13px; color: #fff; }
+  .paused-desc { padding: 0 0 8px; font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .6); }
   .empty { padding: 14px 0; font-size: 12.5px; color: rgba(255, 255, 255, .5); }
   .sk { padding-top: 14px; display: flex; flex-direction: column; gap: 6px; }
   .skr { display: flex; align-items: center; gap: 12px; padding: 6px 8px; }

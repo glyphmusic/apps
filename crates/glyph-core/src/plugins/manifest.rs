@@ -20,6 +20,15 @@ pub struct Manifest {
     /// Oldest Glyph version the plugin works with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_app: Option<String>,
+    /// Newest Glyph version the plugin works with: a version (`0.14.2`) or
+    /// a whole minor line (`0.14` or `0.14.x`, any patch of it). A newer
+    /// Glyph keeps the plugin installed but paused until an update fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_app: Option<String>,
+    /// What changed in this version (shown with the update), at most
+    /// [`MAX_CHANGES`] characters.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub changes: String,
     /// `"theme"` or `"extension"`; other kinds need a newer Glyph.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -751,6 +760,8 @@ impl ThemeSpec {
 pub enum Invalid {
     /// Written for a newer Glyph (schema, kind or `min_app`).
     NeedsNewerApp,
+    /// Made for an older Glyph (`max_app`); an update of the plugin may fit.
+    NeedsOlderApp,
     /// Broken or against the rules; the text says what.
     Bad(String),
 }
@@ -759,6 +770,7 @@ impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Invalid::NeedsNewerApp => f.write_str("needs a newer Glyph"),
+            Invalid::NeedsOlderApp => f.write_str("made for an older Glyph"),
             Invalid::Bad(s) => f.write_str(s),
         }
     }
@@ -813,12 +825,10 @@ impl Manifest {
         if semver::Version::parse(&self.version).is_err() {
             return bad("version must be a semantic version like 1.0.0");
         }
-        if let Some(min) = &self.min_app {
-            let min = semver::Version::parse(min).map_err(|_| Invalid::Bad("min_app must be a semantic version".into()))?;
-            if semver::Version::parse(app).is_ok_and(|v| v < min) {
-                return Err(Invalid::NeedsNewerApp);
-            }
+        if self.changes.chars().count() > MAX_CHANGES {
+            return Err(Invalid::Bad(format!("changes may have {MAX_CHANGES} characters")));
         }
+        fits_app(self.min_app.as_deref(), self.max_app.as_deref(), app)?;
         if let Some(t) = &self.theme {
             t.colors().map_err(|e| Invalid::Bad(e.to_string()))?;
         }
@@ -1058,6 +1068,51 @@ impl Manifest {
     pub fn theme_colors(&self) -> Option<ThemeColors> {
         self.theme.as_ref().and_then(|t| t.colors().ok())
     }
+}
+
+/// Longest `changes` text of a manifest.
+pub const MAX_CHANGES: usize = 300;
+
+/// `max_app` read as the newest version allowed; `true` when any patch of
+/// its minor line is (`0.14`, `0.14.x`).
+fn parse_max_app(max: &str) -> Option<(semver::Version, bool)> {
+    if let Ok(v) = semver::Version::parse(max) {
+        return Some((v, false));
+    }
+    let line = max.strip_suffix(".x").unwrap_or(max);
+    let mut parts = line.split('.');
+    let num = |p: Option<&str>| p.filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.len() <= 9).and_then(|p| p.parse::<u64>().ok());
+    match (num(parts.next()), num(parts.next()), parts.next()) {
+        (Some(major), Some(minor), None) => Some((semver::Version::new(major, minor, 0), true)),
+        _ => None,
+    }
+}
+
+/// Whether Glyph `app` lies between `min` and `max` (see
+/// [`Manifest::min_app`] and [`Manifest::max_app`]); broken bounds are `Bad`.
+pub fn fits_app(min: Option<&str>, max: Option<&str>, app: &str) -> Result<(), Invalid> {
+    let min = min.map(|m| semver::Version::parse(m).map_err(|_| Invalid::Bad("min_app must be a semantic version".into()))).transpose()?;
+    let max = max
+        .map(|m| parse_max_app(m).ok_or_else(|| Invalid::Bad("max_app must be a version like 0.14.2, 0.14 or 0.14.x".into())))
+        .transpose()?;
+    if let (Some(min), Some((max, line))) = (&min, &max) {
+        let below = if *line { (min.major, min.minor) > (max.major, max.minor) } else { min > max };
+        if below {
+            return Err(Invalid::Bad("min_app must not be newer than max_app".into()));
+        }
+    }
+    let Ok(v) = semver::Version::parse(app) else { return Ok(()) };
+    if min.is_some_and(|min| v < min) {
+        return Err(Invalid::NeedsNewerApp);
+    }
+    if let Some((max, line)) = max {
+        // A pre-release of the next version counts as that version.
+        let too_new = if line { (v.major, v.minor) > (max.major, max.minor) } else { semver::Version::new(v.major, v.minor, v.patch) > max };
+        if too_new {
+            return Err(Invalid::NeedsOlderApp);
+        }
+    }
+    Ok(())
 }
 
 /// `a` is a higher semantic version than `b`.

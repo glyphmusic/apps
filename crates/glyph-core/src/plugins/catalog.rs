@@ -23,7 +23,41 @@ pub struct Listing {
     #[serde(default)]
     pub updated: Option<String>,
     pub manifest: Manifest,
+    /// Earlier checked versions, newest first (from the index): for people
+    /// whose Glyph the newest does not fit, and to go back to one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<VersionRef>,
 }
+
+/// An earlier version of a checked plugin: its commit and what the index
+/// read from its manifest there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VersionRef {
+    pub version: String,
+    /// Commit of the plugin's repo with this version.
+    pub rev: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_app: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub changes: String,
+    /// Has code (`main`); with `permissions` for the install warning.
+    #[serde(default)]
+    pub code: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+}
+
+impl VersionRef {
+    /// Fits this Glyph (`min_app`/`max_app`).
+    pub fn fits(&self) -> bool {
+        fits_app(self.min_app.as_deref(), self.max_app.as_deref(), app_version()).is_ok()
+    }
+}
+
+/// Most earlier versions kept per plugin.
+pub const MAX_VERSIONS: usize = 10;
 
 impl Listing {
     pub fn repo_url(&self) -> String {
@@ -41,6 +75,29 @@ impl Listing {
             return Err(Invalid::Bad("only checked plugins may run code".into()));
         }
         Ok(())
+    }
+
+    /// The newest earlier version that fits this Glyph, when the newest
+    /// version itself does not (only `min_app`/`max_app` stand in its way).
+    pub fn fitting_version(&self) -> Option<&VersionRef> {
+        match self.installable() {
+            Err(Invalid::NeedsNewerApp | Invalid::NeedsOlderApp) => self.versions.iter().filter(|v| v.fits()).max_by(|a, b| version_order(&a.version, &b.version)),
+            _ => None,
+        }
+    }
+
+    /// The listing of `rev`: the newest one or one of [`Self::versions`].
+    pub fn version_at(&self, rev: &str) -> Option<&VersionRef> {
+        self.versions.iter().find(|v| v.rev == rev)
+    }
+}
+
+fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
     }
 }
 
@@ -63,6 +120,8 @@ pub struct IndexEntry {
     #[serde(default)]
     pub updated: Option<String>,
     pub manifest: Manifest,
+    #[serde(default)]
+    pub versions: Vec<VersionRef>,
 }
 
 /// A repo found by topic (the search API's fields we use).
@@ -193,6 +252,14 @@ pub(super) fn listings_from_index(index: Index) -> Vec<Listing> {
             checked: true,
             stars: e.stars.filter(|_| own_repo),
             updated: e.updated,
+            // Only versions older than the newest, each once, newest first.
+            versions: {
+                let mut v: Vec<VersionRef> = e.versions.into_iter().filter(|v| is_newer(&e.manifest.version, &v.version) && valid_rev(&v.rev)).collect();
+                v.sort_by(|a, b| version_order(&b.version, &a.version));
+                v.dedup_by(|a, b| a.version == b.version);
+                v.truncate(MAX_VERSIONS);
+                v
+            },
             manifest: e.manifest,
         });
     }
@@ -241,7 +308,7 @@ async fn community_listings(http: &reqwest::Client, repos: &[TopicRepo], checked
         .map(|r| async move {
             let m = fetch_manifest(http, &r.full_name, "HEAD", "").await.ok()?;
             let updated = (!r.pushed_at.is_empty()).then(|| r.pushed_at.clone());
-            Some(Listing { repo: r.full_name, path: String::new(), rev: "HEAD".into(), checked: false, stars: Some(r.stargazers_count), updated, manifest: m })
+            Some(Listing { repo: r.full_name, path: String::new(), rev: "HEAD".into(), checked: false, stars: Some(r.stargazers_count), updated, manifest: m, versions: Vec::new() })
         })
         .buffer_unordered(8)
         .filter_map(|l| async move { l })
@@ -256,6 +323,24 @@ async fn community_listings(http: &reqwest::Client, repos: &[TopicRepo], checked
         }
     }
     out
+}
+
+/// The listing of an earlier version `v` of `l`: its manifest is read at
+/// that commit and must be the same plugin at that version.
+pub async fn listing_at(http: &reqwest::Client, l: &Listing, v: &VersionRef) -> Result<Listing> {
+    if !valid_rev(&v.rev) {
+        bail!("invalid version");
+    }
+    let manifest = fetch_manifest(http, &l.repo, &v.rev, &l.path).await?;
+    if manifest.id != l.manifest.id || manifest.version != v.version {
+        bail!("{}: version {} is not at that commit", l.manifest.id, v.version);
+    }
+    Ok(Listing { repo: l.repo.clone(), path: l.path.clone(), rev: v.rev.clone(), checked: l.checked, stars: l.stars, updated: l.updated.clone(), manifest, versions: Vec::new() })
+}
+
+/// A full commit hash (what the index pins).
+fn valid_rev(rev: &str) -> bool {
+    rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// `glyph-plugin.json` of `repo` at `rev` (raw.githubusercontent.com has no
