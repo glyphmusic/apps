@@ -82,7 +82,7 @@
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
   const tile = $derived(accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent));
   // Closing keeps the choice: reopening shows the video again (not the cover).
-  if (phone.videoResume && cur) phone.videoMode = true;
+  if (phone.videoResume && app.player.current) phone.videoMode = true;
   const close = () => {
     phone.videoResume = phone.videoMode;
     if (phone.videoMode) {
