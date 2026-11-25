@@ -94,6 +94,7 @@
 //   plugin_install      { id, repo, path, rev }              -> void (rejects with the error)
 //   plugin_uninstall    { id }                               -> void
 //   plugin_enable       { id, on }                           -> void
+//   plugin_prefer       { id, over }                         -> void
 //   plugins_reload      {}                                   -> void
 //   plugins_folder      {}                                   -> void   (creates + reveals the plugins folder)
 //   plugin_set_value    { plugin, item, value }              -> void
@@ -430,6 +431,13 @@ export const handlers: Record<string, DemoHandler> = {
   },
   plugin_uninstall: async (_, a) => { await lag(400); st.plugins = st.plugins.filter((p) => p.id !== a.id); st.unfit = st.unfit.filter((p) => p.id !== a.id); },
   plugin_enable: (_, a) => { const p = st.plugins.find((x) => x.id === a.id); if (p) p.enabled = !!a.on; },
+  plugin_prefer: (_, a) => {
+    // Like the backend: the picked plugin moves right before the other one.
+    const me = st.plugins.find((p) => p.id === a.id);
+    const rest = st.plugins.filter((p) => p.id !== a.id);
+    const at = rest.findIndex((p) => p.id === a.over);
+    if (me && at >= 0) { rest.splice(at, 0, me); st.plugins = rest; }
+  },
   plugins_reload: () => {},
   plugins_folder: () => {},
   plugin_set_value: (_, a) => { st.pluginValues[`${a.plugin}.${a.item}`] = a.value; },

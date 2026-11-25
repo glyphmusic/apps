@@ -139,7 +139,7 @@ pub fn setup(core: &Arc<Core>) {
     std::thread::Builder::new()
         .name("glyph-plugins".into())
         .spawn(move || {
-            load(&st);
+            load(&core, &st);
             sync_code(&core, &st);
             crate::theme_icon::sync_host_icon(&core);
             loop {
@@ -160,10 +160,13 @@ fn may_run(p: &Installed, disabled: &[String]) -> bool {
     p.manifest.main.is_some() && !disabled.contains(&p.manifest.id) && (p.origin.checked || p.origin.is_local())
 }
 
-/// Reads the installed plugins (and the cached catalog) from disk.
-fn load(st: &PluginState) {
+/// Reads the installed plugins (and the cached catalog) from disk, in the
+/// user's order (the first wins a conflict).
+fn load(core: &Core, st: &PluginState) {
+    let order = core.st().config.plugins.order.clone();
     let mut rt = st.lock();
     rt.installed = plugins::installed();
+    plugins::sort_by_order(&mut rt.installed, &order);
     rt.unfit = plugins::installed_unfit();
     if rt.catalog.is_none() {
         rt.catalog = plugins::cached_catalog();
@@ -414,8 +417,8 @@ fn font_kind(font: &str) -> &str {
 }
 
 /// The app icon of the looks in use (.png): a theme's while its theme is
-/// picked, an extension's while it is on; the first plugin wins, like the
-/// UI's font and corners.
+/// picked, an extension's while it is on; the first plugin wins (the
+/// user's order, else by name), like the UI's font and corners.
 pub(crate) fn active_app_icon(st: &PluginState, dis: &[String], theme: &str) -> Option<Vec<u8>> {
     let rt = st.lock();
     rt.installed
@@ -559,7 +562,7 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
     for m in &manifests {
         for (l, map) in &m.strings {
             let t = strings.entry(l.clone()).or_default();
-            // Like everything else of a look: the plugin first by name wins.
+            // Like everything else of a look: the first plugin wins (the user's order, else by name).
             for (k, v) in map {
                 t.entry(k.clone()).or_insert_with(|| v.clone());
             }
@@ -660,7 +663,7 @@ pub async fn plugin_install(core: C<'_>, id: String, repo: String, path: Option<
     tokio::task::spawn_blocking(move || plugins::install_with_look(&l2, code.as_deref(), &look).map(|_| ()).map_err(|e| format!("{e:#}")))
         .await
         .map_err(|e| e.to_string())??;
-    load(&st);
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(&core);
     Ok(())
@@ -673,7 +676,7 @@ pub async fn plugin_uninstall(core: C<'_>, id: String) -> Res {
     st.lock().running.remove(&id);
     let gone = id.clone();
     tokio::task::spawn_blocking(move || plugins::uninstall(&gone).map_err(|e| format!("{e:#}"))).await.map_err(|e| e.to_string())??;
-    load(&st);
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(&core);
     Ok(())
@@ -689,7 +692,22 @@ pub fn plugin_enable(core: C<'_>, id: String, on: bool) {
         }
     }
     core.config_changed();
-    load(&st);
+    load(&core, &st);
+    sync_code(&core, &st);
+    crate::theme_icon::sync_host_icon(core);
+}
+
+/// The user picked `id` to win its conflict with `over` (both change the
+/// same thing): `id` now comes first.
+pub fn plugin_prefer(core: C<'_>, id: String, over: String) {
+    let Some(st) = core.plugins() else { return };
+    let current: Vec<String> = st.lock().installed.iter().map(|p| p.manifest.id.clone()).collect();
+    if !current.contains(&id) || !current.contains(&over) {
+        return;
+    }
+    core.st().config.plugins.order = plugins::prefer(&current, &id, &over);
+    core.config_changed();
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(core);
 }
@@ -702,9 +720,8 @@ pub fn plugins_reload(core: C<'_>) {
         let local: Vec<String> = rt.installed.iter().filter(|p| p.origin.is_local()).map(|p| p.manifest.id.clone()).collect();
         rt.running.retain(|id, _| !local.contains(id));
     }
-    load(&st);
     // Reload also re-reads what is installed (an edited manifest).
-    st.lock().installed = plugins::installed();
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(core);
 }

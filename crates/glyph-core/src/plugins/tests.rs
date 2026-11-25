@@ -520,3 +520,22 @@ fn a_manifest_saved_by_an_older_glyph_is_installed_again() {
     let here = Catalog { checked: vec![Listing { rev: "a".repeat(40), ..l }], ..Default::default() };
     assert!(inst.update_in(&here).is_none());
 }
+
+#[test]
+fn the_user_picks_which_plugin_wins() {
+    let inst = |id: &str| Installed { manifest: theme(id, "1.0.0"), origin: Origin { repo: String::new(), path: String::new(), rev: String::new(), checked: false, installed_at: 0 } };
+    let ids = |v: &[Installed]| v.iter().map(|p| p.manifest.id.clone()).collect::<Vec<_>>();
+    // By name until the user picks.
+    let mut v = vec![inst("aurora"), inst("citrus"), inst("sakura")];
+    sort_by_order(&mut v, &[]);
+    assert_eq!(ids(&v), ["aurora", "citrus", "sakura"]);
+    // Sakura should win over aurora.
+    let order = prefer(&ids(&v), "sakura", "aurora");
+    assert_eq!(order, ["sakura", "aurora", "citrus"]);
+    let mut v = vec![inst("aurora"), inst("citrus"), inst("sakura"), inst("berry")];
+    sort_by_order(&mut v, &order);
+    // A new plugin comes after the picked order.
+    assert_eq!(ids(&v), ["sakura", "aurora", "citrus", "berry"]);
+    // And back: aurora over sakura.
+    assert_eq!(prefer(&ids(&v), "aurora", "sakura"), ["aurora", "sakura", "citrus", "berry"]);
+}

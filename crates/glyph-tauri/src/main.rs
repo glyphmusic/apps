@@ -321,6 +321,7 @@ fn main() {
             tauri_commands::plugin_action,
             tauri_commands::plugin_enable,
             tauri_commands::plugin_install,
+            tauri_commands::plugin_prefer,
             tauri_commands::plugin_set_value,
             tauri_commands::plugin_uninstall,
             tauri_commands::plugins_catalog,

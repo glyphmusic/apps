@@ -5,13 +5,14 @@
 ### Added
 
 - **See a plugin before you use it**: a plugin's page now shows its app icon, the icons it replaces, its background pictures and its startup animation. Plugins with their own app icon show it in the list too.
-- **Plugin warnings**: a plugin's page (and the warning before you install it) lists your own settings it replaces while it is on, like the background, font or app icon. When two plugins change the same thing, both say "Plugin conflict" and which one wins (the one whose name comes first). Turn one off to choose.
+- **Solve plugin conflicts**: when two plugins change the same thing, press "Use this one" on a plugin's page to pick which one wins. Glyph remembers it. Until you pick, the plugin whose name comes first wins.
+- **Plugin warnings**: a plugin's page (and the warning before you install it) lists your own settings it replaces while it is on, like the background, font or app icon. When two plugins change the same thing, both say "Plugin conflict" and which one wins.
 
 ### Fixed
 
 - **Plugin corners**: a look's corner roundness now changes the corners of the whole interface, not only a few panels. The plugin page says how round, compared to Glyph's.
 - **Plugin app icons, startup animations and layouts missing**: plugins installed with an older Glyph lost the parts that Glyph did not know yet. Glyph now installs them again in full by itself.
-- **Plugin texts**: when two plugins replace the same text, the one whose name comes first wins, like for the rest of a look.
+- **Plugin texts**: when two plugins replace the same text, the same one wins as for the rest of a look.
 
 ## 0.13.6 - 2026-11-25
 
