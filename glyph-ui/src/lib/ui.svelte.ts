@@ -7,14 +7,14 @@ import { tipFor } from "./i18n.svelte";
 // Next to their button (below, or above near the bottom edge), never at the
 // mouse. One at a time; the first waits 500 ms, the next opens at once while
 // the mouse moves on within 0.8 s. A click hides it until the mouse leaves.
-export const tipState = $state<{ label: string; rect: DOMRect | null; wrap: boolean; side: "below" | "above" | "right"; shown: boolean }>({ label: "", rect: null, wrap: false, side: "below", shown: false });
+export const tipState = $state<{ label: string; rect: DOMRect | null; wrap: boolean; side: "below" | "above" | "right" | "left"; shown: boolean }>({ label: "", rect: null, wrap: false, side: "below", shown: false });
 let tipTimer = 0;
 let tipLast = 0;
 let tipEl: HTMLElement | null = null;
 
 export function tipsWarm() { return tipState.shown || performance.now() - tipLast < 800; }
 
-function showTip(el: HTMLElement, label: string, opts: { instant?: boolean; wrap?: boolean; side?: "right" }) {
+function showTip(el: HTMLElement, label: string, opts: { instant?: boolean; wrap?: boolean; side?: "right" | "left" }) {
   clearTimeout(tipTimer);
   tipEl = el;
   const open = () => {
@@ -35,7 +35,7 @@ function hideTip(el: HTMLElement) {
 export function tipClosed() { tipLast = performance.now(); }
 
 /** `use:tip={"Label"}` or `use:tip={{ label, wrap, instant, side }}`; `use:tip={iconTip("heart")}`. */
-export function tip(el: HTMLElement, arg: string | undefined | { label?: string; wrap?: boolean; instant?: boolean; side?: "right" }) {
+export function tip(el: HTMLElement, arg: string | undefined | { label?: string; wrap?: boolean; instant?: boolean; side?: "right" | "left" }) {
   let a = typeof arg === "string" || arg == null ? { label: arg } : arg;
   const enter = () => a.label && showTip(el, a.label, a);
   const leave = () => hideTip(el);

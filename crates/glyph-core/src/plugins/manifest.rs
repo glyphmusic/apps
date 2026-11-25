@@ -96,6 +96,55 @@ pub struct LookSpec {
     /// Tabs at the bottom on phones to put in order or hide ([`TAB_PARTS`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tabs: Option<LayoutSpec>,
+    /// Where the sidebar sits on computers: `"left"` (Glyph's) or `"right"`
+    /// (the side panel with queue and lyrics then opens on the left).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sidebar_position: String,
+    /// The startup animation: the picture its characters fly together into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub splash: Option<SplashSpec>,
+}
+
+/// A look's startup animation: ASCII art the characters assemble into.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SplashSpec {
+    /// Rows of printable ASCII characters (spaces stay empty).
+    #[serde(default)]
+    pub art: Vec<String>,
+    /// Same shape as `art`: `p` draws that character in the accent colour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tint: Vec<String>,
+    /// How fast it plays: 0.5 (slow) to 2 (fast); 1 is Glyph's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+}
+
+/// Sidebar positions a look can pick.
+pub const SIDEBAR_POSITIONS: &[&str] = &["left", "right"];
+/// Largest startup animation picture (rows, characters per row).
+pub const MAX_SPLASH_ROWS: usize = 40;
+pub const MAX_SPLASH_COLS: usize = 60;
+
+impl SplashSpec {
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.art.is_empty() || self.art.len() > MAX_SPLASH_ROWS {
+            return Err(format!("splash.art takes 1 to {MAX_SPLASH_ROWS} rows"));
+        }
+        let ascii = |r: &String| r.len() <= MAX_SPLASH_COLS && r.bytes().all(|b| (0x20..0x7f).contains(&b));
+        if !self.art.iter().all(ascii) {
+            return Err(format!("splash.art rows are at most {MAX_SPLASH_COLS} printable ASCII characters"));
+        }
+        if self.art.iter().all(|r| r.trim().is_empty()) {
+            return Err("splash.art needs at least one character".into());
+        }
+        if !self.tint.is_empty() && (self.tint.len() != self.art.len() || !self.tint.iter().all(ascii)) {
+            return Err("splash.tint has one row per row of splash.art".into());
+        }
+        if self.speed.is_some_and(|s| !(s.is_finite() && (0.5..=2.0).contains(&s))) {
+            return Err("splash.speed must be between 0.5 and 2".into());
+        }
+        Ok(())
+    }
 }
 
 /// Order and hidden parts of one area (home page, sidebar, tabs). Parts not
@@ -305,7 +354,7 @@ pub(super) fn valid_icon_name(n: &str) -> bool {
 
 impl LookSpec {
     fn is_empty(&self) -> bool {
-        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.home.is_none() && self.sidebar.is_none() && self.tabs.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
+        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.home.is_none() && self.sidebar.is_none() && self.tabs.is_none() && self.sidebar_position.is_empty() && self.splash.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
     }
 
     /// Every file the look needs from the repo, each once.
@@ -348,7 +397,15 @@ impl LookSpec {
     fn validate(&self) -> Result<(), Invalid> {
         let bad = |s: &str| Err(Invalid::Bad(format!("look: {s}")));
         if self.is_empty() {
-            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets, icons, home, sidebar or tabs");
+            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets, icons, home, sidebar, tabs, sidebar_position or splash");
+        }
+        if !self.sidebar_position.is_empty() && !SIDEBAR_POSITIONS.contains(&self.sidebar_position.as_str()) {
+            return bad("sidebar_position must be \"left\" or \"right\"");
+        }
+        if let Some(s) = &self.splash {
+            if let Err(e) = s.validate() {
+                return bad(&e);
+            }
         }
         for (area, l) in [("home", &self.home), ("sidebar", &self.sidebar), ("tabs", &self.tabs)] {
             if let Some(l) = l {

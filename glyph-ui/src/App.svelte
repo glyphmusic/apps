@@ -26,6 +26,8 @@
   import SettingsModal from "./lib/settings/SettingsModal.svelte";
   import Compact from "./lib/compact/Compact.svelte";
   import { loadPlugins, pl } from "./lib/settings/plugins-state.svelte";
+  import { layout } from "./lib/layout.svelte";
+  import { rememberSplash } from "./lib/overlays/splash-art";
   import { installMigrateEvents } from "./lib/settings/migrate-state.svelte";
   import { installSettingsHash } from "./lib/settings/hash.svelte";
   import { installRoutes } from "./lib/routes.svelte";
@@ -247,6 +249,15 @@
     const paused = (app.settingsOpen && app.settingsPage === "plugins") || !!pl.confirm;
     applyLooks(app.config && !paused ? activeLooks(pl.ui.looks ?? [], app.config.visuals.theme) : []);
   });
+  // A look's startup animation plays from the next start on (looks arrive
+  // after it began); not touched while looks are paused.
+  $effect(() => {
+    const paused = (app.settingsOpen && app.settingsPage === "plugins") || !!pl.confirm;
+    if (!app.config || !pl.loaded || paused) return;
+    rememberSplash(activeLooks(pl.ui.looks ?? [], app.config.visuals.theme).find((l) => l.splash)?.splash);
+  });
+  // A look can put the sidebar on the right; the side panel then opens on the left.
+  const flip = $derived(layout.sidebarRight);
 
   $effect(() => {
     if (!app.config) return;
@@ -286,6 +297,8 @@
     if (e.button !== 0) return;
     e.preventDefault();
     const startX = e.clientX;
+    // Mirrored when a look puts the sidebar on the right.
+    const dir = flip ? -1 : 1;
     const startW = side === "left" ? leftW : rightW;
     let latestX = startX;
     let rafId = 0;
@@ -295,10 +308,10 @@
       rafId = 0;
       if (side === "left") {
         const max = Math.max(64, Math.min(280, winW - (rightOpen ? rightW : 0) - 340));
-        app.setLeftSidebarW(Math.min(max, startW + (latestX - startX)));
+        app.setLeftSidebarW(Math.min(max, startW + dir * (latestX - startX)));
       } else {
         const max = Math.max(260, Math.min(580, winW - leftW - 340));
-        app.setRightSidebarW(Math.min(max, startW + (startX - latestX)));
+        app.setRightSidebarW(Math.min(max, startW + dir * (startX - latestX)));
       }
     };
     const move = (ev: PointerEvent) => {
@@ -353,7 +366,7 @@
   {:else}
     <div class="root" class:dim={app.settingsOpen || app.onboarding} class:resizing={resizing !== null} data-skin>
       {#if zen}<div class="tb-space"></div>{:else}<Titlebar bind:search />{/if}
-      <div class="body" class:with-bar={showBar}>
+      <div class="body" class:with-bar={showBar} class:flip>
         {#if !zen}
           <Sidebar width={leftW} />
           <div class="sash left" class:on={resizing === "left"} role="separator" aria-orientation="vertical" aria-label="Resize left sidebar"
@@ -365,7 +378,7 @@
         {#if rightOpen}
           <div class="sash" class:on={resizing === "right"} role="separator" aria-orientation="vertical" aria-label="Resize right sidebar"
             onpointerdown={(e) => startResize(e, "right")} ondblclick={() => app.setRightSidebarW(320, true)}></div>
-          <aside class="right" style:width="{rightW}px" data-part="side-panel" in:fly={{ x: 24, duration: 160, opacity: 0, easing: cubicOut }}><RightPanel /></aside>
+          <aside class="right" style:width="{rightW}px" data-part="side-panel" in:fly={{ x: flip ? -24 : 24, duration: 160, opacity: 0, easing: cubicOut }}><RightPanel /></aside>
         {/if}
       </div>
       {#if showBar}
@@ -394,6 +407,8 @@
   .right { flex: none; width: 320px; height: 100%; padding: var(--gap) 0 var(--gap); overflow: hidden; }
   .sash { position: relative; flex: none; width: 10px; margin: 12px -10px; z-index: 20; cursor: col-resize; touch-action: none; }
   .sash.left { margin: 12px -5px 12px -15px; }
+  .body.flip { flex-direction: row-reverse; }
+  .body.flip .sash.left { margin: 12px -15px 12px -5px; }
   .sash::after { content: ""; position: absolute; top: 50%; left: 50%; width: 2px; height: 36px; border-radius: 2px; background: rgba(255, 255, 255, .24); opacity: 0; transform: translate(-50%, -50%) scaleY(.75); transition: opacity .15s ease-out, transform .15s ease-out, background-color .15s ease-out, height .15s ease-out; }
   .sash:hover::after, .sash.on::after { opacity: 1; transform: translate(-50%, -50%) scaleY(1); }
   .sash.on::after { height: 56px; background: var(--accent); }

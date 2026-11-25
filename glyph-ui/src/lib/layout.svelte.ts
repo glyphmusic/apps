@@ -6,11 +6,15 @@
 export interface LayoutSpec { order?: string[]; hide?: string[] }
 export type LayoutArea = "home" | "sidebar" | "tabs";
 
-export const layout = $state<{ areas: Partial<Record<LayoutArea, LayoutSpec>> }>({ areas: {} });
+export const layout = $state<{ areas: Partial<Record<LayoutArea, LayoutSpec>>; sidebarRight: boolean }>({ areas: {}, sidebarRight: false });
 
-/** Sets the layouts in use (first look per area wins); empty brings Glyph's back. */
-export function setLayouts(areas: Partial<Record<LayoutArea, LayoutSpec>>) {
+/**
+ * Sets the layouts in use (first look per area wins) and where the sidebar
+ * sits (right: the side panel opens on the left); empty brings Glyph's back.
+ */
+export function setLayouts(areas: Partial<Record<LayoutArea, LayoutSpec>>, sidebarRight = false) {
   layout.areas = areas;
+  layout.sidebarRight = sidebarRight;
 }
 
 /**

@@ -1897,6 +1897,8 @@
 "plugins.does.app_icon" = "Ändert das App-Symbol"
 "plugins.does.app_icon.desc" = "Ein eigenes Symbol für Fenster, Taskleiste, Infobereich und Dock (unter Android in der App-Übersicht). Wenn du das Plugin abschaltest, kommt das Glyph-Symbol zurück."
 "plugins.does.layout" = "Ordnet Startseite, Seitenleiste oder Tabs neu"
+"plugins.does.splash" = "Ändert die Start-Animation"
+"plugins.does.splash.desc" = "Zu sehen ab dem nächsten Start von Glyph. Du kannst die Animation unter Einstellungen › Darstellung abschalten."
 "plugins.font.file" = "Eigene Schrift"
 "sp.keys.plugins" = "Plugins öffnen (klappt mit jedem Look)"
 "share.kind.artist" = "Künstler"
