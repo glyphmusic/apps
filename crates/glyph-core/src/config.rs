@@ -358,11 +358,15 @@ pub struct PluginsConfig {
     /// none from "Update all" (set when going back to an earlier version).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<String>,
+    /// Plugins the user picked to win a conflict (two plugins change the
+    /// same thing): earlier wins. Plugins not listed come after, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
 }
 
 impl Default for PluginsConfig {
     fn default() -> Self {
-        Self { auto_update: true, skip_install_warning: false, sort: crate::plugins::Sort::default(), disabled: Vec::new(), held: Vec::new() }
+        Self { auto_update: true, skip_install_warning: false, sort: crate::plugins::Sort::default(), disabled: Vec::new(), held: Vec::new(), order: Vec::new() }
     }
 }
 

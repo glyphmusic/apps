@@ -23,7 +23,7 @@
   import Tog from "./Tog.svelte";
   import PluginPreview from "./PluginPreview.svelte";
   import RiskNote from "./RiskNote.svelte";
-  import { pluginConflicts, pluginOverrides } from "./plugins-state.svelte";
+  import { pluginConflicts, pluginOverrides, preferPlugin } from "./plugins-state.svelte";
   import { acceptWarning, allPermissions, atVersion, cancelWarning, closeDetail, findInstalled, findListing, installPlugin, isHeld, pl, refreshCatalog, setEnabled, setHeld, uninstallPlugin, themeId } from "./plugins-state.svelte";
   import type { PluginVersion } from "./types";
   import { openUrl } from "./util";
@@ -184,7 +184,14 @@
     {#if !confirming && conflicts.length}
       <div class="box">
         <div class="wh"><Icon name="info" size={15} color="var(--warn)" /><span>{t("plugins.conflict")}</span></div>
-        {#each conflicts as c (c.other.id)}<div class="wb">{tf(c.wins ? "plugins.conflict.wins" : "plugins.conflict.loses", { name: c.other.name, what: what(c.parts) })}</div>{/each}
+        {#each conflicts as c (c.other.id)}
+          <div class="cr">
+            <div class="wb">{tf(c.wins ? "plugins.conflict.wins" : "plugins.conflict.loses", { name: c.other.name, what: what(c.parts) })}</div>
+            {#if installed?.enabled}
+              <Button onclick={() => (c.wins ? preferPlugin(c.other.id, m.id) : preferPlugin(m.id, c.other.id))}>{c.wins ? tf("plugins.conflict.use_other", { name: c.other.name }) : t("plugins.conflict.use_this")}</Button>
+            {/if}
+          </div>
+        {/each}
       </div>
     {/if}
     {#if !confirming && overrides.length}
@@ -304,6 +311,7 @@
   .box { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(255, 255, 255, .035); display: flex; flex-direction: column; gap: 6px; }
   .ol { color: #fff; }
   .cf { color: var(--warn); }
+  .cr { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .pv { display: flex; flex-wrap: wrap; gap: 18px; padding: 4px 0 10px; }
   .pvi { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
   .pvi.wide { padding-bottom: 6px; max-width: 100%; }

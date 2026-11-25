@@ -8,6 +8,7 @@ import { setOverrides, t, tf } from "../i18n.svelte";
 import { setPluginThemes, type Theme } from "../theme";
 import { loadBackgrounds } from "../backgrounds.svelte";
 import { errText } from "./util";
+import { preferOrder, sortLikeGlyph, type Named } from "./plugin-order";
 import type { PluginCatalog, PluginInstalled, PluginListing, PluginUiState, PluginVersion } from "./types";
 
 export const THEME_PREFIX = "plugin:";
@@ -105,8 +106,24 @@ export function pluginOverrides(m: PluginListing): string[] {
 
 export interface Conflict { other: PluginInstalled; parts: string[]; wins: boolean }
 
+/** Whether `a` wins over installed `b` (when both change the same thing). */
+function beats(a: Named, b: Named): boolean {
+  const list: Named[] = pl.installed.some((x) => x.id === a.id) ? pl.installed : sortLikeGlyph([...pl.installed, a], app.config.plugins.order ?? []);
+  return list.findIndex((x) => x.id === a.id) < list.findIndex((x) => x.id === b.id);
+}
+
+/** Resolves a conflict: `id` wins over `over` from now on. */
+export async function preferPlugin(id: string, over: string) {
+  const order = preferOrder(pl.installed.map((p) => p.id), id, over);
+  await app.setConfig((c) => { c.plugins.order = order; });
+  await backend().call("plugin_prefer", { id, over });
+  await loadPlugins();
+  const name = pl.installed.find((p) => p.id === id)?.name ?? id;
+  app.toast(tf("plugins.conflict.resolved", { name }));
+}
+
 /** Other plugins in use that change the same things as `m`. Like Glyph
- *  applies them, the plugin whose name comes first wins. */
+ *  applies them, the first plugin wins: the user's pick, else by name. */
 export function pluginConflicts(m: PluginListing): Conflict[] {
   const mine = pluginSlots(m);
   if (!mine.length) return [];
@@ -116,7 +133,7 @@ export function pluginConflicts(m: PluginListing): Conflict[] {
     .filter((o) => o.id !== m.id && o.enabled && (o.kind !== "theme" || theme === themeId(o.id)))
     .flatMap((o) => {
       const parts = [...new Set(pluginSlots(o).filter((s) => keys.has(s.key)).map((s) => s.label))];
-      return parts.length ? [{ other: o, parts, wins: m.name.toLowerCase() < o.name.toLowerCase() }] : [];
+      return parts.length ? [{ other: o, parts, wins: beats(m, o) }] : [];
     });
 }
 

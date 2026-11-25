@@ -85,6 +85,23 @@ pub fn installed_unfit() -> Vec<(Installed, Invalid)> {
         .collect()
 }
 
+/// Puts `v` (sorted by name) in the user's order: plugins in `order` first,
+/// as listed, the rest after them by name. The first plugin wins when two
+/// change the same thing (font, icon, text …).
+pub fn sort_by_order(v: &mut [Installed], order: &[String]) {
+    v.sort_by_key(|p| order.iter().position(|id| *id == p.manifest.id).unwrap_or(usize::MAX));
+}
+
+/// The order after the user picked `id` to win over `over`: `id` moves
+/// right before `over`; everything else keeps its place. `current` is the
+/// installed plugins' ids in their order now.
+pub fn prefer(current: &[String], id: &str, over: &str) -> Vec<String> {
+    let mut v: Vec<String> = current.iter().filter(|x| *x != id).cloned().collect();
+    let at = v.iter().position(|x| x == over).unwrap_or(0);
+    v.insert(at, id.to_string());
+    v
+}
+
 fn scan() -> Vec<(Installed, Result<(), Invalid>)> {
     let Ok(dir) = std::fs::read_dir(plugins_dir()) else { return Vec::new() };
     let mut out: Vec<(Installed, Result<(), Invalid>)> = dir

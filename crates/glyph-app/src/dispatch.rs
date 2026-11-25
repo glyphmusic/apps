@@ -425,6 +425,10 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             plugins::plugin_enable(core, req(&args, "id")?, req(&args, "on")?);
             Ok(Value::Null)
         }
+        "plugin_prefer" => {
+            plugins::plugin_prefer(core, req(&args, "id")?, req(&args, "over")?);
+            Ok(Value::Null)
+        }
         "plugins_reload" => {
             plugins::plugins_reload(core);
             Ok(Value::Null)
