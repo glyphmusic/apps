@@ -502,3 +502,21 @@ fn an_earlier_version_fits_when_the_newest_does_not() {
     l.manifest.min_app = None;
     assert!(l.fitting_version().is_none());
 }
+
+#[test]
+fn a_manifest_saved_by_an_older_glyph_is_installed_again() {
+    // An older Glyph dropped the look's app icon when it saved the manifest.
+    let old = theme("sunset", "1.1.0");
+    let inst = Installed { manifest: old.clone(), origin: Origin { repo: "a/b".into(), path: String::new(), rev: "a".repeat(40), checked: true, installed_at: 0 } };
+    let mut full = old.clone();
+    full.look = Some(LookSpec { app_icon: Some("icon.png".into()), ..Default::default() });
+    let mut l = listing(full, "a/b", true);
+    l.rev = "b".repeat(40);
+    let c = Catalog { checked: vec![l.clone()], ..Default::default() };
+    assert_eq!(inst.update_in(&c).unwrap().rev, "b".repeat(40));
+    // Same manifest at another commit, or the same commit: nothing to do.
+    let same = Catalog { checked: vec![Listing { manifest: old.clone(), ..l.clone() }], ..Default::default() };
+    assert!(inst.update_in(&same).is_none());
+    let here = Catalog { checked: vec![Listing { rev: "a".repeat(40), ..l }], ..Default::default() };
+    assert!(inst.update_in(&here).is_none());
+}

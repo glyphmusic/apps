@@ -35,7 +35,14 @@ export interface PluginListing {
     /** Glyph's font name, "file" for the plugin's own font, or "". */
     font: string; mono?: string; app_icon?: boolean; layout?: boolean; splash?: boolean;
     radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number;
+    home?: boolean; sidebar?: boolean; tabs?: boolean; sidebar_position?: string;
+    /** Names of the icons it replaces, and its startup animation picture. */
+    icon_names?: string[]; splash_art?: string[] | null;
+    /** Its files on GitHub (at the listed commit), to show them; null for local plugins. */
+    preview?: { app_icon: string | null; icons: Record<string, string>; backgrounds: string[] } | null;
   } | null;
+  /** Glyph's text keys it replaces. */
+  replaces?: string[];
   /** Earlier checked versions, newest first (glyph_core::plugins::VersionRef). */
   versions?: PluginVersion[];
   /** The newest earlier version that fits this Glyph when the newest does not. */

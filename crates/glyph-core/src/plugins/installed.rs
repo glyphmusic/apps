@@ -36,10 +36,15 @@ pub struct Installed {
 }
 
 impl Installed {
-    /// The catalog's listing of this plugin when it is newer (same repo).
+    /// The catalog's listing of this plugin when it is newer (same repo),
+    /// or the same version listed at another commit with a different
+    /// manifest: an older Glyph saved it without the fields it did not know
+    /// yet (like a look's app icon), so it is installed again in full.
     pub fn update_in<'a>(&self, catalog: &'a Catalog) -> Option<&'a Listing> {
         let l = self.listing_in(catalog)?;
-        (is_newer(&l.manifest.version, &self.manifest.version) && l.installable().is_ok()).then_some(l)
+        let newer = is_newer(&l.manifest.version, &self.manifest.version);
+        let refresh = l.checked && l.manifest.version == self.manifest.version && l.rev != self.origin.rev && l.manifest != self.manifest;
+        ((newer || refresh) && l.installable().is_ok()).then_some(l)
     }
 
     /// When the newest version does not fit this Glyph: the newest earlier

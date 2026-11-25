@@ -23,6 +23,7 @@
   import Tog from "./Tog.svelte";
   import PluginPreview from "./PluginPreview.svelte";
   import RiskNote from "./RiskNote.svelte";
+  import { pluginConflicts, pluginOverrides } from "./plugins-state.svelte";
   import { acceptWarning, allPermissions, atVersion, cancelWarning, closeDetail, findInstalled, findListing, installPlugin, isHeld, pl, refreshCatalog, setEnabled, setHeld, uninstallPlugin, themeId } from "./plugins-state.svelte";
   import type { PluginVersion } from "./types";
   import { openUrl } from "./util";
@@ -78,6 +79,13 @@
   const ownPage = $derived(pl.ui.pages.findIndex((p) => p.id === id));
   const ICON = "rgba(255,255,255,.7)";
   const sub = $derived(m ? [`v${m.version}`, ...(m.author.trim() ? [m.author] : []), ...(stars != null ? [`★ ${compact(stars)}`] : [])].join(" · ") : "");
+  const overrides = $derived(m ? pluginOverrides(m) : []);
+  const conflicts = $derived(m ? pluginConflicts(m) : []);
+  const preview = $derived(m?.look?.preview ?? null);
+  const previewIcons = $derived(Object.entries(preview?.icons ?? {}));
+  const splashArt = $derived(m?.look?.splash_art ?? null);
+  const hasPreview = $derived(!!preview?.app_icon || previewIcons.length > 0 || !!preview?.backgrounds.length || !!splashArt?.length);
+  const what = (parts: string[]) => parts.map((p) => t(p)).join(", ");
 </script>
 
 {#snippet sw(hex: number)}<span class="sws"><span class="dot" style:background={css(hex)}></span><span class="mono v2">{css(hex)}</span></span>{/snippet}
@@ -102,7 +110,7 @@
     {/if}
   {:else}
     <div class="head">
-      <PluginPreview theme={m.theme} size={64} />
+      <PluginPreview theme={m.theme} size={64} icon={m.look?.preview?.app_icon} />
       <div class="hx">
         <div class="hn">{m.name}</div>
         <div class="hs">{sub}</div>
@@ -158,6 +166,13 @@
             {#each asks as p (p)}<div class="pi"><Icon name="check" size={13} color="rgba(255,255,255,.6)" /><span>{permLabel(p)}</span></div>{/each}
           </div>
         {/if}
+        {#if overrides.length}
+          <div class="pm">
+            <div class="pt">{t("plugins.overrides.title")}</div>
+            {#each overrides as o (o)}<div class="pi"><Icon name="check" size={13} color="rgba(255,255,255,.6)" /><span>{t(o)}</span></div>{/each}
+          </div>
+        {/if}
+        {#each conflicts as c (c.other.id)}<div class="wb cf">{tf(c.wins ? "plugins.conflict.wins" : "plugins.conflict.loses", { name: c.other.name, what: what(c.parts) })}</div>{/each}
         {#if canSkip}
           <button class="skip" onclick={() => (pl.confirmSkip = !pl.confirmSkip)}><Tog on={pl.confirmSkip} label={t("plugins.warn.skip")} /><span>{t("plugins.warn.skip")}</span></button>
         {/if}
@@ -166,8 +181,42 @@
     {:else}
       <div class="rn-wrap"><RiskNote /></div>
     {/if}
+    {#if !confirming && conflicts.length}
+      <div class="box">
+        <div class="wh"><Icon name="info" size={15} color="var(--warn)" /><span>{t("plugins.conflict")}</span></div>
+        {#each conflicts as c (c.other.id)}<div class="wb">{tf(c.wins ? "plugins.conflict.wins" : "plugins.conflict.loses", { name: c.other.name, what: what(c.parts) })}</div>{/each}
+      </div>
+    {/if}
+    {#if !confirming && overrides.length}
+      <div class="box">
+        <div class="wh"><Icon name="info" size={15} color="rgba(255,255,255,.6)" /><span>{t("plugins.overrides.title")}</span></div>
+        <div class="wb">{t("plugins.overrides.desc")}</div>
+        <div class="wb ol">{what(overrides)}</div>
+      </div>
+    {/if}
     {#if pl.failed[id]}<div class="wn">{pl.failed[id]}</div>{/if}
     {#if installed?.stopped && installed.enabled}<div class="wn">{tf("plugins.stopped", { e: installed.stopped })}</div>{/if}
+
+    {#if hasPreview}
+      <SectionLabel text={t("plugins.preview")} />
+      <div class="pv">
+        {#if preview?.app_icon}
+          <div class="pvi"><img class="appicon" src={preview.app_icon} alt="" loading="lazy" /><span class="pvl">{t("plugins.part.app_icon")}</span></div>
+        {/if}
+        {#if previewIcons.length}
+          <div class="pvi">
+            <div class="icons">{#each previewIcons as [name, url] (name)}<span class="ic" title={name} style:mask-image={`url("${url}")`} style:-webkit-mask-image={`url("${url}")`}></span>{/each}</div>
+            <span class="pvl">{t("plugins.part.icons")}</span>
+          </div>
+        {/if}
+        {#if preview?.backgrounds.length}
+          <div class="pvi"><div class="bgs">{#each preview.backgrounds.slice(0, 4) as b (b)}<img class="bg" src={b} alt="" loading="lazy" />{/each}</div><span class="pvl">{t("plugins.does.backgrounds")}</span></div>
+        {/if}
+      </div>
+      {#if splashArt?.length}
+        <div class="pvi wide"><pre class="mono splash">{splashArt.join("\n")}</pre><span class="pvl">{t("plugins.part.splash")}</span></div>
+      {/if}
+    {/if}
 
     <SectionLabel text={t("plugins.details")} />
     <Rows>
@@ -210,7 +259,7 @@
         {#if m.look?.layout}<div class="srow"><RowBase label={t("plugins.does.layout")} /></div>{/if}
         {#if m.look?.splash}<div class="srow"><RowBase label={t("plugins.does.splash")} info={t("plugins.does.splash.desc")} /></div>{/if}
         {#if m.look?.app_icon}<div class="srow"><RowBase label={t("plugins.does.app_icon")} info={t("plugins.does.app_icon.desc")} /></div>{/if}
-        {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{Math.round(m.look.radius * 100)}%</span></RowBase></div>{/if}
+        {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{tf("plugins.corners.value", { p: Math.round(m.look.radius * 100) })}</span></RowBase></div>{/if}
         {#if m.look?.backgrounds}<div class="srow"><RowBase label={t("plugins.does.backgrounds")}><span class="v">{m.look.backgrounds}</span></RowBase></div>{/if}
         {#if m.look?.icons}<div class="srow"><RowBase label={t("plugins.does.icons")}><span class="v">{m.look.icons}</span></RowBase></div>{/if}
         {#if m.look?.css}<div class="srow"><RowBase label={t("plugins.does.css")} info={tf("plugins.does.css.desc", { key: keyLabel(keyOf("plugins")) })} /></div>{/if}
@@ -252,6 +301,19 @@
   .req { padding-top: 10px; font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .62); }
   .wn { padding-top: 10px; font-size: 12.5px; color: var(--warn); }
   .rn-wrap { padding-top: 10px; }
+  .box { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(255, 255, 255, .035); display: flex; flex-direction: column; gap: 6px; }
+  .ol { color: #fff; }
+  .cf { color: var(--warn); }
+  .pv { display: flex; flex-wrap: wrap; gap: 18px; padding: 4px 0 10px; }
+  .pvi { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .pvi.wide { padding-bottom: 6px; max-width: 100%; }
+  .pvl { font-size: 12px; color: rgba(255, 255, 255, .55); }
+  .appicon { width: 64px; height: 64px; border-radius: 14px; object-fit: cover; background: rgba(255, 255, 255, .04); }
+  .icons { display: flex; flex-wrap: wrap; gap: 10px; min-height: 64px; align-items: center; max-width: 320px; }
+  .ic { width: 24px; height: 24px; background: #fff; mask-size: contain; mask-repeat: no-repeat; mask-position: center; -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
+  .bgs { display: flex; gap: 8px; }
+  .bg { width: 96px; height: 64px; border-radius: 8px; object-fit: cover; background: rgba(255, 255, 255, .04); }
+  .splash { margin: 0; padding: 12px 14px; border-radius: 10px; background: rgba(255, 255, 255, .035); font-size: 10px; line-height: 12px; color: var(--accent, #fff); overflow-x: auto; max-width: 100%; }
   .repo-link { display: inline-flex; align-items: center; gap: 6px; text-align: right; transition: color .12s; }
   .repo-link:hover { color: #fff; }
   .warn { margin-top: 16px; padding: 18px; border-radius: 10px; background: rgba(255, 255, 255, .035); display: flex; flex-direction: column; gap: 10px; animation: rise-in .2s var(--ease); }
