@@ -26,8 +26,12 @@ export interface PluginListing {
   sections: string[]; menus: string[]; strings: number; hide: string[];
   /** Credentials it needs, as readable lines. */
   setup: string[];
-  /** What its look changes (font, corners, pictures, style sheet), if it has one. */
-  look?: { font: string; radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number } | null;
+  /** What its look changes (font, corners, pictures, style sheet, app icon), if it has one. */
+  look?: {
+    /** Glyph's font name, "file" for the plugin's own font, or "". */
+    font: string; mono?: string; app_icon?: boolean;
+    radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number;
+  } | null;
 }
 
 export interface PluginInstalled extends PluginListing {

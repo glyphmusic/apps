@@ -17,6 +17,10 @@ import { setIconOverrides } from "./icon-overrides.svelte";
 
 export interface PluginLook {
   plugin: string; font: string; radius: number | null; css: string;
+  /** The plugin's own text font as a data: address (font: ""). */
+  font_data?: string | null;
+  /** Monospaced font: Glyph's font name, or the plugin's own as mono_data. */
+  mono?: string; mono_data?: string | null;
   /** Replaced icons: name -> SVG text. */
   icons?: Record<string, string>;
   /** A theme plugin's look: only while its theme is picked. */
@@ -40,13 +44,42 @@ const BASE_RADIUS = 10;
 
 let styleEl: HTMLStyleElement | null = null;
 
+/** A plugin's own font file, in use everywhere: its @font-face and the stack. */
+function ownFont(plugin: string, kind: "text" | "mono", data: string): { face: string; stack: string } | null {
+  if (!data.startsWith("data:font/") || /["\\<\s()]/.test(data)) return null;
+  const family = `glyph-look-${kind}-${plugin.replace(/[^a-z0-9-]/g, "")}`;
+  const fallback = kind === "mono" ? FONTS.mono : FONTS.inter;
+  return {
+    face: `@font-face { font-family: "${family}"; src: url("${data}"); font-weight: 100 900; font-style: normal; font-display: block; }`,
+    stack: `"${family}", ${fallback}`,
+  };
+}
+
+/** The first look's font of `kind`: (stack, @font-face or ""). */
+function pickFont(looks: PluginLook[], kind: "text" | "mono"): { face: string; stack: string } | null {
+  for (const l of looks) {
+    const name = kind === "text" ? l.font : l.mono;
+    const data = kind === "text" ? l.font_data : l.mono_data;
+    if (data) {
+      const own = ownFont(l.plugin, kind, data);
+      if (own) return own;
+    }
+    if (name && FONTS[name]) return { face: "", stack: FONTS[name] };
+  }
+  return null;
+}
+
 /** Applies the looks (plugins sorted by name; the first font / radius / icon wins). */
 export function applyLooks(looks: PluginLook[]) {
   if (typeof document === "undefined") return;
   const root = document.documentElement.style;
-  const font = looks.find((l) => l.font && FONTS[l.font])?.font;
-  if (font) root.setProperty("--font", FONTS[font]);
+  const font = pickFont(looks, "text");
+  if (font) root.setProperty("--font", font.stack);
   else root.removeProperty("--font");
+  const mono = pickFont(looks, "mono");
+  if (mono) root.setProperty("--mono", mono.stack);
+  else root.removeProperty("--mono");
+  const faces = [font?.face, mono?.face].filter((f): f is string => !!f);
   const radius = looks.find((l) => l.radius != null && Number.isFinite(l.radius))?.radius;
   if (radius != null) {
     const k = Math.min(2, Math.max(0, radius));
@@ -60,7 +93,7 @@ export function applyLooks(looks: PluginLook[]) {
   for (const l of [...looks].reverse()) Object.assign(icons, l.icons ?? {});
   setIconOverrides(icons);
   const sheets = looks.filter((l) => l.css.trim() && safe(l.css));
-  if (!sheets.length) {
+  if (!sheets.length && !faces.length) {
     styleEl?.remove();
     styleEl = null;
     return;
@@ -71,7 +104,8 @@ export function applyLooks(looks: PluginLook[]) {
   }
   // Last in <head>: after Glyph's own styles, so equal rules go to the look.
   document.head.appendChild(styleEl);
-  styleEl.textContent = sheets.map((l) => `/* plugin: ${l.plugin} */\n${l.css}`).join("\n\n");
+  // Fonts first: a style sheet can still set --font itself.
+  styleEl.textContent = [...faces, ...sheets.map((l) => `/* plugin: ${l.plugin} */\n${l.css}`)].join("\n\n");
 }
 
 /** Last check before the sheet goes in: url() only with inlined data, nothing else that loads, balanced braces. */

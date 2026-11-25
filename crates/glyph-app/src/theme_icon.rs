@@ -40,12 +40,17 @@ pub fn resolve_accent(core: &Core, theme_id: &str) -> u32 {
     builtin_accent(theme_id).unwrap_or(DEFAULT_ACCENT)
 }
 
-/// Notifies the host platform of the currently configured theme accent so
-/// native icons (window, tray, Dock, Android launcher/Recents) stay in sync.
+/// Notifies the host platform of the currently configured theme accent and
+/// a plugin look's app icon (if one is in use) so native icons (window,
+/// tray, Dock, Android launcher/Recents) stay in sync.
 pub fn sync_host_icon(core: &Core) {
-    let theme_id = core.st().config.visuals.theme.clone();
+    let (theme_id, disabled) = {
+        let s = core.st();
+        (s.config.visuals.theme.clone(), s.config.plugins.disabled.clone())
+    };
     let accent = resolve_accent(core, &theme_id);
-    core.host.set_theme_icon(&theme_id, accent);
+    let icon = core.plugins().and_then(|st| crate::plugins::active_app_icon(&st, &disabled, &theme_id));
+    core.host.set_theme_icon(&theme_id, accent, icon.as_deref());
 }
 
 /// Decodes PNG bytes into `(width, height, rgba8)` pixels.

@@ -57,10 +57,18 @@ pub struct Manifest {
 /// repo, next to the manifest.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LookSpec {
-    /// Text font: one of [`FONTS`]; empty = Glyph's (Inter). A style sheet
-    /// can bring its own font instead (`@font-face` with an asset).
+    /// Text font: one of [`FONTS`], or the path of a font file (.woff2,
+    /// .woff, .ttf, .otf) in the repo that Glyph then uses everywhere;
+    /// empty = Glyph's (Inter).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub font: String,
+    /// Monospaced font (numbers, ASCII art): like `font`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mono: String,
+    /// The app icon (window, taskbar, tray, Dock, Android Recents): a
+    /// square .png in the repo, 64 to 1024 pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_icon: Option<String>,
     /// Corner roundness: 0 square, 1 Glyph's, 2 very round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
@@ -83,6 +91,17 @@ pub struct LookSpec {
 
 /// Fonts a look can pick (from the system, nothing is downloaded).
 pub const FONTS: &[&str] = &["inter", "system", "rounded", "serif", "mono"];
+/// Font files a look can use as `font` / `mono`.
+pub const FONT_FILES: &[&str] = &["woff2", "woff", "ttf", "otf"];
+/// The app icon at most this big, and its side in pixels.
+pub const MAX_APP_ICON: usize = 1024 * 1024;
+pub const APP_ICON_SIDES: std::ops::RangeInclusive<u32> = 64..=1024;
+
+/// Whether a look's `font` / `mono` names a font file (not one of [`FONTS`]).
+pub fn is_font_file(font: &str) -> bool {
+    font.rsplit_once('.').is_some_and(|(_, e)| FONT_FILES.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// Background pictures per plugin.
 pub const MAX_LOOK_BACKGROUNDS: usize = 8;
 /// One background picture at most this big.
@@ -237,15 +256,20 @@ pub(super) fn valid_icon_name(n: &str) -> bool {
 
 impl LookSpec {
     fn is_empty(&self) -> bool {
-        self.font.is_empty() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
+        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
     }
 
     /// Every file the look needs from the repo, each once.
     pub fn files(&self) -> Vec<&String> {
-        let mut v: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).chain(self.icons.values()).collect();
+        let mut v: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).chain(self.icons.values()).chain(self.font_files()).chain(&self.app_icon).collect();
         v.sort();
         v.dedup();
         v
+    }
+
+    /// The font files `font` and `mono` name.
+    pub fn font_files(&self) -> impl Iterator<Item = &String> {
+        [&self.font, &self.mono].into_iter().filter(|f| is_font_file(f))
     }
 
     /// Largest size file `name` may have, by what it is used for.
@@ -263,17 +287,37 @@ impl LookSpec {
         if self.icons.values().any(|b| b == name) {
             max = max.max(MAX_ICON);
         }
+        if self.font_files().any(|b| b == name) {
+            max = max.max(MAX_LOOK_ASSET);
+        }
+        if self.app_icon.as_deref() == Some(name) {
+            max = max.max(MAX_APP_ICON);
+        }
         max
     }
 
     fn validate(&self) -> Result<(), Invalid> {
         let bad = |s: &str| Err(Invalid::Bad(format!("look: {s}")));
         if self.is_empty() {
-            return bad("needs a font, radius, backgrounds, css, assets or icons");
+            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets or icons");
         }
-        if !self.font.is_empty() && !FONTS.contains(&self.font.as_str()) {
-            // A font this build does not know comes from a newer Glyph.
-            return Err(Invalid::NeedsNewerApp);
+        for (key, f) in [("font", &self.font), ("mono", &self.mono)] {
+            if f.is_empty() || FONTS.contains(&f.as_str()) {
+                continue;
+            }
+            if f.contains('.') || f.contains('/') {
+                if !is_font_file(f) || !valid_path(f) {
+                    return bad(&format!("{key} must be one of Glyph's fonts or the path of a .woff2, .woff, .ttf or .otf file in the repo"));
+                }
+            } else {
+                // A font this build does not know comes from a newer Glyph.
+                return Err(Invalid::NeedsNewerApp);
+            }
+        }
+        if let Some(icon) = &self.app_icon {
+            if !valid_path(icon) || icon.is_empty() || !icon.to_ascii_lowercase().ends_with(".png") {
+                return bad("app_icon must be the path of a .png file in the repo");
+            }
         }
         if self.radius.is_some_and(|r| !(r.is_finite() && (0.0..=2.0).contains(&r))) {
             return bad("radius must be between 0 and 2");
@@ -311,8 +355,11 @@ impl LookSpec {
                 return bad("icons are paths of .svg files in the repo");
             }
         }
-        // Each file has one job among css, backgrounds and assets (icons may share files).
-        let mut files: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).collect();
+        // Each file has one job among css, backgrounds, assets, fonts and the
+        // app icon (icons may share files; font and mono may be the same file).
+        let mut fonts: Vec<&String> = self.font_files().collect();
+        fonts.dedup();
+        let mut files: Vec<&String> = self.css.iter().chain(&self.backgrounds).chain(&self.assets).chain(fonts).chain(&self.app_icon).collect();
         let n = files.len();
         files.sort();
         files.dedup();

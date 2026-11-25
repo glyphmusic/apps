@@ -49,8 +49,9 @@ struct Desk {
     title: String,
     dock_keys: Vec<String>,
     tray: bool,
-    /// Last accent (`0xrrggbb`) applied to window, tray, and Dock icons.
-    theme_accent: Option<u32>,
+    /// Last accent (`0xrrggbb`) and plugin icon (hash of its bytes) applied
+    /// to window, tray, and Dock icons.
+    icon_key: Option<(u32, Option<u64>)>,
     /// "Mini player on top" as last handed to the player and the window.
     mini_on_top: Option<bool>,
     /// Ticks since the mini window was last put on top again.
@@ -61,7 +62,9 @@ thread_local! {
     static DESK: RefCell<Desk> = RefCell::new(Desk::default());
 }
 
-static THEME_ACCENT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+/// The app icon now in use (the tinted base or a plugin look's), as
+/// `(width, height, rgba8)`, for windows and the tray made later.
+static CURRENT_ICON: std::sync::Mutex<Option<std::sync::Arc<(u32, u32, Vec<u8>)>>> = std::sync::Mutex::new(None);
 
 use glyph_app::i18n::tr;
 
@@ -361,31 +364,47 @@ fn base_icon() -> Option<&'static (u32, u32, Vec<u8>)> {
         .as_ref()
 }
 
-fn themed_icon(accent: u32) -> Option<tauri::image::Image<'static>> {
-    let (w, h, base) = base_icon()?;
-    let rgba = glyph_app::theme_icon::tint_rgba(base, accent);
-    Some(tauri::image::Image::new_owned(rgba, *w, *h))
+/// The app icon now in use, set by [`set_theme_icon`].
+fn current_icon() -> Option<tauri::image::Image<'static>> {
+    let cur = CURRENT_ICON.lock().ok()?.clone()?;
+    let (w, h, rgba) = &*cur;
+    Some(tauri::image::Image::new_owned(rgba.clone(), *w, *h))
 }
 
-/// Applies `accent` (`0xrrggbb`) to the desktop window, mini player, tray, and
-/// macOS Dock icons.
-pub fn set_theme_icon(accent: u32) {
+/// Applies `accent` (`0xrrggbb`), or a plugin look's app icon (`custom`,
+/// .png bytes) while one is in use, to the desktop window, mini player,
+/// tray, and macOS Dock icons.
+pub fn set_theme_icon(accent: u32, custom: Option<Vec<u8>>) {
+    use std::hash::{Hash, Hasher};
+    let custom_key = custom.as_ref().map(|png| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        png.hash(&mut h);
+        h.finish()
+    });
+    let key = (accent, custom_key);
     let changed = DESK.with(|d| {
         let mut d = d.borrow_mut();
-        if d.theme_accent == Some(accent) {
+        if d.icon_key == Some(key) {
             return false;
         }
-        d.theme_accent = Some(accent);
-        THEME_ACCENT.store(i64::from(accent), Ordering::Release);
+        d.icon_key = Some(key);
         true
     });
     if !changed {
         return;
     }
-    let Some((w, h, base)) = base_icon() else {
+    // A plugin's icon that does not decode falls back to the tinted one.
+    let pixels = custom.as_deref().and_then(glyph_app::theme_icon::decode_png).or_else(|| {
+        let (w, h, base) = base_icon()?;
+        Some((*w, *h, glyph_app::theme_icon::tint_rgba(base, accent)))
+    });
+    let Some((w, h, rgba)) = pixels else {
         return;
     };
-    let rgba = glyph_app::theme_icon::tint_rgba(base, accent);
+    if let Ok(mut cur) = CURRENT_ICON.lock() {
+        *cur = Some(std::sync::Arc::new((w, h, rgba.clone())));
+    }
+    let (w, h) = (&w, &h);
     if let Some(app) = APP.get() {
         let icon = tauri::image::Image::new_owned(rgba.clone(), *w, *h);
         if let Some(win) = app.get_webview_window("main") {
@@ -434,10 +453,7 @@ fn show_tray(app: &tauri::AppHandle, core: &Arc<Core>) {
             ],
         )?;
         let mut b = TrayIconBuilder::with_id("main").tooltip("Glyph").menu(&menu).show_menu_on_left_click(false);
-        let initial_icon = DESK
-            .with(|d| d.borrow().theme_accent)
-            .and_then(themed_icon)
-            .or_else(|| app.default_window_icon().cloned());
+        let initial_icon = current_icon().or_else(|| app.default_window_icon().cloned());
         if let Some(icon) = initial_icon {
             b = b.icon(icon);
         }
@@ -805,11 +821,8 @@ pub async fn mini_show(app: tauri::AppHandle, core: tauri::State<'_, Arc<Core>>,
         .no_redirection_bitmap(true);
     let win = b.build().map_err(|e| e.to_string())?;
     harden_webview(&win);
-    let accent = THEME_ACCENT.load(Ordering::Acquire);
-    if accent >= 0 {
-        if let Some(icon) = themed_icon(accent as u32) {
-            let _ = win.set_icon(icon);
-        }
+    if let Some(icon) = current_icon() {
+        let _ = win.set_icon(icon);
     }
     // Closed by the system (alt-F4): the main window's button follows.
     let c = core.inner().clone();

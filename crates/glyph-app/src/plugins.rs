@@ -322,9 +322,43 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
 /// What a plugin's look changes (for its card), or null.
 fn look_json(m: &plugins::Manifest) -> Value {
     match &m.look {
-        Some(l) => json!({ "font": l.font, "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len() }),
+        Some(l) => json!({
+            "font": font_kind(&l.font), "mono": font_kind(&l.mono), "app_icon": l.app_icon.is_some(), "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
+        }),
         None => Value::Null,
     }
+}
+
+/// A look's font for the UI: Glyph's font name, or "" for a font file (sent
+/// as `font_data` / `mono_data`).
+fn font_name(font: &str) -> &str {
+    if plugins::is_font_file(font) {
+        ""
+    } else {
+        font
+    }
+}
+
+/// A look's font for its card: Glyph's font name, `"file"` for its own, or "".
+fn font_kind(font: &str) -> &str {
+    if plugins::is_font_file(font) {
+        "file"
+    } else {
+        font
+    }
+}
+
+/// The app icon of the looks in use (.png): a theme's while its theme is
+/// picked, an extension's while it is on; the first plugin wins, like the
+/// UI's font and corners.
+pub(crate) fn active_app_icon(st: &PluginState, dis: &[String], theme: &str) -> Option<Vec<u8>> {
+    let rt = st.lock();
+    rt.installed
+        .iter()
+        .filter(|p| !dis.contains(&p.manifest.id))
+        .filter(|p| p.manifest.look.as_ref().is_some_and(|l| l.app_icon.is_some()))
+        .filter(|p| p.manifest.kind != "theme" || theme == format!("plugin:{}", p.manifest.id))
+        .find_map(|p| p.look_app_icon())
 }
 
 /// Background pictures of the enabled plugins' looks: (id for
@@ -461,7 +495,8 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
             let l = p.manifest.look.as_ref()?;
             // A theme's look goes with its colours (the UI shows it while the theme is picked).
             Some(json!({
-                "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": l.font, "radius": l.radius,
+                "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": font_name(&l.font), "radius": l.radius,
+                "font_data": p.look_font_data(&l.font), "mono": font_name(&l.mono), "mono_data": p.look_font_data(&l.mono),
                 "css": p.look_css().unwrap_or_default(), "icons": p.look_icons(),
             }))
         })

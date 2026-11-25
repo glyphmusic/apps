@@ -5,6 +5,7 @@
 ### Added
 
 - **Glyph Drift (beta)**: a new radio that keeps playing when the queue ends, built on Glyph's own taste instead of Last.fm. Songs you play to the end lead the way, skipped songs steer it away, and it adds a few songs at a time so it follows your mood. Turn it on in Settings > Playback > Content.
+- **Plugins can change the app icon and the whole font**: a plugin's look can bring its own app icon (window, taskbar, tray, Dock, and the app overview on Android), its own font file for all text, and its own monospaced font. Turn the plugin off and Glyph's icon and fonts come back.
 
 ### Changed
 

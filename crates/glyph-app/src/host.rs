@@ -99,8 +99,9 @@ pub trait Host: Send + Sync + 'static {
     }
 
     /// Updates the platform's app/window/tray/launcher icons to match the
-    /// configured theme accent (`0xrrggbb`).
-    fn set_theme_icon(&self, _theme_id: &str, _accent: u32) {}
+    /// configured theme accent (`0xrrggbb`), or to a plugin look's app icon
+    /// (`icon`, checked .png bytes) while one is in use.
+    fn set_theme_icon(&self, _theme_id: &str, _accent: u32, _icon: Option<&[u8]>) {}
 }
 
 static HOST: OnceLock<Arc<dyn Host>> = OnceLock::new();

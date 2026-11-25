@@ -392,14 +392,19 @@ impl Host for AndroidHost {
         }
     }
 
-    fn set_theme_icon(&self, theme_id: &str, accent: u32) {
+    fn set_theme_icon(&self, theme_id: &str, accent: u32, icon: Option<&[u8]>) {
         with_activity("gpuiSetThemeIcon", |env, activity| {
             let t = env.new_string(theme_id)?;
+            // A plugin look's app icon (.png) for Recents, or null.
+            let png = match icon {
+                Some(b) => JObject::from(env.byte_array_from_slice(b)?),
+                None => JObject::null(),
+            };
             env.call_method(
                 activity,
                 jni_str!("gpuiSetThemeIcon"),
-                jni_sig!("(Ljava/lang/String;I)V"),
-                &[JValue::Object(&t), JValue::Int(accent as i32)],
+                jni_sig!("(Ljava/lang/String;I[B)V"),
+                &[JValue::Object(&t), JValue::Int(accent as i32), JValue::Object(&png)],
             )?;
             Ok(())
         });
