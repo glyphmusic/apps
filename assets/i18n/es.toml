@@ -391,6 +391,7 @@
 "sp.server.url.desc" = "Déjalo vacío para usar el servidor público de Glyph, escribe el tuyo, o “off” para consultar las fuentes directamente."
 "search.kind.artist" = "Artista"
 "search.kind.query" = "Búsqueda"
+"search.kind.profile" = "Perfil"
 "ctx.save" = "Guardar en la biblioteca"
 "ctx.unsave" = "Quitar de la biblioteca"
 "toast.saved_to_library" = "Guardado en tu biblioteca"

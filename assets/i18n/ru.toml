@@ -404,6 +404,7 @@
 "sp.server.url.desc" = "Пусто — публичный сервер Glyph. Укажите свой сервер или «off» для прямых запросов."
 "search.kind.artist" = "Исполнитель"
 "search.kind.query" = "Поиск"
+"search.kind.profile" = "Профиль"
 "ctx.save" = "Сохранить в медиатеку"
 "ctx.unsave" = "Убрать из медиатеки"
 "toast.saved_to_library" = "Сохранено в медиатеку"

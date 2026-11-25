@@ -391,6 +391,7 @@
 "sp.server.url.desc" = "Herkese açık Glyph sunucusu için boş bırak, kendi sunucunu gir veya kaynakları doğrudan sorgulamak için “off” yaz."
 "search.kind.artist" = "Sanatçı"
 "search.kind.query" = "Arama"
+"search.kind.profile" = "Profil"
 "ctx.save" = "Kitaplığa kaydet"
 "ctx.unsave" = "Kitaplıktan çıkar"
 "toast.saved_to_library" = "Kitaplığına kaydedildi"

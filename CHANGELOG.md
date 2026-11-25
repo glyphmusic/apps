@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- **Finding people in search**: typing a handle in search, with or without the "@", now shows that person's profile on top of the results (All and Artists). Before, profiles could not be found by search at all.
 - **Text size cards on small phones**: the three text size cards in Settings > Appearance now fit inside their box.
 - **Info buttons on phones**: tapping an (i) next to a setting now shows its explanation. Before, nothing happened on touch screens.
 - **Smoother sheets on Android**: dragging the player, the queue and menus is drawn once per frame, and Now Playing follows your finger when you pull it up from the mini player.

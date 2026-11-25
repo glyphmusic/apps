@@ -429,6 +429,7 @@
 "sp.server.url.desc" = "Leave empty to use the public Glyph server, enter your own, or \"off\" to query sources directly."
 "search.kind.artist" = "Artist"
 "search.kind.query" = "Search"
+"search.kind.profile" = "Profile"
 "ctx.save" = "Save to library"
 "ctx.unsave" = "Remove from library"
 "toast.saved_to_library" = "Saved to your library"

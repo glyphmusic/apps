@@ -391,6 +391,7 @@
 "sp.server.url.desc" = "Залиш порожнім для публічного сервера Glyph, введи власний або «off», щоб звертатися до джерел напряму."
 "search.kind.artist" = "Виконавець"
 "search.kind.query" = "Пошук"
+"search.kind.profile" = "Профіль"
 "ctx.save" = "Зберегти в бібліотеку"
 "ctx.unsave" = "Прибрати з бібліотеки"
 "toast.saved_to_library" = "Збережено в бібліотеку"

@@ -22,18 +22,47 @@
   import FollowButton from "./search/FollowButton.svelte";
   import ArtistName from "./search/ArtistName.svelte";
   import Skeletons from "./search/Skeletons.svelte";
+  import Avatar from "./profile/Avatar.svelte";
+  import { backend } from "../api/backend";
   import { filterSearchHistory } from "./search/history-filter";
   import { app, type SearchFilter } from "../state.svelte";
   import { registerListNav, scrollVirtualRowIntoView } from "../state/list-nav.svelte";
   import { t, tf } from "../i18n.svelte";
   import { uniqBy } from "../fmt";
-  import { PROVIDER_NAME, primaryArtist, type Release, type SearchItem, type Track } from "../api/types";
+  import { PROVIDER_NAME, primaryArtist, type Profile, type Release, type SearchItem, type Track } from "../api/types";
 
   const s = $derived(app.search);
   const filter = $derived(app.searchFilter);
   const query = $derived(s.query);
   const offline = $derived(app.backendState.kind === "offline");
-  const any = $derived(s.tracks.length > 0 || s.albums.length > 0 || s.artists.length > 0 || s.lyric_hits.length > 0);
+  // People: a query that is one handle, with or without "@", is looked up as
+  // a profile (exact handle, the server has no fuzzy people search). Found
+  // profiles show on top of All and Artists.
+  const handleQ = $derived.by(() => {
+    const h = query.trim().replace(/^@/, "").toLowerCase();
+    return /^[a-z0-9_]{3,20}$/.test(h) && !/^_+$/.test(h) ? h : null;
+  });
+  const atQ = $derived(query.trim().startsWith("@"));
+  let prof = $state<Profile | null>(null);
+  let profBusy = $state(false);
+  let profSignedOut = $state(false);
+  $effect(() => {
+    const h = handleQ;
+    prof = null; profSignedOut = false;
+    if (!h) { profBusy = false; return; }
+    profBusy = true;
+    let alive = true;
+    const timer = setTimeout(() => {
+      backend().call<Profile | null>("profile", { handle: h }).then(
+        (p) => { if (alive) { prof = p ?? null; profBusy = false; } },
+        (e) => { if (alive) { prof = null; profBusy = false; profSignedOut = String((e as Error)?.message ?? e).includes("signed_out"); } },
+      );
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  });
+  const profRow = $derived(prof && (filter === "all" || filter === "artists") ? prof : null);
+  const any = $derived(s.tracks.length > 0 || s.albums.length > 0 || s.artists.length > 0 || s.lyric_hits.length > 0 || !!profRow);
+  function openProf(p: Profile) { app.openProfilePage(p.handle); }
   const failing = $derived(!offline && (s.errors.length > 0 || !!s.error));
   const FILTERS: [SearchFilter, string][] = [["all", "search.filter.all"], ["tracks", "search.filter.tracks"], ["albums", "search.filter.albums"], ["artists", "search.filter.artists"]];
 
@@ -283,7 +312,7 @@
       <EmptyState icon="search" title={t("search.empty.title")} sub={t("search.empty.sub")} />
     {/if}
   {:else}
-    <SkeletonSwap loading={!any && s.loading}>
+    <SkeletonSwap loading={!any && (s.loading || (atQ && profBusy))}>
       {#snippet skeleton()}
         <div class="skel">
           {#if filter === "all"}
@@ -298,10 +327,20 @@
       {/snippet}
       {#if !any && s.errors.length}
         <EmptyState icon="refresh-cw" title={t("search.unavailable")} sub={t("search.retry_sources")} />
+      {:else if !any && atQ && profSignedOut}
+        <EmptyState icon="user-round" title={t("profile.signed_out")} sub={t("profile.signed_out.sub")} />
       {:else if !any}
-        <EmptyState title={t("search.none.title")} sub={curly(query)} />
+        <EmptyState title={t("search.none.title")} sub={atQ ? t("profile.not_found") : curly(query)} />
       {:else if filter === "all" || filter === "tracks"}
         <div class="list">
+          {#if profRow}
+            {@const pr = profRow}
+            <div class="arow" onclick={() => openProf(pr)} onkeydown={(e) => e.key === "Enter" && openProf(pr)} role="button" tabindex="-1">
+              <Avatar src={pr.avatar} size={48} flat />
+              <span class="an pn"><span class="trunc">{pr.name || pr.handle}</span><span class="ph-h trunc">@{pr.handle}</span></span>
+              <Chip kind="kind">{t("search.kind.profile")}</Chip>
+            </div>
+          {/if}
           {#each artistRows as a, i (a.name)}
             {@const tr = artistTrack(a)}
             <div class="arow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
@@ -343,6 +382,14 @@
         </div>
       {:else}
         <div class="list">
+          {#if profRow}
+            {@const pr = profRow}
+            <div class="arow" onclick={() => openProf(pr)} onkeydown={(e) => e.key === "Enter" && openProf(pr)} role="button" tabindex="-1">
+              <Avatar src={pr.avatar} size={44} flat />
+              <span class="an pn"><span class="trunc">{pr.name || pr.handle}</span><span class="ph-h trunc">@{pr.handle}</span></span>
+              <Chip kind="kind">{t("search.kind.profile")}</Chip>
+            </div>
+          {/if}
           <VirtualRows count={s.artists.length} pitch={58}>
             {#snippet row(i)}
               {@const a = s.artists[i]}
@@ -397,6 +444,8 @@
   .arow:active:not(:has(.fb:active)), .grow:active { background: rgba(255, 255, 255, .08); transition-duration: .08s; }
   :global(html.compact) .arow, :global(html.compact) .grow { padding: 6px 4px; }
   .an { flex: 1; min-width: 0; font-size: var(--md); font-weight: 500; color: var(--text); }
+  .an.pn { display: flex; flex-direction: column; gap: 2px; }
+  .ph-h { font-size: var(--sm); font-weight: 400; color: var(--dim); font-family: var(--mono); }
   .gt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .g1 { font-size: var(--md); }
   .g2 { font-size: var(--sm); color: var(--dim); }
