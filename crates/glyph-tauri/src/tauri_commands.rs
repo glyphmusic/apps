@@ -305,6 +305,12 @@ pub async fn cover_path(core: C<'_>, track: Track) -> Res<Option<String>> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn cover_local(core: C<'_>, track: Track) -> Res<Option<String>> {
+    // Async so many quick disk checks never block the window's thread.
+    Ok(commands::cover_local(&core, track))
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn track_album(core: C<'_>, track: Track) -> Res<Option<String>> {
     commands::track_album(&core, track).await
 }

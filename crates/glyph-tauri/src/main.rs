@@ -156,6 +156,7 @@ fn main() {
             tauri_commands::album,
             tauri_commands::lyrics,
             tauri_commands::cover_path,
+            tauri_commands::cover_local,
             tauri_commands::track_album,
             tauri_commands::set_config,
             tauri_commands::output_devices,

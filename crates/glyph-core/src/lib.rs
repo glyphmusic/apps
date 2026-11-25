@@ -1501,23 +1501,42 @@ impl Backend {
     }
 
     pub async fn cover_with_meta(&self, track: &Track) -> anyhow::Result<Option<cover::CoverResult>> {
-        if let Some(p) = self.local.cover(track) {
+        if let Some(p) = self.own_cover(track) {
             return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
+        }
+        let (inner, track) = (self.cur(), track.clone());
+        self.spawn(async move { inner.covers.get_with_meta(&track).await }).await?
+    }
+
+    /// A cover the app keeps itself: local files, imports and downloaded songs.
+    fn own_cover(&self, track: &Track) -> Option<PathBuf> {
+        if let Some(p) = self.local.cover(track) {
+            return Some(p);
         }
         if self.imports.contains(track) {
             let p = import::local::cover_path(&self.imports, track);
             if p.is_file() {
-                return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
+                return Some(p);
             }
         }
         if self.downloads.contains(track) {
             let p = downloads::kept_cover_path(track);
             if p.is_file() {
-                return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
+                return Some(p);
             }
         }
-        let (inner, track) = (self.cur(), track.clone());
-        self.spawn(async move { inner.covers.get_with_meta(&track).await }).await?
+        None
+    }
+
+    /// A cover that is already on this device (own covers or the cover cache).
+    /// Never asks the network, so it answers right away.
+    pub fn cover_on_disk(&self, track: &Track) -> Option<PathBuf> {
+        self.own_cover(track).or_else(|| self.cur().covers.cached(track))
+    }
+
+    /// How long the server still asks us to wait before the next cover lookup.
+    pub fn covers_busy_for(&self) -> Option<std::time::Duration> {
+        self.cur().covers.busy_for()
     }
 
     /// Progressively resolves missing album / upgraded cover metadata via the cover chain.
