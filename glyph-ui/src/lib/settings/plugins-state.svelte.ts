@@ -36,12 +36,15 @@ export const pl = $state({
   /** The waiting install is an earlier version picked by hand (kept afterwards). */
   confirmHold: false,
   ui: emptyUi(),
+  /** The home screen can get a shortcut with a plugin's app icon (Android). */
+  canPinIcon: false,
 });
 
 /** Reads the installed plugins and what they add; publishes themes and texts. */
 export async function loadPlugins() {
-  const st = await backend().call<{ installed: PluginInstalled[]; unfit?: PluginInstalled[]; ui: PluginUiState } | undefined>("plugins_state");
+  const st = await backend().call<{ installed: PluginInstalled[]; unfit?: PluginInstalled[]; ui: PluginUiState; can_pin_icon?: boolean } | undefined>("plugins_state");
   if (!st) return;
+  pl.canPinIcon = !!st.can_pin_icon;
   pl.installed = st.installed;
   pl.unfit = st.unfit ?? [];
   pl.ui = st.ui;
@@ -259,6 +262,14 @@ export async function setEnabled(id: string, on: boolean) {
   if (p) p.enabled = on;
   await backend().call("plugin_enable", { id, on });
   await loadPlugins();
+}
+
+/** Asks Android to put a Glyph shortcut with the plugin's app icon on the home screen. */
+export async function pinPluginIcon(id: string) {
+  try {
+    await backend().call("plugin_pin_icon", { id });
+    app.toast(t("plugins.pin_icon.asked"));
+  } catch (e) { app.toastInfo(errText(e)); }
 }
 
 /** "Reload" for plugin makers: reads the plugins folder again. */

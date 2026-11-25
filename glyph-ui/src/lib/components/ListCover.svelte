@@ -34,6 +34,7 @@
   import { backend } from "../api/backend";
   import { accentTile, themeColors } from "../theme";
   import type { ListKey } from "../api/types";
+  import { cornerPx } from "../corners";
   let { list, size = 36 }: { list: ListKey; size?: number } = $props();
   const r = $derived(Math.min(12, Math.max(6, size * 0.06)));
   const accent = $derived(themeColors(app.config?.visuals.theme ?? "glyph").accent);
@@ -91,17 +92,17 @@
 </script>
 
 {#if tile}
-  <div class="tile" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" style:background={tile.bg}><Icon name={tile.icon} size={isz} color={tile.fg} /></div>
+  <div class="tile" style:width="{size}px" style:height="{size}px" style:border-radius={cornerPx(r)} style:background={tile.bg}><Icon name={tile.icon} size={isz} color={tile.fg} /></div>
 {:else if own?.cover}
-  <img class="one" src={own.cover} alt="" decoding="async" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" />
+  <img class="one" src={own.cover} alt="" decoding="async" style:width="{size}px" style:height="{size}px" style:border-radius={cornerPx(r)} />
 {:else if mosaic && urls.length >= 2}
-  <div bind:this={box} class="mo m{Math.min(4, urls.length)}" style:width="{size}px" style:height="{size}px" style:--r="{r}px">
+  <div bind:this={box} class="mo m{Math.min(4, urls.length)}" style:width="{size}px" style:height="{size}px" style:--r={cornerPx(r)}>
     {#each urls.slice(0, urls.length === 3 ? 3 : urls.length >= 4 ? 4 : 2) as u, i}<img class="q{i}" src={u} alt="" decoding="async" />{/each}
   </div>
 {:else if coverTrack}
   <div bind:this={box} class="cv-wrap" style:width="{size}px" style:height="{size}px"><Cover track={coverTrack} {size} radius={r} /></div>
 {:else}
-  <div bind:this={box} class="tile" style:width="{size}px" style:height="{size}px" style:border-radius="{r}px" style:background="var(--card)"><Icon name={list.kind === "album" ? "disc-3" : "list-music"} size={isz} color="rgba(255,255,255,.5)" /></div>
+  <div bind:this={box} class="tile" style:width="{size}px" style:height="{size}px" style:border-radius={cornerPx(r)} style:background="var(--card)"><Icon name={list.kind === "album" ? "disc-3" : "list-music"} size={isz} color="rgba(255,255,255,.5)" /></div>
 {/if}
 
 <style>

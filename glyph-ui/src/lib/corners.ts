@@ -7,6 +7,8 @@
 // looks' own style sheet. Scale 1 puts the original values back.
 
 const PROPS = ["border-top-left-radius", "border-top-right-radius", "border-bottom-right-radius", "border-bottom-left-radius"];
+/** Custom properties that hold a corner (`--r`, `--mi-r`, `--card-radius` …). */
+const RADIUS_VAR = /^--(?:[a-z0-9-]*-)?r$|^--(?!radius-k$)[a-z0-9-]*radius[a-z0-9-]*$/;
 /** Pill-shaped corners (999px and alike) are not scaled. */
 const PILL = 100;
 
@@ -14,6 +16,12 @@ const PILL = 100;
 const originals = new WeakMap<CSSStyleDeclaration, [string, string, string][]>();
 let scale = 1;
 let watching = false;
+
+/** A corner of `px` pixels set from code (inline styles), scaled with the
+ *  look's corners like the style sheets (the root's `--radius-k`). */
+export function cornerPx(px: number): string {
+  return `calc(${px}px * var(--radius-k, 1))`;
+}
 
 /** `value` with every pixel length times `k` (pills stay pills). */
 export function scaleRadius(value: string, k: number): string {
@@ -26,7 +34,10 @@ export function scaleRadius(value: string, k: number): string {
 function fix(style: CSSStyleDeclaration) {
   let orig = originals.get(style);
   if (!orig) {
-    orig = PROPS.map((p) => [p, style.getPropertyValue(p), style.getPropertyPriority(p)] as [string, string, string]).filter(([, v]) => v && v.includes("px"));
+    // Corner variables too (like a menu's `--mi-r: 10px`): rules that use
+    // them read as empty corners here, so the variable is scaled instead.
+    const vars = Array.from(style).filter((p) => p.startsWith("--") && RADIUS_VAR.test(p));
+    orig = [...PROPS, ...vars].map((p) => [p, style.getPropertyValue(p).trim(), style.getPropertyPriority(p)] as [string, string, string]).filter(([, v]) => v && v.includes("px"));
     if (!orig.length) return;
     originals.set(style, orig);
   }
@@ -65,6 +76,9 @@ function watch() {
     }
   }).observe(document.head, { childList: true });
 }
+
+/** The look's corner scale now (1 = Glyph's). */
+export function cornerK(): number { return scale; }
 
 /** Scales the corners of the whole interface by `k` (0 to 2; 1 = Glyph's). */
 export function setCornerScale(k: number) {

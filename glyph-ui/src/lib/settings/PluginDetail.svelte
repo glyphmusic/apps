@@ -23,7 +23,7 @@
   import Tog from "./Tog.svelte";
   import PluginPreview from "./PluginPreview.svelte";
   import RiskNote from "./RiskNote.svelte";
-  import { pluginConflicts, pluginOverrides, preferPlugin } from "./plugins-state.svelte";
+  import { pinPluginIcon, pluginConflicts, pluginOverrides, preferPlugin } from "./plugins-state.svelte";
   import { acceptWarning, allPermissions, atVersion, cancelWarning, closeDetail, findInstalled, findListing, installPlugin, isHeld, pl, refreshCatalog, setEnabled, setHeld, uninstallPlugin, themeId } from "./plugins-state.svelte";
   import type { PluginVersion } from "./types";
   import { openUrl } from "./util";
@@ -201,6 +201,12 @@
         <div class="wb ol">{what(overrides)}</div>
       </div>
     {/if}
+    {#if installed?.look_problems?.length}
+      <div class="box">
+        <div class="wh"><Icon name="info" size={15} color="var(--warn)" /><span>{t("plugins.look_problems")}</span></div>
+        {#each installed.look_problems as e (e)}<div class="wb mono">{e}</div>{/each}
+      </div>
+    {/if}
     {#if pl.failed[id]}<div class="wn">{pl.failed[id]}</div>{/if}
     {#if installed?.stopped && installed.enabled}<div class="wn">{tf("plugins.stopped", { e: installed.stopped })}</div>{/if}
 
@@ -265,7 +271,7 @@
         {#if m.look?.mono}<div class="srow"><RowBase label={t("plugins.does.mono")}><span class="v">{t(`plugins.font.${m.look.mono}`)}</span></RowBase></div>{/if}
         {#if m.look?.layout}<div class="srow"><RowBase label={t("plugins.does.layout")} /></div>{/if}
         {#if m.look?.splash}<div class="srow"><RowBase label={t("plugins.does.splash")} info={t("plugins.does.splash.desc")} /></div>{/if}
-        {#if m.look?.app_icon}<div class="srow"><RowBase label={t("plugins.does.app_icon")} info={t("plugins.does.app_icon.desc")} /></div>{/if}
+        {#if m.look?.app_icon}<div class="srow"><RowBase label={t("plugins.does.app_icon")} info={t("plugins.does.app_icon.desc")}>{#if m.kind === "theme" && curTheme !== themeId(id)}<span class="v">{t("plugins.app_icon.pick_theme")}</span>{:else if pl.canPinIcon && installed?.enabled}<Button onclick={() => pinPluginIcon(id)}>{t("plugins.pin_icon")}</Button>{/if}</RowBase></div>{/if}
         {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{tf("plugins.corners.value", { p: Math.round(m.look.radius * 100) })}</span></RowBase></div>{/if}
         {#if m.look?.backgrounds}<div class="srow"><RowBase label={t("plugins.does.backgrounds")}><span class="v">{m.look.backgrounds}</span></RowBase></div>{/if}
         {#if m.look?.icons}<div class="srow"><RowBase label={t("plugins.does.icons")}><span class="v">{m.look.icons}</span></RowBase></div>{/if}

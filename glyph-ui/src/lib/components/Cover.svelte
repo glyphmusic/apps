@@ -36,6 +36,7 @@
   import { backend } from "../api/backend";
   import { trackKey, type Track } from "../api/types";
   import { fx } from "../ui.svelte";
+  import { cornerPx } from "../corners";
   let { track, size = 40, radius = 6, round = false }: { track: Track | null | undefined; size?: number; radius?: number; round?: boolean } = $props();
   let url = $state<string | null>(null);
   let phase = $state<"loading" | "ready" | "none">("loading");
@@ -128,7 +129,7 @@
   }
 </script>
 
-<div class="cv" bind:this={box} style:width="{size}px" style:height="{size}px" style:border-radius="{r}px">
+<div class="cv" bind:this={box} style:width="{size}px" style:height="{size}px" style:border-radius={round ? `${r}px` : cornerPx(r)}>
   {#if (phase === "loading" && !timedOut) || unveiling}
     <Skeleton w={size} h={size} radius={r} id={key} />
   {:else if phase === "none" || (phase === "loading" && timedOut)}
