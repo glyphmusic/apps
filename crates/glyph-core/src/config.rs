@@ -141,11 +141,23 @@ pub struct PlaybackConfig {
     /// Searches longer for a song's source (more tries, other search
     /// wordings, a short wait between) before giving up on it.
     pub patient_search: bool,
+    /// Pause when another app starts playing sound (a video, another
+    /// music app, a voice message).
+    pub pause_for_others: bool,
+    /// After such a pause, play on when the other sound stops: not after a
+    /// music app, and not when it played longer than a few minutes.
+    pub resume_after_others: bool,
 }
 
 impl Default for PlaybackConfig {
     fn default() -> Self {
-        Self { shuffle: ShuffleStyle::default(), skip_unplayable: true, patient_search: false }
+        Self {
+            shuffle: ShuffleStyle::default(),
+            skip_unplayable: true,
+            patient_search: false,
+            pause_for_others: true,
+            resume_after_others: true,
+        }
     }
 }
 

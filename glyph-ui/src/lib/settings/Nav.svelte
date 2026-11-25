@@ -77,6 +77,7 @@
       .filter(([p, s, key]) => !onWeb() || (!WEB_HIDDEN_KEYS.has(key) && (p !== "playback" || s === 1 || s === 2 || (!mobile && s === 3))))
       .filter(([, , key]) => !onWeb() || signedIn || key !== "sp.mcp")
       .filter(([, , key]) => !mobile || !MOBILE_HIDDEN_KEYS.has(key))
+      .filter(([, , key]) => key !== "sp.other_apps" || app.platform === "android")
       .filter(([, , key, words]) => hit(t(key)) || words.includes(q))
       .slice(0, 14)
       .map(([p, s, key]) => ({ page: p, sub: onWeb() ? (p === "playback" ? s - 1 : p === "integrations" ? 0 : s) : s, label: t(key) }));

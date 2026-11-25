@@ -60,6 +60,14 @@
       <Row label={t("sp.skip_unplayable")} info={t("sp.skip_unplayable.desc")}>
         <Tog on={app.config.playback.skip_unplayable} onchange={(v) => app.setConfig((c) => { c.playback.skip_unplayable = v; })} label={t("sp.skip_unplayable")} />
       </Row>
+      {#if app.platform === "android"}
+      <Row label={t("sp.other_apps")} info={t("sp.other_apps.desc")}>
+        <Tog on={app.config.playback.pause_for_others !== false} onchange={(v) => app.setConfig((c) => { c.playback.pause_for_others = v; })} label={t("sp.other_apps")} />
+      </Row>
+      <Row label={t("sp.other_apps_resume")} info={t("sp.other_apps_resume.desc")}>
+        <Tog on={app.config.playback.resume_after_others !== false} disabled={app.config.playback.pause_for_others === false} why={t("sp.other_apps.off_why")} onchange={(v) => app.setConfig((c) => { c.playback.resume_after_others = v; })} label={t("sp.other_apps_resume")} />
+      </Row>
+      {/if}
       {#if !onWeb()}
       <Row label={t("sp.patient_search")} info={t("sp.patient_search.desc")}>
         <Tog on={app.config.playback.patient_search} onchange={(v) => app.setConfig((c) => { c.playback.patient_search = v; })} label={t("sp.patient_search")} />

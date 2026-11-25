@@ -10,7 +10,10 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.AudioPlaybackConfiguration;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
@@ -27,6 +30,7 @@ import androidx.media.VolumeProviderCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 import androidx.media.session.MediaButtonReceiver;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -49,6 +53,14 @@ import java.util.Objects;
  *
  * While a network device plays, the session is a remote one: the volume
  * keys (also on the lock screen) set the device's volume.
+ *
+ * Audio focus ("Pause when other apps play"): while Glyph plays it holds
+ * the focus, so another app that starts playing takes it and Rust pauses
+ * (glyph_app::other_audio). A short interruption (a voice message, a
+ * navigation prompt) hands the focus back when it ends. A video or another
+ * music app keeps it: then the other players are counted (beyond Glyph's
+ * own, which stays open while paused) to see when the other sound stops,
+ * and whether it is music (no playing on after a music app).
  */
 public class PlaybackService extends Service {
 
@@ -71,6 +83,17 @@ public class PlaybackService extends Service {
 
     /** Volume 0..100 for the network device playing now. */
     static native void nativeVolume(int volume);
+
+    /** Another app plays sound now (and whether it is music); see glyph_app::other_audio. */
+    static native void nativeOtherAudio(boolean active, boolean music);
+
+    /** Setting "Pause when other apps play" (from Rust). Off: no audio focus, Glyph plays along. */
+    private static boolean pauseForOthers = true;
+    /** After the focus went to another app, it counts as playing this long even before its player shows up. */
+    private static final long OTHER_GRACE_MS = 5_000;
+    /** How long the other players are watched after the focus is gone (Rust stops playing on after 5 minutes). */
+    private static final long OTHER_WATCH_MS = 6 * 60_000;
+    private static final long OTHER_POLL_MS = 2_000;
 
     /** How long a pause keeps the foreground (and the locks). */
     private static final long PAUSE_GRACE_MS = 15_000;
@@ -100,6 +123,20 @@ public class PlaybackService extends Service {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable leaveForeground = this::leaveForeground;
 
+    private AudioManager audio;
+    private AudioFocusRequest focusRequest;
+    /** Glyph is in the focus stack (also during a short interruption). */
+    private boolean hasFocus;
+    /** Another app has the focus now. */
+    private boolean focusLost;
+    /** The focus went away for good (a video, another music app): watch the players. */
+    private boolean focusGone;
+    private long lostAt;
+    /** Players (all / music) while Glyph plays alone: its own. */
+    private int ownPlayers = 1, ownMusic = 1;
+    private AudioManager.AudioPlaybackCallback playbackCallback;
+    private final Runnable watchOthers = this::watchOthers;
+
     /**
      * From Rust (MainActivity.gpuiNowPlaying), on the main thread: start,
      * update or stop the service. remote: the network device's volume, -1
@@ -120,6 +157,17 @@ public class PlaybackService extends Service {
             remoteVolume = remote;
         }
         syncService(ctx);
+    }
+
+    /** From Rust: the setting "Pause when other apps play". */
+    static void setPauseForOthers(boolean on) {
+        if (pauseForOthers == on) {
+            return;
+        }
+        pauseForOthers = on;
+        if (instance != null) {
+            instance.syncFocus();
+        }
     }
 
     /** Keeps the service running in the foreground with CPU/Wi-Fi locks whenever a Jam is active. */
@@ -217,6 +265,145 @@ public class PlaybackService extends Service {
             }
         });
         session.setActive(true);
+        audio = getSystemService(AudioManager.class);
+        playbackCallback = new AudioManager.AudioPlaybackCallback() {
+            @Override
+            public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) {
+                countPlayers(configs);
+            }
+        };
+        try {
+            audio.registerAudioPlaybackCallback(playbackCallback, handler);
+        } catch (Exception ignored) {
+            playbackCallback = null;
+        }
+    }
+
+    // ---- Audio focus (see the class comment) ----
+
+    /** Takes or gives up the focus as playback and the setting say. */
+    private void syncFocus() {
+        if (audio == null) {
+            return;
+        }
+        boolean want = pauseForOthers && remoteVolume < 0 && (playing || buffering);
+        if (!pauseForOthers || remoteVolume >= 0) {
+            abandonFocus();
+        } else if (want && !hasFocus) {
+            if (focusRequest == null) {
+                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build())
+                        // Rust pauses itself; ducking stays the system's job.
+                        .setWillPauseWhenDucked(false)
+                        .setOnAudioFocusChangeListener(this::onFocusChange, handler)
+                        .build();
+            }
+            int r;
+            try {
+                r = audio.requestAudioFocus(focusRequest);
+            } catch (Exception e) {
+                r = AudioManager.AUDIOFOCUS_REQUEST_FAILED;
+            }
+            if (r == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                hasFocus = true;
+                otherStopped();
+            }
+        }
+    }
+
+    private void abandonFocus() {
+        if (hasFocus && audio != null && focusRequest != null) {
+            try {
+                audio.abandonAudioFocusRequest(focusRequest);
+            } catch (Exception ignored) {
+                // Gone anyway.
+            }
+        }
+        hasFocus = false;
+        otherStopped();
+    }
+
+    private void otherStopped() {
+        handler.removeCallbacks(watchOthers);
+        if (focusLost) {
+            focusLost = false;
+            focusGone = false;
+            nativeOtherAudio(false, false);
+        }
+    }
+
+    private void onFocusChange(int change) {
+        switch (change) {
+            case AudioManager.AUDIOFOCUS_GAIN:
+                hasFocus = true;
+                otherStopped();
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                // Comes back with AUDIOFOCUS_GAIN when the other app is done.
+                focusLost = true;
+                focusGone = false;
+                nativeOtherAudio(true, false);
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS:
+                // For good: Android will not hand it back, so watch the players.
+                hasFocus = false;
+                focusLost = true;
+                focusGone = true;
+                lostAt = SystemClock.uptimeMillis();
+                nativeOtherAudio(true, false);
+                handler.removeCallbacks(watchOthers);
+                handler.postDelayed(watchOthers, OTHER_GRACE_MS);
+                break;
+            default:
+                // AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: the system turns Glyph down.
+                break;
+        }
+    }
+
+    /** Every few seconds after the focus went away for good. */
+    private void watchOthers() {
+        if (!focusGone) {
+            return;
+        }
+        try {
+            countPlayers(audio.getActivePlaybackConfigurations());
+        } catch (Exception ignored) {
+            // Try again next time.
+        }
+        if (SystemClock.uptimeMillis() - lostAt < OTHER_WATCH_MS) {
+            handler.postDelayed(watchOthers, OTHER_POLL_MS);
+        } else {
+            otherStopped();
+        }
+    }
+
+    /** The players playing now: Glyph's own while it plays alone, the other app's after the focus went away. */
+    private void countPlayers(List<AudioPlaybackConfiguration> configs) {
+        if (configs == null) {
+            return;
+        }
+        int all = 0, music = 0;
+        for (AudioPlaybackConfiguration c : configs) {
+            AudioAttributes a = c.getAudioAttributes();
+            int usage = a.getUsage();
+            if (usage != AudioAttributes.USAGE_MEDIA && usage != AudioAttributes.USAGE_GAME
+                    && usage != AudioAttributes.USAGE_UNKNOWN) {
+                continue;
+            }
+            all++;
+            if (a.getContentType() == AudioAttributes.CONTENT_TYPE_MUSIC) {
+                music++;
+            }
+        }
+        if (hasFocus && !focusLost && playing && !buffering) {
+            ownPlayers = all;
+            ownMusic = music;
+        } else if (focusGone && SystemClock.uptimeMillis() - lostAt >= OTHER_GRACE_MS) {
+            nativeOtherAudio(all > ownPlayers, music > ownMusic);
+        }
     }
 
     /**
@@ -246,6 +433,7 @@ public class PlaybackService extends Service {
     /** Hands the current state to the session and the notification. */
     private void apply(boolean mustStartForeground) {
         applyVolume();
+        syncFocus();
         String meta = title + '\u0000' + artist + '\u0000' + durationMs + '\u0000' + coverPath;
         if (!meta.equals(metaKey)) {
             metaKey = meta;
@@ -319,6 +507,10 @@ public class PlaybackService extends Service {
             foreground = false;
         }
         holdLocks(false);
+        // Paused for a while: the focus is free for other apps again.
+        if (!focusLost) {
+            abandonFocus();
+        }
     }
 
     /** Keeps the CPU and Wi-Fi awake while playing (network streams, device control). */
@@ -475,6 +667,10 @@ public class PlaybackService extends Service {
         instance = null;
         handler.removeCallbacks(leaveForeground);
         holdLocks(false);
+        abandonFocus();
+        if (playbackCallback != null) {
+            audio.unregisterAudioPlaybackCallback(playbackCallback);
+        }
         session.setActive(false);
         session.release();
         super.onDestroy();

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Pause when other apps play** (Android): Glyph pauses when another app starts playing sound, like a YouTube video or a voice message. When the other sound stops, Glyph plays on. It stays paused after a music app like Spotify, or when the other sound played longer than 5 minutes. Both can be turned off in Settings › Playback › Content.
+
 ## 0.13.7 - 2026-11-25
 
 ### Added

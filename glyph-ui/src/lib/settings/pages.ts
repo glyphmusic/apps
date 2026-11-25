@@ -142,6 +142,7 @@ export const OPTIONS: [SettingsPage, number, string, string][] = [
   ["playback", 1, "sp.stats", "stats statistics statistik analytics hörzeit listening time tracking"],
   ["playback", 2, "sp.extractor", "r-dlp rdlp yt-dlp extractor youtube schneller faster"],
   ["playback", 2, "sp.search.mode", "search suche lokal local server rate limit ban quellen sources"],
+  ["playback", 1, "sp.other_apps", "pause pausieren other apps andere youtube spotify video audio focus fokus weiterspielen resume"],
   ["playback", 1, "sp.explicit", "explicit explizit"],
   ["playback", 1, "sp.radio", "radio autoplay"],
   ["playback", 1, "sp.drift", "drift radio autoplay beta glyph endless"],
