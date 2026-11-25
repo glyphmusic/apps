@@ -20,7 +20,7 @@
   import ErrorCard from "../components/ErrorCard.svelte";
   import { app, type PickSongs } from "../state.svelte";
   import { t, tf } from "../i18n.svelte";
-  import { fadeEdges } from "../ui.svelte";
+  import { fadeEdges, eatTap } from "../ui.svelte";
   import { trackKey, type Track } from "../api/types";
   import { backend } from "../api/backend";
   import { drag, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
@@ -223,7 +223,7 @@
 {/snippet}
 
 {#if compact}
-  <div class="bs-dim" class:sheet={data.sheet} transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} role="presentation">
+  <div class="bs-dim" class:sheet={data.sheet} transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation">
     <div class="bs-panel" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="bs-grab" use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
         <span class="hdl"></span>
@@ -243,7 +243,7 @@
 {:else}
   <div class="layer" transition:fade|global={{ duration: 160 }}>
     <div class="tdim"></div>
-    <div class="bd" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
+    <div class="bd" onpointerdown={(e) => { if (e.target === e.currentTarget) { eatTap(); close(); } }} role="presentation">
       <div class="panel" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
         <div class="tt">{t("share_in.title")}</div>
         {@render head()}

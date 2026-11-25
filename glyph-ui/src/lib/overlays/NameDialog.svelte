@@ -25,7 +25,7 @@
   import { app } from "../state.svelte";
   import { backend } from "../api/backend";
   import { t, tf } from "../i18n.svelte";
-  import { press } from "../ui.svelte";
+  import { press, eatTap } from "../ui.svelte";
   import { pickCover, playlistX, removeCover, setPlaylistStorage, toggleAutoDownload } from "../pages/lists/actions";
   import type { ProfileSettingsData } from "../settings/types";
   import { errText } from "../settings/util";
@@ -150,7 +150,7 @@
 {:else}
 <div class="layer" transition:fade|global={{ duration: 160 }}>
   <div class="tdim" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})"></div>
-  <div class="bd" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
+  <div class="bd" style:background="rgba(0,0,0,{editId ? 0.55 : 0.45})" onpointerdown={(e) => { if (e.target === e.currentTarget) { eatTap(); close(); } }} role="presentation">
     {#if editId}
       <div class="panel edit" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
         <div class="eh">

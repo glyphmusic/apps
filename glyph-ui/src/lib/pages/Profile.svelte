@@ -32,6 +32,7 @@
   import CropDialog from "./profile/CropDialog.svelte";
   import { crop, pickProfileImage, profileError } from "./profile/crop.svelte";
   import { setTab } from "../settings/settings.svelte";
+  import { phone, scrollFx } from "../compact/cstate.svelte";
 
   /** What the backend sends beyond types.Profile (see api/demo/extra.ts `profile`). */
   type ProfileX = Profile & { private?: boolean; recent?: Track[] };
@@ -65,6 +66,15 @@
   });
 
   const p = $derived(page && page.handle === handle ? page : null);
+  // Phones: like the artist page. The top bar (Compact.svelte) has the only
+  // back button; the banner fills the top and zooms in as the page scrolls;
+  // the picture sits on the banner's edge and the name goes under it in full.
+  const compact = $derived(app.compact);
+  const heroZoom = $derived.by(() => {
+    if (!compact || scrollFx) return undefined;
+    const y = Math.min(400, Math.max(0, phone.scroll));
+    return y > 0 ? `translateY(${(y * 0.3).toFixed(1)}px) scale(${(1 + y * 0.000625).toFixed(4)})` : undefined;
+  });
   const accent = $derived(themeColors(app.config?.visuals.theme ?? "glyph").accent);
   const own = $derived(!!p?.is_me);
   const priv = $derived(!!p?.private);
@@ -118,13 +128,13 @@
 </script>
 
 {#snippet backPill()}
-  {#if app.history.length}<Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button>{/if}
+  {#if app.history.length && !compact}<Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button>{/if}
 {/snippet}
 
 <SkeletonSwap loading={!p && !signedOut && !error}>
   {#snippet skeleton()}
     <div class="wrap">
-      {#if app.history.length}<div class="bk">{@render backPill()}</div>{/if}
+      {#if app.history.length && !compact}<div class="bk">{@render backPill()}</div>{/if}
       <div class="load">
         <Skeleton w="100%" h={220} radius={14} id="profile-banner" />
         <SkeletonRows prefix="profile" n={5} />
@@ -133,7 +143,7 @@
   {/snippet}
   {#if !p}
     <div class="wrap">
-      {#if app.history.length}<div class="bk">{@render backPill()}</div>{/if}
+      {#if app.history.length && !compact}<div class="bk">{@render backPill()}</div>{/if}
       {#if signedOut}
         <EmptyState icon="music-2" title={t("profile.signed_out")} sub={t("profile.signed_out.sub")} />
       {:else if error}
@@ -141,14 +151,14 @@
       {/if}
     </div>
   {:else}
-  <div class="body">
-    <div class="hero">
+  <div class="body" class:mob={compact}>
+    <div class="hero" class:mob={compact}>
       {#if !p.banner}
-        <div class="grad" style:background="linear-gradient(0deg, hsla(300, 40%, 16%, 0), {accentTile(0.22, 0.45, accent)})"></div>
+        <div class="grad" class:zoom={compact} class:sd={compact && scrollFx} style:transform={heroZoom} style:background="linear-gradient(0deg, hsla(300, 40%, 16%, 0), {accentTile(0.22, 0.45, accent)})"></div>
       {:else}
-        <img bind:this={banEl} class="ban" class:on={bannerOk} src={p.banner} alt="" draggable="false" onload={() => (bannerOk = true)} />
+        <div class="bmask"><img bind:this={banEl} class="ban" class:on={bannerOk} class:zoom={compact} class:sd={compact && scrollFx} style:transform={heroZoom} src={p.banner} alt="" draggable="false" onload={() => (bannerOk = true)} /></div>
       {/if}
-      {#if app.history.length}<div class="back">{@render backPill()}</div>{/if}
+      {#if app.history.length && !compact}<div class="back">{@render backPill()}</div>{/if}
       {#if own}
         <div class="bedit">
           <Button kind="round" icon="image-plus" title={t("profile.image.change")} onclick={() => pickProfileImage(true)} />
@@ -156,17 +166,17 @@
       {/if}
     </div>
 
-    <div class="name">
+    <div class="name" class:mob={compact}>
       <div class="pic">
-        <Avatar src={p.avatar} size={112} />
+        <Avatar src={p.avatar} size={compact ? 96 : 112} />
         {#if own}
           <button class="pen" aria-label={t("profile.image.change")} onclick={() => pickProfileImage(false)}><Icon name="pencil" size={20} color="#fff" /></button>
         {/if}
       </div>
       <div class="who">
         <span class="badge">{t(priv ? "profile.badge.private" : "profile.badge")}</span>
-        <h1 class="handle trunc">@{p.handle}</h1>
-        {#if p.name && p.name.toLowerCase() !== p.handle.toLowerCase()}<div class="pname trunc">{p.name}</div>{/if}
+        <h1 class="handle" class:trunc={!compact}>@{p.handle}</h1>
+        {#if p.name && p.name.toLowerCase() !== p.handle.toLowerCase()}<div class="pname" class:trunc={!compact}>{p.name}</div>{/if}
       </div>
       {#if own}
         <div class="act"><Button onclick={edit}>{t("profile.edit")}</Button></div>
@@ -255,19 +265,37 @@
     -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 60%, rgba(0,0,0,.84) 70%, rgba(0,0,0,.5) 80%, rgba(0,0,0,.16) 90%, transparent 100%);
     mask-image: linear-gradient(to bottom, #000 0, #000 60%, rgba(0,0,0,.84) 70%, rgba(0,0,0,.5) 80%, rgba(0,0,0,.16) 90%, transparent 100%); }
   .ban.on { opacity: 1; }
+  .bmask { position: absolute; inset: 0; overflow: hidden; }
+
+  /* Phones: full bleed from the very top (under the status bar), like the
+     artist photo; scrolling zooms in (same numbers as the artist page). */
+  .hero.mob { margin: calc(-1 * var(--page-top, 8px)) calc(-1 * var(--page-x, 16px)) 0; height: calc(min(240px, 34vh) + var(--safe-top, env(safe-area-inset-top, 0px))); border-radius: 0; }
+  .hero.mob .grad { border-radius: 0; }
+  .zoom { transform-origin: 50% 30%; will-change: transform; }
+  .sd { animation: profile-zoom linear both; animation-timeline: --page; animation-range: 0px 400px; }
+  @keyframes profile-zoom { from { transform: none; } to { transform: translateY(120px) scale(1.25); } }
+  .name.mob { flex-wrap: wrap; align-items: flex-end; gap: 14px 16px; margin-top: -56px; padding: 0; }
+  .name.mob .who { flex: 1 1 100%; order: 2; padding-bottom: 0; gap: 4px; }
+  .name.mob .act { order: 1; margin-left: auto; padding-bottom: 6px; }
+  .name.mob .handle { font-size: clamp(26px, 8vw, 34px); line-height: 1.12; overflow-wrap: anywhere; }
+  .name.mob .pname { font-size: 15px; }
+  .name.mob .pic { width: 96px; height: 96px; }
+  .body.mob { gap: 18px; }
   .back { position: absolute; top: 20px; left: 32px; }
   .bedit { position: absolute; top: 20px; right: 32px; }
 
   /* name row: items-end, gap 20, mt -(56 + 22), px 8 */
-  .name { display: flex; align-items: flex-end; gap: 20px; margin-top: -78px; padding: 0 8px; position: relative; }
+  /* Picture, name and button on one middle line (the picture used to hang
+     below the name because the text was pushed up by its bottom padding). */
+  .name { display: flex; align-items: center; gap: 20px; margin-top: -64px; padding: 0 8px; position: relative; }
   .pic { position: relative; flex: none; width: 112px; height: 112px; }
   .pen { position: absolute; inset: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s ease-out; }
   .pic:hover .pen, .pen:focus-visible { opacity: 1; }
-  .who { flex: 1; min-width: 0; padding-bottom: 70px; display: flex; flex-direction: column; gap: 6px; }
+  .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .handle { margin: 0; font-size: 36px; line-height: 40px; font-weight: 700; color: #fff; }
   .pname { font-size: var(--md); color: rgba(255, 255, 255, .7); }
-  .act { flex: none; padding-bottom: 74px; }
+  .act { flex: none; }
   .bio { font-size: var(--md); color: var(--dim); max-width: 640px; line-height: 1.4; }
   .note { font-size: var(--sm); color: var(--faint); }
 

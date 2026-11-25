@@ -33,7 +33,7 @@
 </script>
 
 <div class="sv">
-  {#if app.history.length}
+  {#if app.history.length && !app.compact}
     <div class="back"><Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button></div>
   {/if}
   <div class="head">

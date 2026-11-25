@@ -51,10 +51,12 @@ const OWN = "demo_user";
 // ---------------------------------------------------------------- profile
 const own: { avatar: string | null; banner: string | null } = { avatar: demoCover("own-avatar"), banner: null };
 const NAMES = ["Rowan Fell", "Ida Marsh", "Teo Lindqvist", "Nora Kade", "Pim Okafor", "Sol Varga"];
+/** Handles that exist in the demo (search finds people by exact handle). */
+const KNOWN = new Set([OWN, "demo", "quiet_one", "rowan", "ida_m", "teo", "nora", "pim", "sol_v", "maria", "mailo"]);
 
 function profile(handle: string): Profile & { private?: boolean; recent?: Track[] } {
   const h = handle.toLowerCase();
-  if (h === "nobody" || h.length < 3) throw new Error("not_found");
+  if (!KNOWN.has(h)) throw new Error("not_found");
   const isMe = h === OWN;
   const n = hash(h);
   const pick = (start: number, len: number) => Array.from({ length: len }, (_, i) => TRACKS[(start + i * 3) % TRACKS.length]);
@@ -232,7 +234,7 @@ const jamHandlers: Record<string, DemoHandler> = {
 export const handlers: Record<string, DemoHandler> = {
   artist_photo: () => null,
   artist_verified: () => false,
-  profile: (_, a) => profile(String(a.handle)),
+  profile: (_, a) => profile(String(a.handle).trim().replace(/^@/, "")),
   profile_playlist: (_, a) => profile(String(a.handle)).playlists.find((p) => p.id === a.id)?.tracks ?? [],
   profile_follow: () => {},
   profile_set_image: (_, a) => { if (a.banner) own.banner = a.image; else own.avatar = a.image; },

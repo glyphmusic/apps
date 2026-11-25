@@ -34,21 +34,55 @@ function hideTip(el: HTMLElement) {
 }
 export function tipClosed() { tipLast = performance.now(); }
 
-/** `use:tip={"Label"}` or `use:tip={{ label, wrap, instant, side }}`; `use:tip={iconTip("heart")}`. */
-export function tip(el: HTMLElement, arg: string | undefined | { label?: string; wrap?: boolean; instant?: boolean; side?: "right" | "left" }) {
+/** `use:tip={"Label"}` or `use:tip={{ label, wrap, instant, side, tap }}`; `use:tip={iconTip("heart")}`.
+ *  Touch screens have no hover: there a tap on an explaining tip (`wrap`,
+ *  or `tap: true`, like the (i) next to a setting) shows it at once; the
+ *  next tap anywhere, a scroll or 5 s close it again. */
+let tapTimer = 0;
+let tapOff: (() => void) | null = null;
+function closeTapTip() {
+  clearTimeout(tapTimer);
+  tapOff?.(); tapOff = null;
+  if (tipEl) hideTip(tipEl);
+}
+export function tip(el: HTMLElement, arg: string | undefined | { label?: string; wrap?: boolean; instant?: boolean; side?: "right" | "left"; tap?: boolean }) {
   let a = typeof arg === "string" || arg == null ? { label: arg } : arg;
-  const enter = () => a.label && showTip(el, a.label, a);
-  const leave = () => hideTip(el);
-  const down = () => { if (tipEl === el) { clearTimeout(tipTimer); tipState.shown = false; } };
+  const mouse = (e: PointerEvent) => e.pointerType === "mouse";
+  const tappable = () => !!a.label && (a.tap ?? !!a.wrap);
+  const enter = (e: PointerEvent) => { if (mouse(e) && a.label) showTip(el, a.label, a); };
+  const leave = (e: PointerEvent) => { if (mouse(e)) hideTip(el); };
+  const down = (e: PointerEvent) => { if (mouse(e) && tipEl === el) { clearTimeout(tipTimer); tipState.shown = false; } };
+  const tap = (e: PointerEvent) => {
+    if (mouse(e) || !tappable()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const again = tipEl === el && tipState.shown;
+    closeTapTip();
+    if (again) return;
+    showTip(el, a.label!, { ...a, instant: true });
+    // Closes on the next tap or scroll (from the next frame, so this tap does not count).
+    requestAnimationFrame(() => {
+      const off = () => closeTapTip();
+      addEventListener("pointerdown", off, { capture: true, once: true });
+      addEventListener("scroll", off, { capture: true, once: true, passive: true });
+      tapOff = () => { removeEventListener("pointerdown", off, { capture: true }); removeEventListener("scroll", off, { capture: true }); };
+    });
+    tapTimer = window.setTimeout(closeTapTip, 5000);
+  };
   el.addEventListener("pointerenter", enter);
   el.addEventListener("pointerleave", leave);
   el.addEventListener("pointerdown", down);
+  el.addEventListener("pointerup", tap);
   return {
     update(n: typeof arg) {
       a = typeof n === "string" || n == null ? { label: n } : n;
       if (tipEl === el && tipState.shown && a.label) tipState.label = a.label;
     },
-    destroy() { leave(); el.removeEventListener("pointerenter", enter); el.removeEventListener("pointerleave", leave); el.removeEventListener("pointerdown", down); },
+    destroy() {
+      if (tipEl === el) closeTapTip();
+      el.removeEventListener("pointerenter", enter); el.removeEventListener("pointerleave", leave);
+      el.removeEventListener("pointerdown", down); el.removeEventListener("pointerup", tap);
+    },
   };
 }
 export const iconTip = (name: string) => tipFor(name);
@@ -420,4 +454,20 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
       }
     },
   };
+}
+
+/**
+ * Closing a sheet or dialog on pointerdown removes its backdrop before the
+ * tap ends, so the rest of that tap (mousedown/mouseup/click, which phones
+ * send after the finger lifts) would land on whatever is underneath, e.g.
+ * start a song. Call this when a backdrop tap closes something: the rest of
+ * that one tap is swallowed.
+ */
+export function eatTap(ms = 600): void {
+  if (typeof window === "undefined") return;
+  const types = ["mousedown", "mouseup", "click", "dblclick", "contextmenu"] as const;
+  const stop = (e: Event) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); if (e.type === "click") off(); };
+  const off = () => { clearTimeout(timer); for (const t of types) window.removeEventListener(t, stop, true); };
+  for (const t of types) window.addEventListener(t, stop, true);
+  const timer = setTimeout(off, ms);
 }

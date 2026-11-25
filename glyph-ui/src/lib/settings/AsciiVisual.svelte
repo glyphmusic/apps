@@ -170,6 +170,9 @@
   }
   .info { flex: none; width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; }
   .info:hover { background: rgba(255, 255, 255, .08); }
+  /* Bigger tap target on touch screens (a tap shows the explanation). */
+  .info { position: relative; cursor: help; }
+  .info::after { content: ""; position: absolute; inset: -10px; }
 
   .preview {
     display: flex;

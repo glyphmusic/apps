@@ -111,6 +111,9 @@
   .s-lab { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; color: rgba(255, 255, 255, .92); }
   .info { flex: none; width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; transition: background-color .12s; }
   .info:hover { background: rgba(255, 255, 255, .08); }
+  /* Bigger tap target on touch screens (a tap shows the explanation). */
+  .info { position: relative; cursor: help; }
+  .info::after { content: ""; position: absolute; inset: -10px; }
   .bar { display: flex; align-items: center; gap: 10px; margin-left: auto; }
   .val { width: 36px; display: flex; justify-content: flex-end; font-size: 12px; color: rgba(255, 255, 255, .6); }
 

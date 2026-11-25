@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { eatTap } from "../ui.svelte";
   // widgets.rs modal_layer + modal_backdrop: a full-window layer. The
   // titlebar band is dimmed too (clicks go through to it); the backdrop
   // starts below the titlebar, takes the clicks and keeps its panel
@@ -10,7 +11,7 @@
 
 <div class="layer" style:z-index={z} style:backdrop-filter={filter} style:-webkit-backdrop-filter={filter}>
   <div class="band" style:background="rgba(0,0,0,{dim * vis})"></div>
-  <div class="backdrop" style:background="rgba(0,0,0,{dim * vis})" onpointerdown={(e) => { if (e.target === e.currentTarget) onbackdrop?.(e); }} role="presentation">
+  <div class="backdrop" style:background="rgba(0,0,0,{dim * vis})" onpointerdown={(e) => { if (e.target === e.currentTarget && onbackdrop) { eatTap(); onbackdrop(e); } }} role="presentation">
     {@render children()}
   </div>
 </div>

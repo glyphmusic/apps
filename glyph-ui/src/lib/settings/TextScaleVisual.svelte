@@ -127,7 +127,9 @@
 
   .thumbs {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    /* minmax(0, …): the three cards shrink to fit narrow phones instead of
+       pushing the last one out of the box. */
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
     padding-top: 2px;
   }
@@ -137,10 +139,11 @@
     align-items: center;
     gap: 10px;
     padding: 4px 0;
+    min-width: 0;
   }
   .box {
-    width: 112px;
-    max-width: 100%;
+    width: 100%;
+    max-width: 112px;
     height: 74px;
     padding: 6px;
     border-radius: 6px;

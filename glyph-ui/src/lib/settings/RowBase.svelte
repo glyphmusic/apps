@@ -8,9 +8,13 @@
   import Icon from "../components/Icon.svelte";
   import { tip } from "../ui.svelte";
   import { sui } from "./settings.svelte";
+  import { app } from "../state.svelte";
   let { label, info, status, statusColor, leading, children }: { label: string; info?: string | null; status?: string | null; statusColor?: string; leading?: Snippet; children?: Snippet } = $props();
   let el: HTMLDivElement | undefined = $state();
   const lit = $derived(sui.flash != null && sui.flash.label === label);
+  // Phones have no hover: the explanation sits under the label (two lines,
+  // a tap shows all of it) instead of behind an (i).
+  let more = $state(false);
   $effect(() => { if (lit && el) el.scrollIntoView({ block: "center", behavior: "smooth" }); });
 </script>
 
@@ -20,8 +24,9 @@
     <div class="l">
       <div class="lt">
         <span class="lab">{label}</span>
-        {#if info}<span class="info" use:tip={{ label: info, wrap: true }}><Icon name="info" size={13} color="rgba(255,255,255,.42)" /></span>{/if}
+        {#if info && !app.compact}<span class="info" use:tip={{ label: info, wrap: true }}><Icon name="info" size={13} color="rgba(255,255,255,.42)" /></span>{/if}
       </div>
+      {#if info && app.compact}<button class="desc" class:more onclick={() => (more = !more)} aria-expanded={more}>{info}</button>{/if}
       {#if status}<div class="st" style:color={statusColor}>{status}</div>{/if}
     </div>
   </div>
@@ -39,6 +44,11 @@
   .lab { min-width: 0; font-size: 14px; font-weight: 500; color: #fff; }
   .info { flex: none; width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; transition: background-color .12s; }
   .info:hover { background: rgba(255, 255, 255, .08); }
+  .desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; margin-top: 2px; padding: 0; text-align: left; font: 400 13px/18px var(--font); color: rgba(255, 255, 255, .55); }
+  .desc.more { -webkit-line-clamp: unset; line-clamp: unset; }
+  /* Bigger tap target on touch screens (a tap shows the explanation). */
+  .info { position: relative; cursor: help; }
+  .info::after { content: ""; position: absolute; inset: -10px; }
   .st { font-size: 12.5px; color: rgba(255, 255, 255, .55); overflow-wrap: anywhere; }
   .c { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; flex: none; max-width: 100%; margin-left: auto; }
 </style>

@@ -269,6 +269,9 @@
   }
   .info { flex: none; width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; transition: background-color .12s; }
   .info:hover { background: rgba(255, 255, 255, .08); }
+  /* Bigger tap target on touch screens (a tap shows the explanation). */
+  .info { position: relative; cursor: help; }
+  .info::after { content: ""; position: absolute; inset: -10px; }
   .sw { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
   .th { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 2px solid transparent; transition: border-color .15s ease-out, transform .15s var(--ease); }
   .th:hover { transform: scale(1.08); }

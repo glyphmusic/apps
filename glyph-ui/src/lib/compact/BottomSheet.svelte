@@ -18,7 +18,7 @@
   import { t, tf } from "../i18n.svelte";
   import { rating, type Track } from "../api/types";
   import { jam } from "../jam.svelte";
-  import { fadeEdges } from "../ui.svelte";
+  import { fadeEdges, eatTap } from "../ui.svelte";
   import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "../overlays/sleep.svelte";
   import ConnectView from "../shell/ConnectView.svelte";
   import { drag, sheetIn, sheetOut, shouldClose, SWIPE_ACT } from "./cstate.svelte";
@@ -171,8 +171,8 @@
   }
 </script>
 
-<div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} role="presentation">
-  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+<div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation">
+  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     {#if kind === "devices"}
       <ConnectView
         sheet
@@ -376,6 +376,7 @@
   .dim { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, .55); }
   .panel { position: absolute; left: 0; right: 0; bottom: 0; height: min(86vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 12px)); height: min(86dvh, calc(100dvh - var(--safe-top, env(safe-area-inset-top)) - 12px)); border-radius: 16px 16px 0 0; background: hsl(0 0% 8%); padding-bottom: max(var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; }
   .panel.settle { transition: transform .24s var(--ease); }
+  .panel.dragging { will-change: transform; }
   .grab { flex: none; touch-action: none; }
   .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 8px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
   .q-top { padding: 0 16px 10px; display: flex; align-items: flex-start; gap: 12px; }

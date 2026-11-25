@@ -11,7 +11,7 @@
   import { t } from "../../i18n.svelte";
   import { artistTrack } from "./actions";
   import { primaryArtist } from "../../api/types";
-  let { name }: { name: string } = $props();
+  let { name, fluid = false }: { name: string; fluid?: boolean } = $props();
   const photo = $derived(app.artistPhoto(name));
   const tr = $derived(photo ? null : artistTrack(name));
   function menu(e: MouseEvent) {
@@ -20,7 +20,7 @@
   }
 </script>
 
-<button class="ac" onclick={() => app.openArtistPage(name)} oncontextmenu={menu}>
+<button class="ac" class:fluid onclick={() => app.openArtistPage(name)} oncontextmenu={menu}>
   {#if photo}<img class="ph" src={photo} alt="" />
   {:else if tr}<Cover track={tr} size={168} round />
   {:else}<span class="none"><Icon name="user-round" size={48} color="rgba(255,255,255,.5)" /></span>{/if}
@@ -36,4 +36,7 @@
   .none { display: grid; place-items: center; background: var(--card); }
   .nm { padding-top: 6px; font-size: var(--md); font-weight: 500; color: var(--text); min-width: 0; }
   .kd { font-size: var(--sm); color: var(--dim); }
+  /* fluid: fills a grid cell (phones: two per row), the picture stays round. */
+  .ac.fluid { width: auto; min-width: 0; }
+  .ac.fluid .ph, .ac.fluid .none, .ac.fluid :global(.cv) { width: 100% !important; height: auto !important; aspect-ratio: 1; }
 </style>

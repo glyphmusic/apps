@@ -8,11 +8,33 @@
 - **Solve plugin conflicts**: when two plugins change the same thing, press "Use this one" on a plugin's page to pick which one wins. Glyph remembers it. Until you pick, the plugin whose name comes first wins.
 - **Plugin warnings**: a plugin's page (and the warning before you install it) lists your own settings it replaces while it is on, like the background, font or app icon. When two plugins change the same thing, both say "Plugin conflict" and which one wins.
 
+### Changed
+
+- **A first start that gets you going**: instead of a tour of features, the first start now asks what you like, then lets you make your first playlist right away (give it a name, tick songs we picked for you or search for others), then speed and colour. At the end the new playlist opens.
+- **Clearer song selection**: when you select songs in a list, a coloured badge shows how many you picked out of how many. On phones a bar above the player now offers Add to queue, Add to playlist, Download and Remove (before, only Remove).
+- **Tidier menus**: the song menu now starts with Play, Play next and Add to queue, then Like and Add to playlist, then Go to artist, Go to album and Start radio. Rarely used items (download, copy link, watch video, "Not the right one?") moved into "More". The playlist menu also starts with Play.
+- **Profiles on phones look like artist pages**: one back button instead of two, the banner fills the top and zooms in as you scroll, and the full name shows under the picture instead of being cut off.
+- **Less empty space on phones**: similar artists and albums show two per row; Liked Songs, Downloads and Recently played put shuffle and play next to the title instead of in a half-empty row; Local files and mix pages have one back button.
+- **First start keeps its size**: every step of the first start has the same height, so the window no longer grows or shrinks when you press Next.
+- **Profile header on computers**: picture, name and Follow button now sit on one line.
+- **Clearer settings on phones**: the pages are grouped into cards (Preferences, Application) with an arrow on each row, and every setting shows its explanation right under its name (tap it to read all of it).
+
 ### Fixed
 
 - **Plugin corners**: a look's corner roundness now changes the corners of the whole interface, not only a few panels. The plugin page says how round, compared to Glyph's.
 - **Plugin app icons, startup animations and layouts missing**: plugins installed with an older Glyph lost the parts that Glyph did not know yet. Glyph now installs them again in full by itself.
 - **Plugin texts**: when two plugins replace the same text, the same one wins as for the rest of a look.
+- **Closing sheets by tapping beside them**: tapping above an open sheet, menu or dialog to close it no longer also taps the button or song underneath (for example starting a song).
+- **Lists on phones**: a fast scroll up now stops at the top of the list instead of flinging the search bar into view and pulling it back. Scroll up once more to show the search bar.
+- **Top bar title on phones**: the list or artist name now rises into the top bar from below as you scroll, instead of just appearing.
+- **Now Playing on phones**: the covers of the next and previous song no longer peek in at the screen edges.
+- **Mini player swipe**: when you swipe the small player bar, the current song fades out while the next one fades in.
+- **Video stays on**: closing Now Playing while a video plays and opening it again shows the video again, not the cover.
+- **Video full screen on phones**: the video and its buttons now stay below the status bar (time, battery) and above the gesture bar.
+- **Finding people in search**: typing a handle in search, with or without the "@", now shows that person's profile on top of the results (All and Artists). Before, profiles could not be found by search at all.
+- **Text size cards on small phones**: the three text size cards in Settings > Appearance now fit inside their box.
+- **Info buttons on phones**: tapping an (i) next to a setting now shows its explanation. Before, nothing happened on touch screens.
+- **Smoother sheets on Android**: dragging the player, the queue and menus is drawn once per frame, and Now Playing follows your finger when you pull it up from the mini player.
 
 ## 0.13.6 - 2026-11-25
 

@@ -44,7 +44,7 @@
       if (app.player.current) phone.npOpen = true;
     }
   });
-  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoPickerOpen = false; } });
+  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoResume = false; phone.videoPickerOpen = false; } });
   $effect(() => { if (!app.settingsOpen) phone.settingsInPage = false; });
   // Leaving the phone layout (window made wide) closes the share menu.
   $effect(() => () => { app.shareSheet = null; });
@@ -59,8 +59,10 @@
   let scrollTop = $state(0);
   let barBgK = $state(0);
   let titleK = $state(0);
+  /** Bar title rises in from below like a lift as the page title scrolls away. */
+  const lift = (k: number) => (k >= 1 ? undefined : `translateY(${((1 - k) * 18).toFixed(1)}px)`);
   let playK = $state(0);
-  const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.section?.title ?? ""));
+  const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.openProfile ?? "") + (app.section?.title ?? ""));
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
   function syncBar(top = mainEl?.scrollTop ?? 0) {
@@ -69,7 +71,7 @@
       return;
     }
     const cutoff = barEl.getBoundingClientRect().bottom;
-    const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .sv .head h1, .desk h1.hd");
+    const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .name.mob .handle, .sv .head h1, .desk h1.hd");
     const playEl = mainEl.querySelector<HTMLElement>(".lv .head .play, .ap .mob-acts .rp, .sv .head .play");
     const noArtList = ownList && !!mainEl.querySelector(".lv .head.no-art");
     const effTop = ownList ? Math.max(0, top - phone.listRevealH) : top;
@@ -79,7 +81,7 @@
     // title right below the bar, so the bar stays transparent until scrolled.
     barBgK = noArtList
       ? clamp01(effTop / 24)
-      : app.view === "artist" || ownList
+      : app.view === "artist" || app.view === "profile" || ownList
         ? (titleEl ? clamp01((cutoff + 36 - titleEl.getBoundingClientRect().top) / 48) : clamp01((effTop - 180) / 48))
         : clamp01(top / 24);
     titleK = titleEl ? clamp01((cutoff - titleEl.getBoundingClientRect().bottom) / 24) : clamp01((effTop - 20) / 36);
@@ -134,6 +136,7 @@
     : app.view === "taste" ? t("taste.title")
     : app.view === "server" ? t({ "": "admin.title", people: "admin.people.title", settings: "admin.limits", versions: "admin.versions" }[admin.sub])
     : app.view === "artist" ? app.openArtist ?? ""
+    : app.view === "profile" ? (app.openProfile ? `@${app.openProfile}` : "")
     : app.view === "releases" || app.view === "similar" ? `${app.openArtist} · ${t(app.view === "releases" ? "artist.albums" : "artist.similar")}`
     : "",
   );
@@ -219,7 +222,7 @@
   class:fading={hideShell || !phone.npOpen || phone.npPull === 0}
   style:opacity={hideShell ? 0 : phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}
 >
-  {#if app.view !== "artist" && !ownList}
+  {#if app.view !== "artist" && app.view !== "profile" && !ownList}
   <div class="top" style:background="rgba(10, 10, 10, {topK})">
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
@@ -241,7 +244,7 @@
   {:else}
     <div class="backbar" class:titled={app.view === "server"} bind:this={barEl}>
       <IconAction name="arrow-left" onclick={back} />
-      <span class="bt trunc" style:opacity={app.view === "server" ? 1 : titleK}>{barTitle}</span>
+      <span class="bt"><span class="bti trunc" style:opacity={app.view === "server" ? 1 : titleK} style:transform={app.view === "server" ? undefined : lift(titleK)}>{barTitle}</span></span>
       {@render barPlayBtn()}
       {#if app.view === "server" && admin.me}
         <span class="admin-role trunc">{admin.me.owner ? t("admin.role.owner") : tf("admin.role.admin", { handle: admin.me.handle ?? "" })}</span>
@@ -250,21 +253,25 @@
     </div>
   {/if}
   </div>
-  {:else if app.view === "artist"}
+  {:else if app.view === "artist" || app.view === "profile"}
+    <!-- Over the photo (artist) or banner (profile): round back button, the
+         name comes up in the bar once the page title scrolls under it. -->
     <div class="backbar over artist" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <span class="pill-ic" style:--bar-k={barBgK}>
         <IconAction name="arrow-left" onclick={back} />
       </span>
-      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
-      {@render barPlayBtn()}
-      <span class="pill-ic" style:--bar-k={barBgK}>
-        <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: artistMenuTrack, artist: app.openArtist })} />
-      </span>
+      <span class="bt"><span class="bti trunc" style:opacity={titleK} style:transform={lift(titleK)}>{barTitle}</span></span>
+      {#if app.view === "artist"}
+        {@render barPlayBtn()}
+        <span class="pill-ic" style:--bar-k={barBgK}>
+          <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: artistMenuTrack, artist: app.openArtist })} />
+        </span>
+      {/if}
     </div>
   {:else}
     <div class="backbar over" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <IconAction name="arrow-left" onclick={back} />
-      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
+      <span class="bt"><span class="bti trunc" style:opacity={titleK} style:transform={lift(titleK)}>{barTitle}</span></span>
       {@render barPlayBtn()}
       {#if app.openList}
         <IconAction name="ellipsis-vertical" label={t("ctx.more")} onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: barTracks[0] ?? null, list: app.openList! })} />
@@ -284,13 +291,13 @@
     <div class="tail" class:with-mini={!!app.player.current}></div>
   </main>
 
-  <div class="bottom" class:has-mini={!!app.player.current}>
+  <div class="bottom" class:has-mini={!!app.player.current} bind:offsetHeight={phone.bottomH}>
     {#if app.player.current}<MiniBar />{/if}
     <TabBar />
   </div>
 </div>
 
-{#if phone.npOpen && app.player.current}<NowPlayingSheet />{/if}
+{#if (phone.npOpen || phone.npRise > 0) && app.player.current}<NowPlayingSheet />{/if}
 {#if phone.lyricsOpen && app.player.current}<LyricsView />{/if}
 {#if phone.videoPickerOpen && app.player.current}<VideoPickerSheet />{/if}
 {#if app.showQueue || app.showDevices}<BottomSheet />{/if}
@@ -314,7 +321,8 @@
   .backbar.over.artist { top: 0; height: calc(54px + var(--safe-top, env(safe-area-inset-top))); padding: var(--safe-top, env(safe-area-inset-top)) 12px 0; gap: 8px; }
   .pill-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: color-mix(in srgb, #141414, transparent calc(var(--bar-k, 0) * 100%)); }
   .pill-ic > :global(*) { width: 38px; height: 38px; }
-  .bt { flex: 1; font-size: 16px; font-weight: 700; color: var(--text); }
+  .bt { flex: 1; min-width: 0; overflow: hidden; font-size: 16px; font-weight: 700; color: var(--text); }
+  .bti { display: block; will-change: transform; }
   /* Pages whose name lives in the bar (Server): as big as the tab headers (Header.svelte), centred. */
   .backbar.titled { height: 60px; }
   .backbar.titled .bt { font-size: 22px; line-height: 60px; height: 60px; margin-left: 2px; }

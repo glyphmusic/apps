@@ -68,7 +68,10 @@
 
 <div class="pickbar" role="toolbar" aria-label={t("pick.select")}>
   <Button icon="x" onclick={() => app.stopPicking()}>{t("pick.done")}</Button>
-  <span class="pick-n">{tf("pick.n", { n: pickedN })}</span>
+  <span class="pick-n" aria-label={tf("pick.n", { n: pickedN })}>
+    {#key pickedN}<span class="badge mono" class:zero={!pickedN}>{pickedN}</span>{/key}
+    <span class="of">{tf("pick.of_n", { n: tracks.length })}</span>
+  </span>
   <Button kind="text" onclick={() => app.pickAll(tracks)}>{t(allPicked ? "pick.none" : "pick.all")}</Button>
   <span class="flex1"></span>
   <div class="pacts">
@@ -106,7 +109,12 @@
     border-radius: 12px;
     background: #161618;
   }
-  .pick-n { font-size: var(--md); font-weight: 600; color: var(--text); padding: 0 4px; }
+  /* The count stands out (accent badge that pops on every change), so it
+     is clear at a glance how many songs the actions will touch. */
+  .pick-n { display: inline-flex; align-items: center; gap: 8px; padding: 0 4px; font-size: var(--md); color: var(--dim); }
+  .badge { min-width: 26px; height: 26px; padding: 0 8px; display: inline-grid; place-items: center; border-radius: 13px; background: var(--accent); color: #000; font-size: 13px; font-weight: 700; animation: pick-pop .22s var(--ease); }
+  .badge.zero { background: rgba(255, 255, 255, .1); color: var(--dim); }
+  @keyframes pick-pop { from { transform: scale(.7); } 60% { transform: scale(1.12); } to { transform: none; } }
   .pacts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .pl-sel.off { opacity: .4; pointer-events: none; }
 </style>

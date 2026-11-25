@@ -129,7 +129,8 @@ export class DemoBackend implements Backend, DemoCtx {
       // `?admin` signs in a demo admin (server dashboard, demo/admin.ts).
       account: demoAdmin() ? { handle: "demo" } : null,
       version: "0.12.4-demo", platform: "web",
-      first_run: false, output_devices: ["System default", "Speakers (Demo)", "Headphones (Demo)"], update: null,
+      // `?onboarding` in the address shows the first-start tour.
+      first_run: typeof location !== "undefined" && new URLSearchParams(location.search).has("onboarding"), output_devices: ["System default", "Speakers (Demo)", "Headphones (Demo)"], update: null,
     } satisfies Snapshot);
   }
 
