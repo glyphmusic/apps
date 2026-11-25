@@ -117,6 +117,22 @@ export function installPwa(): () => void {
   };
   syncMode();
 
+  // iPhone Home Screen app: with the black-translucent status bar, iOS makes
+  // 100dvh shorter than the screen by the status bar's height, which left a
+  // black bar under the tab bar. The app always fills the whole screen
+  // there, so the page takes the screen's height (screen.* never turns with
+  // the phone, so landscape uses the width).
+  const syncHeight = () => {
+    const root = document.documentElement.style;
+    if (!(pwa.standalone && pwa.ios && !pwa.ipad)) { root.removeProperty("--app-h"); return; }
+    const landscape = window.innerWidth > window.innerHeight;
+    const full = landscape ? Math.min(screen.width, screen.height) : Math.max(screen.width, screen.height);
+    root.setProperty("--app-h", `${Math.max(full, window.innerHeight)}px`);
+  };
+  syncHeight();
+  window.addEventListener("resize", syncHeight);
+  window.addEventListener("orientationchange", syncHeight);
+
   const mqStandalone = window.matchMedia?.("(display-mode: standalone)");
   mqStandalone?.addEventListener?.("change", syncMode);
 
@@ -174,6 +190,8 @@ export function installPwa(): () => void {
     mqStandalone?.removeEventListener?.("change", syncMode);
     window.removeEventListener("beforeinstallprompt", onBeforeInstall);
     window.removeEventListener("appinstalled", onAppInstalled);
+    window.removeEventListener("resize", syncHeight);
+    window.removeEventListener("orientationchange", syncHeight);
     if (vv) {
       vv.removeEventListener("resize", syncIme);
       vv.removeEventListener("scroll", syncIme);

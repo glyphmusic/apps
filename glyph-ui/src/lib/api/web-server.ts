@@ -58,10 +58,13 @@ export interface AccountSession {
   account: AccountInfo;
 }
 
+/** `glyph_protocol::LoginStartResponse`. */
 export interface LoginStartResponse {
   login_id: string;
-  code: string;
-  browser_url: string;
+  /** Only this device knows it; the poll needs it to collect the tokens. */
+  poll_secret: string;
+  user_code: string;
+  url: string;
   expires_in_s: number;
 }
 
@@ -410,8 +413,8 @@ export const server = {
   loginStart: (device_name: string, platform: string, pake?: string) =>
     sendJson<LoginStartResponse>("POST", "/v1/account/login/start", { device_name, platform, ...(pake ? { pake } : {}) }, undefined, undefined, false),
 
-  loginPoll: (login_id: string) =>
-    getJson<LoginPollResponse>("/v1/account/login/poll", { login_id }, undefined, undefined, false),
+  loginPoll: (login_id: string, poll_secret: string) =>
+    sendJson<LoginPollResponse>("POST", "/v1/account/login/poll", { login_id, poll_secret }, undefined, undefined, false),
 
   tokenRefresh: (refresh_token: string) =>
     sendJson<AccountSession>("POST", "/v1/account/token/refresh", { refresh_token }, undefined, undefined, false),

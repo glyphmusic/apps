@@ -232,6 +232,8 @@ export interface WebAccountHost {
 export class WebAccountManager {
   private session: StoredAccountSession | null;
   private devices: DeviceInfo[] = [];
+  /** login_id -> poll_secret of running browser / pairing sign-ins. */
+  private pollSecrets = new Map<string, string>();
   /** Space the account uses on the server (null: unknown or no limit there). */
   private storage: { used_bytes: number; limit_bytes: number } | null = null;
   private syncing = false;
@@ -1178,35 +1180,38 @@ export class WebAccountManager {
         };
       },
 
-      account_login_start: async (a) => {
+      account_login_start: async () => {
         const res = await server.loginStart(detectDeviceName(), detectPlatform());
-        const url = res.browser_url.startsWith("http")
-          ? res.browser_url
-          : `${serverOrigin()}${res.browser_url.startsWith("/") ? "" : "/"}${res.browser_url}`;
-        if (a.open_browser) {
-          window.open(url, "_blank", "noopener,noreferrer");
-        }
+        const url = res.url.startsWith("http")
+          ? res.url
+          : `${serverOrigin()}${res.url.startsWith("/") ? "" : "/"}${res.url}`;
+        this.pollSecrets.set(res.login_id, res.poll_secret);
         return {
           login_id: res.login_id,
-          code: res.code,
-          browser_url: url,
+          user_code: res.user_code,
+          url,
           expires_in_s: res.expires_in_s,
         };
       },
 
       account_login_poll: async (a) => {
-        const res = await server.loginPoll(String(a.login_id));
+        const id = String(a.login_id);
+        const secret = this.pollSecrets.get(id);
+        if (!secret) return { state: "expired" };
+        const res = await server.loginPoll(id, secret);
         if (res.status === "done") {
+          this.pollSecrets.delete(id);
           await this.finishSignIn(res.session);
           return { state: "done", handle: res.session.account.handle };
         }
+        if (res.status === "expired") this.pollSecrets.delete(id);
         return { state: res.status };
       },
 
       account_password_submit: async (a) => {
         const handle = String(a.handle ?? "").trim().replace(/^@/, "");
         const password = String(a.password ?? "");
-        const create = Boolean(a.create);
+        const create = Boolean(a.register ?? a.create);
         const device_name = detectDeviceName();
         const platform = detectPlatform();
 
@@ -1216,7 +1221,7 @@ export class WebAccountManager {
           const reg = await server.passwordRegister({ handle, salt, key, device_name, platform });
           const session = "session" in reg ? reg.session : reg;
           await this.finishSignIn(session, password);
-          return "recovery_code" in reg ? reg.recovery_code : undefined;
+          return { handle: session.account.handle, recovery_code: "recovery_code" in reg ? reg.recovery_code : null };
         }
 
         const saltRes = await server.passwordSalt(handle);
@@ -1226,6 +1231,7 @@ export class WebAccountManager {
           throw new Error("suspicious_salt");
         }
         await this.finishSignIn(session, password);
+        return { handle: session.account.handle, recovery_code: null };
       },
 
       account_unlock_keys: async (a) => {

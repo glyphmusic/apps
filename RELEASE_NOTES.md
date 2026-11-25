@@ -1,7 +1,6 @@
-# Glyph 0.13.8 - 2026-11-25
+# Glyph 0.13.9 - 2026-11-25
 
-- **Radio**: a radio started from a song now sounds like that song (same genre and mood), finds many more similar songs and starts right away when the queue ends.
-- **Android**: Glyph pauses when another app plays sound and plays on afterwards.
-- **Plugins**: a plugin's app icon can go on the Android home screen, broken look parts are listed, big app icons work on the desktop and corners round everywhere.
+- **Web**: signing in and creating an account on glyph.my/web work again.
+- **iPhone**: the web app on the home screen fills the whole screen, without a black bar at the bottom.
 
 See CHANGELOG.md for the complete changes.

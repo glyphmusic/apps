@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.9 - 2026-11-25
+
+### Fixed
+
+- **Sign in on the web**: on glyph.my/web, signing in through the website page and creating an account with a name and password work again.
+- **Black bar on iPhone**: Glyph added to the iPhone home screen as a web app now fills the whole screen, without a black bar under the tabs.
+
 ## 0.13.8 - 2026-11-25
 
 ### Added
