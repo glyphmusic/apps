@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- **See a plugin before you use it**: a plugin's page now shows its app icon, the icons it replaces, its background pictures and its startup animation. Plugins with their own app icon show it in the list too.
+- **Solve plugin conflicts**: when two plugins change the same thing, press "Use this one" on a plugin's page to pick which one wins. Glyph remembers it. Until you pick, the plugin whose name comes first wins.
+- **Plugin warnings**: a plugin's page (and the warning before you install it) lists your own settings it replaces while it is on, like the background, font or app icon. When two plugins change the same thing, both say "Plugin conflict" and which one wins.
+
 ### Changed
 
 - **A first start that gets you going**: instead of a tour of features, the first start now asks what you like, then lets you make your first playlist right away (give it a name, tick songs we picked for you or search for others), then speed and colour. At the end the new playlist opens.
@@ -15,6 +21,9 @@
 
 ### Fixed
 
+- **Plugin corners**: a look's corner roundness now changes the corners of the whole interface, not only a few panels. The plugin page says how round, compared to Glyph's.
+- **Plugin app icons, startup animations and layouts missing**: plugins installed with an older Glyph lost the parts that Glyph did not know yet. Glyph now installs them again in full by itself.
+- **Plugin texts**: when two plugins replace the same text, the same one wins as for the rest of a look.
 - **Closing sheets by tapping beside them**: tapping above an open sheet, menu or dialog to close it no longer also taps the button or song underneath (for example starting a song).
 - **Lists on phones**: a fast scroll up now stops at the top of the list instead of flinging the search bar into view and pulling it back. Scroll up once more to show the search bar.
 - **Top bar title on phones**: the list or artist name now rises into the top bar from below as you scroll, instead of just appearing.

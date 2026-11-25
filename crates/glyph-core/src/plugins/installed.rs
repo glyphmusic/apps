@@ -36,10 +36,15 @@ pub struct Installed {
 }
 
 impl Installed {
-    /// The catalog's listing of this plugin when it is newer (same repo).
+    /// The catalog's listing of this plugin when it is newer (same repo),
+    /// or the same version listed at another commit with a different
+    /// manifest: an older Glyph saved it without the fields it did not know
+    /// yet (like a look's app icon), so it is installed again in full.
     pub fn update_in<'a>(&self, catalog: &'a Catalog) -> Option<&'a Listing> {
         let l = self.listing_in(catalog)?;
-        (is_newer(&l.manifest.version, &self.manifest.version) && l.installable().is_ok()).then_some(l)
+        let newer = is_newer(&l.manifest.version, &self.manifest.version);
+        let refresh = l.checked && l.manifest.version == self.manifest.version && l.rev != self.origin.rev && l.manifest != self.manifest;
+        ((newer || refresh) && l.installable().is_ok()).then_some(l)
     }
 
     /// When the newest version does not fit this Glyph: the newest earlier
@@ -78,6 +83,23 @@ pub fn installed_unfit() -> Vec<(Installed, Invalid)> {
             _ => None,
         })
         .collect()
+}
+
+/// Puts `v` (sorted by name) in the user's order: plugins in `order` first,
+/// as listed, the rest after them by name. The first plugin wins when two
+/// change the same thing (font, icon, text …).
+pub fn sort_by_order(v: &mut [Installed], order: &[String]) {
+    v.sort_by_key(|p| order.iter().position(|id| *id == p.manifest.id).unwrap_or(usize::MAX));
+}
+
+/// The order after the user picked `id` to win over `over`: `id` moves
+/// right before `over`; everything else keeps its place. `current` is the
+/// installed plugins' ids in their order now.
+pub fn prefer(current: &[String], id: &str, over: &str) -> Vec<String> {
+    let mut v: Vec<String> = current.iter().filter(|x| *x != id).cloned().collect();
+    let at = v.iter().position(|x| x == over).unwrap_or(0);
+    v.insert(at, id.to_string());
+    v
 }
 
 fn scan() -> Vec<(Installed, Result<(), Invalid>)> {

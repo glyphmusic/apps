@@ -94,6 +94,7 @@
 //   plugin_install      { id, repo, path, rev }              -> void (rejects with the error)
 //   plugin_uninstall    { id }                               -> void
 //   plugin_enable       { id, on }                           -> void
+//   plugin_prefer       { id, over }                         -> void
 //   plugins_reload      {}                                   -> void
 //   plugins_folder      {}                                   -> void   (creates + reveals the plugins folder)
 //   plugin_set_value    { plugin, item, value }              -> void
@@ -178,6 +179,13 @@ function asInstalled(l: PluginListing, extra: Partial<PluginInstalled> = {}): Pl
   return { ...l, local: false, enabled: true, has_page: l.sections.length > 0, missing_credentials: false, stopped: null, log: [], update: cat && newer(cat.version, l.version) ? cat : null, ...extra };
 }
 st.plugins = [asInstalled(L({ id: "lyrics-tidy", name: "Lyrics Tidy", version: "1.1.0", stars: 64, strings: 4, sections: ["Lyrics (own page)"] }), { installed_at: 1793000000, latest: "1.2.0" })];
+const NEON_LOOK = { font: "rounded", radius: 1.6, backgrounds: 0, css: true, app_icon: true, icons: 2, splash: true, icon_names: ["heart", "heart-fill"],
+  splash_art: ["  *  NEON  *  ", " ~~~~~~~~~~~~ ", "  *        *  "],
+  preview: { app_icon: "https://raw.githubusercontent.com/glyphmusic/plugins/main/themes/aurora/app-icon.png", icons: { heart: "https://raw.githubusercontent.com/glyphmusic/plugins/main/themes/aurora/icons/heart.svg", "heart-fill": "https://raw.githubusercontent.com/glyphmusic/plugins/main/themes/aurora/icons/heart-fill.svg" }, backgrounds: [] } };
+st.plugins.push(
+  asInstalled(L({ id: "neon-night", name: "Neon Night", description: "Rounder corners, a rounded font, star hearts and its own app icon.", stars: 9, look: NEON_LOOK }), { installed_at: 1793500000 }),
+  asInstalled(L({ id: "big-corners", name: "Big Corners", description: "Very round corners and a serif font.", stars: 4, look: { font: "serif", radius: 2, backgrounds: 0, css: false } }), { installed_at: 1793600000 }),
+);
 st.unfit = [asInstalled(L({ id: "classic-bar", name: "Classic Bar", version: "1.0.0", max_app: "0.12", installable: "needs_older_app", description: "The old sidebar look.", stars: 5, strings: 2 }), { enabled: false, installed_at: 1780000000 })];
 
 function pluginUi(): PluginUiState {
@@ -204,7 +212,9 @@ function pluginUi(): PluginUiState {
       });
     }
   }
-  return { hidden: [], sections, pages, strings: {} };
+  // Looks: font and corners of the demo plugins (sorted by name, like the app).
+  const looks = active.filter((p) => p.look).sort((a, b) => a.name.localeCompare(b.name)).map((p) => ({ plugin: p.id, font: p.look!.font, radius: p.look!.radius, css: "" }));
+  return { hidden: [], sections, pages, strings: {}, looks };
 }
 
 // ---- migrate -----------------------------------------------------------------
@@ -421,6 +431,13 @@ export const handlers: Record<string, DemoHandler> = {
   },
   plugin_uninstall: async (_, a) => { await lag(400); st.plugins = st.plugins.filter((p) => p.id !== a.id); st.unfit = st.unfit.filter((p) => p.id !== a.id); },
   plugin_enable: (_, a) => { const p = st.plugins.find((x) => x.id === a.id); if (p) p.enabled = !!a.on; },
+  plugin_prefer: (_, a) => {
+    // Like the backend: the picked plugin moves right before the other one.
+    const me = st.plugins.find((p) => p.id === a.id);
+    const rest = st.plugins.filter((p) => p.id !== a.id);
+    const at = rest.findIndex((p) => p.id === a.over);
+    if (me && at >= 0) { rest.splice(at, 0, me); st.plugins = rest; }
+  },
   plugins_reload: () => {},
   plugins_folder: () => {},
   plugin_set_value: (_, a) => { st.pluginValues[`${a.plugin}.${a.item}`] = a.value; },

@@ -139,7 +139,7 @@ pub fn setup(core: &Arc<Core>) {
     std::thread::Builder::new()
         .name("glyph-plugins".into())
         .spawn(move || {
-            load(&st);
+            load(&core, &st);
             sync_code(&core, &st);
             crate::theme_icon::sync_host_icon(&core);
             loop {
@@ -160,10 +160,13 @@ fn may_run(p: &Installed, disabled: &[String]) -> bool {
     p.manifest.main.is_some() && !disabled.contains(&p.manifest.id) && (p.origin.checked || p.origin.is_local())
 }
 
-/// Reads the installed plugins (and the cached catalog) from disk.
-fn load(st: &PluginState) {
+/// Reads the installed plugins (and the cached catalog) from disk, in the
+/// user's order (the first wins a conflict).
+fn load(core: &Core, st: &PluginState) {
+    let order = core.st().config.plugins.order.clone();
     let mut rt = st.lock();
     rt.installed = plugins::installed();
+    plugins::sort_by_order(&mut rt.installed, &order);
     rt.unfit = plugins::installed_unfit();
     if rt.catalog.is_none() {
         rt.catalog = plugins::cached_catalog();
@@ -319,7 +322,8 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
         "permissions": permission_list(m), "theme": theme_json(m),
         "sections": sections, "menus": menus,
         "strings": m.strings.values().map(|s| s.len()).max().unwrap_or(0),
-        "hide": m.hide, "setup": setup, "look": look_json(m),
+        "hide": m.hide, "setup": setup, "look": look_json(m, raw_base(&l.repo, &l.rev, &l.path).as_deref()),
+        "replaces": replaced_texts(m),
         "versions": l.versions.iter().map(version_json).collect::<Vec<_>>(),
         "fitting": l.fitting_version().map(|v| v.version.clone()),
     })
@@ -352,15 +356,45 @@ fn version_listing_json(core: &Core, l: &Listing, v: &VersionRef) -> Value {
 }
 
 /// What a plugin's look changes (for its card), or null.
-fn look_json(m: &plugins::Manifest) -> Value {
-    match &m.look {
-        Some(l) => json!({
-            "font": font_kind(&l.font), "mono": font_kind(&l.mono), "app_icon": l.app_icon.is_some(),
-            "layout": l.home.is_some() || l.sidebar.is_some() || l.tabs.is_some() || !l.sidebar_position.is_empty(),
-            "splash": l.splash.is_some(), "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
-        }),
-        None => Value::Null,
+fn look_json(m: &plugins::Manifest, base: Option<&str>) -> Value {
+    let Some(l) = &m.look else { return Value::Null };
+    // Where the look's files can be seen (the commit on GitHub), for its preview.
+    let url = |f: &str| base.map(|b| format!("{b}{f}"));
+    let preview = base.map(|_| {
+        json!({
+            "app_icon": l.app_icon.as_deref().and_then(url),
+            "icons": l.icons.iter().filter_map(|(n, f)| Some((n.clone(), Value::String(url(f)?)))).collect::<Map<String, Value>>(),
+            "backgrounds": l.backgrounds.iter().filter_map(|f| url(f)).collect::<Vec<_>>(),
+        })
+    });
+    json!({
+        "font": font_kind(&l.font), "mono": font_kind(&l.mono), "app_icon": l.app_icon.is_some(),
+        "layout": l.home.is_some() || l.sidebar.is_some() || l.tabs.is_some() || !l.sidebar_position.is_empty(),
+        "home": l.home.is_some(), "sidebar": l.sidebar.is_some(), "tabs": l.tabs.is_some(), "sidebar_position": l.sidebar_position,
+        "splash": l.splash.is_some(), "splash_art": l.splash.as_ref().map(|s| s.art.clone()),
+        "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
+        "icon_names": l.icons.keys().collect::<Vec<_>>(),
+        "preview": preview,
+    })
+}
+
+/// Raw files of `repo` at `rev` (with the plugin's folder), or `None` for
+/// plugins put in the folder by hand.
+fn raw_base(repo: &str, rev: &str, path: &str) -> Option<String> {
+    if repo == plugins::LOCAL_REPO || !plugins::valid_repo(repo) || rev.is_empty() || !rev.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
     }
+    let dir = if path.is_empty() { String::new() } else { format!("{path}/") };
+    Some(format!("https://raw.githubusercontent.com/{repo}/{rev}/{dir}"))
+}
+
+/// Glyph's texts the plugin replaces (keys not of its own), each once.
+fn replaced_texts(m: &plugins::Manifest) -> Vec<String> {
+    let own = format!("{}.", m.id);
+    let mut keys: Vec<String> = m.strings.values().flat_map(|t| t.keys()).filter(|k| !k.starts_with(&own)).cloned().collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// A look's font for the UI: Glyph's font name, or "" for a font file (sent
@@ -383,8 +417,8 @@ fn font_kind(font: &str) -> &str {
 }
 
 /// The app icon of the looks in use (.png): a theme's while its theme is
-/// picked, an extension's while it is on; the first plugin wins, like the
-/// UI's font and corners.
+/// picked, an extension's while it is on; the first plugin wins (the
+/// user's order, else by name), like the UI's font and corners.
 pub(crate) fn active_app_icon(st: &PluginState, dis: &[String], theme: &str) -> Option<Vec<u8>> {
     let rt = st.lock();
     rt.installed
@@ -528,8 +562,9 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
     for m in &manifests {
         for (l, map) in &m.strings {
             let t = strings.entry(l.clone()).or_default();
+            // Like everything else of a look: the first plugin wins (the user's order, else by name).
             for (k, v) in map {
-                t.insert(k.clone(), v.clone());
+                t.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
     }
@@ -628,7 +663,7 @@ pub async fn plugin_install(core: C<'_>, id: String, repo: String, path: Option<
     tokio::task::spawn_blocking(move || plugins::install_with_look(&l2, code.as_deref(), &look).map(|_| ()).map_err(|e| format!("{e:#}")))
         .await
         .map_err(|e| e.to_string())??;
-    load(&st);
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(&core);
     Ok(())
@@ -641,7 +676,7 @@ pub async fn plugin_uninstall(core: C<'_>, id: String) -> Res {
     st.lock().running.remove(&id);
     let gone = id.clone();
     tokio::task::spawn_blocking(move || plugins::uninstall(&gone).map_err(|e| format!("{e:#}"))).await.map_err(|e| e.to_string())??;
-    load(&st);
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(&core);
     Ok(())
@@ -657,7 +692,22 @@ pub fn plugin_enable(core: C<'_>, id: String, on: bool) {
         }
     }
     core.config_changed();
-    load(&st);
+    load(&core, &st);
+    sync_code(&core, &st);
+    crate::theme_icon::sync_host_icon(core);
+}
+
+/// The user picked `id` to win its conflict with `over` (both change the
+/// same thing): `id` now comes first.
+pub fn plugin_prefer(core: C<'_>, id: String, over: String) {
+    let Some(st) = core.plugins() else { return };
+    let current: Vec<String> = st.lock().installed.iter().map(|p| p.manifest.id.clone()).collect();
+    if !current.contains(&id) || !current.contains(&over) {
+        return;
+    }
+    core.st().config.plugins.order = plugins::prefer(&current, &id, &over);
+    core.config_changed();
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(core);
 }
@@ -670,9 +720,8 @@ pub fn plugins_reload(core: C<'_>) {
         let local: Vec<String> = rt.installed.iter().filter(|p| p.origin.is_local()).map(|p| p.manifest.id.clone()).collect();
         rt.running.retain(|id, _| !local.contains(id));
     }
-    load(&st);
     // Reload also re-reads what is installed (an edited manifest).
-    st.lock().installed = plugins::installed();
+    load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(core);
 }

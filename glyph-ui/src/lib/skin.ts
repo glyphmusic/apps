@@ -14,6 +14,7 @@
 // "settings" | "menu" | "dialog" | "toasts" | "tooltip" | "mini-player" |
 // "tab-bar" | "mini-bar" | "now-playing"]`.
 import { setIconOverrides } from "./icon-overrides.svelte";
+import { setCornerScale } from "./corners";
 import { setLayouts, type LayoutArea, type LayoutSpec } from "./layout.svelte";
 import type { SplashSpec } from "./overlays/splash-art";
 
@@ -93,9 +94,11 @@ export function applyLooks(looks: PluginLook[]) {
     const k = Math.min(2, Math.max(0, radius));
     root.setProperty("--radius", `${Math.round(BASE_RADIUS * k * 10) / 10}px`);
     root.setProperty("--radius-k", String(k));
+    setCornerScale(k);
   } else {
     root.removeProperty("--radius");
     root.removeProperty("--radius-k");
+    setCornerScale(1);
   }
   const icons: Record<string, string> = {};
   for (const l of [...looks].reverse()) Object.assign(icons, l.icons ?? {});

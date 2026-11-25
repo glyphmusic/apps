@@ -8,6 +8,7 @@ import { setOverrides, t, tf } from "../i18n.svelte";
 import { setPluginThemes, type Theme } from "../theme";
 import { loadBackgrounds } from "../backgrounds.svelte";
 import { errText } from "./util";
+import { preferOrder, sortLikeGlyph, type Named } from "./plugin-order";
 import type { PluginCatalog, PluginInstalled, PluginListing, PluginUiState, PluginVersion } from "./types";
 
 export const THEME_PREFIX = "plugin:";
@@ -73,6 +74,67 @@ export async function refreshCatalog(force = false) {
 
 export function findListing(id: string): PluginListing | undefined {
   return pl.catalog?.checked.find((l) => l.id === id) ?? pl.catalog?.community.find((l) => l.id === id);
+}
+
+// ---- what a plugin takes over, and conflicts between plugins -------------
+
+/** One thing a plugin changes that only one plugin can: `key` to compare, `label` (i18n key) to show. */
+export interface Slot { key: string; label: string }
+
+/** What `m` changes that only one plugin can change at a time. */
+export function pluginSlots(m: PluginListing): Slot[] {
+  const l = m.look, out: Slot[] = [];
+  if (l?.font) out.push({ key: "font", label: "plugins.part.font" });
+  if (l?.mono) out.push({ key: "mono", label: "plugins.part.mono" });
+  if (l?.app_icon) out.push({ key: "app_icon", label: "plugins.part.app_icon" });
+  if (l?.radius != null) out.push({ key: "corners", label: "plugins.part.corners" });
+  if (l?.splash) out.push({ key: "splash", label: "plugins.part.splash" });
+  if (l?.sidebar_position) out.push({ key: "sidebar_position", label: "plugins.part.sidebar_position" });
+  for (const a of ["home", "sidebar", "tabs"] as const) if (l?.[a]) out.push({ key: a, label: "plugins.part.layout" });
+  for (const n of l?.icon_names ?? []) out.push({ key: `icon:${n}`, label: "plugins.part.icons" });
+  for (const k of m.replaces ?? []) out.push({ key: `text:${k}`, label: "plugins.part.texts" });
+  return out;
+}
+
+/** Your own settings `m` replaces while it is on (labels, i18n keys). */
+export function pluginOverrides(m: PluginListing): string[] {
+  const l = m.look, out: string[] = [];
+  if (l?.css || (m.theme && m.kind !== "theme")) out.push("plugins.part.background");
+  for (const s of pluginSlots(m)) if (!out.includes(s.label)) out.push(s.label);
+  return out;
+}
+
+export interface Conflict { other: PluginInstalled; parts: string[]; wins: boolean }
+
+/** Whether `a` wins over installed `b` (when both change the same thing). */
+function beats(a: Named, b: Named): boolean {
+  const list: Named[] = pl.installed.some((x) => x.id === a.id) ? pl.installed : sortLikeGlyph([...pl.installed, a], app.config.plugins.order ?? []);
+  return list.findIndex((x) => x.id === a.id) < list.findIndex((x) => x.id === b.id);
+}
+
+/** Resolves a conflict: `id` wins over `over` from now on. */
+export async function preferPlugin(id: string, over: string) {
+  const order = preferOrder(pl.installed.map((p) => p.id), id, over);
+  await app.setConfig((c) => { c.plugins.order = order; });
+  await backend().call("plugin_prefer", { id, over });
+  await loadPlugins();
+  const name = pl.installed.find((p) => p.id === id)?.name ?? id;
+  app.toast(tf("plugins.conflict.resolved", { name }));
+}
+
+/** Other plugins in use that change the same things as `m`. Like Glyph
+ *  applies them, the first plugin wins: the user's pick, else by name. */
+export function pluginConflicts(m: PluginListing): Conflict[] {
+  const mine = pluginSlots(m);
+  if (!mine.length) return [];
+  const keys = new Set(mine.map((s) => s.key));
+  const theme = app.config.visuals.theme;
+  return pl.installed
+    .filter((o) => o.id !== m.id && o.enabled && (o.kind !== "theme" || theme === themeId(o.id)))
+    .flatMap((o) => {
+      const parts = [...new Set(pluginSlots(o).filter((s) => keys.has(s.key)).map((s) => s.label))];
+      return parts.length ? [{ other: o, parts, wins: beats(m, o) }] : [];
+    });
 }
 
 /** An installed plugin, running or paused. */
