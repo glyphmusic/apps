@@ -15,6 +15,10 @@
 - **Better search**: small typos ("beleiver", "metalica") still find the right song, and songs you picked from search before rank higher.
 - **Better "Add songs" for playlists**: suggestions now match the sound and artists of the playlist itself, not only your overall taste.
 
+### Fixed
+
+- **Server dashboard bans**: a banned person shows as one row in the ban list, with the number of device entries next to it, and "Unban" there lifts the account ban and its device bans together. The "banned" badge disappears right after an unban, without reloading the page.
+
 ## 0.13.5 - 2026-11-24
 
 ### Fixed

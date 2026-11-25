@@ -1979,6 +1979,7 @@
 "admin.bans.until" = "do {d}"
 "admin.bans.forever" = "bezterminowo"
 "admin.bans.none" = "Nikt nie jest zablokowany."
+"admin.bans.devices" = "+{n} wpisów urządzeń"
 "admin.note.owner" = "Zalogowano jako właściciel serwera."
 "admin.note.admin" = "Klucze, aktualizacje i nadawanie roli administratora pozostają w rękach właściciela serwera."
 "admin.limit.youtube_account" = "YouTube tylko z kontem"

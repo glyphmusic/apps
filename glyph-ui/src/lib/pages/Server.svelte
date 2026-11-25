@@ -255,14 +255,39 @@
       },
     });
   }
-  async function unban(target: string, id?: string) {
+  async function unban(target: string) {
     const r = await act(() => adminCall<{ bans: Ban[] }>("POST", "bans/remove", { target }), t("admin.done"));
     if (r) {
       bans = r.bans;
-      const gone = id ?? people.find((x) => x.handle === target)?.id;
-      if (gone) { people = people.map((x) => (x.id === gone ? { ...x, banned: false } : x)); if (detail?.id === gone) detail = { ...detail, banned: false }; }
+      // The answer is the full list: every person's badge follows it at once,
+      // whichever row (account, device, IP) was removed.
+      const banned = (id: string) => r.bans.some((b) => b.kind === "account" && b.value === id);
+      people = people.map((x) => (x.banned === banned(x.id) ? x : { ...x, banned: banned(x.id) }));
+      if (detail) detail = { ...detail, banned: banned(detail.id) };
     }
   }
+  // One row per banned person: an account ban and the device/IP bans made
+  // with it share the account id. Removing the row lifts all of them.
+  interface BanRow { key: string; ban: Ban; extra: number; target: string }
+  const banRows = $derived.by(() => {
+    const rows = new Map<string, BanRow>();
+    for (const b of bans) {
+      const key = b.kind === "account" ? b.value : (b.origin ?? b.id);
+      const row = rows.get(key);
+      if (!row) {
+        rows.set(key, { key, ban: b, extra: 0, target: b.id });
+        continue;
+      }
+      row.extra += 1;
+      if (b.kind === "account") row.ban = b;
+    }
+    for (const row of rows.values()) {
+      if (row.extra === 0) continue;
+      const handle = people.find((x) => x.id === row.key)?.handle ?? row.ban.label?.match(/^@([^\s/]+)/)?.[1];
+      if (handle) row.target = handle;
+    }
+    return [...rows.values()];
+  });
   async function setDevices(p: AdminAccountRow, n: number | null) {
     const a = await act(() => adminCall<AdminAccount>("PUT", `accounts/${encodeURIComponent(p.handle)}`, { device_limit: n }));
     if (a) updateRow(a);
@@ -437,7 +462,7 @@
               <Button icon="rotate-ccw" onclick={() => resetProfile(p, { banner: true })} disabled={busy}>{t("admin.profile.reset_banner")}</Button>
             {/if}
             {#if detail.banned}
-              <Button icon="ban" onclick={() => unban(p.handle, p.id)} disabled={busy}>{t("admin.unban")}</Button>
+              <Button icon="ban" onclick={() => unban(p.handle)} disabled={busy}>{t("admin.unban")}</Button>
             {:else}
               <Button kind="danger" icon="ban" onclick={() => ban(p)} disabled={busy}>{t("admin.ban.ok")}</Button>
             {/if}
@@ -518,12 +543,13 @@
 
 {#snippet bansCard(max: number)}
   <div class="card cbox">
-    <div class="ch"><SectionTitle icon="ban" title={tf("admin.bans", { n: bans.length })} /></div>
-    {#each bans.slice(0, max) as b (b.id)}
+    <div class="ch"><SectionTitle icon="ban" title={tf("admin.bans", { n: banRows.length })} /></div>
+    {#each banRows.slice(0, max) as row (row.key)}
+      {@const b = row.ban}
       <div class="ban">
-        <span class="bl trunc">{b.label ?? `${b.kind} ${b.value.slice(0, 12)}`}</span>
-        <span class="bm">{b.expires_at ? tf("admin.bans.until", { d: new Date(b.expires_at).toLocaleDateString() }) : t("admin.bans.forever")}</span>
-        <Button kind="text" onclick={() => unban(b.id)} disabled={busy}>{t("admin.unban")}</Button>
+        <span class="bl trunc">{(b.kind === "account" ? b.label : b.label?.split(" / ")[0]) ?? `${b.kind} ${b.value.slice(0, 12)}`}</span>
+        <span class="bm">{#if row.extra > 0}{tf("admin.bans.devices", { n: row.extra })} · {/if}{b.expires_at ? tf("admin.bans.until", { d: new Date(b.expires_at).toLocaleDateString() }) : t("admin.bans.forever")}</span>
+        <Button kind="text" onclick={() => unban(row.target)} disabled={busy}>{t("admin.unban")}</Button>
       </div>
     {:else}
       <div class="na">{t("admin.bans.none")}</div>

@@ -2005,6 +2005,7 @@
 "admin.bans.until" = "tot {d}"
 "admin.bans.forever" = "geen einde"
 "admin.bans.none" = "Niemand is verban nie."
+"admin.bans.devices" = "+{n} toestelinskrywings"
 "admin.note.owner" = "Jy is aangemeld as die bedienereienaar."
 "admin.note.admin" = "Sleutels, opdaterings en die toekenning van die admin-rol bly by die bedienereienaar."
 "admin.limit.youtube_account" = "YouTube net met 'n rekening"

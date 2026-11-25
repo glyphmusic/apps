@@ -1979,6 +1979,7 @@
 "admin.bans.until" = "bitiş: {d}"
 "admin.bans.forever" = "süresiz"
 "admin.bans.none" = "Yasaklı kimse yok."
+"admin.bans.devices" = "+{n} cihaz kaydı"
 "admin.note.owner" = "Sunucu sahibi olarak oturum açtın."
 "admin.note.admin" = "Anahtarlar, güncellemeler ve yönetici rolü verme yetkisi sunucu sahibinde kalır."
 "admin.limit.youtube_account" = "YouTube yalnızca hesapla"

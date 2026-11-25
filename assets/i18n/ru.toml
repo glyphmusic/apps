@@ -2007,6 +2007,7 @@
 "admin.bans.until" = "до {d}"
 "admin.bans.forever" = "бессрочно"
 "admin.bans.none" = "Никто не заблокирован."
+"admin.bans.devices" = "+{n} записей устройств"
 "admin.note.owner" = "Вы вошли как владелец сервера."
 "admin.note.admin" = "Ключи, обновления и выдача роли админа доступны только владельцу сервера."
 "admin.limit.youtube_account" = "YouTube только с аккаунтом"
