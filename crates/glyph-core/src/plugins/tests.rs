@@ -432,7 +432,26 @@ fn install_and_uninstall_roundtrip() {
     assert_eq!(inst.look_backgrounds().len(), 1);
     assert!(inst.look_icons()["heart"].starts_with("<svg"));
     assert!(inst.look_file("../origin.json").is_none());
+    assert!(inst.look_problems().is_empty());
+    assert!(inst.look_data_url("icons/heart.svg").unwrap().starts_with("data:image/svg+xml;base64,"));
     uninstall("neon").unwrap();
+    // A local plugin (made by hand): what does not work is said, not hidden.
+    let mut m = theme("handmade", "0.1.0");
+    m.look = Some(LookSpec { app_icon: Some("icon.png".into()), css: Some("style.css".into()), ..Default::default() });
+    let dir = plugins_dir().join("handmade");
+    paths::write_json(&dir.join(MANIFEST_FILE), &m).unwrap();
+    // 32 x 32: too small for an app icon. No style sheet at all.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend_from_slice(&32u32.to_be_bytes());
+    png.extend_from_slice(&32u32.to_be_bytes());
+    std::fs::write(dir.join("icon.png"), &png).unwrap();
+    let local = installed().into_iter().find(|p| p.manifest.id == "handmade").unwrap();
+    let problems = local.look_problems();
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("icon.png:") && p.contains("32 x 32")));
+    assert!(problems.iter().any(|p| p == "style.css: missing"));
+    assert!(local.look_app_icon().is_none());
+    uninstall("handmade").unwrap();
     std::env::remove_var("GLYPH_DATA_DIR");
 }
 

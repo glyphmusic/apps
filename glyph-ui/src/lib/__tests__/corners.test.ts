@@ -13,3 +13,10 @@ describe("scaleRadius", () => {
     expect(scaleRadius("var(--radius)", 2)).toBe("var(--radius)");
   });
 });
+
+describe("cornerPx", () => {
+  it("follows the look's corner scale", async () => {
+    const { cornerPx } = await import("../corners");
+    expect(cornerPx(6)).toBe("calc(6px * var(--radius-k, 1))");
+  });
+});

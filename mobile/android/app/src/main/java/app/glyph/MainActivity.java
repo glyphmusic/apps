@@ -10,9 +10,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.content.pm.ShortcutInfo;
+import android.content.pm.ShortcutManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.drawable.Icon;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -1680,6 +1683,34 @@ public class MainActivity extends AppCompatActivity {
             }
             scheduleLauncherAlias(aliasForTheme(themeId, rgb));
         });
+    }
+
+    /**
+     * Asks the launcher to add a Glyph shortcut with a plugin's app icon
+     * ({@code png}, checked by Rust) to the home screen. Android doesn't let
+     * an app swap its own launcher icon for any picture, but a pinned
+     * shortcut can carry one. False when the launcher can't pin shortcuts.
+     */
+    public boolean gpuiPinIcon(String key, byte[] png) {
+        ShortcutManager sm = getSystemService(ShortcutManager.class);
+        if (sm == null || !sm.isRequestPinShortcutSupported() || png == null) {
+            return false;
+        }
+        Bitmap bmp = BitmapFactory.decodeByteArray(png, 0, png.length);
+        if (bmp == null) {
+            return false;
+        }
+        Intent open = new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        ShortcutInfo info = new ShortcutInfo.Builder(this, "icon-" + key)
+                .setShortLabel("Glyph")
+                .setIcon(Icon.createWithBitmap(bmp))
+                .setIntent(open)
+                .build();
+        try {
+            return sm.requestPinShortcut(info, null);
+        } catch (IllegalStateException e) {
+            return false;
+        }
     }
 
     /** Shows a plugin's app icon in Recents; false when it does not decode. */

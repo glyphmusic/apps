@@ -102,6 +102,18 @@ pub trait Host: Send + Sync + 'static {
     /// configured theme accent (`0xrrggbb`), or to a plugin look's app icon
     /// (`icon`, checked .png bytes) while one is in use.
     fn set_theme_icon(&self, _theme_id: &str, _accent: u32, _icon: Option<&[u8]>) {}
+
+    /// Whether [`Host::pin_app_icon`] works here (Android: the home screen
+    /// icon can't change, but a shortcut with another icon can be added).
+    fn can_pin_app_icon(&self) -> bool {
+        false
+    }
+
+    /// Asks the system to put a Glyph shortcut with `png` (a plugin look's
+    /// checked app icon) on the home screen; `key` names the shortcut.
+    fn pin_app_icon(&self, _key: &str, _png: &[u8]) -> Result<(), String> {
+        Err("not supported here".into())
+    }
 }
 
 static HOST: OnceLock<Arc<dyn Host>> = OnceLock::new();

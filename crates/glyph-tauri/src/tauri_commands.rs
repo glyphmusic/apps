@@ -1148,6 +1148,11 @@ pub fn plugin_enable(core: C<'_>, id: String, on: bool) {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn plugin_pin_icon(core: C<'_>, id: String) -> Res {
+    plugins::plugin_pin_icon(&core, id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn plugin_prefer(core: C<'_>, id: String, over: String) {
     plugins::plugin_prefer(&core, id, over)
 }

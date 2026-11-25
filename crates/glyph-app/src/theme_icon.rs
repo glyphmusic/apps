@@ -50,12 +50,24 @@ pub fn sync_host_icon(core: &Core) {
     };
     let accent = resolve_accent(core, &theme_id);
     let icon = core.plugins().and_then(|st| crate::plugins::active_app_icon(&st, &disabled, &theme_id));
+    tracing::debug!(theme = %theme_id, plugins = core.plugins().is_some(), plugin_icon = icon.as_ref().map(Vec::len), "app icon");
     core.host.set_theme_icon(&theme_id, accent, icon.as_deref());
 }
 
 /// Decodes PNG bytes into `(width, height, rgba8)` pixels.
 pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some((w, h, rgba.into_raw()))
+}
+
+/// Decodes a plugin's app icon for window, tray and Dock: at most `max`
+/// pixels a side. Big icons (512, 1024) are scaled down: some systems drop
+/// a window icon that large (X11 kept no icon at all for 512 x 512).
+pub fn decode_icon(png: &[u8], max: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    let img = if img.width() > max || img.height() > max { img.resize(max, max, image::imageops::FilterType::Lanczos3) } else { img };
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Some((w, h, rgba.into_raw()))
@@ -135,6 +147,15 @@ mod tests {
         let mono = tint_rgba(&src, 0xe8e8e8);
         assert_eq!(mono[0], mono[1]);
         assert_eq!(mono[1], mono[2]);
+    }
+
+    #[test]
+    fn big_plugin_icons_are_scaled_down() {
+        let big = encode_png(512, 512, &vec![200; 512 * 512 * 4]).unwrap();
+        let (w, h, px) = decode_icon(&big, 256).unwrap();
+        assert_eq!((w, h, px.len()), (256, 256, 256 * 256 * 4));
+        let small = encode_png(128, 128, &vec![9; 128 * 128 * 4]).unwrap();
+        assert_eq!(decode_icon(&small, 256).unwrap().0, 128);
     }
 
     #[test]

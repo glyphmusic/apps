@@ -7,6 +7,7 @@
   // then the lyrics card (accent tile) and the "Next in queue" card.
   import { onDestroy } from "svelte";
   import Cover from "../components/Cover.svelte";
+  import { cornerPx } from "../corners";
   import SongTitle from "../components/SongTitle.svelte";
   import ThinBar from "../components/ThinBar.svelte";
   import Icon from "../components/Icon.svelte";
@@ -148,7 +149,7 @@
 
 <svelte:window bind:innerHeight={vh} />
 
-<div class="sheet" data-part="now-playing" style:transform="translateY({y}px)" style:border-radius={y > 0 ? `${Math.min(22, 10 + y * 0.3).toFixed(1)}px ${Math.min(22, 10 + y * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={y === 0} class:dragging={y > 0}
+<div class="sheet" data-part="now-playing" style:transform="translateY({y}px)" style:border-radius={y > 0 ? `${cornerPx(Math.min(22, 10 + y * 0.3))} ${cornerPx(Math.min(22, 10 + y * 0.3))} 0 0` : undefined} class:settle={y === 0} class:dragging={y > 0}
   in:sheetIn|global={{ duration: rising ? 0 : 300 }} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hdr" style:background="rgba(15,15,15,{0.94 * sk})"
