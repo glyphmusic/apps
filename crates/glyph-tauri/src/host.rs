@@ -147,7 +147,8 @@ impl Host for TauriHost {
         crate::discord::client_id(&glyph_core::Config::default()).is_some()
     }
 
-    fn set_theme_icon(&self, _theme_id: &str, accent: u32) {
-        let _ = self.app.run_on_main_thread(move || crate::desktop::set_theme_icon(accent));
+    fn set_theme_icon(&self, _theme_id: &str, accent: u32, icon: Option<&[u8]>) {
+        let icon = icon.map(<[u8]>::to_vec);
+        let _ = self.app.run_on_main_thread(move || crate::desktop::set_theme_icon(accent, icon));
     }
 }

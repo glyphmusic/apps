@@ -127,6 +127,22 @@ impl Installed {
             .collect()
     }
 
+    /// A font file of the look (`font` or `mono`) as a `data:` address, so
+    /// the UI loads nothing; `None` for Glyph's own fonts.
+    pub fn look_font_data(&self, font: &str) -> Option<String> {
+        use base64::Engine;
+        if !is_font_file(font) {
+            return None;
+        }
+        let bytes = self.look_bytes(font)?;
+        Some(format!("data:{};base64,{}", mime_of(font)?, base64::engine::general_purpose::STANDARD.encode(bytes)))
+    }
+
+    /// The look's app icon (.png bytes), checked.
+    pub fn look_app_icon(&self) -> Option<Vec<u8>> {
+        self.look_bytes(self.manifest.look.as_ref()?.app_icon.as_ref()?)
+    }
+
     /// The look's background pictures that are on disk, in manifest order
     /// (index, file).
     pub fn look_backgrounds(&self) -> Vec<(usize, PathBuf)> {
@@ -187,6 +203,7 @@ pub fn check_look_file(look: &LookSpec, name: &str, bytes: &[u8]) -> Result<()> 
             let css = std::str::from_utf8(bytes).map_err(|_| anyhow!("{name}: the style sheet is not UTF-8 text"))?;
             return check_css(css, &look.assets).map_err(|e| anyhow!("{name}: {e}"));
         }
+        "png" if look.app_icon.as_deref() == Some(name) => return check_app_icon(bytes).map_err(|e| anyhow!("{name}: {e}")),
         "png" | "jpg" | "jpeg" | "webp" => crate::backgrounds::image_ext(bytes).is_some(),
         "gif" => bytes.starts_with(b"GIF8"),
         "svg" => std::str::from_utf8(bytes).is_ok_and(|s| s.contains("<svg")),
@@ -198,6 +215,19 @@ pub fn check_look_file(look: &LookSpec, name: &str, bytes: &[u8]) -> Result<()> 
     };
     if !ok {
         bail!("{name}: not a {ext} file");
+    }
+    Ok(())
+}
+
+/// Checks an app icon: a PNG, square, [`APP_ICON_SIDES`] pixels.
+pub fn check_app_icon(bytes: &[u8]) -> Result<()> {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+        bail!("the app icon is not a PNG file");
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().expect("4 bytes"));
+    let h = u32::from_be_bytes(bytes[20..24].try_into().expect("4 bytes"));
+    if w != h || !APP_ICON_SIDES.contains(&w) {
+        bail!("the app icon must be square, {} to {} pixels (it is {w} x {h})", APP_ICON_SIDES.start(), APP_ICON_SIDES.end());
     }
     Ok(())
 }

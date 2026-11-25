@@ -197,10 +197,42 @@ fn looks_validate() {
     assert!(matches!(parse(r#"{"assets":["x.exe"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"icons":{"Heart":"h.svg"}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"icons":{"heart":"h.png"}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    // Own font files for text and mono, and an app icon.
+    let own = parse(r#"{"font":"fonts/Literata.woff2","mono":"fonts/Code.ttf","app_icon":"icon.png"}"#);
+    assert!(own.validate("1.0.0").is_ok());
+    let l = own.look.as_ref().unwrap();
+    assert_eq!(l.files(), ["fonts/Code.ttf", "fonts/Literata.woff2", "icon.png"]);
+    assert_eq!(l.max_size("icon.png"), MAX_APP_ICON);
+    assert_eq!(l.max_size("fonts/Code.ttf"), MAX_LOOK_ASSET);
+    assert!(parse(r#"{"font":"f/a.woff2","mono":"f/a.woff2"}"#).validate("1.0.0").is_ok());
+    assert!(matches!(parse(r#"{"font":"f/a.exe"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"font":"../a.woff2"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"font":"f/a.woff2","assets":["f/a.woff2"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"app_icon":"icon.svg"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"app_icon":"a.png","backgrounds":["a.png"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert_eq!(parse(r#"{"mono":"pixel"}"#).validate("1.0.0"), Err(Invalid::NeedsNewerApp));
     // A theme may bring a look; a look alone makes a valid extension.
     let mut t = theme("sunset", "1.0.0");
     t.look = Some(LookSpec { font: "rounded".into(), ..Default::default() });
     assert!(t.validate("1.0.0").is_ok());
+}
+
+#[test]
+fn app_icon_is_checked() {
+    let png = |w: u32, h: u32| {
+        let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b
+    };
+    assert!(check_app_icon(&png(512, 512)).is_ok());
+    assert!(check_app_icon(&png(512, 256)).is_err());
+    assert!(check_app_icon(&png(32, 32)).is_err());
+    assert!(check_app_icon(&png(2048, 2048)).is_err());
+    assert!(check_app_icon(b"GIF89a").is_err());
+    let look = LookSpec { app_icon: Some("icon.png".into()), ..Default::default() };
+    assert!(check_look_file(&look, "icon.png", &png(256, 256)).is_ok());
+    assert!(check_look_file(&look, "icon.png", &png(256, 100)).is_err());
 }
 
 #[test]

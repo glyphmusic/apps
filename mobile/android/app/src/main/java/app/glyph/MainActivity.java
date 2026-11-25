@@ -1659,16 +1659,35 @@ public class MainActivity extends AppCompatActivity {
         return d == null ? 60f : d.getRefreshRate();
     }
 
-    /** Updates Android Recents icon immediately and schedules launcher alias switch. */
-    public void gpuiSetThemeIcon(String themeId, int accentRgb) {
+    /**
+     * Updates Android Recents icon immediately and schedules launcher alias switch.
+     * {@code png} is a plugin look's app icon (checked by Rust) or null; it is
+     * shown in Recents, the launcher keeps the theme's icon.
+     */
+    public void gpuiSetThemeIcon(String themeId, int accentRgb, byte[] png) {
         if (isSheet()) {
             return;
         }
         int rgb = accentRgb & 0x00ffffff;
         runOnUiThread(() -> {
-            updateTaskDescription(rgb);
+            if (png == null || !updateCustomTaskDescription(png)) {
+                updateTaskDescription(rgb);
+            }
             scheduleLauncherAlias(aliasForTheme(themeId, rgb));
         });
+    }
+
+    /** Shows a plugin's app icon in Recents; false when it does not decode. */
+    @SuppressWarnings("deprecation")
+    private boolean updateCustomTaskDescription(byte[] png) {
+        Bitmap bmp = BitmapFactory.decodeByteArray(png, 0, png.length);
+        if (bmp == null) {
+            return false;
+        }
+        // The tinted icon is drawn again once the plugin's icon goes.
+        lastAccentRgb = -1;
+        setTaskDescription(new ActivityManager.TaskDescription("Glyph", bmp));
+        return true;
     }
 
     @SuppressWarnings("deprecation")
