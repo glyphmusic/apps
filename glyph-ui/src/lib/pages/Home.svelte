@@ -24,6 +24,11 @@
   import { uniqBy } from "../fmt";
   import { listId, trackKey, type ListKey, type Track } from "../api/types";
   import { slide } from "svelte/transition";
+  import { arrange, layout } from "../layout.svelte";
+
+  // Plugin looks can put the sections in order or hide them (layout.svelte.ts).
+  const PARTS = ["greeting", "cards", "recent", "new_releases", "mixes", "recs", "trending"] as const;
+  const parts = $derived(arrange(PARTS, layout.areas.home));
 
   type HomeRecentEntry =
     | { kind: "song"; track: Track; key: string }
@@ -100,8 +105,6 @@
 </script>
 
 <div class="home">
-  <!-- Phones: the greeting sits in the compact header (views.rs TOUCH). -->
-  {#if !app.compact}<SectionTitle heading title={t("home.greeting")} />{/if}
   {#if showInstallBanner}
     <div class="pwa-banner" transition:slide={{ duration: 200 }}>
       <img class="pwa-ic" src="{import.meta.env.BASE_URL}apple-touch-icon.png" alt="Glyph" width="40" height="40" />
@@ -113,68 +116,75 @@
       <button class="pwa-x" onclick={dismissInstallBanner} aria-label={t("tip.x")}><Icon name="x" size={15} /></button>
     </div>
   {/if}
-  <HomeCards />
-
-  <HomeSection icon="disc-3" title={t("home.recent")} more={recent.length ? () => app.openListView({ kind: "recent" }) : undefined}>
-    {#if !recent.length}
-      <EmptyState title={t("home.empty.title")} sub={t("home.empty.sub")} />
-    {:else}
-      <HScroll>
-        {#each recent as it, i (it.key)}
-          {#if it.kind === "song"}
-            <SongCard track={it.track} onplay={() => playRecent(it.track)} from={{ list: { kind: "recent" }, index: i }} />
-          {:else if it.kind === "artist"}
-            <ArtistCard name={it.name} track={it.track} />
-          {:else if it.kind === "list"}
-            <ListCard list={it.list} />
-          {/if}
-        {/each}
-      </HScroll>
-    {/if}
-  </HomeSection>
-
-  {#if releases.length}
-    <HomeSection icon="sparkles" title={t("home.new_releases")}>
-      <HScroll>{#each releases as r (r.id)}<ReleaseCard release={r} />{/each}</HScroll>
-    </HomeSection>
-  {/if}
-
-  <SkeletonSwap {loading}>
-    {#snippet skeleton()}
-      <div class="feeds">
-        {#if showRecs}
-          <HomeSection icon="heart" title={t("home.recs")}>
-            <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
-          </HomeSection>
+  {#each parts as part (part)}
+    {#if part === "greeting"}
+      <!-- Phones: the greeting sits in the compact header (views.rs TOUCH). -->
+      {#if !app.compact}<SectionTitle heading title={t("home.greeting")} />{/if}
+    {:else if part === "cards"}
+      <HomeCards />
+    {:else if part === "recent"}
+      <HomeSection icon="disc-3" title={t("home.recent")} more={recent.length ? () => app.openListView({ kind: "recent" }) : undefined}>
+        {#if !recent.length}
+          <EmptyState title={t("home.empty.title")} sub={t("home.empty.sub")} />
+        {:else}
+          <HScroll>
+            {#each recent as it, i (it.key)}
+              {#if it.kind === "song"}
+                <SongCard track={it.track} onplay={() => playRecent(it.track)} from={{ list: { kind: "recent" }, index: i }} />
+              {:else if it.kind === "artist"}
+                <ArtistCard name={it.name} track={it.track} />
+              {:else if it.kind === "list"}
+                <ListCard list={it.list} />
+              {/if}
+            {/each}
+          </HScroll>
         {/if}
-        <HomeSection icon="headphones" title={t("home.trending")}>
-          <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-trend" {i} />{/each}</HScroll>
+      </HomeSection>
+    {:else if part === "new_releases"}
+      {#if releases.length}
+        <HomeSection icon="sparkles" title={t("home.new_releases")}>
+          <HScroll>{#each releases as r (r.id)}<ReleaseCard release={r} />{/each}</HScroll>
         </HomeSection>
-      </div>
-    {/snippet}
-    <div class="feeds">
-      {#if mixes.length}
+      {/if}
+    {:else if part === "mixes"}
+      {#if mixes.length && !loading}
         <HomeSection icon="sparkles" title={t("taste.home.mixes")} more={() => app.navigate("taste")} moreLabel={t("taste.title")}>
           <HScroll>{#each mixes as mix (mix.id)}<MixCard {mix} />{/each}</HScroll>
         </HomeSection>
       {/if}
-      {#if recs.length}
-        <HomeSection icon="heart" title={t("home.recs")} more={showAll(t("home.recs"), "heart", recs)}>
-          <HScroll>{#each recs as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(recs, i)} />{/each}</HScroll>
-        </HomeSection>
+    {:else if part === "recs"}
+      {#if showRecs && (loading || recs.length)}
+        <SkeletonSwap {loading}>
+          {#snippet skeleton()}
+            <HomeSection icon="heart" title={t("home.recs")}>
+              <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-recs" {i} />{/each}</HScroll>
+            </HomeSection>
+          {/snippet}
+          <HomeSection icon="heart" title={t("home.recs")} more={showAll(t("home.recs"), "heart", recs)}>
+            <HScroll>{#each recs as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(recs, i)} />{/each}</HScroll>
+          </HomeSection>
+        </SkeletonSwap>
       {/if}
-      {#if trending.length}
-        <HomeSection icon="headphones" title={t("home.trending")} more={showAll(t("home.trending"), "headphones", trending)}>
-          <HScroll>{#each trending as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(trending, i)} />{/each}</HScroll>
-        </HomeSection>
+    {:else if part === "trending"}
+      {#if loading || trending.length}
+        <SkeletonSwap {loading}>
+          {#snippet skeleton()}
+            <HomeSection icon="headphones" title={t("home.trending")}>
+              <HScroll>{#each Array(7) as _, i}<CardSkeleton id="home-trend" {i} />{/each}</HScroll>
+            </HomeSection>
+          {/snippet}
+          <HomeSection icon="headphones" title={t("home.trending")} more={showAll(t("home.trending"), "headphones", trending)}>
+            <HScroll>{#each trending as tr, i (trackKey(tr))}<SongCard track={tr} onplay={() => app.play(trending, i)} />{/each}</HScroll>
+          </HomeSection>
+        </SkeletonSwap>
       {/if}
-    </div>
-  </SkeletonSwap>
+    {/if}
+  {/each}
 </div>
 
 <style>
-  .home, .feeds { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
-  :global(html.compact) .home, :global(html.compact) .feeds { gap: 20px; }
+  .home { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+  :global(html.compact) .home { gap: 20px; }
   .pwa-banner {
     display: flex;
     align-items: center;

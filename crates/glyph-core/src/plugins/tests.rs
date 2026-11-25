@@ -211,6 +211,11 @@ fn looks_validate() {
     assert!(matches!(parse(r#"{"app_icon":"icon.svg"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"app_icon":"a.png","backgrounds":["a.png"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert_eq!(parse(r#"{"mono":"pixel"}"#).validate("1.0.0"), Err(Invalid::NeedsNewerApp));
+    // Home page, sidebar and tabs: order and hide; unknown names wait for a newer Glyph.
+    assert!(parse(r#"{"home":{"order":["mixes","recent"],"hide":["trending","greeting"]},"sidebar":{"hide":["now_playing"]},"tabs":{"order":["library"]}}"#).validate("1.0.0").is_ok());
+    assert!(parse(r#"{"home":{"hide":["from-the-future"]}}"#).validate("1.0.0").is_ok());
+    assert!(matches!(parse(r#"{"home":{"hide":["Recent"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"sidebar":{"order":["home","home"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     // A theme may bring a look; a look alone makes a valid extension.
     let mut t = theme("sunset", "1.0.0");
     t.look = Some(LookSpec { font: "rounded".into(), ..Default::default() });

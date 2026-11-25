@@ -29,7 +29,7 @@ export interface PluginListing {
   /** What its look changes (font, corners, pictures, style sheet, app icon), if it has one. */
   look?: {
     /** Glyph's font name, "file" for the plugin's own font, or "". */
-    font: string; mono?: string; app_icon?: boolean;
+    font: string; mono?: string; app_icon?: boolean; layout?: boolean;
     radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number;
   } | null;
 }

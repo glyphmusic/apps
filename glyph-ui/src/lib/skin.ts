@@ -14,6 +14,7 @@
 // "settings" | "menu" | "dialog" | "toasts" | "tooltip" | "mini-player" |
 // "tab-bar" | "mini-bar" | "now-playing"]`.
 import { setIconOverrides } from "./icon-overrides.svelte";
+import { setLayouts, type LayoutArea, type LayoutSpec } from "./layout.svelte";
 
 export interface PluginLook {
   plugin: string; font: string; radius: number | null; css: string;
@@ -21,6 +22,8 @@ export interface PluginLook {
   font_data?: string | null;
   /** Monospaced font: Glyph's font name, or the plugin's own as mono_data. */
   mono?: string; mono_data?: string | null;
+  /** Order and hidden parts of the home page, sidebar and phone tabs. */
+  home?: LayoutSpec | null; sidebar?: LayoutSpec | null; tabs?: LayoutSpec | null;
   /** Replaced icons: name -> SVG text. */
   icons?: Record<string, string>;
   /** A theme plugin's look: only while its theme is picked. */
@@ -92,6 +95,12 @@ export function applyLooks(looks: PluginLook[]) {
   const icons: Record<string, string> = {};
   for (const l of [...looks].reverse()) Object.assign(icons, l.icons ?? {});
   setIconOverrides(icons);
+  const areas: Partial<Record<LayoutArea, LayoutSpec>> = {};
+  for (const a of ["home", "sidebar", "tabs"] as const) {
+    const spec = looks.find((l) => l[a])?.[a];
+    if (spec) areas[a] = spec;
+  }
+  setLayouts(areas);
   const sheets = looks.filter((l) => l.css.trim() && safe(l.css));
   if (!sheets.length && !faces.length) {
     styleEl?.remove();

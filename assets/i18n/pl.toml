@@ -1864,6 +1864,7 @@
 "plugins.does.mono" = "Zmienia czcionkę o stałej szerokości"
 "plugins.does.app_icon" = "Zmienia ikonę aplikacji"
 "plugins.does.app_icon.desc" = "Własna ikona okna, paska zadań, zasobnika i Docka (na Androidzie w przeglądzie aplikacji). Po wyłączeniu wtyczki wraca ikona Glyph."
+"plugins.does.layout" = "Zmienia układ strony głównej, paska bocznego lub kart"
 "plugins.font.file" = "Własna czcionka"
 "sp.keys.plugins" = "Otwórz wtyczki (działa przy każdym wyglądzie)"
 "share.kind.artist" = "Wykonawca"

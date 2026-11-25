@@ -1864,6 +1864,7 @@
 "plugins.does.mono" = "Cambia la fuente monoespaciada"
 "plugins.does.app_icon" = "Cambia el icono de la app"
 "plugins.does.app_icon.desc" = "Un icono propio para la ventana, la barra de tareas, la bandeja y el Dock (en Android, en la vista de apps recientes). Vuelve el icono de Glyph cuando desactivas el plugin."
+"plugins.does.layout" = "Reordena el inicio, la barra lateral o las pestañas"
 "plugins.font.file" = "Fuente propia"
 "sp.keys.plugins" = "Abrir plugins (funciona con cualquier estilo)"
 "share.kind.artist" = "Artista"

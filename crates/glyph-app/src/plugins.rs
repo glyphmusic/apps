@@ -323,7 +323,8 @@ fn listing_json(core: &Core, l: &Listing, installable: &str) -> Value {
 fn look_json(m: &plugins::Manifest) -> Value {
     match &m.look {
         Some(l) => json!({
-            "font": font_kind(&l.font), "mono": font_kind(&l.mono), "app_icon": l.app_icon.is_some(), "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
+            "font": font_kind(&l.font), "mono": font_kind(&l.mono), "app_icon": l.app_icon.is_some(),
+            "layout": l.home.is_some() || l.sidebar.is_some() || l.tabs.is_some(), "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
         }),
         None => Value::Null,
     }
@@ -497,6 +498,7 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
             Some(json!({
                 "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": font_name(&l.font), "radius": l.radius,
                 "font_data": p.look_font_data(&l.font), "mono": font_name(&l.mono), "mono_data": p.look_font_data(&l.mono),
+                "home": l.home, "sidebar": l.sidebar, "tabs": l.tabs,
                 "css": p.look_css().unwrap_or_default(), "icons": p.look_icons(),
             }))
         })
