@@ -7,6 +7,7 @@
 - **A first start that gets you going**: instead of a tour of features, the first start now asks what you like, then lets you make your first playlist right away (give it a name, tick songs we picked for you or search for others), then speed and colour. At the end the new playlist opens.
 - **Clearer song selection**: when you select songs in a list, a coloured badge shows how many you picked out of how many. On phones a bar above the player now offers Add to queue, Add to playlist, Download and Remove (before, only Remove).
 - **Tidier menus**: the song menu now starts with Play, Play next and Add to queue, then Like and Add to playlist, then Go to artist, Go to album and Start radio. Rarely used items (download, copy link, watch video, "Not the right one?") moved into "More". The playlist menu also starts with Play.
+- **Profiles on phones look like artist pages**: one back button instead of two, the banner fills the top and zooms in as you scroll, and the full name shows under the picture instead of being cut off.
 - **Clearer settings on phones**: the pages are grouped into cards (Preferences, Application) with an arrow on each row, and every setting shows its explanation right under its name (tap it to read all of it).
 
 ### Fixed

@@ -60,7 +60,7 @@
   let barBgK = $state(0);
   let titleK = $state(0);
   let playK = $state(0);
-  const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.section?.title ?? ""));
+  const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.openProfile ?? "") + (app.section?.title ?? ""));
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
   function syncBar(top = mainEl?.scrollTop ?? 0) {
@@ -69,7 +69,7 @@
       return;
     }
     const cutoff = barEl.getBoundingClientRect().bottom;
-    const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .sv .head h1, .desk h1.hd");
+    const titleEl = mainEl.querySelector<HTMLElement>(".lv .head h1, .ap .hero .name, .name.mob .handle, .sv .head h1, .desk h1.hd");
     const playEl = mainEl.querySelector<HTMLElement>(".lv .head .play, .ap .mob-acts .rp, .sv .head .play");
     const noArtList = ownList && !!mainEl.querySelector(".lv .head.no-art");
     const effTop = ownList ? Math.max(0, top - phone.listRevealH) : top;
@@ -79,7 +79,7 @@
     // title right below the bar, so the bar stays transparent until scrolled.
     barBgK = noArtList
       ? clamp01(effTop / 24)
-      : app.view === "artist" || ownList
+      : app.view === "artist" || app.view === "profile" || ownList
         ? (titleEl ? clamp01((cutoff + 36 - titleEl.getBoundingClientRect().top) / 48) : clamp01((effTop - 180) / 48))
         : clamp01(top / 24);
     titleK = titleEl ? clamp01((cutoff - titleEl.getBoundingClientRect().bottom) / 24) : clamp01((effTop - 20) / 36);
@@ -134,6 +134,7 @@
     : app.view === "taste" ? t("taste.title")
     : app.view === "server" ? t({ "": "admin.title", people: "admin.people.title", settings: "admin.limits", versions: "admin.versions" }[admin.sub])
     : app.view === "artist" ? app.openArtist ?? ""
+    : app.view === "profile" ? (app.openProfile ? `@${app.openProfile}` : "")
     : app.view === "releases" || app.view === "similar" ? `${app.openArtist} · ${t(app.view === "releases" ? "artist.albums" : "artist.similar")}`
     : "",
   );
@@ -219,7 +220,7 @@
   class:fading={hideShell || !phone.npOpen || phone.npPull === 0}
   style:opacity={hideShell ? 0 : phone.npOpen ? Math.min(1, phone.npPull / 140) : 1}
 >
-  {#if app.view !== "artist" && !ownList}
+  {#if app.view !== "artist" && app.view !== "profile" && !ownList}
   <div class="top" style:background="rgba(10, 10, 10, {topK})">
   {#if app.view === "home"}
     <Header title={t("home.greeting")}>
@@ -250,16 +251,20 @@
     </div>
   {/if}
   </div>
-  {:else if app.view === "artist"}
+  {:else if app.view === "artist" || app.view === "profile"}
+    <!-- Over the photo (artist) or banner (profile): round back button, the
+         name comes up in the bar once the page title scrolls under it. -->
     <div class="backbar over artist" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <span class="pill-ic" style:--bar-k={barBgK}>
         <IconAction name="arrow-left" onclick={back} />
       </span>
       <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
-      {@render barPlayBtn()}
-      <span class="pill-ic" style:--bar-k={barBgK}>
-        <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: artistMenuTrack, artist: app.openArtist })} />
-      </span>
+      {#if app.view === "artist"}
+        {@render barPlayBtn()}
+        <span class="pill-ic" style:--bar-k={barBgK}>
+          <IconAction name="ellipsis-vertical" onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: artistMenuTrack, artist: app.openArtist })} />
+        </span>
+      {/if}
     </div>
   {:else}
     <div class="backbar over" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
