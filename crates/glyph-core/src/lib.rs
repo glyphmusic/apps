@@ -1060,6 +1060,7 @@ impl Backend {
         if let Some((p, _)) = self.local_file(track) {
             return Ok(Some(p));
         }
+        let saved_track = track.clone();
         let (inner, dl, track) = (self.cur(), self.downloads.clone(), track.clone());
         let job = downloads::Job { progress: Arc::default(), quality: inner.config.audio.download_quality.effective() };
         let key = dedupe::track_key(&track);
@@ -1147,7 +1148,14 @@ impl Backend {
         let mut guard = DownloadGuard { handle, dl_progress: self.dl_progress.clone(), key, progress };
         let res = (&mut guard.handle).await.map_err(|e| anyhow!("backend task failed: {e}"));
         drop(guard);
-        res?
+        let res = res?;
+        if matches!(res, Ok(Some(_))) {
+            // Album, cover and lyrics are saved too, so the song is complete offline.
+            if let Some(rt) = &self.rt {
+                rt.spawn(save_download_extras(self.cur(), self.downloads.clone(), saved_track));
+            }
+        }
+        res
     }
 
     /// `None` when no download of `track` runs; else 0..=1, or `Some(None)`
@@ -1185,6 +1193,15 @@ impl Backend {
             impl Drop for Running { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
             let _running = Running;
             let _location = downloads.relocation.read().await;
+            // Songs saved before extras were kept (or while offline) get them now.
+            static TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+            let todo: Vec<Track> = downloads.missing_extras(64).into_iter()
+                .filter(|t| TRIED.lock().unwrap_or_else(|e| e.into_inner()).insert(dedupe::track_key(t)))
+                .take(4)
+                .collect();
+            for t in todo {
+                save_download_extras(inner.clone(), downloads.clone(), t).await;
+            }
             for entry in downloads.claim_refresh(2) {
                 let job = downloads::Job { progress: Arc::default(), quality: entry.revision.quality };
                 downloads::run_job(job, async {
@@ -1306,7 +1323,11 @@ impl Backend {
     pub fn downloaded_bytes(&self, tracks: &[Track]) -> u64 { self.downloads.saved_bytes(tracks) }
 
     pub fn remove_download(&self, track: &Track) -> bool {
-        self.downloads.remove(track)
+        let gone = self.downloads.remove(track);
+        if gone {
+            downloads::forget_cover(track);
+        }
+        gone
     }
 
     /// Drops the local file a song plays from after it failed to decode
@@ -1315,7 +1336,11 @@ impl Backend {
     /// `None`: the song has no such file.
     pub fn forget_broken_file(&self, track: &Track) -> Option<BrokenFile> {
         if self.downloads.local(track).is_some() {
-            return self.downloads.remove(track).then_some(BrokenFile::Download);
+            let gone = self.downloads.remove(track);
+            if gone {
+                downloads::forget_cover(track);
+            }
+            return gone.then_some(BrokenFile::Download);
         }
         if self.imports.local(track).is_some() || self.local.local(track).is_some() {
             return None;
@@ -1481,6 +1506,12 @@ impl Backend {
         }
         if self.imports.contains(track) {
             let p = import::local::cover_path(&self.imports, track);
+            if p.is_file() {
+                return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
+            }
+        }
+        if self.downloads.contains(track) {
+            let p = downloads::kept_cover_path(track);
             if p.is_file() {
                 return Ok(Some(cover::CoverResult { path: p, album: None, cover_url: None }));
             }
@@ -1967,5 +1998,47 @@ async fn update_pins(server: Option<&ServerClient>) -> updater::Pins {
     match tokio::time::timeout(std::time::Duration::from_secs(5), server.health()).await {
         Ok(Ok(h)) => updater::Pins { stable: h.stable_app_version, latest: h.latest_app_version },
         _ => updater::Pins::default(),
+    }
+}
+
+/// Saves what belongs to a downloaded song besides its audio: the album name
+/// (also remembered in the download index), the cover (kept apart from the
+/// cover cache so it is never pruned) and the lyrics (lyrics cache). Best
+/// effort: a failure only means the song shows less while offline.
+async fn save_download_extras(inner: Arc<Inner>, dl: Arc<downloads::Downloads>, track: Track) {
+    let mut full = track.clone();
+    if full.album.as_deref().is_none_or(|a| a.trim().is_empty()) {
+        match inner.covers.resolve_meta(&full).await {
+            Ok(Some((cover_url, album))) => {
+                dl.update_meta(&track, album.as_deref(), cover_url.as_deref());
+                if album.is_some() {
+                    full.album = album;
+                }
+                if let Some(u) = cover_url.filter(|u| !cover::is_youtube_cover(u)) {
+                    if full.cover_url.as_deref().is_none_or(cover::is_youtube_cover) {
+                        full.cover_url = Some(u);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("album lookup for download failed: {e:#}"),
+        }
+    }
+    if !downloads::kept_cover_path(&track).is_file() {
+        match inner.covers.get_with_meta(&full).await {
+            Ok(Some(found)) => {
+                if found.album.is_some() || found.cover_url.is_some() {
+                    dl.update_meta(&track, found.album.as_deref(), found.cover_url.as_deref());
+                }
+                if let Err(e) = downloads::keep_cover(&track, &found.path) {
+                    tracing::debug!("could not keep cover of download: {e:#}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("cover for download failed: {e:#}"),
+        }
+    }
+    if let Err(e) = inner.lyrics(&full).await {
+        tracing::debug!("lyrics for download failed: {e:#}");
     }
 }
