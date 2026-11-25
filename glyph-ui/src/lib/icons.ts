@@ -8,7 +8,13 @@ const icons: Record<string, string> = {};
 const masks: Record<string, string> = {};
 for (const [path, src] of Object.entries(files)) {
   const name = path.split("/").pop()!.replace(/\.svg$/, "");
-  const clean = src.replace(/<!--[\s\S]*?-->/g, "").trim();
+  // Repeat until nothing is left, so nested or broken comments cannot slip through.
+  let clean = src;
+  for (let prev = ""; prev !== clean; ) {
+    prev = clean;
+    clean = clean.replace(/<!--[\s\S]*?-->/g, "").replace(/<!--/g, "");
+  }
+  clean = clean.trim();
   // Size only the outer <svg>; rects inside keep their width / height.
   icons[name] = clean.replace(/<svg\b[^>]*>/, (tag) =>
     tag.replace(/\s(width|height|class)="[^"]*"/g, "").replace("<svg", '<svg aria-hidden="true" width="100%" height="100%"'),
