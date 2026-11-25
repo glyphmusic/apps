@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { eatTap } from "../ui.svelte";
   // compact.rs drawer: the profile menu from the left, 86 % of the width (max
   // 360), surface hsla(0 0 7%); profile row (52 px picture, @handle 19 bold),
   // a rule, then Stats, Recently played, Downloads, Transfer music, Settings.
@@ -31,7 +32,7 @@
   ]);
 </script>
 
-<div class="back" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} role="presentation"
+<div class="back" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation"
   use:drag={{ axis: "x", move: (dx) => (sx = Math.min(0, dx)), end: (dx, _dy, vx) => { if (shouldClose(-dx, -vx)) { close(); return; } sx = 0; } }}>
   <div class="panel" style:transform="translateX({sx}px)" in:sheetIn|global={{ axis: "x", dir: -1, duration: 240 }} out:sheetOut|global={{ axis: "x", dir: -1, duration: 200 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     <button class="prof" onclick={() => go(() => (app.account ? app.openProfilePage(app.account.handle) : app.openSettings("account")))}>

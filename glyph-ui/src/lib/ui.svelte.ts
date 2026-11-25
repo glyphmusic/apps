@@ -455,3 +455,19 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
     },
   };
 }
+
+/**
+ * Closing a sheet or dialog on pointerdown removes its backdrop before the
+ * tap ends, so the rest of that tap (mousedown/mouseup/click, which phones
+ * send after the finger lifts) would land on whatever is underneath, e.g.
+ * start a song. Call this when a backdrop tap closes something: the rest of
+ * that one tap is swallowed.
+ */
+export function eatTap(ms = 600): void {
+  if (typeof window === "undefined") return;
+  const types = ["mousedown", "mouseup", "click", "dblclick", "contextmenu"] as const;
+  const stop = (e: Event) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); if (e.type === "click") off(); };
+  const off = () => { clearTimeout(timer); for (const t of types) window.removeEventListener(t, stop, true); };
+  for (const t of types) window.addEventListener(t, stop, true);
+  const timer = setTimeout(off, ms);
+}

@@ -30,7 +30,7 @@
   import { app } from "../state.svelte";
   import { onWeb } from "../web";
   import { t, tf } from "../i18n.svelte";
-  import { fadeEdges, outside } from "../ui.svelte";
+  import { fadeEdges, outside, eatTap } from "../ui.svelte";
   import { drag, phone, sheetIn, sheetOut, shouldClose } from "../compact/cstate.svelte";
   import { videoState } from "../pages/nowplaying/video-state.svelte";
   import { splitArtists, trackKey, type ListKey, type Track } from "../api/types";
@@ -514,7 +514,7 @@
 <svelte:window bind:innerHeight={vh} />
 
 {#if compact}
-  <div class="bs-dim" transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} oncontextmenu={(e) => e.preventDefault()} role="presentation">
+  <div class="bs-dim" transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} oncontextmenu={(e) => e.preventDefault()} role="presentation">
     <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="bs-grab" bind:this={grabEl} use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
         <span class="hdl"></span>

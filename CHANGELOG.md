@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- **Closing sheets by tapping beside them**: tapping above an open sheet, menu or dialog to close it no longer also taps the button or song underneath (for example starting a song).
 - **Lists on phones**: a fast scroll up now stops at the top of the list instead of flinging the search bar into view and pulling it back. Scroll up once more to show the search bar.
 - **Top bar title on phones**: the list or artist name now rises into the top bar from below as you scroll, instead of just appearing.
 - **Now Playing on phones**: the covers of the next and previous song no longer peek in at the screen edges.

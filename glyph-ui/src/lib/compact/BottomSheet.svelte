@@ -18,7 +18,7 @@
   import { t, tf } from "../i18n.svelte";
   import { rating, type Track } from "../api/types";
   import { jam } from "../jam.svelte";
-  import { fadeEdges } from "../ui.svelte";
+  import { fadeEdges, eatTap } from "../ui.svelte";
   import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "../overlays/sleep.svelte";
   import ConnectView from "../shell/ConnectView.svelte";
   import { drag, sheetIn, sheetOut, shouldClose, SWIPE_ACT } from "./cstate.svelte";
@@ -171,7 +171,7 @@
   }
 </script>
 
-<div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} role="presentation">
+<div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation">
   <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     {#if kind === "devices"}
       <ConnectView

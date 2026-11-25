@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { eatTap } from "../ui.svelte";
   // Confirm dialog (app.confirm). GPUI has no shared confirm dialog; this
   // one is built from lists/dialogs.rs name_dialog's frame: modal_layer
   // with a black 45 % backdrop (titlebar dimmed, still draggable), panel
@@ -26,7 +27,7 @@
 
 <div class="layer" transition:fade|global={{ duration: 160 }}>
   <div class="tdim"></div>
-  <div class="bd" onpointerdown={(e) => e.target === e.currentTarget && close()} role="presentation">
+  <div class="bd" onpointerdown={(e) => { if (e.target === e.currentTarget) { eatTap(); close(); } }} role="presentation">
     <div class="panel" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="alertdialog" tabindex="-1">
       <div class="tt">{c.title}</div>
       {#if c.body}<div class="body">{c.body}</div>{/if}
