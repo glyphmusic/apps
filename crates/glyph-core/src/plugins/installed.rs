@@ -201,6 +201,29 @@ impl Installed {
         self.look_bytes(self.manifest.look.as_ref()?.app_icon.as_ref()?)
     }
 
+    /// A look file as a `data:` address (for the plugin page's preview),
+    /// when it passes [`check_look_file`].
+    pub fn look_data_url(&self, name: &str) -> Option<String> {
+        use base64::Engine;
+        let bytes = self.look_bytes(name)?;
+        Some(format!("data:{};base64,{}", mime_of(name)?, base64::engine::general_purpose::STANDARD.encode(bytes)))
+    }
+
+    /// What of the look does not work, one line each (a missing file, an
+    /// app icon of the wrong size …), for the plugin page. Glyph skips
+    /// these parts and uses its own.
+    pub fn look_problems(&self) -> Vec<String> {
+        let Some(look) = &self.manifest.look else { return Vec::new() };
+        look.files()
+            .into_iter()
+            .filter_map(|name| {
+                let Some(path) = self.look_file(name) else { return Some(format!("{name}: not a file of the plugin")) };
+                let Ok(bytes) = std::fs::read(&path) else { return Some(format!("{name}: missing")) };
+                check_look_file(look, name, &bytes).err().map(|e| format!("{e:#}"))
+            })
+            .collect()
+    }
+
     /// The look's background pictures that are on disk, in manifest order
     /// (index, file).
     pub fn look_backgrounds(&self) -> Vec<(usize, PathBuf)> {

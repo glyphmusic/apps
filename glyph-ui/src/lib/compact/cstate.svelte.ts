@@ -2,6 +2,7 @@ import { cubicOut } from "svelte/easing";
 import { app } from "../state.svelte";
 import { fx } from "../ui.svelte";
 import { pwa } from "../pwa.svelte";
+import { cornerK } from "../corners";
 
 // Phone layout state (compact.rs / compact/now_playing.rs): Now Playing is a
 // sheet over the page (it never enters the back history), lyrics open full
@@ -243,7 +244,8 @@ export function sheetOut(node: HTMLElement, opts: { axis?: "x" | "y"; dir?: 1 | 
     easing: cubicOut,
     css: (_t: number, u: number) => {
       const pos = start + (end - start) * u;
-      const rad = opts.radius ? ` border-radius: ${(startR + (22 - startR) * u).toFixed(1)}px ${(startR + (22 - startR) * u).toFixed(1)}px 0 0;` : "";
+      const rEnd = 22 * cornerK();
+      const rad = opts.radius ? ` border-radius: ${(startR + (rEnd - startR) * u).toFixed(1)}px ${(startR + (rEnd - startR) * u).toFixed(1)}px 0 0;` : "";
       return `transform: translate${axis}(${pos.toFixed(1)}px);${rad}`;
     },
   };

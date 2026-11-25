@@ -6,6 +6,7 @@
   // across (still in performance mode and with reduced motion).
   import { fx } from "../ui.svelte";
   import { seedOf, shimmer } from "../shimmer";
+  import { cornerPx } from "../corners";
   let { w, h, radius = 6, id = "", round = false, ascii }: { w: number | string; h: number | string; radius?: number; id?: string; round?: boolean; ascii?: boolean } = $props();
   const isAscii = $derived(ascii !== undefined ? ascii : fx.ascii);
   const still = $derived(fx.still || fx.reduce);
@@ -19,7 +20,7 @@
   class:sweep={!isAscii && !still}
   style:width={typeof w === "number" ? `${w}px` : w}
   style:height={typeof h === "number" ? `${h}px` : h}
-  style:border-radius="{r}px"
+  style:border-radius={round ? `${r}px` : cornerPx(r)}
 >
   {#if isAscii}<canvas use:shimmer={{ seed, still }} aria-hidden="true"></canvas>{/if}
 </div>

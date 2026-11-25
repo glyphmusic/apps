@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Plugin app icon on the Android home screen**: Android doesn't let an app swap its own home screen icon for any picture. A plugin's page now has "Add to home screen", which puts a Glyph shortcut with the plugin's icon there (Android asks first).
+- **Broken look parts are shown**: when part of a plugin's look doesn't work (an app icon of the wrong size, a missing file …), its page now lists it, instead of Glyph quietly using its own. The preview also works for plugins you made yourself.
+
+### Fixed
+
+- **Plugin app icon on the desktop**: big app icons (512 or 1024 pixels) are scaled down for the window and tray. Some systems dropped them, so the icon did not change.
+- **Plugin corners**: covers, loading boxes and some menus now round with the rest of the interface too.
+
 ## 0.13.7 - 2026-11-25
 
 ### Added

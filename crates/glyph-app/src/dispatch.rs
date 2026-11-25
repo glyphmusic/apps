@@ -426,6 +426,7 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             plugins::plugin_enable(core, req(&args, "id")?, req(&args, "on")?);
             Ok(Value::Null)
         }
+        "plugin_pin_icon" => res(plugins::plugin_pin_icon(core, req(&args, "id")?)),
         "plugin_prefer" => {
             plugins::plugin_prefer(core, req(&args, "id")?, req(&args, "over")?);
             Ok(Value::Null)

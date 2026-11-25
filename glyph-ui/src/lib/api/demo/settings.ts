@@ -418,7 +418,8 @@ export const handlers: Record<string, DemoHandler> = {
   migrate_progress: () => migrateProgress(),
   migrate_cancel: () => { if (st.run) st.run.cancelled = true; },
 
-  plugins_state: () => ({ installed: st.plugins, unfit: st.unfit, ui: pluginUi() }),
+  plugins_state: () => ({ installed: st.plugins, unfit: st.unfit, ui: pluginUi(), can_pin_icon: true }),
+  plugin_pin_icon: () => {},
   plugins_catalog: async (_, a) => { await lag(a.force ? 700 : 300); return CATALOG; },
   plugin_install: async (_, a) => {
     await lag(1000);

@@ -394,7 +394,7 @@ pub fn set_theme_icon(accent: u32, custom: Option<Vec<u8>>) {
         return;
     }
     // A plugin's icon that does not decode falls back to the tinted one.
-    let pixels = custom.as_deref().and_then(glyph_app::theme_icon::decode_png).or_else(|| {
+    let pixels = custom.as_deref().and_then(|png| glyph_app::theme_icon::decode_icon(png, 256)).or_else(|| {
         let (w, h, base) = base_icon()?;
         Some((*w, *h, glyph_app::theme_icon::tint_rgba(base, accent)))
     });

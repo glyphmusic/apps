@@ -13,6 +13,7 @@
   import { fmtTime } from "../fmt";
   import { accentTile, themeColors } from "../theme";
   import { fadeEdges } from "../ui.svelte";
+  import { cornerPx } from "../corners";
   import { phone, drag, sheetIn, sheetOut, shouldClose } from "./cstate.svelte";
   let pull = $state(0);
   let box: HTMLDivElement | undefined = $state();
@@ -36,7 +37,7 @@
   const close = () => (phone.lyricsOpen = false);
 </script>
 
-<div class="lv" style:background={accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent)} style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${Math.min(22, 10 + pull * 0.3).toFixed(1)}px ${Math.min(22, 10 + pull * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={pull === 0}
+<div class="lv" style:background={accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent)} style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${cornerPx(Math.min(22, 10 + pull * 0.3))} ${cornerPx(Math.min(22, 10 + pull * 0.3))} 0 0` : undefined} class:settle={pull === 0}
   in:sheetIn|global={{ duration: 280 }} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hd" use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>

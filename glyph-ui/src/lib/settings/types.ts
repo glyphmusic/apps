@@ -73,6 +73,8 @@ export interface PluginInstalled extends PluginListing {
   latest?: string | null;
   /** Unix seconds; 0 for local plugins. */
   installed_at?: number;
+  /** Parts of the look that don't work (missing file, wrong app icon size …). */
+  look_problems?: string[];
 }
 
 export interface PluginCatalog { checked: PluginListing[]; community: PluginListing[]; partial: boolean }

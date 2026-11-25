@@ -491,6 +491,15 @@ fn installed_base(core: &Core, rt: &Rt, p: &Installed) -> Value {
     o.insert("update".into(), update);
     // The newest listed version (for the versions list in the detail view).
     o.insert("latest".into(), json!(from_cat.map(|l| l.manifest.version.clone())));
+    // The preview from the files on disk (also for plugins put in the
+    // folder by hand, and offline); background pictures stay links.
+    if let (Some(look), Some(l)) = (o.get_mut("look").and_then(Value::as_object_mut), &m.look) {
+        let icons: Map<String, Value> = l.icons.iter().filter_map(|(n, f)| Some((n.clone(), Value::String(p.look_data_url(f)?)))).collect();
+        let app_icon = l.app_icon.as_deref().and_then(|f| p.look_data_url(f));
+        let backgrounds = look.get("preview").and_then(|v| v.get("backgrounds")).cloned().unwrap_or_else(|| json!([]));
+        look.insert("preview".into(), json!({ "app_icon": app_icon, "icons": icons, "backgrounds": backgrounds }));
+    }
+    o.insert("look_problems".into(), json!(p.look_problems()));
     o.insert("local".into(), json!(p.origin.is_local()));
     o.insert("installed_at".into(), json!(p.origin.installed_at));
     v
@@ -617,7 +626,10 @@ pub fn plugins_state(core: C<'_>) -> Value {
         (s.config.plugins.disabled.clone(), s.config.resolved_language())
     };
     let rt = st.lock();
-    json!({ "installed": installed_json(&core, &rt, &dis), "unfit": unfit_json(&core, &rt), "ui": ui_json(&rt, &dis, lang) })
+    json!({
+        "installed": installed_json(&core, &rt, &dis), "unfit": unfit_json(&core, &rt), "ui": ui_json(&rt, &dis, lang),
+        "can_pin_icon": core.host.can_pin_app_icon(),
+    })
 }
 
 pub async fn plugins_catalog(core: C<'_>, force: Option<bool>) -> Res<Value> {
@@ -710,6 +722,18 @@ pub fn plugin_prefer(core: C<'_>, id: String, over: String) {
     load(&core, &st);
     sync_code(&core, &st);
     crate::theme_icon::sync_host_icon(core);
+}
+
+/// Puts a Glyph shortcut with the plugin's app icon on the home screen
+/// (Android: the launcher icon itself can't take another picture).
+pub fn plugin_pin_icon(core: C<'_>, id: String) -> Res {
+    let st = need_plugins(core)?;
+    let png = {
+        let rt = st.lock();
+        let p = rt.installed.iter().find(|p| p.manifest.id == id).ok_or_else(|| crate::i18n::tr(core, "plugins.err.not_found"))?;
+        p.look_app_icon().ok_or_else(|| crate::i18n::tr(core, "plugins.pin_icon.none"))?
+    };
+    core.host.pin_app_icon(&id, &png).map_err(|_| crate::i18n::tr(core, "plugins.pin_icon.failed"))
 }
 
 /// "Reload" for plugin makers: reads the plugins folder again.

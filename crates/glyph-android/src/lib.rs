@@ -392,6 +392,22 @@ impl Host for AndroidHost {
         }
     }
 
+    fn can_pin_app_icon(&self) -> bool {
+        true
+    }
+
+    fn pin_app_icon(&self, key: &str, png: &[u8]) -> Result<(), String> {
+        let asked = with_activity("gpuiPinIcon", |env, activity| {
+            let k = env.new_string(key)?;
+            let b = JObject::from(env.byte_array_from_slice(png)?);
+            env.call_method(activity, jni_str!("gpuiPinIcon"), jni_sig!("(Ljava/lang/String;[B)Z"), &[JValue::Object(&k), JValue::Object(&b)])?.z()
+        });
+        match asked {
+            Some(true) => Ok(()),
+            _ => Err("the home screen does not take shortcuts".into()),
+        }
+    }
+
     fn set_theme_icon(&self, theme_id: &str, accent: u32, icon: Option<&[u8]>) {
         with_activity("gpuiSetThemeIcon", |env, activity| {
             let t = env.new_string(theme_id)?;
