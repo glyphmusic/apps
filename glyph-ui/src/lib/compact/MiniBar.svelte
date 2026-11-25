@@ -29,6 +29,8 @@
   const viewPrev = $derived(frozen ? frozen.prev : prev);
   const viewCur = $derived(frozen ? frozen.cur : cur);
   const viewNext = $derived(frozen ? frozen.next : next);
+  // Cross-fade while sliding: the current song fades out as the other fades in.
+  const fade = $derived(Math.min(1, Math.abs(sx) / Math.max(120, ow)));
 
   $effect(() => {
     const f = frozen;
@@ -84,8 +86,8 @@
   }
 </script>
 
-{#snippet slide(tr: Track, offset: string)}
-  <span class="in" style:transform="translateX({offset})">
+{#snippet slide(tr: Track, offset: string, op: number)}
+  <span class="in" style:transform="translateX({offset})" style:opacity={op}>
     <Cover track={tr} size={48} radius={6} />
     <span class="tx">
       <span class="t"><SongTitle rating={rating(tr)}>{tr.title}</SongTitle></span>
@@ -98,9 +100,9 @@
   oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); app.openCtx({ x: e.clientX, y: e.clientY, track: cur }); }}>
   <button class="open" bind:clientWidth={ow} onclick={() => (phone.npOpen = true)}>
     <span class="strip" class:settling style:transform="translateX({sx}px)">
-      {#if viewPrev}{@render slide(viewPrev, "-100%")}{/if}
-      {@render slide(viewCur, "0")}
-      {#if viewNext}{@render slide(viewNext, "100%")}{/if}
+      {#if viewPrev}{@render slide(viewPrev, "-100%", sx > 0 ? fade : 0)}{/if}
+      {@render slide(viewCur, "0", 1 - fade)}
+      {#if viewNext}{@render slide(viewNext, "100%", sx < 0 ? fade : 0)}{/if}
     </span>
   </button>
   <div class="acts">
@@ -117,6 +119,7 @@
   .open { flex: 1; min-width: 0; height: 100%; position: relative; overflow: hidden; text-align: left; }
   .strip { position: relative; display: block; width: 100%; height: 100%; }
   .strip.settling { transition: transform .2s var(--ease); }
+  .strip.settling .in { transition: opacity .2s var(--ease); }
   .in { position: absolute; inset: 0; display: flex; align-items: center; gap: 12px; padding-right: 8px; min-width: 0; }
   .tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .t { font-size: var(--md); font-weight: 500; min-width: 0; }

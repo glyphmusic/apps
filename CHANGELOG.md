@@ -15,6 +15,10 @@
 
 ### Fixed
 
+- **Now Playing on phones**: the covers of the next and previous song no longer peek in at the screen edges.
+- **Mini player swipe**: when you swipe the small player bar, the current song fades out while the next one fades in.
+- **Video stays on**: closing Now Playing while a video plays and opening it again shows the video again, not the cover.
+- **Video full screen on phones**: the video and its buttons now stay below the status bar (time, battery) and above the gesture bar.
 - **Finding people in search**: typing a handle in search, with or without the "@", now shows that person's profile on top of the results (All and Artists). Before, profiles could not be found by search at all.
 - **Text size cards on small phones**: the three text size cards in Settings > Appearance now fit inside their box.
 - **Info buttons on phones**: tapping an (i) next to a setting now shows its explanation. Before, nothing happened on touch screens.

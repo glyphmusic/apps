@@ -473,7 +473,7 @@
     <MenuItem icon="radio" label={t("ctx.radio")} onenter={closesSub} onclick={run(() => songRadio(song))} />
     {#if compact && m.nowPlaying && phone.videoMode}
       <MenuItem icon="search" label={t("video.switch")} onenter={closesSub} onclick={run(() => (phone.videoPickerOpen = true))} />
-      <MenuItem icon="music-2" label={t("video.back_to_song")} onenter={closesSub} onclick={run(() => { videoState.leave(true); phone.videoMode = false; phone.videoPickerOpen = false; })} />
+      <MenuItem icon="music-2" label={t("video.back_to_song")} onenter={closesSub} onclick={run(() => { videoState.leave(true); phone.videoMode = false; phone.videoResume = false; phone.videoPickerOpen = false; })} />
     {/if}
     {#if !onWeb() && isDownloading(song)}
       <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />

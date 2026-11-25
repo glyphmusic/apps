@@ -44,7 +44,7 @@
       if (app.player.current) phone.npOpen = true;
     }
   });
-  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoPickerOpen = false; } });
+  $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoResume = false; phone.videoPickerOpen = false; } });
   $effect(() => { if (!app.settingsOpen) phone.settingsInPage = false; });
   // Leaving the phone layout (window made wide) closes the share menu.
   $effect(() => () => { app.shareSheet = null; });

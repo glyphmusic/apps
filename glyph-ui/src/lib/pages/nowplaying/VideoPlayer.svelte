@@ -816,6 +816,13 @@
     contain: none;
     transform: none;
     background: #050506;
+    /* Phones: keep the picture and every button clear of the status bar,
+       the camera cutout and the gesture bar. */
+    box-sizing: border-box;
+    padding: var(--safe-top, env(safe-area-inset-top)) var(--safe-right, env(safe-area-inset-right)) var(--safe-bottom, env(safe-area-inset-bottom)) var(--safe-left, env(safe-area-inset-left));
+  }
+  .stage.fs .overlay {
+    inset: var(--safe-top, env(safe-area-inset-top)) var(--safe-right, env(safe-area-inset-right)) var(--safe-bottom, env(safe-area-inset-bottom)) var(--safe-left, env(safe-area-inset-left));
   }
   .stage.idle { cursor: none; }
 

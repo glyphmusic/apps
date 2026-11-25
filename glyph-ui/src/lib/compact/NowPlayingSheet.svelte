@@ -72,7 +72,8 @@
     padTop + titleGapNoLine + 52 + lineReserve + seekMt + 34 + trMt + playBtn + toolsMt + 40 + (hasNextCard ? cardMt : 0) + peek
   );
   const art = $derived(Math.max(96, Math.min(vw - SIDE * 2, availH - overhead)));
-  const slideStep = $derived(Math.max(art + SIDE, Math.ceil((vw + art) / 2)));
+  // Side covers start fully off screen (a safe gap so no edge peeks in).
+  const slideStep = $derived(Math.max(art + SIDE, Math.ceil((vw + art) / 2)) + 16);
   const sk = $derived(Math.min(1, Math.max(0, (scrolled - art - (180 - Math.round(c * 24))) / 40)));
   const dur = $derived(app.player.duration ?? 0);
   const frac = $derived(dur ? Math.min(1, app.position / dur) : 0);
@@ -80,7 +81,10 @@
   const next = $derived(app.upNext[0]?.track ?? (app.player.repeat === "all" && app.queue.items.length > 1 ? app.queue.items[0] : null));
   const remote = $derived(app.devices.find((d) => d.active && d.kind !== "this"));
   const tile = $derived(accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent));
+  // Closing keeps the choice: reopening shows the video again (not the cover).
+  if (phone.videoResume && cur) phone.videoMode = true;
   const close = () => {
+    phone.videoResume = phone.videoMode;
     if (phone.videoMode) {
       videoState.leave(true);
       phone.videoMode = false;
@@ -93,6 +97,7 @@
   function setVideoMode(on: boolean) {
     if (phone.videoMode === on) return;
     if (!on) {
+      phone.videoResume = false;
       videoState.leave(true);
       phone.videoPickerOpen = false;
     }
@@ -107,6 +112,7 @@
 
   onDestroy(() => {
     if (phone.videoMode) {
+      phone.videoResume = true;
       videoState.leave(true);
       phone.videoMode = false;
       phone.videoPickerOpen = false;

@@ -19,6 +19,8 @@ export const phone = $state({
   lyricsOpen: false,
   videoMode: false,
   videoPickerOpen: false,
+  /** Now Playing was closed while showing the video: open it on the video again. */
+  videoResume: false,
   drawerOpen: false,
   settingsInPage: false,
   settingsSub: 0,
