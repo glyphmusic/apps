@@ -49,6 +49,13 @@
   const pickMode = $derived(app.isPicking(l));
   const pickedN = $derived(pickMode ? tracks.filter((x) => app.isPicked(x)).length : 0);
   const allPicked = $derived(pickMode && pickedN === tracks.length && tracks.length > 0);
+  const pickedTracks = $derived(pickMode ? app.pickedTracksOf(tracks) : []);
+  function pickQueue() { if (!pickedTracks.length) return; app.queueAdd(pickedTracks, false); app.stopPicking(); }
+  function pickDownload() { if (!pickedTracks.length) return; app.download(pickedTracks); app.stopPicking(); }
+  function pickPlaylist(e: MouseEvent) {
+    if (!pickedTracks.length) return;
+    app.openCtx({ x: e.clientX, y: e.clientY, track: null, tracks: [...pickedTracks], from: { list: l, index: -1 } });
+  }
   const noArt = $derived(l.kind === "liked" || l.kind === "artist_liked" || l.kind === "recent" || l.kind === "downloads");
 
   // Pull-to-reveal search + sort bar above the resting threshold.
@@ -380,13 +387,27 @@
     <div class="picks">
       <div class="pickbar" role="toolbar">
         <button class="pk" onclick={() => app.stopPicking()}>{t("pick.done")}</button>
-        <span class="pick-n">{tf("pick.n", { n: pickedN })}</span>
-        <button class="pk danger" disabled={!pickedN} onclick={() => app.removePicked(l)} aria-label={t("pick.remove")}><Icon name="trash-2" size={18} />{t("pick.remove")}</button>
+        <span class="pick-n" aria-label={tf("pick.n", { n: pickedN })}>
+          {#key pickedN}<span class="badge mono" class:zero={!pickedN}>{pickedN}</span>{/key}
+          <span class="of trunc">{tf("pick.of_n", { n: tracks.length })}</span>
+        </span>
+        <button class="pk" onclick={() => app.pickAll(tracks)}>{t(allPicked ? "pick.none" : "pick.all")}</button>
       </div>
     </div>
-    <div class="pick-more">
-      <button class="chip" onclick={() => app.pickAll(tracks)}><Icon name={allPicked ? "circle" : "circle-check"} size={15} />{t(allPicked ? "pick.none" : "pick.all")}</button>
-      {#if l.kind === "liked"}<button class="chip" onclick={() => app.clearLiked()}><Icon name="trash-2" size={15} />{t("liked.clear")}</button>{/if}
+    {#if l.kind === "liked"}
+      <div class="pick-more">
+        <button class="chip" onclick={() => app.clearLiked()}><Icon name="trash-2" size={15} />{t("liked.clear")}</button>
+      </div>
+    {/if}
+    <!-- What to do with the picked songs: a bar over the mini player, in
+         thumb reach (it used to be only "Remove", up top). -->
+    <div class="pick-acts" class:off={!pickedN} role="toolbar" aria-label={tf("pick.n", { n: pickedN })} style:bottom="{phone.bottomH + 8}px">
+      <button class="pa" disabled={!pickedN} onclick={pickQueue}><Icon name="list-plus" size={20} /><span>{t("pick.queue")}</span></button>
+      <button class="pa" disabled={!pickedN} onclick={pickPlaylist}><Icon name="list-music" size={20} /><span>{t("pick.playlist")}</span></button>
+      {#if !onWeb() && l.kind !== "downloads"}
+        <button class="pa" disabled={!pickedN} onclick={pickDownload}><Icon name="arrow-down-to-line" size={20} /><span>{t("pick.download")}</span></button>
+      {/if}
+      <button class="pa danger" disabled={!pickedN} onclick={() => app.removePicked(l)}><Icon name="trash-2" size={20} /><span>{t("pick.remove")}</span></button>
     </div>
   {/if}
   <SkeletonSwap loading={albumLoading}>
@@ -410,6 +431,7 @@
       </div>
     {/if}
   </SkeletonSwap>
+  {#if pickMode}<div class="pick-room" aria-hidden="true"></div>{/if}
   <div style:height="24px"></div>
 </div>
 
@@ -460,11 +482,20 @@
   /* Stays under the top bar while the rows scroll. */
   .picks { position: sticky; top: calc(52px + var(--safe-top, env(safe-area-inset-top))); z-index: 3; padding: 0 16px; display: flex; flex-direction: column; }
   .pickbar { margin-top: 4px; height: 52px; padding: 0 6px; display: flex; align-items: center; gap: 4px; border-radius: 14px; background: #161618; }
-  .pick-n { flex: 1; min-width: 0; padding: 0 6px; font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; }
+  .pick-n { flex: 1; min-width: 0; padding: 0 4px; display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--dim); white-space: nowrap; }
+  .badge { flex: none; min-width: 30px; height: 30px; padding: 0 9px; display: grid; place-items: center; border-radius: 15px; background: var(--accent); color: #000; font-size: 14.5px; font-weight: 700; animation: pick-pop .22s var(--ease); }
+  .badge.zero { background: rgba(255, 255, 255, .1); color: var(--dim); }
+  @keyframes pick-pop { from { transform: scale(.7); } 60% { transform: scale(1.12); } to { transform: none; } }
+  .pick-acts { position: fixed; left: 12px; right: 12px; z-index: 6; height: 62px; padding: 0 4px; display: flex; align-items: stretch; border-radius: 16px; background: #1c1c1f; animation: pick-up .26s var(--ease); }
+  @keyframes pick-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .pa { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 12px; font-size: 11.5px; line-height: 13px; color: rgba(255, 255, 255, .88); text-align: center; transition: opacity .15s; }
+  .pa span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+  .pa:active { background: rgba(255, 255, 255, .08); }
+  .pa:disabled { opacity: .35; }
+  .pa.danger { color: var(--danger); }
+  .pick-room { height: 78px; }
   .pk { flex: none; height: 40px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; border-radius: 20px; font-size: 14px; font-weight: 500; color: rgba(255, 255, 255, .85); }
   .pk:active { background: rgba(255, 255, 255, .08); }
-  .pk.danger { color: #fff; background: var(--danger); }
-  .pk.danger:disabled { opacity: .4; }
   .pick-more { padding: 8px 16px 2px; display: flex; flex-wrap: wrap; gap: 8px; }
   .chip { height: 36px; padding: 0 12px 0 10px; display: inline-flex; align-items: center; gap: 6px; border-radius: 18px; font-size: 13.5px; color: rgba(255, 255, 255, .8); background: rgba(255, 255, 255, .07); }
   .chip:active { background: rgba(255, 255, 255, .13); }

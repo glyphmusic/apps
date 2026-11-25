@@ -15,7 +15,7 @@
   import { back as migrateBack, mg } from "../settings/migrate-state.svelte";
   import Tog from "../settings/Tog.svelte";
   import { adv, setAdvanced, subHidden } from "../settings/advanced.svelte";
-  import { pageComponent, pageInfo, pageShown, subtabs } from "../settings/pages";
+  import { GROUPS, pageComponent, pageInfo, pageShown, subtabs } from "../settings/pages";
 
   const order = $derived<SettingsPage[]>((onWeb() ? [
     "overview", "account",
@@ -24,6 +24,13 @@
     "overview", "account",
     "playback", "audio", "appearance", "storage", "migrate", "transfer", "server", "plugins", "notifications", "about",
   ]).filter((p) => pageShown(p as SettingsPage)) as SettingsPage[]);
+  // The rows in cards by group (like the desktop nav: overview, then
+  // preferences, then the app), so the long list reads in three parts.
+  const grouped = $derived(
+    GROUPS.map((g) => ({ label: g.label, pages: order.filter((p) => g.pages.includes(p)) }))
+      .concat([{ label: "", pages: order.filter((p) => !GROUPS.some((g) => g.pages.includes(p))) }])
+      .filter((g) => g.pages.length),
+  );
   const page = $derived(app.settingsPage);
   const Body = $derived(pageComponent(page));
   let pageEl: HTMLElement | undefined = $state();
@@ -79,17 +86,23 @@
         {#each quick as q}
           <button class="qt" class:on={q.on} onclick={q.run}>
             <Icon name={q.icon} size={22} color={q.on ? "var(--accent)" : "rgba(255,255,255,.8)"} />
-            <span class="ql trunc">{q.label}</span>
+            <span class="ql">{q.label}</span>
             <span class="qs">{q.on ? t("common.on") : t("common.off")}</span>
           </button>
         {/each}
       </div>
-      {#each order as p}
-        {@const info = pageInfo(p)}
-        <button class="mr" onclick={() => open(p)}>
-          <Icon name={info.icon} size={22} color="rgba(255,255,255,.85)" />
-          <span class="mt"><span class="trunc">{info.name}</span>{#if info.sub}<span class="ms">{info.sub}</span>{/if}</span>
-        </button>
+      {#each grouped as g}
+        {#if g.label}<div class="gl">{t(g.label)}</div>{/if}
+        <div class="grp">
+          {#each g.pages as p}
+            {@const info = pageInfo(p)}
+            <button class="mr" onclick={() => open(p)}>
+              <span class="mi"><Icon name={info.icon} size={20} color="rgba(255,255,255,.9)" /></span>
+              <span class="mt"><span class="trunc">{info.name}</span>{#if info.sub}<span class="ms">{info.sub}</span>{/if}</span>
+              <Icon name="chevron-right" size={18} color="rgba(255,255,255,.35)" />
+            </button>
+          {/each}
+        </div>
       {/each}
       <div class="adv">
         <span class="mt"><span class="trunc">{t("settings.advanced")}</span><span class="ms">{t("settings.advanced.sub")}</span></span>
@@ -119,11 +132,16 @@
   .qt { flex: 1; min-width: 0; height: 84px; padding: 0 6px; border-radius: 10px; background: rgba(255, 255, 255, .07); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
   .qt.on { background: rgba(255, 255, 255, .14); }
   .qt:active { background: rgba(255, 255, 255, .18); }
-  .ql { max-width: 100%; font-size: 12px; color: #fff; }
+  .ql { max-width: 100%; font-size: 12px; line-height: 14px; color: #fff; text-align: center; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   .qs { font-size: 11px; color: rgba(255, 255, 255, .55); }
-  .mr { width: 100%; display: flex; align-items: center; gap: 16px; min-height: 52px; padding: 8px 16px; text-align: left; }
+  .gl { padding: 14px 28px 6px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: rgba(255, 255, 255, .45); }
+  .grp { margin: 0 12px; border-radius: 14px; background: rgba(255, 255, 255, .04); overflow: hidden; }
+  .grp + .grp { margin-top: 10px; }
+  .mi { flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: rgba(255, 255, 255, .07); }
+  .mr { width: 100%; display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 10px 12px 10px 12px; text-align: left; }
+  .mr + .mr { border-top: 1px solid rgba(255, 255, 255, .05); }
   .mr:active { background: rgba(255, 255, 255, .06); }
   .mt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 15px; color: #fff; }
-  .adv { display: flex; align-items: center; gap: 16px; min-height: 52px; margin-top: 8px; padding: 8px 16px; }
+  .adv { display: flex; align-items: center; gap: 16px; min-height: 52px; margin: 12px 12px 0; padding: 8px 12px; border-radius: 14px; background: rgba(255, 255, 255, .04); }
   .ms { font-size: 12.5px; color: rgba(255, 255, 255, .55); }
 </style>

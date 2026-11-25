@@ -37,6 +37,11 @@
   let scrolled = $state(0);
   let pull = $state(0);
   let ax = $state(0);
+  let vh = $state(innerHeight);
+  // Pulled up from the mini bar: the sheet sits under the finger (no slide-in).
+  const rising = !phone.npOpen && phone.npRise > 0;
+  const riseY = $derived(!phone.npOpen && phone.npRise > 0 ? Math.max(0, vh - 64 - phone.npRise) : null);
+  const y = $derived(riseY ?? pull);
   const cur = $derived(app.player.current!);
   const lines = $derived(app.lyrics.lyrics?.synced ? app.lyrics.lyrics.lines : []);
   const showLyricLine = $derived(app.config.ui.np_lyric_line !== false);
@@ -135,8 +140,10 @@
   }
 </script>
 
-<div class="sheet" data-part="now-playing" style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${Math.min(22, 10 + pull * 0.3).toFixed(1)}px ${Math.min(22, 10 + pull * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={pull === 0}
-  in:sheetIn|global={{ duration: 300 }} out:sheetOut|global={{ duration: 230, radius: true }}
+<svelte:window bind:innerHeight={vh} />
+
+<div class="sheet" data-part="now-playing" style:transform="translateY({y}px)" style:border-radius={y > 0 ? `${Math.min(22, 10 + y * 0.3).toFixed(1)}px ${Math.min(22, 10 + y * 0.3).toFixed(1)}px 0 0` : undefined} class:settle={y === 0} class:dragging={y > 0}
+  in:sheetIn|global={{ duration: rising ? 0 : 300 }} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hdr" style:background="rgba(15,15,15,{0.94 * sk})"
     use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
@@ -258,6 +265,7 @@
 <style>
   .sheet { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; overflow: hidden; background: #080808; }
   .sheet.settle { transition: transform .24s var(--ease), border-radius .22s var(--ease); }
+  .sheet.dragging { will-change: transform; }
   .hdr { position: relative; flex: none; height: calc(52px + var(--safe-top, env(safe-area-inset-top))); padding-top: var(--safe-top, env(safe-area-inset-top)); touch-action: none; }
   .normal { position: absolute; inset: var(--safe-top, env(safe-area-inset-top)) 0 0; padding: 0 4px; display: flex; align-items: center; gap: 4px; }
   .from { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; }

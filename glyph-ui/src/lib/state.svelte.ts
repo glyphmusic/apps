@@ -51,6 +51,8 @@ export interface CtxMenu {
   save?: boolean;
   /** Opened from the mobile full-screen Now Playing sheet. */
   nowPlaying?: boolean;
+  /** Several picked songs (select mode on phones): opens right on "Add to playlist". */
+  tracks?: Track[] | null;
 }
 
 /** app.rs Toast: "Title · Sub" (sub shown in caps), check or info icon, optional undo. */

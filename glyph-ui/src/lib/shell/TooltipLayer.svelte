@@ -38,7 +38,7 @@
   .tip.right { flex-direction: row; align-items: center; }
   .tip.left { flex-direction: row-reverse; align-items: center; }
   .box { padding: 5px 9px; border-radius: 6px; background: var(--tip-bg); white-space: nowrap; font: 500 12.5px var(--font); color: rgba(255, 255, 255, .92); }
-  .wrap .box { width: 280px; padding: 8px 11px; white-space: normal; font-weight: 400; line-height: 18px; color: rgba(255, 255, 255, .86); }
+  .wrap .box { width: min(280px, calc(100vw - 12px)); box-sizing: border-box; padding: 8px 11px; white-space: normal; font-weight: 400; line-height: 18px; color: rgba(255, 255, 255, .86); }
   .arrow { position: relative; width: 10px; display: flex; flex-direction: column; align-items: center; }
   .arrow i { display: block; height: 1px; background: var(--tip-bg); }
   .arrow.l { width: auto; flex-direction: row; }

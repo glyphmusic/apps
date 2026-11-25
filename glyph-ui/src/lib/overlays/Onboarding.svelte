@@ -1,9 +1,9 @@
 <script lang="ts">
-  // ui/onboarding.rs layer(): first start, a short tour of what Glyph does,
-  // one idea per page (welcome, search, library, sound, lyrics, devices,
-  // speed, theme), each with a small live illustration to play with; on the
-  // speed page the user picks full effects or performance mode (the one that
-  // suits the device, checked on first start, is marked). It follows the
+  // First start: instead of a tour of features, the user makes something
+  // right away: welcome, pick what you like (taste), your first playlist
+  // (name it, tick songs), then speed (full effects or performance mode, the
+  // one that suits the device is marked) and colour. When the tour ends the
+  // playlist is made and opened. It follows the
   // splash on a fresh install; Settings > About opens it again
   // (`app.onboarding = true`). Arrow keys / Enter go on, Escape skips; on
   // touch screens a sideways swipe turns the page and the sheet is full
@@ -22,18 +22,14 @@
   import Button from "../components/Button.svelte";
   import ModalLayer from "./ModalLayer.svelte";
   import Welcome from "../pages/onboarding/Welcome.svelte";
-  import SearchPage from "../pages/onboarding/SearchPage.svelte";
-  import LibraryPage from "../pages/onboarding/LibraryPage.svelte";
-  import SoundPage from "../pages/onboarding/SoundPage.svelte";
-  import LyricsPage from "../pages/onboarding/LyricsPage.svelte";
-  import DevicesPage from "../pages/onboarding/DevicesPage.svelte";
+  import FirstPlaylistPage from "../pages/onboarding/FirstPlaylistPage.svelte";
   import ThemePage from "../pages/onboarding/ThemePage.svelte";
   import SpeedPage from "../pages/onboarding/SpeedPage.svelte";
   import TastePage from "../pages/onboarding/TastePage.svelte";
   import { easeOut, k, ob, resetTour } from "../pages/onboarding/anim.svelte";
   import type { TasteProfile, Track } from "../api/types";
 
-  const PAGES = ["welcome", "search", "library", "sound", "lyrics", "devices", "speed", "taste", "theme"] as const;
+  const PAGES = ["welcome", "taste", "playlist", "speed", "theme"] as const;
   const CLOSE = 240;
 
   let page = $state(0), prev = $state(0), dir = $state(0);
@@ -46,6 +42,9 @@
   let tasteTracks = $state<Track[]>([]);
   let tasteGenres = $state<string[]>([]);
   let tasteSaved = false;
+  let plName = $state("");
+  let plTracks = $state<Track[]>([]);
+  let plMade = false;
 
   const still = $derived(fx.reduce);
   const touch = $derived(app.compact);
@@ -58,7 +57,7 @@
   const stageW = $derived(cardW - pad * 2);
   const key = $derived(PAGES[page]);
   const stageH = $derived(
-    key === "taste"
+    key === "taste" || key === "playlist"
       ? (touch ? Math.min(390, Math.max(260, vh * 0.45)) : Math.min(340, Math.max(245, vh - 330)))
       : (touch ? Math.min(330, Math.max(220, vh * 0.36)) : Math.min(250, Math.max(200, vh - 400))),
   );
@@ -129,12 +128,21 @@
     }
   });
 
+  /** Makes the playlist from the playlist step (if it has songs) and opens it. */
+  function makePlaylist(open: boolean) {
+    if (plMade || !plTracks.length) return;
+    plMade = true;
+    const name = plName.trim() || t("onboarding.playlist.name_ph");
+    app.createPlaylist(name, $state.snapshot(plTracks) as Track[])
+      .then((id) => { if (open && id) app.openListView({ kind: "playlist", id }); })
+      .catch(() => {});
+  }
+
   function go(to: number) {
     if (to === page || to < 0 || to >= n || closing) return;
     dir = to > page ? 1 : -1;
     prev = page; page = to; pageAt = performance.now();
     // Coming back replays the page's intro.
-    if (PAGES[to] === "search") ob.resultsAt = null;
     revealRestart(titleKey(to));
   }
   function next() { if (last) finish(false); else go(page + 1); }
@@ -144,6 +152,7 @@
   function finish(migrate: boolean) {
     if (closing) return;
     commitTasteIfPicked();
+    makePlaylist(!migrate);
     closing = performance.now(); thenMigrate = migrate;
     backend().call("onboarding_seen").catch(() => {});
   }
@@ -151,7 +160,7 @@
   // Phones: a sideways swipe turns the page (a swipe never finishes the tour).
   function pdown(e: PointerEvent) {
     if (!touch) return;
-    if (key === "taste" && (e.target as HTMLElement | null)?.closest(".genres, .picked-pills, input, textarea")) {
+    if ((key === "taste" || key === "playlist") && (e.target as HTMLElement | null)?.closest(".genres, .picked-pills, .list, input, textarea")) {
       swipe = null;
       return;
     }
@@ -171,11 +180,7 @@
 {#if !app.splash}
   {#snippet art()}
     {#if key === "welcome"}<Welcome {s} h={stageH} />
-    {:else if key === "search"}<SearchPage {s} {now} {still} h={stageH} />
-    {:else if key === "library"}<LibraryPage {s} {now} w={stageW} />
-    {:else if key === "sound"}<SoundPage {s} {now} {still} w={stageW} h={stageH} />
-    {:else if key === "lyrics"}<LyricsPage {now} {still} w={stageW} h={stageH} />
-    {:else if key === "devices"}<DevicesPage {s} {now} {still} w={stageW} h={stageH} />
+    {:else if key === "playlist"}<FirstPlaylistPage bind:name={plName} bind:picked={plTracks} artists={tasteArtists} tracks={tasteTracks} {touch} />
     {:else if key === "speed"}<SpeedPage {s} w={stageW} />
     {:else if key === "taste"}<TastePage bind:selectedArtists={tasteArtists} bind:selectedTracks={tasteTracks} bind:selectedGenres={tasteGenres} />
     {:else}<ThemePage {s} {still} w={stageW} />{/if}

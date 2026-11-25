@@ -10,6 +10,12 @@ import { pwa } from "../pwa.svelte";
 export const phone = $state({
   npOpen: false,
   npPull: 0,
+  /** How far Now Playing is pulled up from the mini bar (px) while the
+   *  finger is still down: the sheet follows the finger, then opens or
+   *  falls back on release. */
+  npRise: 0,
+  /** Height of the bottom stack (mini player + tabs), for bars that sit above it. */
+  bottomH: 120,
   lyricsOpen: false,
   videoMode: false,
   videoPickerOpen: false,
@@ -71,6 +77,17 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   let touchStart: { x: number; y: number } | null = null;
   let claimed = false;
   let suppressClick = 0;
+  // Moves are applied once per frame: a phone sends pointer moves faster
+  // than it paints, and each one re-renders the sheet (Android lag).
+  let pending: [number, number] | null = null;
+  let raf = 0;
+  const frames = typeof requestAnimationFrame === "function";
+  const flush = () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    const p = pending; pending = null;
+    if (p) o.move?.(p[0], p[1]);
+  };
   const releaseClaim = (id?: number) => {
     if (id !== undefined) {
       if (claimedPointers.get(id) === el) claimedPointers.delete(id);
@@ -115,7 +132,9 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
     }
     e.preventDefault();
     e.stopPropagation();
-    o.move?.(dx, dy);
+    pending = [dx, dy];
+    if (!frames) flush();
+    else if (!raf) raf = requestAnimationFrame(flush);
   };
   const tstart = (e: TouchEvent) => {
     if (e.touches.length !== 1) return;
@@ -146,6 +165,7 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
     start = null; claimed = false;
     releaseClaim(e.pointerId);
     if (was) {
+      flush();
       if (e.type === "pointerup") suppressClick = performance.now();
       o.end?.(dx, dy, vx, vy);
       e.preventDefault();
@@ -180,6 +200,7 @@ export function drag(el: HTMLElement, opts: { axis?: "x" | "y" | "any"; move?: (
   return {
     update(n: typeof opts) { o = n; },
     destroy() {
+      if (raf) cancelAnimationFrame(raf);
       releaseClaim();
       el.removeEventListener("pointerdown", down); el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", up);

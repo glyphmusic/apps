@@ -7,9 +7,11 @@
   // copy link | hide artist. List menu: cover header → save (albums), add
   // all to playlist | play, shuffle, queue, radio, download all | pin, open,
   // share, go to artist; own playlists: edit, storage, versions, delete.
-  // Song menu: cover header → like, add to playlist (+ remove in playlists) |
-  // play, play next, queue, radio | recommendations (+ remove recent),
-  // copy link, more (download, artist, album). Sidebar entries add "Hide from sidebar".
+  // Song menu: cover header → play, play next, queue | like, add to
+  // playlist (+ remove in playlists) | artist, album, radio | recommendations
+  // (+ remove recent), more (download, copy link, video, wrong song).
+  // List menu: play, shuffle, queue | save / add to playlist, (own: add songs,
+  // edit) | more | delete. Sidebar entries add "Hide from sidebar".
   // Flyouts (add to playlist, recommendations, storage, versions) open on
   // hover, right of the menu or left when they would not fit.
   // "Save to" (right-click on a heart): song header, then Liked Songs and
@@ -48,7 +50,7 @@
   const list = $derived(m.list ?? null);
   const artist = $derived(m.artist ?? null);
   // Songs the menu acts on: one song, or a whole list.
-  const songs = $derived<Track[]>(list ? shownTracks(list) : tr ? [tr] : []);
+  const songs = $derived<Track[]>(m.tracks?.length ? m.tracks : list ? shownTracks(list) : tr ? [tr] : []);
   let sub = $state<Sub>(null);
   let directArtists = $state(false);
   let moreSub = $state<MoreSub>(null);
@@ -119,7 +121,7 @@
   $effect.pre(() => {
     const ctx = app.ctx;
     if (!ctx) return;
-    const preset = ctx.artists?.length ? "artists" : null;
+    const preset = ctx.tracks?.length ? "playlist" : ctx.artists?.length ? "artists" : null;
     directArtists = !!preset;
     sub = preset;
     moreSub = null;
@@ -142,10 +144,11 @@
   const listKind = $derived(list?.kind === "album" ? list.artist : t("list.kind.playlist"));
   // ---- song ----
   const removable = $derived(m.from && (m.from.list.kind === "playlist" || m.from.list.kind === "recent") ? m.from : null);
-  const targets = $derived(app.library.playlists.filter((p) => p.id !== own));
+  const pickedFrom = $derived(m.tracks?.length && m.from?.list.kind === "playlist" ? m.from.list.id : null);
+  const targets = $derived(app.library.playlists.filter((p) => p.id !== own && p.id !== pickedFrom));
 
-  function addTo(id: string) { close(); app.addToPlaylist(id, songs); }
-  function newPlaylist() { openNameDialog(songs, null); }
+  function addTo(id: string) { close(); app.addToPlaylist(id, songs); if (m.tracks?.length) app.stopPicking(); }
+  function newPlaylist() { openNameDialog(songs, null); if (m.tracks?.length) app.stopPicking(); }
   function openList(l: ListKey) { close(); app.openListView(l); }
   function openAddSongs(id: string) {
     app.showQueue = false;
@@ -266,29 +269,19 @@
 {/snippet}
 
 {#snippet moreBody(song: Track)}
-  {@const songArtists = splitArtists(song.artist)}
-  {#if !onWeb()}
-    {#if isDownloading(song)}
-      <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={() => (moreSub = null)} onclick={run(() => app.cancelDownloads([song]))} />
-    {:else if app.isDownloaded(song)}
-      <MenuItem icon="trash-2" label={t("ctx.remove_download")} danger onenter={() => (moreSub = null)} onclick={run(() => removeDownloads([song]))} />
+  {#if !onWeb() && !isDownloading(song)}
+    {#if app.isDownloaded(song)}
+      <MenuItem icon="trash-2" label={t("ctx.remove_download")} danger onclick={run(() => removeDownloads([song]))} />
     {:else}
-      <MenuItem icon="download" label={t("ctx.download")} onenter={() => (moreSub = null)} onclick={run(() => app.download([song]))} />
+      <MenuItem icon="download" label={t("ctx.download")} onclick={run(() => app.download([song]))} />
     {/if}
-    <Sep />
   {/if}
-  {#if songArtists.length > 1 && !compact}
-    <div class="sub-wrap" role="none" onmouseenter={(e) => enterMoreSub("artists", e)}>
-      <MenuItem icon="user-round" label={t("ctx.artist")} sub open={moreSub === "artists"} onenter={() => (moreSub = "artists")} />
-    </div>
-  {:else if songArtists.length > 1}
-    <MenuItem icon="user-round" label={t("ctx.artist")} sub onclick={() => setSub("artists")} />
-  {:else}
-    <MenuItem icon="user-round" label={t("ctx.artist")} onenter={() => (moreSub = null)} onclick={() => openArtist(songArtists[0] ?? song.artist)} />
+  <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onclick={run(() => app.share({ track: song }))} />
+  {#if !(compact && m.nowPlaying && phone.videoMode)}
+    <MenuItem icon="tv" label={t("ctx.watch_video")} onclick={() => openVideo(song)} />
   {/if}
-  {#if song.album?.trim()}
-    <MenuItem icon="disc-3" label={t("ctx.album")} onenter={() => (moreSub = null)} onclick={() => openAlbum(song.album!, song.artist, song)} />
-  {/if}
+  <Sep />
+  <MenuItem icon="arrow-right-left" label={t("ctx.wrong_song")} onclick={run(() => app.openWrongSong(song))} />
 {/snippet}
 
 {#snippet listMoreBody(k: ListKey)}
@@ -406,18 +399,23 @@
       <MenuItem icon="eye-off" label={t("ctx.hide_artist")} danger onenter={closesSub} onclick={run(() => toggleHiddenArtist(artist))} />
     {/if}
   {:else if list}
-    {#if album}
-      {@const saved = app.isSavedAlbum(list)}
-      <MenuItem icon={saved ? "heart-fill" : "heart"} color={saved ? "var(--accent)" : undefined} label={t(saved ? "ctx.unsave" : "ctx.save")} onenter={closesSub} onclick={run(() => app.toggleSaveAlbum(list))} />
-    {/if}
-    {#if has}{@render playlistSub()}{/if}
-    {#if album || has}<Sep />{/if}
     {#if has}
       <MenuItem icon="play" label={t("ctx.play")} onenter={closesSub} onclick={run(() => app.play(songs, 0, contextOf(list)))} />
       <MenuItem icon="shuffle" label={t("ctx.shuffle")} onenter={closesSub} onclick={run(() => playShuffled(songs, contextOf(list)))} />
       <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => queueAll(songs))} />
       <Sep />
     {/if}
+    {#if album}
+      {@const saved = app.isSavedAlbum(list)}
+      <MenuItem icon={saved ? "heart-fill" : "heart"} color={saved ? "var(--accent)" : undefined} label={t(saved ? "ctx.unsave" : "ctx.save")} onenter={closesSub} onclick={run(() => app.toggleSaveAlbum(list))} />
+    {/if}
+    {#if has}{@render playlistSub()}{/if}
+    {#if own}
+      {@const id = own}
+      <MenuItem icon="circle-plus" label={t("add.title")} onenter={closesSub} onclick={run(() => openAddSongs(id))} />
+      <MenuItem icon="pencil" label={t("list.edit")} onenter={closesSub} onclick={() => openNameDialog([], id)} />
+    {/if}
+    {#if album || has || own}<Sep />{/if}
     {#if !onWeb() && anyDlBusy}
       <MenuItem icon="x" label={t("ctx.cancel_downloads")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads(songs))} />
     {/if}
@@ -442,13 +440,18 @@
     {#if own}
       {@const id = own}
       <Sep />
-      <MenuItem icon="circle-plus" label={t("add.title")} onenter={closesSub} onclick={run(() => openAddSongs(id))} />
-      <MenuItem icon="pencil" label={t("list.edit")} onenter={closesSub} onclick={() => openNameDialog([], id)} />
       <MenuItem icon="trash-2" label={t("list.delete")} danger onenter={closesSub} onclick={run(() => deletePlaylist(id))} />
     {/if}
   {:else if tr}
     {@const song = tr}
     {@const liked = app.isLiked(song)}
+    {@const songArtists = splitArtists(song.artist)}
+    <!-- Play first, then keep (like, playlist), then go (artist, album,
+         radio); the rarely used ones live under "More". -->
+    <MenuItem icon="play" label={t("ctx.play")} onenter={closesSub} onclick={run(() => app.play([song], 0))} />
+    <MenuItem icon="list-start" label={t("ctx.play_next")} onenter={closesSub} onclick={run(() => app.queueAdd([song], true))} />
+    <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => app.queueAdd([song], false))} />
+    <Sep />
     <MenuItem icon={liked ? "heart-fill" : "heart"} color={liked ? "var(--accent)" : undefined} label={t(liked ? "ctx.unlike" : "ctx.like")} onenter={closesSub} onclick={run(() => app.toggleLike(song))} />
     {@render playlistSub()}
     {#if removable && removable.list.kind === "playlist"}
@@ -456,41 +459,33 @@
       <MenuItem icon="circle-minus" label={t("ctx.remove")} danger onenter={closesSub} onclick={run(() => removeShown(from.list, from.index))} />
     {/if}
     <Sep />
-    <MenuItem icon="play" label={t("ctx.play")} onenter={closesSub} onclick={run(() => app.play([song], 0))} />
-    <MenuItem icon="list-start" label={t("ctx.play_next")} onenter={closesSub} onclick={run(() => app.queueAdd([song], true))} />
-    <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => app.queueAdd([song], false))} />
+    {#if songArtists.length > 1}
+      <MenuItem icon="user-round" label={t("ctx.artist")} sub open={!compact && subOpen("artists")}
+        onenter={() => { if (!compact) sub = "artists"; }} onclick={compact ? () => setSub("artists") : undefined}>
+        {#if !compact && subOpen("artists")}<Flyout {flip}>{@render artistsBody(songArtists, 24)}</Flyout>{/if}
+      </MenuItem>
+    {:else}
+      <MenuItem icon="user-round" label={t("ctx.artist")} onenter={closesSub} onclick={() => openArtist(songArtists[0] ?? song.artist)} />
+    {/if}
+    {#if song.album?.trim()}
+      <MenuItem icon="disc-3" label={t("ctx.album")} onenter={closesSub} onclick={() => openAlbum(song.album!, song.artist, song)} />
+    {/if}
     <MenuItem icon="radio" label={t("ctx.radio")} onenter={closesSub} onclick={run(() => songRadio(song))} />
+    {#if compact && m.nowPlaying && phone.videoMode}
+      <MenuItem icon="search" label={t("video.switch")} onenter={closesSub} onclick={run(() => (phone.videoPickerOpen = true))} />
+      <MenuItem icon="music-2" label={t("video.back_to_song")} onenter={closesSub} onclick={run(() => { videoState.leave(true); phone.videoMode = false; phone.videoPickerOpen = false; })} />
+    {/if}
+    {#if !onWeb() && isDownloading(song)}
+      <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />
+    {/if}
     <Sep />
     <MenuItem icon="sliders-horizontal" label={t("ctx.recommend")} sub open={!compact && subOpen("recommend")}
       onenter={() => { if (!compact) sub = "recommend"; }} onclick={compact ? () => setSub("recommend") : undefined}>
       {#if !compact && subOpen("recommend")}<Flyout {flip}>{@render recommendBody(song)}</Flyout>{/if}
     </MenuItem>
-    <MenuItem icon={app.compact ? "share-2" : "link-2"} label={t(app.compact ? "share.title" : "ctx.copy_link")} onenter={closesSub} onclick={run(() => app.share({ track: song }))} />
-    {#if compact && m.nowPlaying && phone.videoMode}
-      <MenuItem icon="search" label={t("video.switch")} onenter={closesSub} onclick={run(() => (phone.videoPickerOpen = true))} />
-      <MenuItem icon="music-2" label={t("video.back_to_song")} onenter={closesSub} onclick={run(() => { videoState.leave(true); phone.videoMode = false; phone.videoPickerOpen = false; })} />
-    {:else}
-      <MenuItem icon="tv" label={t("ctx.watch_video")} onenter={closesSub} onclick={() => openVideo(song)} />
-    {/if}
-    <MenuItem icon="arrow-right-left" label={t("ctx.wrong_song")} onenter={closesSub} onclick={run(() => app.openWrongSong(song))} />
-    {#if !onWeb() && isDownloading(song)}
-      <MenuItem icon="x" label={t("ctx.cancel_download")} danger onenter={closesSub} onclick={run(() => app.cancelDownloads([song]))} />
-    {/if}
     <MenuItem icon="ellipsis" label={t("ctx.more")} sub open={!compact && subOpen("more")}
       onenter={() => { if (!compact) { sub = "more"; moreSub = null; } }} onclick={compact ? () => setSub("more") : undefined}>
-      {#if !compact && subOpen("more")}
-        {@const songArtists = splitArtists(song.artist)}
-        <Flyout {flip}>
-          {@render moreBody(song)}
-          {#snippet aside()}
-            {#if moreSub === "artists" && songArtists.length > 1}
-              <Flyout flip={nestedFlip} top={moreSubTop}>
-                {@render artistsBody(songArtists, 24)}
-              </Flyout>
-            {/if}
-          {/snippet}
-        </Flyout>
-      {/if}
+      {#if !compact && subOpen("more")}<Flyout {flip}>{@render moreBody(song)}</Flyout>{/if}
     </MenuItem>
   {/if}
 
@@ -520,7 +515,7 @@
 
 {#if compact}
   <div class="bs-dim" transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={close} oncontextmenu={(e) => e.preventDefault()} role="presentation">
-    <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="bs-grab" bind:this={grabEl} use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
         <span class="hdl"></span>
         <div class="bs-stage">
@@ -533,8 +528,10 @@
             >
               {#if sub === "artists" && directArtists}
                 <div class="bs-title">{t("library.artists")}</div>
+              {:else if sub === "playlist" && directArtists}
+                <div class="bs-title">{t("pick.playlist")} · {tf("pick.n", { n: songs.length })}</div>
               {:else if sub}
-                <button class="bs-back" onclick={() => setSub((sub === "artists" && tr) || ((sub === "artists" || sub === "storage" || sub === "versions") && list) ? "more" : null, -1)}>
+                <button class="bs-back" onclick={() => setSub((sub === "artists" || sub === "storage" || sub === "versions") && list ? "more" : null, -1)}>
                   <span class="bs-bk-ic"><Icon name="chevron-left" size={20} color="rgba(255,255,255,.85)" /></span>
                   <span class="ht">
                     <span class="t1 trunc">{subTitle}</span>
@@ -608,6 +605,7 @@
   .bs-dim { position: fixed; inset: 0; z-index: 80; background: rgba(0, 0, 0, .55); }
   .bs-panel { position: absolute; left: 0; right: 0; bottom: 0; max-height: min(82vh, calc(100vh - var(--safe-top, env(safe-area-inset-top)) - 16px)); border-radius: 16px 16px 0 0; border-top: 1px solid rgba(255, 255, 255, .08); background: hsl(0 0% 8%); box-shadow: 0 -12px 40px rgba(0, 0, 0, .6); padding-bottom: max(10px, var(--safe-bottom, env(safe-area-inset-bottom)), var(--ime-bottom, 0px)); display: flex; flex-direction: column; overflow: hidden; --mi-h: 42px; --mi-px: 14px; --mi-r: 10px; --mi-fs: 15.5px; --mi-gap: 13px; }
   .bs-panel.settle { transition: transform .24s var(--ease); }
+  .bs-panel.dragging { will-change: transform; }
   .bs-grab { flex: none; touch-action: none; }
   .hdl { display: block; width: 36px; height: 4px; margin: 10px auto 6px; border-radius: 2px; background: rgba(255, 255, 255, .25); }
   .bs-hd { padding: 4px 10px 10px; border-bottom: 1px solid rgba(255, 255, 255, .07); }

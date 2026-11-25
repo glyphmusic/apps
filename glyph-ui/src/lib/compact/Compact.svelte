@@ -284,13 +284,13 @@
     <div class="tail" class:with-mini={!!app.player.current}></div>
   </main>
 
-  <div class="bottom" class:has-mini={!!app.player.current}>
+  <div class="bottom" class:has-mini={!!app.player.current} bind:offsetHeight={phone.bottomH}>
     {#if app.player.current}<MiniBar />{/if}
     <TabBar />
   </div>
 </div>
 
-{#if phone.npOpen && app.player.current}<NowPlayingSheet />{/if}
+{#if (phone.npOpen || phone.npRise > 0) && app.player.current}<NowPlayingSheet />{/if}
 {#if phone.lyricsOpen && app.player.current}<LyricsView />{/if}
 {#if phone.videoPickerOpen && app.player.current}<VideoPickerSheet />{/if}
 {#if app.showQueue || app.showDevices}<BottomSheet />{/if}

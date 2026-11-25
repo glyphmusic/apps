@@ -42,7 +42,11 @@
 
   function move(dx: number, dy: number) {
     if (!dirLock) dirLock = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
-    if (dirLock !== "x") return;
+    if (dirLock !== "x") {
+      // Pulling up: Now Playing comes up with the finger.
+      phone.npRise = Math.max(0, -dy);
+      return;
+    }
     if (frozen) { clearTimeout(timer); frozen = null; }
     settling = false;
     const damp = (dx > 0 && !prev) || (dx < 0 && !next);
@@ -73,6 +77,9 @@
       timer = window.setTimeout(() => (settling = false), 220);
     } else if (dy < -SWIPE_ACT * 0.5 || (vy < -0.35 && dy < -14)) {
       phone.npOpen = true;
+      phone.npRise = 0;
+    } else {
+      phone.npRise = 0;
     }
   }
 </script>
@@ -106,7 +113,7 @@
 </div>
 
 <style>
-  .mini { position: relative; height: 64px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border-radius: 12px; background: #141414; overflow: hidden; touch-action: pan-y; transition: transform .16s var(--ease); }
+  .mini { position: relative; height: 64px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border-radius: 12px; background: #141414; overflow: hidden; touch-action: none; transition: transform .16s var(--ease); }
   .open { flex: 1; min-width: 0; height: 100%; position: relative; overflow: hidden; text-align: left; }
   .strip { position: relative; display: block; width: 100%; height: 100%; }
   .strip.settling { transition: transform .2s var(--ease); }

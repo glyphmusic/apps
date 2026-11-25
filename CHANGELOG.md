@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A first start that gets you going**: instead of a tour of features, the first start now asks what you like, then lets you make your first playlist right away (give it a name, tick songs we picked for you or search for others), then speed and colour. At the end the new playlist opens.
+- **Clearer song selection**: when you select songs in a list, a coloured badge shows how many you picked out of how many. On phones a bar above the player now offers Add to queue, Add to playlist, Download and Remove (before, only Remove).
+- **Tidier menus**: the song menu now starts with Play, Play next and Add to queue, then Like and Add to playlist, then Go to artist, Go to album and Start radio. Rarely used items (download, copy link, watch video, "Not the right one?") moved into "More". The playlist menu also starts with Play.
+- **Clearer settings on phones**: the pages are grouped into cards (Preferences, Application) with an arrow on each row, and every setting shows its explanation right under its name (tap it to read all of it).
+
+### Fixed
+
+- **Info buttons on phones**: tapping an (i) next to a setting now shows its explanation. Before, nothing happened on touch screens.
+- **Smoother sheets on Android**: dragging the player, the queue and menus is drawn once per frame, and Now Playing follows your finger when you pull it up from the mini player.
+
 ## 0.13.6 - 2026-11-25
 
 ### Added
