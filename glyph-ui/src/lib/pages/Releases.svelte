@@ -33,15 +33,15 @@
       <SkeletonArtistRows prefix="releases" n={2} />
     {/snippet}
     {#if releases.length}
-      <div class="grid">
+      <div class="grid" class:mob={app.compact}>
         {#each releases as r (r.id)}
-          <ReleaseCard size={168} title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r), { kind: r.kind, tracks: r.tracks })} />
+          <ReleaseCard size={168} fluid={app.compact} title={r.title} artist={r.artist} tracks={[seed(r)]} label={r.year ? `${r.year} · ${releaseKind(r.kind)}` : releaseKind(r.kind)} onopen={() => app.openAlbum(r.title, r.artist, [], seed(r), { kind: r.kind, tracks: r.tracks })} />
         {/each}
       </div>
     {:else if grouped.length}
-      <div class="grid">
+      <div class="grid" class:mob={app.compact}>
         {#each grouped as g (g.title)}
-          <ReleaseCard size={168} title={g.title} artist={name} tracks={g.tracks} label={albumLabel(g.title, name, g.tracks.length)} onopen={() => app.openListView({ kind: "album", title: g.title, artist: name, tracks: g.tracks })} />
+          <ReleaseCard size={168} fluid={app.compact} title={g.title} artist={name} tracks={g.tracks} label={albumLabel(g.title, name, g.tracks.length)} onopen={() => app.openListView({ kind: "album", title: g.title, artist: name, tracks: g.tracks })} />
         {/each}
       </div>
     {:else}
@@ -53,4 +53,6 @@
 <style>
   .rv { display: flex; flex-direction: column; gap: 16px; padding-bottom: 20px; }
   .grid { display: flex; flex-wrap: wrap; gap: 4px; margin-left: -8px; }
+  /* Phones: two per row (the cards fill their column) instead of one big card per row. */
+  .grid.mob { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px; margin: 0 -8px; }
 </style>

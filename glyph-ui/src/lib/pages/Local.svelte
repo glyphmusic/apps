@@ -110,7 +110,7 @@
 </script>
 
 <div class="pg">
-  {#if app.history.length}<div class="bk"><Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button></div>{/if}
+  {#if app.history.length && !app.compact}<div class="bk"><Button kind="back" icon="arrow-left" onclick={() => app.back()}>{t("common.back")}</Button></div>{/if}
 
   <div class="head">
     <div class="hl">

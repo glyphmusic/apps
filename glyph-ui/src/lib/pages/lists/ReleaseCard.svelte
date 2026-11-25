@@ -5,7 +5,7 @@
   import Cover from "../../components/Cover.svelte";
   import { app } from "../../state.svelte";
   import type { ListKey, Track } from "../../api/types";
-  let { title, artist, tracks, label, size = 160, onopen }: { title: string; artist: string; tracks: Track[]; label: string; size?: number; onopen: () => void } = $props();
+  let { title, artist, tracks, label, size = 160, fluid = false, onopen }: { title: string; artist: string; tracks: Track[]; label: string; size?: number; fluid?: boolean; onopen: () => void } = $props();
   const lk = $derived<ListKey>({ kind: "album", title, artist, tracks });
   function menu(e: MouseEvent) {
     e.preventDefault(); e.stopPropagation();
@@ -13,7 +13,7 @@
   }
 </script>
 
-<button class="rc" style:width="{size + 16}px" onclick={onopen} oncontextmenu={menu}>
+<button class="rc" class:fluid style:width={fluid ? undefined : `${size + 16}px`} onclick={onopen} oncontextmenu={menu}>
   <Cover track={tracks[0]} {size} radius={8} />
   <span class="tl trunc">{title}</span>
   <span class="lb mono">{label.toUpperCase()}</span>
@@ -24,4 +24,7 @@
   .rc:hover { background: rgba(255, 255, 255, .05); }
   .tl { padding-top: 4px; font-size: var(--md); font-weight: 500; color: var(--text); }
   .lb { font-size: 11px; color: var(--faint); }
+  /* fluid: fills a grid cell (phones: two per row). */
+  .rc.fluid { min-width: 0; }
+  .rc.fluid :global(.cv) { width: 100% !important; height: auto !important; aspect-ratio: 1; }
 </style>

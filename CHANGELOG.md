@@ -8,10 +8,14 @@
 - **Clearer song selection**: when you select songs in a list, a coloured badge shows how many you picked out of how many. On phones a bar above the player now offers Add to queue, Add to playlist, Download and Remove (before, only Remove).
 - **Tidier menus**: the song menu now starts with Play, Play next and Add to queue, then Like and Add to playlist, then Go to artist, Go to album and Start radio. Rarely used items (download, copy link, watch video, "Not the right one?") moved into "More". The playlist menu also starts with Play.
 - **Profiles on phones look like artist pages**: one back button instead of two, the banner fills the top and zooms in as you scroll, and the full name shows under the picture instead of being cut off.
+- **Less empty space on phones**: similar artists and albums show two per row; Liked Songs, Downloads and Recently played put shuffle and play next to the title instead of in a half-empty row; Local files and mix pages have one back button.
+- **First start keeps its size**: every step of the first start has the same height, so the window no longer grows or shrinks when you press Next.
+- **Profile header on computers**: picture, name and Follow button now sit on one line.
 - **Clearer settings on phones**: the pages are grouped into cards (Preferences, Application) with an arrow on each row, and every setting shows its explanation right under its name (tap it to read all of it).
 
 ### Fixed
 
+- **Text size cards on small phones**: the three text size cards in Settings > Appearance now fit inside their box.
 - **Info buttons on phones**: tapping an (i) next to a setting now shows its explanation. Before, nothing happened on touch screens.
 - **Smoother sheets on Android**: dragging the player, the queue and menus is drawn once per frame, and Now Playing follows your finger when you pull it up from the mini player.
 

@@ -285,15 +285,17 @@
   .bedit { position: absolute; top: 20px; right: 32px; }
 
   /* name row: items-end, gap 20, mt -(56 + 22), px 8 */
-  .name { display: flex; align-items: flex-end; gap: 20px; margin-top: -78px; padding: 0 8px; position: relative; }
+  /* Picture, name and button on one middle line (the picture used to hang
+     below the name because the text was pushed up by its bottom padding). */
+  .name { display: flex; align-items: center; gap: 20px; margin-top: -64px; padding: 0 8px; position: relative; }
   .pic { position: relative; flex: none; width: 112px; height: 112px; }
   .pen { position: absolute; inset: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(0, 0, 0, .5); opacity: 0; transition: opacity .15s ease-out; }
   .pic:hover .pen, .pen:focus-visible { opacity: 1; }
-  .who { flex: 1; min-width: 0; padding-bottom: 70px; display: flex; flex-direction: column; gap: 6px; }
+  .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   .badge { font-size: var(--sm); font-weight: 500; line-height: 18px; color: rgba(255, 255, 255, .65); }
   .handle { margin: 0; font-size: 36px; line-height: 40px; font-weight: 700; color: #fff; }
   .pname { font-size: var(--md); color: rgba(255, 255, 255, .7); }
-  .act { flex: none; padding-bottom: 74px; }
+  .act { flex: none; }
   .bio { font-size: var(--md); color: var(--dim); max-width: 640px; line-height: 1.4; }
   .note { font-size: var(--sm); color: var(--faint); }
 

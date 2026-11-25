@@ -56,11 +56,9 @@
   const pad = $derived(touch ? 20 : 30);
   const stageW = $derived(cardW - pad * 2);
   const key = $derived(PAGES[page]);
-  const stageH = $derived(
-    key === "taste" || key === "playlist"
-      ? (touch ? Math.min(390, Math.max(260, vh * 0.45)) : Math.min(340, Math.max(245, vh - 330)))
-      : (touch ? Math.min(330, Math.max(220, vh * 0.36)) : Math.min(250, Math.max(200, vh - 400))),
-  );
+  // One stage height for every step (the tallest, for the taste and playlist
+  // pickers), so the card never grows or shrinks when you press Next.
+  const stageH = $derived(touch ? Math.min(390, Math.max(260, vh * 0.45)) : Math.min(340, Math.max(245, vh - 330)));
   const open = $derived(still ? 1 : shownAt == null ? 0 : easeOut((now - shownAt) / 1000 / 0.32));
   const close = $derived(closing ? (still ? 0 : 1 - easeOut((now - closing) / CLOSE)) : 1);
   const vis = $derived(Math.min(open, close));
@@ -251,7 +249,8 @@
   .stage { position: relative; border-radius: 14px; background: rgba(255, 255, 255, .035); overflow: hidden; max-width: 100%; }
   .text { display: flex; flex-direction: column; gap: 8px; }
   .title { font-size: 22px; font-weight: 700; color: rgba(255, 255, 255, .96); }
-  .body { min-height: 63px; font-size: 14px; line-height: 21px; color: rgba(255, 255, 255, .66); }
+  /* Room for the longest text (4 lines), so the card keeps its height. */
+  .body { min-height: 84px; font-size: 14px; line-height: 21px; color: rgba(255, 255, 255, .66); }
   .foot { display: flex; align-items: center; justify-content: space-between; }
   .dots { display: flex; align-items: center; }
   .dotw { padding: 8px 3px; }
@@ -271,5 +270,5 @@
   .sheet .btns :global(.btn.primary) { flex: 1.7; }
   .sheet .btns :global(.btn.migrate) { flex-basis: 100%; order: -1; }
   .sheet .title { font-size: 26px; line-height: 1.15; }
-  .sheet .body { min-height: 88px; font-size: 15.5px; line-height: 23px; }
+  .sheet .body { min-height: 115px; font-size: 15.5px; line-height: 23px; }
 </style>

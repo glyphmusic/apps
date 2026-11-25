@@ -26,7 +26,7 @@
       <SkeletonArtistRows prefix="similar" n={2} />
     {/snippet}
     {#if similar.length}
-      <div class="grid">{#each similar as n (n)}<ArtistCard name={n} />{/each}</div>
+      <div class="grid" class:mob={app.compact}>{#each similar as n (n)}<ArtistCard name={n} fluid={app.compact} />{/each}</div>
     {:else}
       <EmptyState title={t("artist.similar")} />
     {/if}
@@ -36,4 +36,6 @@
 <style>
   .sv { display: flex; flex-direction: column; gap: 16px; padding-bottom: 20px; }
   .grid { display: flex; flex-wrap: wrap; gap: 4px; margin-left: -8px; }
+  /* Phones: two per row (the cards fill their column) instead of one big card per row. */
+  .grid.mob { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px; margin: 0 -8px; }
 </style>

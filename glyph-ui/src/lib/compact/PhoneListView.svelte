@@ -348,16 +348,7 @@
         <div class="art">{@render cover()}</div>
       {/if}
     {/if}
-    <h1>{app.listTitle(l)}</h1>
-    <div class="n">
-      {#if albumLoading && l.kind === "album"}
-        {l.artist}
-      {:else}
-        {tf("common.n_songs", { n: tracks.length })}{#if l.kind === "artist_liked"} · <button class="link" onclick={() => app.openArtistPage(l.artist)}>{l.artist}</button>{/if}
-      {/if}
-    </div>
-    {#if !pickMode}
-    <div class="acts">
+    {#snippet smallActs()}
       {#if tracks.length && !onWeb()}
         {#if dl.state === "busy"}
           <button type="button" class="dl-act" aria-label={t("ctx.cancel_downloads")} onclick={() => app.cancelDownloads(tracks)}>
@@ -375,12 +366,46 @@
       {/if}
       {#if l.kind === "playlist"}<IconAction name="pencil" label={t("list.edit")} onclick={() => openNameDialog([], l.id)} />{/if}
       {#if pickable && tracks.length}<IconAction name="circle-check" label={t("pick.select")} onclick={() => app.startPicking(l)} />{/if}
-      <span class="flex1"></span>
+    {/snippet}
+    {#snippet playActs()}
       {#if visibleTracks.length}
         <IconAction name="shuffle" label={t("tip.shuffle")} onclick={shuffle} />
         <button class="play" onclick={play} aria-label={t("common.play")}><PlayGlyph loading={here && app.loading} playing={here && app.playing} size={20} button={52} /></button>
       {/if}
+    {/snippet}
+    {#if noArt}
+      <!-- No cover: title left, shuffle + play right on the same height, the
+           small actions under the song count, so no row stands half empty. -->
+      <div class="trow">
+        <div class="tw">
+          <h1>{app.listTitle(l)}</h1>
+          <div class="n">
+            {#if albumLoading && l.kind === "album"}
+              {l.artist}
+            {:else}
+              {tf("common.n_songs", { n: tracks.length })}{#if l.kind === "artist_liked"} · <button class="link" onclick={() => app.openArtistPage(l.artist)}>{l.artist}</button>{/if}
+            {/if}
+          </div>
+          {#if !pickMode}<div class="acts mini">{@render smallActs()}</div>{/if}
+        </div>
+        {#if !pickMode}<div class="pacts">{@render playActs()}</div>{/if}
+      </div>
+    {:else}
+    <h1>{app.listTitle(l)}</h1>
+    <div class="n">
+      {#if albumLoading && l.kind === "album"}
+        {l.artist}
+      {:else}
+        {tf("common.n_songs", { n: tracks.length })}{#if l.kind === "artist_liked"} · <button class="link" onclick={() => app.openArtistPage(l.artist)}>{l.artist}</button>{/if}
+      {/if}
     </div>
+    {#if !pickMode}
+    <div class="acts">
+      {@render smallActs()}
+      <span class="flex1"></span>
+      {@render playActs()}
+    </div>
+    {/if}
     {/if}
   </div>
   {#if pickMode}
@@ -460,6 +485,11 @@
   .msort.on { color: var(--accent); background: rgba(var(--accent-rgb), .14); }
   .head { display: flex; flex-direction: column; gap: 4px; padding: 0 16px; }
   .head.no-art { padding-top: 56px; }
+  .trow { display: flex; align-items: center; gap: 12px; }
+  .tw { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .acts.mini { margin-top: 4px; margin-left: -10px; }
+  .acts.mini:empty { display: none; }
+  .pacts { flex: none; display: flex; align-items: center; gap: 4px; }
   .head.no-art.has-reveal { padding-top: 8px; }
   .art { display: flex; justify-content: center; padding: 20px 0 16px; }
   .art.edit { align-self: center; transition: transform .14s var(--ease); }
