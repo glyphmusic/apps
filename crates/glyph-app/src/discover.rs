@@ -40,6 +40,10 @@ enum Sleep {
 
 struct Inner {
     radio_on: bool,
+    /// Glyph Drift Radio (beta) station, while it runs.
+    drift: Option<glyph_core::drift::Drift>,
+    /// A Drift refill is on its way.
+    drift_loading: bool,
     /// Radio answer, when it was asked and for which backend (its address).
     radio_ok: Option<(bool, Instant, usize)>,
     /// The list the queue was started from (its listening counts for the sidebar).
@@ -97,6 +101,8 @@ pub fn setup(core: &Arc<Core>) {
     core.set_discover(Discover {
         inner: Mutex::new(Inner {
             radio_on: true,
+            drift: None,
+            drift_loading: false,
             radio_ok: None,
             playing_from,
             fade_last: None,
@@ -311,8 +317,11 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
                     && !(hide && t.maybe_explicit())
             });
             if taste_on {
+                // The station should sound like its seeds, not only like the
+                // listener's overall taste.
+                let vibe = glyph_core::drift::Vibe::of_tracks(&picked, &taste);
                 for (t, w) in &mut found {
-                    *w = taste.score_recommendation(t, *w, bucket, false);
+                    *w = taste.score_recommendation(t, *w, bucket, false) + vibe.fit(t, &taste) * 0.8;
                 }
                 found.retain(|(_, w)| w.is_finite());
             }
@@ -396,10 +405,245 @@ pub fn on_queue_end(core: &Arc<Core>) -> bool {
         (st.current.clone(), st.queue.history().into_iter().cloned().collect::<Vec<Track>>())
     };
     let Some(current) = current else { return false };
+    if core.st().config.taste.is_drift() {
+        drift_start(core, current, played);
+        return true;
+    }
     let exclude: HashSet<String> = played.iter().map(track_key).collect();
     let seeds: Vec<Track> = std::iter::once(current.clone()).chain(played.into_iter().rev().take(4)).collect();
     radio_from_seeds(core, seeds, exclude, current.title, true);
     true
+}
+
+// ---- Glyph Drift Radio (beta) ----
+
+/// Starts a Drift station after the queue ended on `current`.
+fn drift_start(core: &Arc<Core>, current: Track, played: Vec<Track>) {
+    let Some(d) = core.discover() else { return };
+    let lg = lang(core);
+    let label = tr(lg, "queue.drift_from", &[("title", &current.title)]);
+    let drift = {
+        let st = core.st();
+        let taste = glyph_core::taste::Taste::from_library(&st.library);
+        let seeds: Vec<Track> = std::iter::once(current.clone()).chain(played.iter().rev().take(4).cloned()).collect();
+        glyph_core::drift::Drift::new(label, &seeds, played.iter().map(track_key), &taste, glyph_core::paths::now_unix())
+    };
+    {
+        let mut g = d.g();
+        g.drift = Some(drift);
+        g.drift_loading = false;
+    }
+    toast(core, "toast.drift", Some(json!({ "title": current.title })), None, "ok");
+    drift_refill(core, true);
+}
+
+/// Songs of one artist for Drift: the server's top songs, else the songs of
+/// the newest release (Deezer). Never Last.fm.
+async fn drift_artist_songs(b: &glyph_core::Backend, name: &str, lang: &str) -> Vec<Track> {
+    let top = tokio::time::timeout(Duration::from_secs(5), b.artist_server(name, lang)).await.ok().flatten();
+    let mut songs: Vec<Track> = top.map(|s| s.top.into_iter().take(6).collect()).unwrap_or_default();
+    if songs.is_empty() {
+        if let Ok(Ok(releases)) = tokio::time::timeout(Duration::from_secs(5), b.artist_releases(name)).await {
+            if let Some(r) = releases.first() {
+                if let Ok(Ok(t)) = tokio::time::timeout(Duration::from_secs(5), b.release_tracks(r)).await {
+                    songs = t.into_iter().take(5).collect();
+                }
+            }
+        }
+    }
+    songs.retain(|t| by_artist(&t.artist, name));
+    songs
+}
+
+/// Adds the next few Drift songs. `ended`: the queue already ran out, so the
+/// first new song starts right away.
+fn drift_refill(core: &Arc<Core>, ended: bool) {
+    let Some(d) = core.discover() else { return };
+    let Some(b) = core.backend() else { return };
+    {
+        let mut g = d.g();
+        if g.drift.is_none() || g.drift_loading {
+            return;
+        }
+        g.drift_loading = true;
+    }
+    let ended_on = core.st().current.as_ref().map(track_key);
+    if ended {
+        let mut st = core.st();
+        st.radio_loading = true;
+        st.error = None;
+        drop(st);
+        core.emit_player();
+    }
+    let core = core.clone();
+    crate::rt::spawn(async move {
+        use glyph_core::drift::BATCH;
+        let Some(d) = core.discover() else { return };
+        let lg = lang(&core);
+        let hide = hide_explicit(&core);
+        // What the listener did since the last refill steers the station.
+        let (taste, events, server_mode) = {
+            let st = core.st();
+            (
+                glyph_core::taste::Taste::from_library(&st.library),
+                st.library.taste.session_events.clone(),
+                st.config.taste.is_server_mode() && b.server_taste_engine_available(),
+            )
+        };
+        let plan = {
+            let mut g = d.g();
+            g.drift.as_mut().map(|dr| {
+                dr.absorb(&events, &taste);
+                (dr.seeds(4), dr.next_artists(&taste, 6), dr.label.clone(), dr.vibe.clone())
+            })
+        };
+        let Some((seeds, artists, label, vibe)) = plan else {
+            d.g().drift_loading = false;
+            return;
+        };
+
+        // 1. Glyph's own server engine (collaborative graph, no Last.fm).
+        let server = async {
+            if !server_mode || seeds.is_empty() {
+                return Vec::new();
+            }
+            let reqs: Vec<glyph_core::taste::TasteSeedTrack> = seeds
+                .iter()
+                .enumerate()
+                .map(|(i, s)| glyph_core::taste::TasteSeedTrack {
+                    title: s.title.clone(),
+                    artist: s.artist.clone(),
+                    album: s.album.clone(),
+                    weight: (1.0 - i as f32 * 0.15).max(0.4),
+                    is_session: true,
+                })
+                .collect();
+            let exclude: Vec<String> = seeds.iter().map(glyph_core::taste::song_key).collect();
+            crate::taste::run_server_recommend(&core, glyph_core::taste::TastePurpose::Radio, reqs, &exclude, Some(30))
+                .await
+                .map(|r| r.recommendations.into_iter().enumerate().map(|(i, r)| (r.track, 1.0 - i as f32 / 40.0)).collect())
+                .unwrap_or_default()
+        };
+        // 2. Neighbours in Glyph's artist graph: their top songs.
+        let graph = futures::future::join_all(artists.iter().map(|(a, w)| {
+            let b = b.clone();
+            let name = taste.display_artist(a);
+            let w = *w;
+            async move {
+                drift_artist_songs(&b, &name, lg)
+                    .await
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| (t, (w.min(1.5) * 0.7 + 0.3) - i as f32 * 0.08))
+                    .collect::<Vec<_>>()
+            }
+        }));
+        let (server, graph) = futures::join!(server, graph);
+        let mut cands: Vec<(Track, f32)> = server;
+        cands.extend(graph.into_iter().flatten());
+
+        // 3. Thin pool: the listener's own songs that fit the vibe.
+        if cands.len() < BATCH * 3 {
+            let st = core.st();
+            let mut seen = HashSet::new();
+            for t in st.library.liked.iter().chain(st.library.playlists.iter().flat_map(|p| p.tracks.iter())).take(800) {
+                if seen.insert(track_key(t)) && vibe.fit(t, &taste) > 0.3 {
+                    cands.push((t.clone(), -0.4));
+                }
+            }
+        }
+        // 4. Last resort only: the classic similar songs of the newest seed.
+        if cands.len() < BATCH {
+            if let Some(s) = seeds.first() {
+                if let Ok(v) = b.similar(s).await {
+                    cands.extend(v.into_iter().take(25).enumerate().map(|(i, t)| (t, 0.4 - i as f32 / 60.0)));
+                }
+            }
+        }
+
+        let tracks = {
+            let st = core.st();
+            cands.retain(|(t, _)| !st.library.is_hidden(&t.artist) && !st.library.taste.is_disliked_track(t) && !(hide && t.maybe_explicit()));
+            drop(st);
+            let bucket = glyph_core::taste::TimeBucket::now();
+            let mut g = d.g();
+            g.drift_loading = false;
+            match g.drift.as_mut() {
+                Some(dr) if dr.label == label => dr.pick(cands, &taste, bucket, BATCH),
+                _ => Vec::new(),
+            }
+        };
+
+        if tracks.is_empty() {
+            if ended {
+                {
+                    let mut st = core.st();
+                    st.radio_loading = false;
+                }
+                d.g().drift = None;
+                toast(&core, "toast.radio_empty", None, None, "info");
+                core.emit_player();
+            }
+            return;
+        }
+        if ended {
+            let first = {
+                let mut st = core.st();
+                st.radio_loading = false;
+                let still_ended = st.current.as_ref().map(track_key) == ended_on && st.queue.peek_next().is_none();
+                if still_ended {
+                    st.queue.append(tracks);
+                    let f = st.queue.skip_next().cloned();
+                    if f.is_some() {
+                        st.context = Some(label);
+                    }
+                    f
+                } else {
+                    None
+                }
+            };
+            match first {
+                Some(t) => core.start_track(t),
+                None => {
+                    d.g().drift = None;
+                    core.emit_player();
+                }
+            }
+        } else {
+            let added = {
+                let mut st = core.st();
+                if st.context.as_deref() == Some(label.as_str()) {
+                    st.queue.append(tracks);
+                    true
+                } else {
+                    false
+                }
+            };
+            if added {
+                core.emit_queue();
+            }
+        }
+    });
+}
+
+/// Keeps a Drift station going: refills when few songs are left and stops
+/// once the listener plays something else.
+fn drift_on_track_started(core: &Arc<Core>, d: &Discover) {
+    let label = match d.g().drift.as_ref() {
+        Some(dr) => dr.label.clone(),
+        None => return,
+    };
+    let (same, left, on) = {
+        let st = core.st();
+        (st.context.as_deref() == Some(label.as_str()), st.queue.upcoming().len(), st.config.taste.is_drift())
+    };
+    if !same || !on {
+        d.g().drift = None;
+        return;
+    }
+    if left <= glyph_core::drift::LOW_WATER && !crate::storage::is_offline() {
+        drift_refill(core, false);
+    }
 }
 
 pub fn set_radio(core: C<'_>, on: bool) {
@@ -495,8 +739,52 @@ pub async fn add_suggestions(core: C<'_>, id: String) -> Res<Vec<Track>> {
         let trending = b.trending(20).await.unwrap_or_default();
         return Ok(recs.into_iter().chain(trending).collect());
     }
-    let answers = futures::future::join_all(seeds.iter().map(|s| b.similar(s))).await;
+    // Glyph's own graph: artists next to the playlist's artists (shared
+    // playlists, co-listening, cached similar artists) add their top songs.
+    let (taste_on, taste, lg) = {
+        let st = core.st();
+        let on = st.config.taste.enabled;
+        let t = if on { glyph_core::taste::Taste::from_library(&st.library) } else { glyph_core::taste::Taste::default() };
+        (on, t, st.config.resolved_language())
+    };
+    let vibe = glyph_core::drift::Vibe::of_tracks(&pool, &taste);
+    let neighbours: Vec<String> = if taste_on {
+        let mut near: HashMap<String, f32> = HashMap::new();
+        for (a, w) in &vibe.artists {
+            for (n, s) in taste.artist_links(a).iter().take(8) {
+                if !vibe.artists.contains_key(n) {
+                    *near.entry(n.clone()).or_default() += w * s;
+                }
+            }
+        }
+        let mut v: Vec<(String, f32)> = near.into_iter().filter(|(a, _)| taste.artist_affinity(a) > -0.2 && !taste.is_hidden(a)).collect();
+        v.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+        v.into_iter().take(4).map(|(a, _)| taste.display_artist(&a)).collect()
+    } else {
+        Vec::new()
+    };
+    let near_songs = futures::future::join_all(neighbours.iter().map(|a| {
+        let b = b.clone();
+        let a = a.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(4), b.artist_server(&a, lg))
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.top.into_iter().take(5).collect::<Vec<Track>>())
+                .unwrap_or_default()
+        }
+    }));
+    let (answers, near_songs) = futures::join!(futures::future::join_all(seeds.iter().map(|s| b.similar(s))), near_songs);
     let mut found: Vec<(Track, f32)> = Vec::new();
+    for (i, t) in near_songs.into_iter().flat_map(|v| v.into_iter().enumerate()) {
+        let w = 0.8 - i as f32 * 0.1;
+        let key = track_key(&t);
+        match found.iter_mut().find(|(x, _)| track_key(x) == key) {
+            Some(f) => f.1 += w,
+            None => found.push((t, w)),
+        }
+    }
     for sim in answers {
         for (i, t) in sim.unwrap_or_default().into_iter().take(30).enumerate() {
             let w = 1.0 - i as f32 / 40.0;
@@ -509,16 +797,13 @@ pub async fn add_suggestions(core: C<'_>, id: String) -> Res<Vec<Track>> {
     }
     let have: HashSet<String> = own.iter().map(track_key).collect();
     let st = core.st();
-    let taste_on = st.config.taste.enabled;
-    let taste = if taste_on {
-        glyph_core::taste::Taste::from_library(&st.library)
-    } else {
-        glyph_core::taste::Taste::default()
-    };
     let bucket = glyph_core::taste::TimeBucket::now();
     if taste_on {
+        // A playlist has its own sound: songs that fit it beat songs that
+        // only fit the listener's overall taste.
         for (t, w) in &mut found {
-            *w = taste.score_recommendation(t, *w, bucket, false);
+            let fit = glyph_core::drift::playlist_fit(&vibe, t, &taste);
+            *w = taste.score_recommendation(t, *w, bucket, false) * 0.6 + fit * 1.4;
         }
         found.retain(|(_, w)| w.is_finite());
     }
@@ -1023,6 +1308,7 @@ pub fn on_track_started(core: &Arc<Core>, _track: &Track) {
     if let Some((t, ms)) = flush {
         add_time(core, &t, ms);
     }
+    drift_on_track_started(core, &d);
 }
 
 fn add_time(core: &Arc<Core>, t: &Track, ms: u64) {

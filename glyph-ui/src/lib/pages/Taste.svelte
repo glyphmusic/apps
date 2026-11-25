@@ -147,6 +147,7 @@
   function toggleLocalOptOut() {
     app.setConfig((c) => {
       c.taste = {
+        ...c.taste,
         enabled: c.taste?.enabled ?? true,
         server_collab: !(c.taste?.server_collab ?? true),
         metadata_enrichment: c.taste?.metadata_enrichment ?? true,

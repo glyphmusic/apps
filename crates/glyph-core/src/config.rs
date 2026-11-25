@@ -298,9 +298,18 @@ pub struct TasteConfig {
     /// Enrich artist affinities with genre, mood, and era tags (via server
     /// cache when server mode is on, or direct local lookup when opted out).
     pub metadata_enrichment: bool,
+    /// Beta: Glyph Drift Radio. When the queue ends, radio keeps going from
+    /// Glyph's own artist graph and the listener's reactions (finished songs
+    /// pull, skips push away) instead of Last.fm similar tracks. Default: off.
+    pub drift_radio: bool,
 }
 
 impl TasteConfig {
+    /// True when Glyph Drift Radio (beta) replaces the classic radio at queue end.
+    pub fn is_drift(&self) -> bool {
+        self.enabled && self.drift_radio
+    }
+
     /// True when the server-first Taste Engine is enabled (the default).
     pub fn is_server_mode(&self) -> bool {
         self.enabled && self.server_collab
@@ -314,7 +323,7 @@ impl TasteConfig {
 
 impl Default for TasteConfig {
     fn default() -> Self {
-        Self { enabled: true, server_collab: true, metadata_enrichment: true }
+        Self { enabled: true, server_collab: true, metadata_enrichment: true, drift_radio: false }
     }
 }
 

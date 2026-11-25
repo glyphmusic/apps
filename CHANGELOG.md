@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Glyph Drift (beta)**: a new radio that keeps playing when the queue ends, built on Glyph's own taste instead of Last.fm. Songs you play to the end lead the way, skipped songs steer it away, and it adds a few songs at a time so it follows your mood. Turn it on in Settings > Playback > Content.
+
+### Changed
+
+- **Smarter recommendations**: Glyph now links artists you put in the same playlists, play one after another, or that are known to be similar, and suggests new artists close to your favourites first.
+- **Better search**: small typos ("beleiver", "metalica") still find the right song, and songs you picked from search before rank higher.
+- **Better "Add songs" for playlists**: suggestions now match the sound and artists of the playlist itself, not only your overall taste.
+
 ## 0.13.5 - 2026-11-24
 
 ### Fixed

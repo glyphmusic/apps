@@ -1110,6 +1110,16 @@ pub struct Taste {
     variety_score: f32,
     /// The user's country ("DE"), for a small lift of songs released there.
     region: Option<String>,
+    /// Glyph's own artist graph: normalized artist -> linked artists with a
+    /// strength in `0.0..=1.0`, strongest first. Built from cached similar
+    /// artists, co-listened session pairs, playlist neighbours and the
+    /// collaborative cache (see [`build_artist_links`]).
+    artist_links: HashMap<String, Vec<(String, f32)>>,
+    /// How close an artist is to what the listener loves, through the graph
+    /// (`0.0..=1.0`). Artists the listener rejected are never in it.
+    artist_graph: HashMap<String, f32>,
+    /// Songs the listener picked from search before (`song_key`).
+    search_picks: HashSet<String>,
 }
 
 /// Country part of a locale: "de-DE", "en_US.UTF-8", "zh-Hans-CN" -> DE, US, CN.
@@ -1690,6 +1700,16 @@ impl Taste {
             );
 
         let liked = lib.liked.iter().map(song_key).collect();
+        let artist_links = build_artist_links(lib, &artist_meta, now_s);
+        let artist_graph = build_artist_graph(lib, &artists, &artist_affinities, &hidden, &artist_links);
+        let search_picks = lib
+            .search_items
+            .iter()
+            .filter_map(|i| match i {
+                crate::library::SearchItem::Song { track } => Some(song_key(track)),
+                _ => None,
+            })
+            .collect();
 
         Self {
             artists,
@@ -1717,6 +1737,9 @@ impl Taste {
             intent,
             variety_score,
             region: user_region(),
+            artist_links,
+            artist_graph,
+            search_picks,
         }
     }
 
@@ -1770,6 +1793,36 @@ impl Taste {
 
     pub fn is_disliked_track(&self, t: &Track) -> bool {
         self.disliked_tracks.contains(&song_key(t))
+    }
+
+    /// How close `credit` is to the listener's favourites through Glyph's
+    /// artist graph (`0.0..=1.0`); `0.0` for unknown or rejected artists.
+    pub fn graph_affinity(&self, credit: &str) -> f32 {
+        credited(credit)
+            .iter()
+            .filter_map(|a| self.artist_graph.get(a))
+            .copied()
+            .fold(0.0, f32::max)
+    }
+
+    /// Linked artists of one normalized artist, strongest first.
+    pub fn artist_links(&self, artist_key: &str) -> &[(String, f32)] {
+        self.artist_links.get(artist_key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Display spelling of a normalized artist (the key itself when unknown).
+    pub fn display_artist(&self, artist_key: &str) -> String {
+        self.artist_display.get(artist_key).cloned().unwrap_or_else(|| title_case(artist_key))
+    }
+
+    /// The listener picked this song from search before.
+    pub fn is_search_pick(&self, t: &Track) -> bool {
+        self.search_picks.contains(&song_key(t))
+    }
+
+    /// Canonical genres, moods and eras of `t` (from its credited artists).
+    pub fn track_tags(&self, t: &Track) -> (Vec<String>, Vec<String>, Vec<String>) {
+        self.track_genres_moods_eras(t)
     }
 
     pub fn track_skip_penalty(&self, t: &Track) -> f32 {
@@ -2010,6 +2063,18 @@ impl Taste {
         // Session repulsion for artists just skipped in this session.
         if credited(&t.artist).iter().any(|a| self.repelled_artists.contains(a)) {
             sc -= 2.2;
+        }
+
+        // Glyph artist graph: a new artist next to several favourites is a
+        // far better bet than a random one with matching tags. Known artists
+        // already carry their own affinity, so the lift fades for them.
+        if artist_aff >= 0.0 {
+            let graph = self.graph_affinity(&t.artist);
+            if graph > 0.0 {
+                let known = self.artist_weight(&t.artist);
+                let novelty = if is_familiar { 0.5 } else { 0.7 + 0.3 * self.intent.novelty.clamp(0.0, 1.0) };
+                sc += graph * 0.85 * (1.0 - known).max(0.25) * novelty;
+            }
         }
 
         // Discovery lift calibrated to user's inferred novelty preference.
@@ -2383,6 +2448,172 @@ impl Taste {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+// ---------------------------------------------------------------- Glyph artist graph
+
+/// Most links kept per artist.
+const MAX_LINKS: usize = 24;
+/// Largest playlist (distinct artists) read for playlist neighbours.
+const MAX_PLAYLIST_ARTISTS: usize = 60;
+
+/// Combines two link strengths like independent evidence (noisy-or), so
+/// several weak hints add up but never pass `1.0`.
+fn noisy_or(a: f32, b: f32) -> f32 {
+    1.0 - (1.0 - a.clamp(0.0, 1.0)) * (1.0 - b.clamp(0.0, 1.0))
+}
+
+fn link(links: &mut HashMap<String, HashMap<String, f32>>, a: &str, b: &str, w: f32) {
+    if a.is_empty() || b.is_empty() || a == b || w <= 0.0 {
+        return;
+    }
+    let e = links.entry(a.to_string()).or_default().entry(b.to_string()).or_insert(0.0);
+    *e = noisy_or(*e, w);
+}
+
+/// Glyph's own artist graph, built only from what Glyph already knows (no
+/// extra request): cached similar artists, songs the listener played one
+/// after another to the end, artists sharing the listener's playlists, and
+/// the collaborative cache ("because of" seeds).
+pub fn build_artist_links(
+    lib: &Library,
+    artist_meta: &HashMap<String, (Vec<String>, Vec<String>, Vec<String>, Vec<String>)>,
+    now_s: u64,
+) -> HashMap<String, Vec<(String, f32)>> {
+    let mut links: HashMap<String, HashMap<String, f32>> = HashMap::new();
+    // 1. Cached similar artists (ranked lists): strong but one-way, mirrored softly.
+    for (a, (_, _, _, similar)) in artist_meta {
+        for (i, s) in similar.iter().take(MAX_LINKS).enumerate() {
+            let b = normalize_artist(s);
+            let w = (0.9 - i as f32 * 0.035).max(0.25);
+            link(&mut links, a, &b, w);
+            link(&mut links, &b, a, w * 0.6);
+        }
+    }
+    // 2. Co-listened pairs: both songs ran to the end one after another.
+    for (x, y, ts) in &lib.taste.session_pairs {
+        let decay = 0.5f64.powf(now_s.saturating_sub(*ts) as f64 / SHORT_DECAY_HALF_LIFE_S) as f32;
+        let w = 0.35 + 0.5 * decay.clamp(0.0, 1.0);
+        let (kx, ky) = (normalize_artist(x), normalize_artist(y));
+        link(&mut links, &kx, &ky, w);
+        link(&mut links, &ky, &kx, w);
+    }
+    // 3. Playlist neighbours: artists the listener put side by side.
+    for p in &lib.playlists {
+        let mut set: Vec<String> = Vec::new();
+        for t in &p.tracks {
+            let k = normalize_artist(&primary_artist(&t.artist));
+            if !k.is_empty() && !set.contains(&k) {
+                set.push(k);
+                if set.len() >= MAX_PLAYLIST_ARTISTS {
+                    break;
+                }
+            }
+        }
+        if set.len() < 2 {
+            continue;
+        }
+        // Small, focused playlists say more than huge mixed ones.
+        let w = (0.9 / (set.len() as f32).sqrt()).clamp(0.08, 0.55);
+        for (i, a) in set.iter().enumerate() {
+            for b in set.iter().skip(i + 1) {
+                link(&mut links, a, b, w);
+                link(&mut links, b, a, w);
+            }
+        }
+    }
+    // 4. Collaborative cache: "people who like X also like Y".
+    if let Some(c) = &lib.taste.collab_cache {
+        for rec in &c.recommendations {
+            let b = normalize_artist(&rec.artist);
+            for src in &rec.because_of {
+                let a = normalize_artist(src);
+                let w = (0.45 + rec.score.clamp(0.0, 1.0) * 0.4).min(0.85);
+                link(&mut links, &a, &b, w);
+                link(&mut links, &b, &a, w * 0.5);
+            }
+        }
+    }
+    links
+        .into_iter()
+        .map(|(a, m)| {
+            let mut v: Vec<(String, f32)> = m.into_iter().collect();
+            v.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+            v.truncate(MAX_LINKS);
+            (a, v)
+        })
+        .collect()
+}
+
+/// How close every artist is to what the listener loves, one hop through
+/// [`build_artist_links`]. Hidden or disliked artists stay out.
+fn build_artist_graph(
+    lib: &Library,
+    artists: &HashMap<String, f32>,
+    affinities: &HashMap<String, f32>,
+    hidden: &HashSet<String>,
+    links: &HashMap<String, Vec<(String, f32)>>,
+) -> HashMap<String, f32> {
+    let mut g: HashMap<String, f32> = HashMap::new();
+    for (a, &w) in artists {
+        if w < 0.05 {
+            continue;
+        }
+        let Some(ls) = links.get(a) else { continue };
+        for (b, s) in ls {
+            let e = g.entry(b.clone()).or_insert(0.0);
+            *e = noisy_or(*e, w * s);
+        }
+    }
+    if let Some(c) = &lib.taste.collab_cache {
+        for rec in &c.recommendations {
+            let b = normalize_artist(&rec.artist);
+            let e = g.entry(b).or_insert(0.0);
+            *e = noisy_or(*e, rec.score.clamp(0.0, 1.0) * 0.7);
+        }
+    }
+    g.retain(|k, v| !hidden.contains(k) && affinities.get(k).is_none_or(|a| *a > -0.15) && *v > 0.02);
+    g
+}
+
+/// Levenshtein distance, giving up (returns `max + 1`) once it passes `max`.
+fn edit_distance(a: &str, b: &str, max: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max {
+        return max + 1;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        let mut row_min = cur[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            row_min = row_min.min(cur[j]);
+        }
+        if row_min > max {
+            return max + 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// The same word, or a small typo of it ("beleiver" ~ "believer"). Short
+/// words must match exactly so "the" never turns into "she".
+fn word_close(typed: &str, real: &str) -> bool {
+    if typed == real {
+        return true;
+    }
+    let n = typed.chars().count().min(real.chars().count());
+    let max = match n {
+        0..=3 => return false,
+        4..=7 => 1,
+        _ => 2,
+    };
+    edit_distance(typed, real, max) <= max
+}
+
 fn infer_local_intent(
     events: &[SessionEvent],
     query_genres: &[String],
@@ -3517,7 +3748,9 @@ fn title_artist_match(t: &Track, q: &str) -> f32 {
     if qw.len() < 2 {
         return 0.0;
     }
-    let all_in_query = |ws: &[String]| !ws.is_empty() && ws.iter().all(|w| qw.contains(w));
+    // Typo tolerant: "imagine dragns beleiver" still names the song.
+    let in_query = |w: &String| qw.iter().any(|q| word_close(q, w));
+    let all_in_query = |ws: &[String]| !ws.is_empty() && ws.iter().all(in_query);
     let core_title = words(&normalize_title(&t.title));
     let full_title = words(&t.title);
     let credits: Vec<String> = credited(&t.artist).iter().flat_map(|a| words(a)).collect();
@@ -3531,7 +3764,10 @@ fn title_artist_match(t: &Track, q: &str) -> f32 {
     let album = t.album.as_deref().map(words).unwrap_or_default();
     let missing = qw
         .iter()
-        .filter(|w| !JOINERS.contains(&w.as_str()) && !full_title.contains(w) && !credits.contains(w) && !album.contains(w))
+        .filter(|w| {
+            let found = |ws: &[String]| ws.iter().any(|x| word_close(w, x));
+            !JOINERS.contains(&w.as_str()) && !found(&full_title) && !found(&credits) && !found(&album)
+        })
         .count();
     s - (missing as f32 * 0.6).min(2.4)
 }
@@ -3565,6 +3801,19 @@ pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
             s += 1.0;
         }
         s += title_artist_match(t, &q);
+
+        // One mistyped word ("beleiver", "metalica"): nothing matched as
+        // written, but a close word in the title or the artist did.
+        let exact_hit = title.contains(&q) || (!artist.is_empty() && (artist.contains(&q) || q.contains(&artist)));
+        let qw = words(&q);
+        if !exact_hit && qw.len() == 1 {
+            let w = &qw[0];
+            if words(&title).iter().any(|x| word_close(w, x)) {
+                s += 1.5;
+            } else if words(&t.artist).iter().any(|x| word_close(w, x)) {
+                s += 1.3;
+            }
+        }
 
         // Search query musical intent (e.g. "chill late night", "90s hip hop", "traurig indie"):
         // boost tracks whose artist genres/moods/eras align with the queried vibe!
@@ -3623,6 +3872,14 @@ pub fn score(t: &Track, query: &str, taste: &Taste) -> f32 {
     s += taste.track_love_score(t) * 0.65;
     if taste.is_liked(t) {
         s += 1.0;
+    }
+    // Picked from search before: people search the same songs again.
+    if taste.is_search_pick(t) {
+        s += 0.8;
+    }
+    // New artists close to the listener's favourites rank above strangers.
+    if aff >= 0.0 {
+        s += taste.graph_affinity(&t.artist) * 0.6;
     }
     if taste.is_disliked_track(t) {
         s -= 1.8;
@@ -3755,6 +4012,37 @@ mod tests {
         let feat = bare("Stay", "Justin Bieber feat. The Kid LAROI");
         assert!(score(&feat, "stay justin bieber", &taste) > score(&bare("Stay", "Rihanna"), "stay justin bieber", &taste));
         assert!(score(&right, "believer", &taste) > score(&other, "believer", &taste));
+    }
+
+    #[test]
+    fn small_typos_still_find_the_song() {
+        let taste = Taste::default();
+        let right = bare("Believer", "Imagine Dragons");
+        let other = bare("Thunder", "Imagine Dragons");
+        let stranger = bare("Something", "Other Band");
+        assert!(score(&right, "beleiver", &taste) > score(&other, "beleiver", &taste) + 1.0);
+        assert!(score(&right, "imagine dragns beleiver", &taste) > score(&other, "imagine dragns beleiver", &taste));
+        assert!(score(&bare("Enter Sandman", "Metallica"), "metalica", &taste) > score(&stranger, "metalica", &taste) + 1.0);
+        // Short words never count as typos of each other.
+        assert!(!word_close("she", "the"));
+        assert!(word_close("beleiver", "believer"));
+        assert!(!word_close("believer", "achiever"));
+    }
+
+    #[test]
+    fn search_picks_and_graph_neighbours_rank_higher() {
+        let mut lib = Library::default();
+        lib.liked.push(bare("Show Me How", "Men I Trust"));
+        lib.create_playlist("Night").tracks = vec![bare("Show Me How", "Men I Trust"), bare("Locket", "Crumb")];
+        lib.search_items.push(crate::library::SearchItem::Song { track: bare("Hello", "Picked") });
+        let taste = Taste::from_library(&lib);
+        assert!(score(&bare("Hello", "Picked"), "hello", &taste) > score(&bare("Hello", "Other"), "hello", &taste));
+        assert!(score(&bare("Bones", "Crumb"), "bones", &taste) > score(&bare("Bones", "Stranger"), "bones", &taste));
+        let base = TimeBucket::Night;
+        assert!(
+            taste.score_recommendation(&bare("Bones", "Crumb"), 0.5, base, false)
+                > taste.score_recommendation(&bare("Bones", "Stranger"), 0.5, base, false)
+        );
     }
 
     #[test]
@@ -3898,7 +4186,7 @@ mod tests {
 
         let local_opt_out = build_profile(
             &lib,
-            &TasteConfig { enabled: true, server_collab: false, metadata_enrichment: true },
+            &TasteConfig { enabled: true, server_collab: false, metadata_enrichment: true, drift_radio: false },
             true,
             1000,
             20,
@@ -3908,7 +4196,7 @@ mod tests {
 
         let off = build_profile(
             &lib,
-            &TasteConfig { enabled: false, server_collab: true, metadata_enrichment: true },
+            &TasteConfig { enabled: false, server_collab: true, metadata_enrichment: true, drift_radio: false },
             true,
             1000,
             20,
