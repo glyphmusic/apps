@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- **Lists on phones**: a fast scroll up now stops at the top of the list instead of flinging the search bar into view and pulling it back. Scroll up once more to show the search bar.
+- **Top bar title on phones**: the list or artist name now rises into the top bar from below as you scroll, instead of just appearing.
 - **Now Playing on phones**: the covers of the next and previous song no longer peek in at the screen edges.
 - **Mini player swipe**: when you swipe the small player bar, the current song fades out while the next one fades in.
 - **Video stays on**: closing Now Playing while a video plays and opening it again shows the video again, not the cover.

@@ -59,6 +59,8 @@
   let scrollTop = $state(0);
   let barBgK = $state(0);
   let titleK = $state(0);
+  /** Bar title rises in from below like a lift as the page title scrolls away. */
+  const lift = (k: number) => (k >= 1 ? undefined : `translateY(${((1 - k) * 18).toFixed(1)}px)`);
   let playK = $state(0);
   const viewKey = $derived(app.view + (app.openList ? listId(app.openList) : "") + app.openArtist + (app.openProfile ?? "") + (app.section?.title ?? ""));
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -242,7 +244,7 @@
   {:else}
     <div class="backbar" class:titled={app.view === "server"} bind:this={barEl}>
       <IconAction name="arrow-left" onclick={back} />
-      <span class="bt trunc" style:opacity={app.view === "server" ? 1 : titleK}>{barTitle}</span>
+      <span class="bt"><span class="bti trunc" style:opacity={app.view === "server" ? 1 : titleK} style:transform={app.view === "server" ? undefined : lift(titleK)}>{barTitle}</span></span>
       {@render barPlayBtn()}
       {#if app.view === "server" && admin.me}
         <span class="admin-role trunc">{admin.me.owner ? t("admin.role.owner") : tf("admin.role.admin", { handle: admin.me.handle ?? "" })}</span>
@@ -258,7 +260,7 @@
       <span class="pill-ic" style:--bar-k={barBgK}>
         <IconAction name="arrow-left" onclick={back} />
       </span>
-      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
+      <span class="bt"><span class="bti trunc" style:opacity={titleK} style:transform={lift(titleK)}>{barTitle}</span></span>
       {#if app.view === "artist"}
         {@render barPlayBtn()}
         <span class="pill-ic" style:--bar-k={barBgK}>
@@ -269,7 +271,7 @@
   {:else}
     <div class="backbar over" bind:this={barEl} style:background="rgba(10, 10, 10, {barBgK})">
       <IconAction name="arrow-left" onclick={back} />
-      <span class="bt trunc" style:opacity={titleK}>{barTitle}</span>
+      <span class="bt"><span class="bti trunc" style:opacity={titleK} style:transform={lift(titleK)}>{barTitle}</span></span>
       {@render barPlayBtn()}
       {#if app.openList}
         <IconAction name="ellipsis-vertical" label={t("ctx.more")} onclick={(e) => app.openCtx({ x: e.clientX, y: e.clientY, track: barTracks[0] ?? null, list: app.openList! })} />
@@ -319,7 +321,8 @@
   .backbar.over.artist { top: 0; height: calc(54px + var(--safe-top, env(safe-area-inset-top))); padding: var(--safe-top, env(safe-area-inset-top)) 12px 0; gap: 8px; }
   .pill-ic { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: color-mix(in srgb, #141414, transparent calc(var(--bar-k, 0) * 100%)); }
   .pill-ic > :global(*) { width: 38px; height: 38px; }
-  .bt { flex: 1; font-size: 16px; font-weight: 700; color: var(--text); }
+  .bt { flex: 1; min-width: 0; overflow: hidden; font-size: 16px; font-weight: 700; color: var(--text); }
+  .bti { display: block; will-change: transform; }
   /* Pages whose name lives in the bar (Server): as big as the tab headers (Header.svelte), centred. */
   .backbar.titled { height: 60px; }
   .backbar.titled .bt { font-size: 22px; line-height: 60px; height: 60px; margin-left: 2px; }

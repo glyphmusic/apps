@@ -225,6 +225,12 @@
       settleTimer = window.setTimeout(snap, 90);
     };
     const onScroll = () => {
+      // A fast scroll up from deep in the list stops at the list's top: the
+      // search bar is not flung into view. Scrolling up again from there shows it.
+      if (startedDeep && revealH > 0 && !keepOpen && sc.scrollTop < revealH - 1) {
+        sc.scrollTop = revealH;
+        phone.scroll = revealH;
+      }
       if (touching) return;
       if (!startedDeep && revealH > 0 && sc.scrollTop > revealH + 80) {
         startedDeep = true;
