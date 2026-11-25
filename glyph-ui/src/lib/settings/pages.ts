@@ -144,6 +144,7 @@ export const OPTIONS: [SettingsPage, number, string, string][] = [
   ["playback", 2, "sp.search.mode", "search suche lokal local server rate limit ban quellen sources"],
   ["playback", 1, "sp.explicit", "explicit explizit"],
   ["playback", 1, "sp.radio", "radio autoplay"],
+  ["playback", 1, "sp.drift", "drift radio autoplay beta glyph endless"],
   ["playback", 1, "sp.taste", "taste geschmack algorithmus algorithm personalization personalisierung mixes daily mix"],
   ["playback", 1, "sp.taste_server", "collaborative server taste geschmack privacy datenschutz opt out local lokal"],
   ["playback", 1, "sp.taste_meta", "genre mood stimmung tags metadata enrichment"],

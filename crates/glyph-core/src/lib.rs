@@ -26,6 +26,7 @@ pub mod backgrounds;
 pub mod catalog;
 pub mod cover;
 pub mod dedupe;
+pub mod drift;
 pub mod e2e;
 pub mod e2e_sync;
 pub mod downloads;

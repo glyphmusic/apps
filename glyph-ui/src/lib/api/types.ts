@@ -277,6 +277,8 @@ export interface TasteConfig {
   enabled: boolean;
   server_collab: boolean;
   metadata_enrichment: boolean;
+  /** Beta: Glyph Drift Radio after the queue ends (apps only). */
+  drift_radio?: boolean;
 }
 
 export interface WeightedTag {

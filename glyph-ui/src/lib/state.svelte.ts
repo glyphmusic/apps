@@ -100,6 +100,7 @@ function normalizeConfig(c: Config): Config {
   c.taste.enabled ??= true;
   c.taste.server_collab ??= true;
   c.taste.metadata_enrichment ??= true;
+  c.taste.drift_radio ??= false;
   return c;
 }
 

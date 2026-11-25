@@ -35,9 +35,11 @@
   const tasteOn = $derived(app.config.taste?.enabled !== false);
   const serverCollab = $derived(app.config.taste?.server_collab !== false);
   const metaEnrich = $derived(app.config.taste?.metadata_enrichment !== false);
-  function setTaste(patch: Partial<{ enabled: boolean; server_collab: boolean; metadata_enrichment: boolean }>) {
+  const drift = $derived(app.config.taste?.drift_radio === true);
+  function setTaste(patch: Partial<{ enabled: boolean; server_collab: boolean; metadata_enrichment: boolean; drift_radio: boolean }>) {
     app.setConfig((c) => {
       c.taste = {
+        ...c.taste,
         enabled: c.taste?.enabled ?? true,
         server_collab: c.taste?.server_collab ?? true,
         metadata_enrichment: c.taste?.metadata_enrichment ?? true,
@@ -72,6 +74,11 @@
       <Row label={t("sp.radio")} info={radio.ok === false ? t("radio.off") : t("sp.radio.desc")}>
         <Tog on={radio.on} disabled={radio.ok === false} why={t("radio.off")} onchange={setRadio} label={t("sp.radio")} />
       </Row>
+      {#if !onWeb()}
+      <Row label={t("sp.drift")} info={t("sp.drift.desc")}>
+        <Tog on={drift} disabled={!tasteOn} why={t("sp.taste.off_why")} onchange={(v) => setTaste({ drift_radio: v })} label={t("sp.drift")} />
+      </Row>
+      {/if}
       <Row label={t("sp.recommendations")} info={t("sp.recommendations.desc")}>
         <Tog on={app.config.ui.recommendations !== false} onchange={(v) => app.setConfig((c) => { c.ui.recommendations = v; })} label={t("sp.recommendations")} />
       </Row>
