@@ -30,6 +30,7 @@ import androidx.media.VolumeProviderCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 import androidx.media.session.MediaButtonReceiver;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -72,27 +73,35 @@ public class PlaybackService extends Service {
     private static final int NOTIFICATION_ID = 1;
     /** Custom action / intent action of the add (like) button. */
     private static final String ACTION_LIKE = "app.glyph.LIKE";
+    /** Custom actions / intent actions of the shuffle and repeat buttons. */
+    private static final String ACTION_SHUFFLE = "app.glyph.SHUFFLE", ACTION_REPEAT = "app.glyph.REPEAT";
     /** Longest side of the artwork bitmap (the system scales it anyway). */
     private static final int ART_PX = 720;
 
     // Codes for nativeMediaKey (see glyph-android: nativeMediaKey).
     static final int KEY_PLAY = 0, KEY_PAUSE = 1, KEY_TOGGLE = 2, KEY_NEXT = 3, KEY_PREVIOUS = 4, KEY_STOP = 5,
-            KEY_LIKE = 6;
+            KEY_LIKE = 6, KEY_SHUFFLE = 7, KEY_REPEAT = 8;
 
     static native void nativeMediaKey(int code);
 
     /** Volume 0..100 for the network device playing now. */
     static native void nativeVolume(int volume);
 
-    /** Another app plays sound now (and whether it is music); see glyph_app::other_audio. */
-    static native void nativeOtherAudio(boolean active, boolean music);
+    /** The seek bar of the media player was dragged to this point (ms). */
+    static native void nativeSeekTo(long ms);
+
+    /**
+     * Another app plays sound now, whether it is music, and whether that is
+     * sure (Android says so, or its player was seen); see glyph_app::other_audio.
+     */
+    static native void nativeOtherAudio(boolean active, boolean music, boolean sure);
 
     /** Setting "Pause when other apps play" (from Rust). Off: no audio focus, Glyph plays along. */
     private static boolean pauseForOthers = true;
     /** After the focus went to another app, it counts as playing this long even before its player shows up. */
     private static final long OTHER_GRACE_MS = 5_000;
-    /** How long the other players are watched after the focus is gone (Rust stops playing on after 5 minutes). */
-    private static final long OTHER_WATCH_MS = 6 * 60_000;
+    /** How long the other players are watched after the focus is gone (Rust stops playing on after 2 minutes). */
+    private static final long OTHER_WATCH_MS = 3 * 60_000;
     private static final long OTHER_POLL_MS = 2_000;
 
     /** How long a pause keeps the foreground (and the locks). */
@@ -105,6 +114,10 @@ public class PlaybackService extends Service {
     private static String title = "", artist = "", coverPath = "";
     private static boolean playing = false, buffering = false, liked = false, jamActive = false;
     private static long positionMs = 0, durationMs = 0;
+    /** Settings > Playback: shuffle + repeat buttons instead of the add button. */
+    private static boolean modeButtons = false, shuffleOn = false;
+    /** Repeat: 0 off, 1 the whole queue, 2 this song. */
+    private static int repeatMode = 0;
     /** Volume of the network device playing now, -1 when the phone plays. */
     private static int remoteVolume = -1;
     private static long volumeKeyAt;
@@ -157,6 +170,22 @@ public class PlaybackService extends Service {
             remoteVolume = remote;
         }
         syncService(ctx);
+    }
+
+    /**
+     * From Rust: which extra buttons the media player shows (the add
+     * button, or shuffle + repeat) and whether shuffle / repeat are on.
+     */
+    static void setButtons(boolean modes, boolean shuffle, int repeat) {
+        if (modeButtons == modes && shuffleOn == shuffle && repeatMode == repeat) {
+            return;
+        }
+        modeButtons = modes;
+        shuffleOn = shuffle;
+        repeatMode = repeat;
+        if (instance != null) {
+            instance.apply(false);
+        }
     }
 
     /** From Rust: the setting "Pause when other apps play". */
@@ -258,9 +287,19 @@ public class PlaybackService extends Service {
                 nativeMediaKey(KEY_PREVIOUS);
             }
             @Override public void onStop() { nativeMediaKey(KEY_STOP); }
+            @Override public void onSeekTo(long pos) {
+                // Shown at once (no jump back until Rust reports the new point).
+                positionMs = Math.max(0, durationMs > 0 ? Math.min(pos, durationMs) : pos);
+                apply(false);
+                nativeSeekTo(positionMs);
+            }
             @Override public void onCustomAction(String action, android.os.Bundle extras) {
                 if (ACTION_LIKE.equals(action)) {
                     nativeMediaKey(KEY_LIKE);
+                } else if (ACTION_SHUFFLE.equals(action)) {
+                    nativeMediaKey(KEY_SHUFFLE);
+                } else if (ACTION_REPEAT.equals(action)) {
+                    nativeMediaKey(KEY_REPEAT);
                 }
             }
         });
@@ -331,7 +370,7 @@ public class PlaybackService extends Service {
         if (focusLost) {
             focusLost = false;
             focusGone = false;
-            nativeOtherAudio(false, false);
+            nativeOtherAudio(false, false, false);
         }
     }
 
@@ -345,7 +384,7 @@ public class PlaybackService extends Service {
                 // Comes back with AUDIOFOCUS_GAIN when the other app is done.
                 focusLost = true;
                 focusGone = false;
-                nativeOtherAudio(true, false);
+                nativeOtherAudio(true, false, true);
                 break;
             case AudioManager.AUDIOFOCUS_LOSS:
                 // For good: Android will not hand it back, so watch the players.
@@ -353,7 +392,8 @@ public class PlaybackService extends Service {
                 focusLost = true;
                 focusGone = true;
                 lostAt = SystemClock.uptimeMillis();
-                nativeOtherAudio(true, false);
+                // Not sure yet: if its player is never seen, Glyph stays paused.
+                nativeOtherAudio(true, false, false);
                 handler.removeCallbacks(watchOthers);
                 handler.postDelayed(watchOthers, OTHER_GRACE_MS);
                 break;
@@ -402,7 +442,7 @@ public class PlaybackService extends Service {
             ownPlayers = all;
             ownMusic = music;
         } else if (focusGone && SystemClock.uptimeMillis() - lostAt >= OTHER_GRACE_MS) {
-            nativeOtherAudio(all > ownPlayers, music > ownMusic);
+            nativeOtherAudio(all > ownPlayers, music > ownMusic, all > ownPlayers);
         }
     }
 
@@ -419,9 +459,14 @@ public class PlaybackService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_LIKE.equals(intent.getAction())) {
-            // The add button of the notification itself (Android 12 and older).
+        String action = intent == null ? null : intent.getAction();
+        if (ACTION_LIKE.equals(action)) {
+            // The extra buttons of the notification itself (Android 12 and older).
             nativeMediaKey(KEY_LIKE);
+        } else if (ACTION_SHUFFLE.equals(action)) {
+            nativeMediaKey(KEY_SHUFFLE);
+        } else if (ACTION_REPEAT.equals(action)) {
+            nativeMediaKey(KEY_REPEAT);
         } else {
             MediaButtonReceiver.handleIntent(session, intent);
         }
@@ -447,28 +492,33 @@ public class PlaybackService extends Service {
             }
             session.setMetadata(m.build());
         }
-        int likeIcon = liked ? R.drawable.ic_liked : R.drawable.ic_like;
-        String likeLabel = liked ? "Remove from Liked Songs" : "Add to Liked Songs";
-        session.setPlaybackState(new PlaybackStateCompat.Builder()
+        List<Extra> extras = extraButtons();
+        PlaybackStateCompat.Builder state = new PlaybackStateCompat.Builder()
                 .setActions(PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
                         | PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_SKIP_TO_NEXT
-                        | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS | PlaybackStateCompat.ACTION_STOP)
-                // Android 13+ draws its media controls from the session: the
-                // custom action is the add button left of "previous".
-                .addCustomAction(new PlaybackStateCompat.CustomAction.Builder(ACTION_LIKE, likeLabel, likeIcon).build())
+                        | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS | PlaybackStateCompat.ACTION_STOP
+                        // The seek bar can be dragged (only with a known length).
+                        | (durationMs > 0 ? PlaybackStateCompat.ACTION_SEEK_TO : 0));
+        // Android 13+ draws its media controls from the session: the custom
+        // actions are the extra buttons (the add button, or shuffle + repeat).
+        for (Extra e : extras) {
+            state.addCustomAction(new PlaybackStateCompat.CustomAction.Builder(e.action, e.label, e.icon).build());
+        }
+        session.setPlaybackState(state
                 .setState(buffering ? PlaybackStateCompat.STATE_BUFFERING
                         : playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
                         positionMs, playing && !buffering ? 1f : 0f)
                 .build());
 
         boolean active = playing || buffering || jamActive;
-        String key = meta + '\u0000' + playing + '\u0000' + buffering + '\u0000' + liked + '\u0000' + jamActive;
+        String key = meta + '\u0000' + playing + '\u0000' + buffering + '\u0000' + liked + '\u0000' + jamActive
+                + '\u0000' + modeButtons + '\u0000' + shuffleOn + '\u0000' + repeatMode;
         // Paused (and not in a Jam): the grace timer already runs (or the foreground is gone).
         if (!mustStartForeground && key.equals(notificationKey) && (foreground || !active)) {
             return;
         }
         notificationKey = key;
-        Notification n = buildNotification(likeIcon, likeLabel);
+        Notification n = buildNotification(extras);
         if (active || mustStartForeground) {
             handler.removeCallbacks(leaveForeground);
             try {
@@ -619,7 +669,34 @@ public class PlaybackService extends Service {
         return art;
     }
 
-    private Notification buildNotification(int likeIcon, String likeLabel) {
+    /** One extra button of the media player: custom action, label and icon. */
+    private static final class Extra {
+        final String action, label;
+        final int icon;
+
+        Extra(String action, String label, int icon) {
+            this.action = action;
+            this.label = label;
+            this.icon = icon;
+        }
+    }
+
+    /** The extra buttons picked in Settings > Playback, in their current state. */
+    private static List<Extra> extraButtons() {
+        List<Extra> out = new ArrayList<>();
+        if (modeButtons) {
+            out.add(new Extra(ACTION_SHUFFLE, shuffleOn ? "Shuffle off" : "Shuffle on",
+                    shuffleOn ? R.drawable.ic_shuffle_on : R.drawable.ic_shuffle));
+            out.add(new Extra(ACTION_REPEAT, repeatMode == 0 ? "Repeat all" : repeatMode == 1 ? "Repeat one" : "Repeat off",
+                    repeatMode == 2 ? R.drawable.ic_repeat_one : repeatMode == 1 ? R.drawable.ic_repeat_on : R.drawable.ic_repeat));
+        } else {
+            out.add(new Extra(ACTION_LIKE, liked ? "Remove from Liked Songs" : "Add to Liked Songs",
+                    liked ? R.drawable.ic_liked : R.drawable.ic_like));
+        }
+        return out;
+    }
+
+    private Notification buildNotification(List<Extra> extras) {
         Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent content = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         if (title.isEmpty()) {
@@ -633,9 +710,15 @@ public class PlaybackService extends Service {
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .build();
         }
-        Intent likeIntent = new Intent(this, PlaybackService.class).setAction(ACTION_LIKE);
-        NotificationCompat.Action like = new NotificationCompat.Action(likeIcon, likeLabel,
-                PendingIntent.getService(this, 1, likeIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
+        // Android 12 and older: the first extra button left of "previous",
+        // a second one right of "next".
+        List<NotificationCompat.Action> extraActions = new ArrayList<>();
+        for (int i = 0; i < extras.size(); i++) {
+            Extra e = extras.get(i);
+            Intent intent = new Intent(this, PlaybackService.class).setAction(e.action);
+            extraActions.add(new NotificationCompat.Action(e.icon, e.label,
+                    PendingIntent.getService(this, 1 + i, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)));
+        }
         NotificationCompat.Action prev = new NotificationCompat.Action(android.R.drawable.ic_media_previous, "Previous",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS));
         NotificationCompat.Action toggle = playing || buffering
@@ -645,7 +728,7 @@ public class PlaybackService extends Service {
                         MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY));
         NotificationCompat.Action next = new NotificationCompat.Action(android.R.drawable.ic_media_next, "Next",
                 MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_SKIP_TO_NEXT));
-        return new NotificationCompat.Builder(this, CHANNEL)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_glyph)
                 .setContentTitle(title)
                 .setContentText(artist)
@@ -653,12 +736,17 @@ public class PlaybackService extends Service {
                 .setContentIntent(content)
                 .setOngoing(playing || buffering)
                 .setOnlyAlertOnce(true)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .addAction(like)
-                .addAction(prev)
-                .addAction(toggle)
-                .addAction(next)
-                .setStyle(new MediaStyle().setMediaSession(session.getSessionToken()).setShowActionsInCompactView(1, 2, 3))
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+        int first = extraActions.isEmpty() ? 0 : 1;
+        if (first == 1) {
+            b.addAction(extraActions.get(0));
+        }
+        b.addAction(prev).addAction(toggle).addAction(next);
+        for (int i = 1; i < extraActions.size(); i++) {
+            b.addAction(extraActions.get(i));
+        }
+        return b.setStyle(new MediaStyle().setMediaSession(session.getSessionToken())
+                        .setShowActionsInCompactView(first, first + 1, first + 2))
                 .build();
     }
 

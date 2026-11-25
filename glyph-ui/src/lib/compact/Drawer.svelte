@@ -34,7 +34,7 @@
 
 <div class="back" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation"
   use:drag={{ axis: "x", move: (dx) => (sx = Math.min(0, dx)), end: (dx, _dy, vx) => { if (shouldClose(-dx, -vx)) { close(); return; } sx = 0; } }}>
-  <div class="panel" style:transform="translateX({sx}px)" in:sheetIn|global={{ axis: "x", dir: -1, duration: 240 }} out:sheetOut|global={{ axis: "x", dir: -1, duration: 200 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+  <div class="panel" style:transform="translateX({sx}px)" in:sheetIn|global={{ axis: "x", dir: -1, duration: 300 }} out:sheetOut|global={{ axis: "x", dir: -1, duration: 200 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     <button class="prof" onclick={() => go(() => (app.account ? app.openProfilePage(app.account.handle) : app.openSettings("account")))}>
       <Avatar size={52} />
       <span class="pt">

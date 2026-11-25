@@ -3,7 +3,7 @@
 // glyph-tauri::account commands.
 import { encodePicture, pictureCanvas } from "../picture";
 import type {
-  Account, BackendEvents, Config, Library, ListKey, Playlist, Profile, RecentItem, SearchItem, Track,
+  Account, BackendEvents, Config, Library, LibraryFolder, ListKey, Playlist, Profile, RecentItem, SearchItem, Track,
 } from "./types";
 import type { ProfileSettingsData } from "../settings/types";
 import { listId, sameList, trackKey } from "./types";
@@ -1028,6 +1028,13 @@ export class WebAccountManager {
           this.host.stats.applyRemote(devId, it.key, it.deleted ? null : it.value);
           break;
         }
+        case SYNC_KIND.LIBRARY_PREF: {
+          if (it.key === "folders") {
+            lib.folders = !it.deleted && Array.isArray(it.value) ? (it.value as LibraryFolder[]) : [];
+            libChanged = true;
+          }
+          break;
+        }
       }
 
       recordKnown(it, hashSource);
@@ -1086,6 +1093,7 @@ export class WebAccountManager {
       }
     }
     for (const p of lib.pinned) put(SYNC_KIND.PINNED, listSyncKey(p), p);
+    if (lib.folders?.length) put(SYNC_KIND.LIBRARY_PREF, "folders", lib.folders);
     for (const rl of lib.recent_lists) put(SYNC_KIND.RECENT_LIST, listSyncKey(rl), rl);
     for (const s of lib.search_history) {
       const k = pickJournalKey(journal, SYNC_KIND.SEARCH, searchSyncKey(s), legacySearchSyncKey(s));
@@ -1132,6 +1140,8 @@ export class WebAccountManager {
         continue;
       }
       if (likedCleared && kind === SYNC_KIND.LIKED) continue;
+      // App library choices the web does not keep must not be deleted.
+      if (kind === SYNC_KIND.LIBRARY_PREF && key !== "folders") continue;
       // For stats, only delete our own device's stats when stats are disabled
       if (kind === SYNC_KIND.STATS && !key.startsWith(`${devId}:`)) continue;
       if (!current.has(kKey)) {

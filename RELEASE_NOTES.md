@@ -1,5 +1,9 @@
-# Glyph 0.13.11 - 2026-11-25
+# Glyph 0.14.0 - 2026-11-25
 
-- **Device icons**: in the server dashboard each device shows its own icon (phone, computer, laptop or browser) instead of a phone for all of them.
+- **Folders**: sort your playlists into folders in the library.
+- **Good or not?**: a new easy way to teach Glyph your taste.
+- **Media player on Android**: seek bar, and Shuffle + Repeat buttons if you like.
+- **Smoother phone sheets and queue**.
+- **Plugins**: corners can be set per part.
 
 See CHANGELOG.md for the complete changes.

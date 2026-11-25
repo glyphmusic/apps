@@ -8,6 +8,8 @@
 // cells whose character changed are drawn again. Performance mode and
 // reduced motion: one still frame (just the grain), no clock at all.
 
+import { holdingStill } from "./motion";
+
 const RAMP = " .:-=+*#";
 const FPS = 20;
 /** Cells per second the band travels (the app: 60). */
@@ -149,6 +151,8 @@ function moving() {
 function frame() {
   timer = 0;
   if (typeof document !== "undefined" && document.hidden) return;
+  // A sheet slides: draw again once it stands still.
+  if (holdingStill()) { timer = window.setTimeout(frame, 1000 / FPS); return; }
   const t = (performance.now() - t0) / 1000;
   for (const it of items) if (it.visible) paint(it, t);
   if (moving()) timer = window.setTimeout(frame, 1000 / FPS);

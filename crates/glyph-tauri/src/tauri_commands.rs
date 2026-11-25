@@ -150,6 +150,26 @@ pub fn playlist_create(core: C, name: String, tracks: Vec<Track>) -> String {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub fn folder_create(core: C, name: String, playlists: Option<Vec<String>>) -> String {
+    commands::folder_create(&core, name, playlists.unwrap_or_default())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn folder_rename(core: C, id: String, name: String) {
+    commands::folder_rename(&core, id, name)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn folder_delete(core: C, id: String) {
+    commands::folder_delete(&core, id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn folder_set(core: C, playlist: String, folder: Option<String>) {
+    commands::folder_set(&core, playlist, folder)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub fn playlist_rename(core: C, id: String, name: String) {
     commands::playlist_rename(&core, id, name)
 }

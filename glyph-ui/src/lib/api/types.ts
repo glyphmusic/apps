@@ -150,6 +150,13 @@ export type SearchItem =
   | { kind: "query"; text: string }
   | { kind: "artist"; name: string; track?: Track | null };
 
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  /** Playlist ids in folder order. */
+  playlists: string[];
+}
+
 export interface Library {
   liked: Track[];
   /** Unix ms of the last "Clear Liked Songs" action (0 / unset = never). */
@@ -158,6 +165,8 @@ export interface Library {
   playlists: Playlist[];
   saved_albums: ListKey[];
   pinned: ListKey[];
+  /** Library folders holding own playlists (glyph_core LibraryFolder). */
+  folders?: LibraryFolder[];
   recent_lists: ListKey[];
   followed: string[];
   downloads: Track[];
@@ -492,7 +501,7 @@ export interface Config {
   integrations: { discord_presence: boolean; discord_client_id: string };
   sharing: { glyph_links: boolean; profile_sections?: ProfileSection[] };
   player: { volume: number; shuffle: boolean; repeat: string; show_queue: boolean; mini_on_top: boolean; mini_large: boolean; mini_card_w?: number; mini_card_h?: number };
-  playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; pause_for_others?: boolean; resume_after_others?: boolean; autoplay?: boolean; gapless?: boolean };
+  playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; pause_for_others?: boolean; resume_after_others?: boolean; media_buttons?: "like" | "modes"; autoplay?: boolean; gapless?: boolean };
   lists: { sort: Record<string, string> };
   stats: { enabled: boolean };
   taste?: TasteConfig;

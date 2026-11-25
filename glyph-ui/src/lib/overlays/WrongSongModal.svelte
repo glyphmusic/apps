@@ -393,7 +393,7 @@
       data-part="dialog"
       style:transform="translateY({pull}px)"
       class:settle={pull === 0}
-      in:sheetIn|global={{ duration: 260 }}
+      in:sheetIn|global={{ duration: 340 }}
       out:sheetOut|global={{ duration: 210 }}
       onpointerdown={(e) => e.stopPropagation()}
       role="dialog"

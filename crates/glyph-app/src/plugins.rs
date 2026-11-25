@@ -372,7 +372,7 @@ fn look_json(m: &plugins::Manifest, base: Option<&str>) -> Value {
         "layout": l.home.is_some() || l.sidebar.is_some() || l.tabs.is_some() || !l.sidebar_position.is_empty(),
         "home": l.home.is_some(), "sidebar": l.sidebar.is_some(), "tabs": l.tabs.is_some(), "sidebar_position": l.sidebar_position,
         "splash": l.splash.is_some(), "splash_art": l.splash.as_ref().map(|s| s.art.clone()),
-        "radius": l.radius, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
+        "radius": l.radius, "radii": l.radii, "backgrounds": l.backgrounds.len(), "css": l.css.is_some(), "assets": l.assets.len(), "icons": l.icons.len(),
         "icon_names": l.icons.keys().collect::<Vec<_>>(),
         "preview": preview,
     })
@@ -600,7 +600,7 @@ fn ui_json(rt: &Rt, dis: &[String], lang: &str) -> Value {
             let l = p.manifest.look.as_ref()?;
             // A theme's look goes with its colours (the UI shows it while the theme is picked).
             Some(json!({
-                "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": font_name(&l.font), "radius": l.radius,
+                "plugin": p.manifest.id, "theme": p.manifest.kind == "theme", "font": font_name(&l.font), "radius": l.radius, "radii": l.radii,
                 "font_data": p.look_font_data(&l.font), "mono": font_name(&l.mono), "mono_data": p.look_font_data(&l.mono),
                 "home": l.home, "sidebar": l.sidebar, "tabs": l.tabs,
                 "sidebar_position": l.sidebar_position, "splash": l.splash,

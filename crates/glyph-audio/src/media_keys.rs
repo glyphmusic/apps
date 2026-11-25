@@ -34,6 +34,7 @@ pub(crate) fn map_event(e: &MediaControlEvent) -> Option<MediaKeyEvent> {
         MediaControlEvent::Seek(SeekDirection::Backward) | MediaControlEvent::SeekBy(SeekDirection::Backward, _) => {
             MediaKeyEvent::SeekBackward
         }
+        MediaControlEvent::SetPosition(p) => MediaKeyEvent::SeekTo(p.0.as_millis() as u64),
         _ => return None,
     })
 }
@@ -148,6 +149,10 @@ mod tests {
         assert_eq!(
             map_event(&MediaControlEvent::SeekBy(SeekDirection::Backward, Duration::from_secs(5))),
             Some(MediaKeyEvent::SeekBackward)
+        );
+        assert_eq!(
+            map_event(&MediaControlEvent::SetPosition(MediaPosition(Duration::from_millis(83_500)))),
+            Some(MediaKeyEvent::SeekTo(83_500))
         );
         assert_eq!(map_event(&MediaControlEvent::Raise), None);
     }

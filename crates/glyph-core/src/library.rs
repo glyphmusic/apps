@@ -59,6 +59,17 @@ pub struct Playlist {
     pub shared_by: Option<String>,
 }
 
+/// A folder in the library that holds own playlists (by id), so the user can
+/// sort them. Folders do not nest; a playlist sits in at most one folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LibraryFolder {
+    pub id: String,
+    pub name: String,
+    /// Playlist ids in the order the user put them in.
+    #[serde(default)]
+    pub playlists: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaylistRevision {
     pub playlist: Playlist,
@@ -281,6 +292,9 @@ pub struct Library {
     /// Lists pinned to the top of the sidebar and the library.
     #[serde(default)]
     pub pinned: Vec<ListKey>,
+    /// Library folders holding own playlists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<LibraryFolder>,
     /// Liked Songs was downloaded once: newly liked songs download too.
     #[serde(default)]
     pub liked_auto_download: bool,
@@ -372,6 +386,11 @@ fn tracks_empty(key: &ListKey) -> bool {
 
 pub fn clean_playlist_name(name: &str) -> String {
     name.trim().chars().take(PLAYLIST_NAME_MAX).collect::<String>().trim_end().to_string()
+}
+
+/// Folder names follow the playlist name rules.
+pub fn clean_folder_name(name: &str) -> String {
+    clean_playlist_name(name)
 }
 
 impl Library {
@@ -864,6 +883,53 @@ impl Library {
         self.playlists.iter_mut().find(|p| p.id == id)
     }
 
+    /// New folder with `playlists` moved into it; returns its id.
+    pub fn create_folder(&mut self, name: &str, playlists: &[String]) -> String {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.folders.push(LibraryFolder { id: id.clone(), name: clean_folder_name(name), playlists: vec![] });
+        for p in playlists {
+            self.set_playlist_folder(p, Some(&id));
+        }
+        id
+    }
+
+    pub fn folder(&self, id: &str) -> Option<&LibraryFolder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    pub fn rename_folder(&mut self, id: &str, name: &str) {
+        if let Some(f) = self.folders.iter_mut().find(|f| f.id == id) {
+            f.name = clean_folder_name(name);
+        }
+    }
+
+    /// Removes the folder; its playlists go back to the top of the library.
+    pub fn delete_folder(&mut self, id: &str) {
+        self.folders.retain(|f| f.id != id);
+    }
+
+    /// Folder the playlist is in, if any.
+    pub fn folder_of(&self, playlist: &str) -> Option<&LibraryFolder> {
+        self.folders.iter().find(|f| f.playlists.iter().any(|p| p == playlist))
+    }
+
+    /// Moves a playlist into `folder` (at its end), or out of every folder
+    /// with `None`. An unknown folder leaves the playlist where it was.
+    pub fn set_playlist_folder(&mut self, playlist: &str, folder: Option<&str>) {
+        if folder.is_some_and(|id| self.folder(id).is_none()) {
+            return;
+        }
+        if folder.is_some() && self.folder_of(playlist).map(|f| f.id.as_str()) == folder {
+            return;
+        }
+        for f in &mut self.folders {
+            f.playlists.retain(|p| p != playlist);
+        }
+        if let Some(f) = folder.and_then(|id| self.folders.iter_mut().find(|f| f.id == id)) {
+            f.playlists.push(playlist.to_string());
+        }
+    }
+
     pub fn rename_playlist(&mut self, id: &str, name: &str) {
         if let Some(p) = self.playlist_mut(id) {
             p.name = clean_playlist_name(name);
@@ -1322,6 +1388,47 @@ pub(crate) fn same_entry(a: &Track, b: &Track) -> bool {
         || a.external_ids.get(&b.source).map(|id| id == &b.id).unwrap_or(false)
         || b.external_ids.get(&a.source).map(|id| id == &a.id).unwrap_or(false)
         || same_song(a, b)
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn playlists_move_between_folders() {
+        let mut lib = Library::default();
+        let a = lib.create_playlist("A").id.clone();
+        let b = lib.create_playlist("B").id.clone();
+        let f = lib.create_folder("  Rock  ", &[a.clone()]);
+        assert_eq!(lib.folder(&f).unwrap().name, "Rock");
+        assert_eq!(lib.folder_of(&a).unwrap().id, f);
+        let g = lib.create_folder("Chill", &[]);
+        lib.set_playlist_folder(&a, Some(&g));
+        lib.set_playlist_folder(&b, Some(&g));
+        assert!(lib.folder(&f).unwrap().playlists.is_empty());
+        assert_eq!(lib.folder(&g).unwrap().playlists, vec![a.clone(), b.clone()]);
+        // Unknown folder: nothing moves.
+        lib.set_playlist_folder(&a, Some("nope"));
+        assert_eq!(lib.folder_of(&a).unwrap().id, g);
+        lib.set_playlist_folder(&a, None);
+        assert!(lib.folder_of(&a).is_none());
+        lib.rename_folder(&g, "Calm");
+        assert_eq!(lib.folder(&g).unwrap().name, "Calm");
+        lib.delete_folder(&g);
+        assert!(lib.folder_of(&b).is_none());
+        assert_eq!(lib.playlists.len(), 2);
+    }
+
+    #[test]
+    fn folders_survive_a_save_round_trip() {
+        let mut lib = Library::default();
+        let a = lib.create_playlist("A").id.clone();
+        lib.create_folder("Rock", &[a]);
+        let back: Library = serde_json::from_str(&serde_json::to_string(&lib).unwrap()).unwrap();
+        assert_eq!(back.folders, lib.folders);
+        let old: Library = serde_json::from_str(r#"{"liked":[],"playlists":[]}"#).unwrap();
+        assert!(old.folders.is_empty());
+    }
 }
 
 #[cfg(test)]

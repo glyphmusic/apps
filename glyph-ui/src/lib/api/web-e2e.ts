@@ -27,6 +27,8 @@ export const SYNC_KIND = {
   KEYRING: "keyring",
   E2E: "sealed",
   E2E_PLAYLIST: "sealed_playlist",
+  /** Whole-value library choices from the apps (glyph_core::sync PREFERENCE). */
+  LIBRARY_PREF: "library_pref",
 } as const;
 
 export interface SyncItem {

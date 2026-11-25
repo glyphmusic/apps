@@ -2,6 +2,7 @@
 // tooltips, ASCII reveal, adaptive ink, press / pop feedback.
 import type { Glow } from "./glow";
 import { tipFor } from "./i18n.svelte";
+import { holdingStill } from "./motion";
 
 // ---- tooltips (widgets/tooltip.rs) --------------------------------------
 // Next to their button (below, or above near the bottom edge), never at the
@@ -229,7 +230,7 @@ export function setGlow(g: Glow | null, solidDarkInk = false) {
   }
 }
 function updateInks() {
-  if (!glow || document.hidden || glow.isPaused() || inked.size === 0) return;
+  if (!glow || document.hidden || glow.isPaused() || holdingStill() || inked.size === 0) return;
   for (const el of inked) {
     const lum = glow.lumAt(el.getBoundingClientRect());
     if (lum == null) continue;
@@ -413,8 +414,15 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
     }
   };
 
+  let later = 0;
   const schedule = () => {
     if (isUiSuspended()) return;
+    // A sheet slides: fix the fade once it stands (a new mask would make
+    // the phone draw the moving sheet again).
+    if (holdingStill()) {
+      if (!later) later = window.setTimeout(() => { later = 0; schedule(); }, 120);
+      return;
+    }
     if (!raf) raf = requestAnimationFrame(update);
   };
 
@@ -444,6 +452,7 @@ export function fadeEdges(el: HTMLElement, initial: FadeEdgesOpts = {}) {
     },
     destroy() {
       cancelAnimationFrame(raf);
+      clearTimeout(later);
       uiResumeListeners.delete(schedule);
       el.removeEventListener("scroll", update);
       ro.disconnect();

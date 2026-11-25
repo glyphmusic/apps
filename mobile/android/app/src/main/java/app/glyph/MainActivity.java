@@ -1644,6 +1644,14 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> PlaybackService.setPauseForOthers(on));
     }
 
+    /**
+     * Settings > Playback "Media player buttons": modes true shows shuffle +
+     * repeat instead of the add button; repeat is 0 off, 1 all, 2 one.
+     */
+    public void gpuiMediaButtons(boolean modes, boolean shuffle, int repeat) {
+        runOnUiThread(() -> PlaybackService.setButtons(modes, shuffle, repeat));
+    }
+
     /** Keeps the foreground service and wake/Wi-Fi locks alive while in a Jam even without active audio. */
     public void gpuiJamActive(boolean active) {
         runOnUiThread(() -> PlaybackService.setJamActive(this, active));
@@ -1682,7 +1690,43 @@ public class MainActivity extends AppCompatActivity {
                 updateTaskDescription(rgb);
             }
             scheduleLauncherAlias(aliasForTheme(themeId, rgb));
+            // Waits a moment: at start the look's icon comes a bit later,
+            // so the home screen icon doesn't jump to Glyph's and back.
+            pendingPinnedPng = png;
+            themeHandler.removeCallbacks(refreshPinnedRunnable);
+            themeHandler.postDelayed(refreshPinnedRunnable, 3000L);
         });
+    }
+
+    /**
+     * Gives Glyph shortcuts already on the home screen the look's icon now
+     * in use (Glyph's own when none), so the icon follows the look after the
+     * first "add to home screen" without asking again.
+     */
+    private byte[] pendingPinnedPng;
+    private final Runnable refreshPinnedRunnable = () -> refreshPinnedIcons(pendingPinnedPng);
+
+    private void refreshPinnedIcons(byte[] png) {
+        ShortcutManager sm = getSystemService(ShortcutManager.class);
+        if (sm == null) {
+            return;
+        }
+        try {
+            Bitmap bmp = png == null ? null : BitmapFactory.decodeByteArray(png, 0, png.length);
+            Icon icon = bmp != null ? Icon.createWithBitmap(bmp) : Icon.createWithResource(this, R.mipmap.ic_launcher);
+            Intent open = new Intent(this, MainActivity.class).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ShortcutInfo> update = new ArrayList<>();
+            for (ShortcutInfo s : sm.getPinnedShortcuts()) {
+                if (s.getId().startsWith("icon-")) {
+                    update.add(new ShortcutInfo.Builder(this, s.getId()).setShortLabel("Glyph").setIcon(icon).setIntent(open).build());
+                }
+            }
+            if (!update.isEmpty()) {
+                sm.updateShortcuts(update);
+            }
+        } catch (RuntimeException e) {
+            Log.w("Glyph", "pinned icon update failed", e);
+        }
     }
 
     /**

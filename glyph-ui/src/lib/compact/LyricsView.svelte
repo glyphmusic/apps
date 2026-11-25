@@ -38,7 +38,7 @@
 </script>
 
 <div class="lv" style:background={accentTile(0.24, 0.5, themeColors(app.config.visuals.theme).accent)} style:transform="translateY({pull}px)" style:border-radius={pull > 0 ? `${cornerPx(Math.min(22, 10 + pull * 0.3))} ${cornerPx(Math.min(22, 10 + pull * 0.3))} 0 0` : undefined} class:settle={pull === 0}
-  in:sheetIn|global={{ duration: 280 }} out:sheetOut|global={{ duration: 230, radius: true }}
+  in:sheetIn|global={{ duration: 360 }} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hd" use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
     <IconAction name="chevron-down" onclick={close} />

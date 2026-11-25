@@ -6,7 +6,9 @@
   // play/pause, and bottom Shuffle / Repeat / Sleep Timer bar. Swipe a row
   // right to add the song to the queue again, left to take it out; songs
   // added to the queue by hand carry an accent queue mark.
-  import { fade, fly } from "svelte/transition";
+  import { tick } from "svelte";
+  import { fade, fly, scale } from "svelte/transition";
+  import { flip } from "svelte/animate";
   import { cubicOut } from "svelte/easing";
   import Icon from "../components/Icon.svelte";
   import Cover from "../components/Cover.svelte";
@@ -16,7 +18,7 @@
   import { app } from "../state.svelte";
   import { thisIcon, thisName } from "../connect";
   import { t, tf } from "../i18n.svelte";
-  import { rating, type Track } from "../api/types";
+  import { rating, trackKey, type Track } from "../api/types";
   import { jam } from "../jam.svelte";
   import { fadeEdges, eatTap } from "../ui.svelte";
   import { SLEEP_MINUTES, setSleep, sleepCountdown, sleepLabel } from "../overlays/sleep.svelte";
@@ -30,7 +32,18 @@
   let listEl: HTMLDivElement | undefined = $state();
   let dragRow = $state<{ from: number; slot: number; dy: number; h: number } | null>(null);
   let rowDragActive = false;
-  let queueCap = $state(30);
+  /** The dragged row glides into its slot before the queue changes. */
+  let dropping = $state(false);
+  /** Rows don't slide when the dropped row is already where it lands. */
+  let noFlip = $state(false);
+  // Only the rows that fit at first, the rest once the sheet stands:
+  // nothing new in it while it slides in.
+  let queueCap = $state(14);
+  const grow = () => { if (queueCap < 30) queueCap = 30; };
+  $effect(() => {
+    const t = setTimeout(grow, 900);
+    return () => clearTimeout(t);
+  });
   /** The row being swiped sideways (its key) and how far. */
   let swipe = $state<{ key: string; dx: number } | null>(null);
   /** Rows swiped out to the left, gone once the new queue arrives. */
@@ -40,7 +53,30 @@
   const kind = $derived(app.showDevices ? "devices" : "queue");
   const close = () => { app.showQueue = false; app.showDevices = false; app.jamOpen = false; jam.page = "main"; };
   const up = $derived(app.upNext);
-  const upShown = $derived(editing || dragRow ? up : up.slice(0, queueCap));
+  // Only the rows near the screen exist, also while editing or dragging:
+  // drawing the whole queue at once made the sheet stall on phones.
+  const upShown = $derived(up.slice(0, queueCap));
+  /**
+   * A lasting id per queue entry: a song keeps its id when it moves, so its
+   * row moves along (no new row, no cover loading again). Songs are matched
+   * to the last queue by their key, in order.
+   */
+  let uidLast = new Map<string, number[]>();
+  let uidNext = 0;
+  const uids = $derived.by(() => {
+    const pool = new Map<string, number[]>();
+    for (const [k, l] of uidLast) pool.set(k, [...l]);
+    const seen = new Map<string, number[]>();
+    const out = app.queue.items.map((t) => {
+      const k = trackKey(t);
+      const id = pool.get(k)?.shift() ?? ++uidNext;
+      const l = seen.get(k);
+      if (l) l.push(id); else seen.set(k, [id]);
+      return id;
+    });
+    uidLast = seen;
+    return out;
+  });
   function onListScroll() {
     if (!listEl || queueCap >= up.length) return;
     if (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 260) queueCap += 30;
@@ -64,23 +100,21 @@
     selected = selected.includes(qIdx) ? selected.filter((x) => x !== qIdx) : [...selected, qIdx];
   }
 
-  async function moveSelectedTop() {
+  // Both show the new queue at once (one step, no row-by-row jumping)
+  // and send the single changes to the core after.
+  function moveSelectedTop() {
     if (!selected.length) return;
-    const sorted = [...selected].sort((a, b) => a - b);
-    let dest = base;
-    for (const idx of sorted) {
-      if (idx !== dest) await app.queueMove(idx, dest);
-      dest++;
-    }
+    const sel = selected;
     selected = [];
     editing = false;
+    void app.queueMoveMany(sel, base);
   }
 
-  async function removeSelected() {
+  function removeSelected() {
     if (!selected.length) return;
-    const sorted = [...selected].sort((a, b) => b - a);
-    for (const idx of sorted) await app.queueRemove(idx);
+    const sel = selected;
     selected = [];
+    void app.queueRemoveMany(sel);
     if (!app.upNext.length) editing = false;
   }
 
@@ -118,7 +152,7 @@
       for (let i = 0; i < centers.length; i++) {
         if (i !== from && draggedCenter > centers[i]) slot++;
       }
-      slot = Math.max(0, Math.min(up.length - 1, slot));
+      slot = Math.max(0, Math.min(upShown.length - 1, slot));
       dragRow = { from, slot, dy, h };
     };
     const cleanup = () => {
@@ -132,10 +166,21 @@
     const onEnd = () => {
       cleanup();
       const d = dragRow;
-      dragRow = null;
-      if (d && d.slot !== d.from && up[d.from] && up[d.slot]) {
-        app.queueMove(u.index, up[d.slot].index);
-      }
+      if (!d || d.slot === d.from || !up[d.from] || !up[d.slot]) { dragRow = null; return; }
+      // Glide into the free slot first, then change the queue: the rows
+      // already stand where the new queue puts them, so nothing jumps.
+      const id = uids[u.index], toId = uids[up[d.slot].index];
+      dropping = true;
+      dragRow = { ...d, dy: (centers[d.slot] ?? startCenter + (d.slot - d.from) * d.h) - startCenter };
+      setTimeout(() => {
+        noFlip = true;
+        // Looked up again: the queue may have changed meanwhile.
+        const from = uids.indexOf(id), to = uids.indexOf(toId);
+        if (from >= 0 && to >= 0) app.queueMove(from, to);
+        dragRow = null;
+        dropping = false;
+        void tick().then(() => (noFlip = false));
+      }, 170);
     };
     grip.addEventListener("touchmove", blockTouch, { passive: false });
     addEventListener("pointermove", onMove);
@@ -152,13 +197,18 @@
     return sign * Math.min(max, SWIPE_ACT + (abs - SWIPE_ACT) * 0.35);
   }
 
-  const rowKey = (u: { track: Track; index: number }) => `${u.index}:${u.track.source}:${u.track.id}`;
+  const rowKey = (u: { track: Track; index: number }) => String(uids[u.index] ?? `${u.index}:${u.track.source}:${u.track.id}`);
   /** Sideways swipe on a queue row: right adds it again, left removes it. */
   function swipeEnd(u: { track: Track; index: number }, dx: number, vx: number) {
     const key = rowKey(u);
     swipe = null;
     if (dx >= SWIPE_ACT || (vx > 0.5 && dx > 28)) app.queueAdd([u.track], false);
-    else if (dx <= -SWIPE_ACT || (vx < -0.5 && dx < -28)) { leaving = [...leaving, key]; app.queueRemove(u.index); }
+    else if (dx <= -SWIPE_ACT || (vx < -0.5 && dx < -28)) {
+      // The row slides out first, then the rows below close the gap.
+      leaving = [...leaving, key];
+      const id = uids[u.index];
+      setTimeout(() => { const at = uids.indexOf(id); if (at >= 0) app.queueRemove(at); }, 170);
+    }
   }
 
   function rowShift(i: number): number {
@@ -172,7 +222,7 @@
 </script>
 
 <div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation">
-  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 340 }} out:sheetOut|global={{ duration: 210 }} onintroend={() => requestAnimationFrame(grow)} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     {#if kind === "devices"}
       <ConnectView
         sheet
@@ -268,16 +318,18 @@
           {@const sx = swipe?.key === key ? swipe.dx : 0}
           {@const gone = leaving.includes(key)}
           {@const queued = i < manual}
-          {#if !editing && i === manual && manual > 0 && up.length > manual}
-            <div class="sec">{app.queue.context ? tf("queue.from_n", { name: app.queue.context, n: up.length - manual }) : tf("queue.later_n", { n: up.length - manual })}</div>
-          {/if}
           {@const shiftY = rowShift(i)}
           {@const armedAdd = sx >= SWIPE_ACT}
           {@const armedRm = sx <= -SWIPE_ACT}
+          <div class="q-item" animate:flip={{ duration: noFlip ? 0 : 220, easing: cubicOut }}>
+          {#if !editing && i === manual && manual > 0 && up.length > manual}
+            <div class="sec">{app.queue.context ? tf("queue.from_n", { name: app.queue.context, n: up.length - manual }) : tf("queue.later_n", { n: up.length - manual })}</div>
+          {/if}
           <div
             class="q-wrap"
             class:gone
             class:dragging
+            class:dropping={dragging && dropping}
             class:reordering={!!dragRow && !dragging}
             class:swiping-wrap={sx !== 0}
             style:transform={shiftY ? `translateY(${shiftY}px)` : undefined}
@@ -314,7 +366,7 @@
             tabindex="-1"
           >
             {#if editing}
-              <span class="chk" class:on={checked}>
+              <span class="chk" class:on={checked} transition:scale|local={{ duration: 160, start: 0.5, easing: cubicOut }}>
                 {#if checked}<Icon name="check" size={13} color="#000" />{/if}
               </span>
             {/if}
@@ -333,6 +385,7 @@
                 <line x1="2" y1="11.5" x2="16" y2="11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
               </svg>
             </button>
+          </div>
           </div>
           </div>
         {/each}
@@ -413,6 +466,7 @@
   .q-wrap { position: relative; border-radius: 10px; margin: 0 6px; transition: opacity .2s ease-out; }
   .q-wrap.reordering { transition: transform .18s var(--ease), opacity .2s ease-out; }
   .q-wrap.dragging { z-index: 10; transition: none; }
+  .q-wrap.dragging.dropping { transition: transform .17s var(--ease); }
   .q-wrap.swiping-wrap, .q-wrap.gone { overflow: hidden; }
   .q-wrap.gone { opacity: 0; pointer-events: none; }
   .under {

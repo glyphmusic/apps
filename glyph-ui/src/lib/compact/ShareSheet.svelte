@@ -123,7 +123,7 @@
 </script>
 
 <div class="dim" transition:fade|global={{ duration: 200 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} role="presentation">
-  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }}
+  <div class="panel" style:transform="translateY({pull}px)" class:settle={pull === 0} in:sheetIn|global={{ duration: 340 }} out:sheetOut|global={{ duration: 210 }}
     onpointerdown={(e) => e.stopPropagation()} role="dialog" aria-label={t("share.title")} tabindex="-1"
     use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
     <span class="hdl"></span>

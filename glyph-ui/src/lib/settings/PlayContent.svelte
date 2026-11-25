@@ -14,6 +14,7 @@
   import Row from "./Row.svelte";
   import Rows from "./Rows.svelte";
   import Tog from "./Tog.svelte";
+  import Segmented from "./Segmented.svelte";
   import ShuffleVisual from "./ShuffleVisual.svelte";
   import PluginHost from "./PluginHost.svelte";
   import AppOnly from "./AppOnly.svelte";
@@ -66,6 +67,9 @@
       </Row>
       <Row label={t("sp.other_apps_resume")} info={t("sp.other_apps_resume.desc")}>
         <Tog on={app.config.playback.resume_after_others !== false} disabled={app.config.playback.pause_for_others === false} why={t("sp.other_apps.off_why")} onchange={(v) => app.setConfig((c) => { c.playback.resume_after_others = v; })} label={t("sp.other_apps_resume")} />
+      </Row>
+      <Row label={t("sp.media_buttons")} info={t("sp.media_buttons.desc")}>
+        <Segmented value={app.config.playback.media_buttons ?? "like"} options={[{ value: "like", label: t("sp.media_buttons.like") }, { value: "modes", label: t("sp.media_buttons.modes") }]} onpick={(v) => app.setConfig((c) => { c.playback.media_buttons = v; })} />
       </Row>
       {/if}
       {#if !onWeb()}

@@ -56,6 +56,15 @@ pub fn repeat_from(s: &str) -> RepeatMode {
     }
 }
 
+/// The repeat mode after one tap on a repeat button: off -> all -> one -> off.
+pub fn next_repeat(s: &str) -> &'static str {
+    match s {
+        "off" => "all",
+        "all" => "one",
+        _ => "off",
+    }
+}
+
 pub fn player(i: PlayerInput) -> Player {
     let loading_track = i.resolving || i.radio_loading;
     let status = if loading_track {
@@ -163,6 +172,7 @@ pub fn library(lib: &Library, downloads: &[Track]) -> Value {
         "playlists": playlists,
         "saved_albums": lib.saved_albums,
         "pinned": lib.pinned,
+        "folders": lib.folders,
         "recent_lists": lib.recent_lists,
         "downloads": downloads,
         "search_history": lib.search_items,
@@ -253,6 +263,13 @@ mod tests {
     use super::*;
     use glyph_audio::BackendKind;
     use std::time::Duration;
+
+    #[test]
+    fn repeat_button_cycles() {
+        assert_eq!(next_repeat("off"), "all");
+        assert_eq!(next_repeat("all"), "one");
+        assert_eq!(next_repeat("one"), "off");
+    }
 
     fn track(id: &str, dur_ms: u64) -> Track {
         Track {

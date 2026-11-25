@@ -242,6 +242,19 @@ pub async fn dispatch(core: &Arc<Core>, cmd: &str, args: Value) -> Result<Value,
             commands::pin(core, req::<ListKey>(&args, "list")?, req(&args, "on")?);
             Ok(Value::Null)
         }
+        "folder_create" => ok(commands::folder_create(core, req(&args, "name")?, opt(&args, "playlists")?.unwrap_or_default())),
+        "folder_rename" => {
+            commands::folder_rename(core, req(&args, "id")?, req(&args, "name")?);
+            Ok(Value::Null)
+        }
+        "folder_delete" => {
+            commands::folder_delete(core, req(&args, "id")?);
+            Ok(Value::Null)
+        }
+        "folder_set" => {
+            commands::folder_set(core, req(&args, "playlist")?, opt(&args, "folder")?);
+            Ok(Value::Null)
+        }
         "save_album" => {
             commands::save_album(core, req::<ListKey>(&args, "list")?, req(&args, "on")?);
             Ok(Value::Null)

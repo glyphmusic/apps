@@ -147,6 +147,19 @@ pub struct PlaybackConfig {
     /// After such a pause, play on when the other sound stops: not after a
     /// music app, and not when it played longer than a few minutes.
     pub resume_after_others: bool,
+    /// Phone media player: the extra buttons next to previous / next.
+    pub media_buttons: MediaButtons,
+}
+
+/// Extra buttons in the phone's media player (notification, lock screen).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaButtons {
+    /// One button: add to / remove from Liked Songs.
+    #[default]
+    Like,
+    /// Two buttons: shuffle and repeat.
+    Modes,
 }
 
 impl Default for PlaybackConfig {
@@ -157,6 +170,7 @@ impl Default for PlaybackConfig {
             patient_search: false,
             pause_for_others: true,
             resume_after_others: true,
+            media_buttons: MediaButtons::default(),
         }
     }
 }

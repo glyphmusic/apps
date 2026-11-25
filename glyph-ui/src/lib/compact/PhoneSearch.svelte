@@ -9,12 +9,24 @@
   import Header from "./Header.svelte";
   import IconAction from "./IconAction.svelte";
   import { app } from "../state.svelte";
+  import { phone } from "./cstate.svelte";
   import { t } from "../i18n.svelte";
   import type { SearchItem } from "../api/types";
   let { part, bg = 0 }: { part: "bar" | "recent"; bg?: number } = $props();
   const active = $derived(app.searchFocused || app.searchQuery.trim() !== "");
   const history = $derived(app.library.search_history.length > 0);
   const items = $derived<SearchItem[]>(history ? app.library.search_history : app.library.recent.flatMap((r): SearchItem[] => (r.kind === "song" ? [{ kind: "song", track: r.track }] : r.kind === "artist" ? [{ kind: "artist", name: r.name, track: r.track }] : [])).slice(0, 12));
+  // Scrolled down: the profile picture and title slide away, only the
+  // field stays on top. Comes back near the top. Only when the list is long
+  // enough to stay scrolled once the header is gone (no flicker).
+  let hdGone = $state(false);
+  $effect(() => {
+    const y = phone.scroll;
+    if (!hdGone && y > 40) {
+      const m = document.getElementById("main-scroll");
+      if (!m || m.scrollHeight - m.clientHeight > 140) hdGone = true;
+    } else if (hdGone && y < 8) hdGone = false;
+  });
   function pick(it: SearchItem) {
     if (it.kind === "song") { app.playOne(it.track); app.pickSearch(it); }
     else if (it.kind === "artist") { app.openArtistPage(it.name); app.pickSearch(it); }
@@ -29,10 +41,10 @@
 {#if part === "bar"}
   <div style:background="rgba(10, 10, 10, {bg})">
     {#if !active}
-      <Header title={t("nav.search")} />
+      <div class="hdw" class:gone={hdGone}><div><Header title={t("nav.search")} /></div></div>
     {/if}
     <!-- Keep one SearchField mounted across active transitions so focusing it on tap never unmounts the input. -->
-    <div class:bar={active} class:field={!active}>
+    <div class:bar={active} class:field={!active} class:up={!active && hdGone}>
       {#if active}
         <IconAction name="arrow-left" onclick={() => { app.setQuery(""); app.searchFocused = false; (document.activeElement as HTMLElement)?.blur(); }} />
       {/if}
@@ -58,8 +70,12 @@
 {/if}
 
 <style>
+  .hdw { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .22s var(--ease), opacity .18s var(--ease); }
+  .hdw > div { min-height: 0; overflow: hidden; }
+  .hdw.gone { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
   .bar { flex: none; height: 60px; padding: 0 16px 0 4px; display: flex; align-items: center; gap: 4px; }
-  .field { padding: 0 16px 8px; }
+  .field { padding: 0 16px 8px; transition: padding-top .22s var(--ease); }
+  .field.up { padding-top: 8px; }
   .hint { margin: 0; padding-top: 24px; font-size: 14px; color: var(--dim); }
   h2 { margin: 0; padding-bottom: 6px; font-size: 18px; font-weight: 700; color: var(--text); }
   .it { height: 64px; display: flex; align-items: center; gap: 12px; border-radius: 8px; transition: background-color .12s var(--ease), transform .16s var(--ease); }

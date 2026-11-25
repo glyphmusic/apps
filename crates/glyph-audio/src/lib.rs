@@ -370,6 +370,13 @@ pub enum MediaKeyEvent {
     SeekBackward,
     /// Like / unlike the current song (the phone notification's add button).
     Like,
+    /// Shuffle on / off (a phone media player button).
+    Shuffle,
+    /// Repeat off -> all -> one -> off (a phone media player button).
+    Repeat,
+    /// Jump to this point of the song, in milliseconds (the phone's media
+    /// player or the system's seek bar was dragged).
+    SeekTo(u64),
     /// Volume 0..=100 from the phone's volume keys while a network device
     /// plays (see `MediaKeys::set_remote_volume`).
     Volume(u8),

@@ -81,6 +81,10 @@ pub struct LookSpec {
     /// Corner roundness: 0 square, 1 Glyph's, 2 very round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
+    /// Corner roundness of single parts ([`RADIUS_PARTS`] -> 0 to 2, like
+    /// `radius`); parts not named here follow `radius`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub radii: BTreeMap<String, f32>,
     /// Pictures (.png, .jpg, .webp) offered in Settings â€º Appearance â€º
     /// Background picture.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -127,6 +131,9 @@ pub struct SplashSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
 }
+
+/// Parts whose corners a look can set one by one (`radii`).
+pub const RADIUS_PARTS: &[&str] = &["covers", "buttons", "fields", "cards", "menus", "dialogs", "player"];
 
 /// Sidebar positions a look can pick.
 pub const SIDEBAR_POSITIONS: &[&str] = &["left", "right"];
@@ -363,7 +370,7 @@ pub(super) fn valid_icon_name(n: &str) -> bool {
 
 impl LookSpec {
     fn is_empty(&self) -> bool {
-        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.home.is_none() && self.sidebar.is_none() && self.tabs.is_none() && self.sidebar_position.is_empty() && self.splash.is_none() && self.radius.is_none() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
+        self.font.is_empty() && self.mono.is_empty() && self.app_icon.is_none() && self.home.is_none() && self.sidebar.is_none() && self.tabs.is_none() && self.sidebar_position.is_empty() && self.splash.is_none() && self.radius.is_none() && self.radii.is_empty() && self.backgrounds.is_empty() && self.css.is_none() && self.assets.is_empty() && self.icons.is_empty()
     }
 
     /// Every file the look needs from the repo, each once.
@@ -406,7 +413,7 @@ impl LookSpec {
     fn validate(&self) -> Result<(), Invalid> {
         let bad = |s: &str| Err(Invalid::Bad(format!("look: {s}")));
         if self.is_empty() {
-            return bad("needs a font, mono, app_icon, radius, backgrounds, css, assets, icons, home, sidebar, tabs, sidebar_position or splash");
+            return bad("needs a font, mono, app_icon, radius, radii, backgrounds, css, assets, icons, home, sidebar, tabs, sidebar_position or splash");
         }
         if !self.sidebar_position.is_empty() && !SIDEBAR_POSITIONS.contains(&self.sidebar_position.as_str()) {
             return bad("sidebar_position must be \"left\" or \"right\"");
@@ -443,6 +450,15 @@ impl LookSpec {
         }
         if self.radius.is_some_and(|r| !(r.is_finite() && (0.0..=2.0).contains(&r))) {
             return bad("radius must be between 0 and 2");
+        }
+        for (part, r) in &self.radii {
+            if !(r.is_finite() && (0.0..=2.0).contains(r)) {
+                return bad(&format!("radii.{part} must be between 0 and 2"));
+            }
+        }
+        // A part this build does not know comes from a newer Glyph.
+        if self.radii.keys().any(|k| !RADIUS_PARTS.contains(&k.as_str())) {
+            return Err(Invalid::NeedsNewerApp);
         }
         let ext = |f: &str| f.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
         if self.backgrounds.len() > MAX_LOOK_BACKGROUNDS {

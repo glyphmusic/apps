@@ -15,6 +15,7 @@
   import { t, tf } from "../i18n.svelte";
   import { playingFrom } from "../pages/lists/actions";
   import PlayGlyph from "../components/PlayGlyph.svelte";
+  import { warmCovers } from "../components/Cover.svelte";
   import Header from "./Header.svelte";
   import IconAction from "./IconAction.svelte";
   import TabBar from "./TabBar.svelte";
@@ -46,6 +47,14 @@
   });
   $effect(() => { if (!app.player.current) { phone.npOpen = false; phone.lyricsOpen = false; phone.videoMode = false; phone.videoResume = false; phone.videoPickerOpen = false; } });
   $effect(() => { if (!app.settingsOpen) phone.settingsInPage = false; });
+  // The next songs' covers are ready before the queue or Now Playing opens,
+  // so those sheets slide in without loading pictures on the way.
+  $effect(() => {
+    const next = app.upNext.slice(0, 15).map((u) => u.track);
+    const cur = app.player.current;
+    const t = setTimeout(() => warmCovers(cur ? [cur, ...next] : next), 600);
+    return () => clearTimeout(t);
+  });
   // Leaving the phone layout (window made wide) closes the share menu.
   $effect(() => () => { app.shareSheet = null; });
   // Navigating away from the sheet ("Go to album" in its menu) closes it.

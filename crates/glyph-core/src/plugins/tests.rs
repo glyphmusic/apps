@@ -191,6 +191,10 @@ fn looks_validate() {
     assert_eq!(parse(r#"{"font":"comic"}"#).validate("1.0.0"), Err(Invalid::NeedsNewerApp));
     assert!(matches!(parse(r#"{}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"radius":3}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    // Corners of single parts.
+    assert!(parse(r#"{"radii":{"covers":0,"buttons":2}}"#).validate("1.0.0").is_ok());
+    assert!(matches!(parse(r#"{"radii":{"covers":2.5}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"radii":{"wobble":1}}"#).validate("1.0.0"), Err(Invalid::NeedsNewerApp)));
     assert!(matches!(parse(r#"{"backgrounds":["../x.png"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"backgrounds":["x.gif"]}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"css":"x.js"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));

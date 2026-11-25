@@ -529,6 +529,9 @@ pub fn tick(core: &Arc<Core>) {
             MediaKeyEvent::SeekForward => core.seek(core.player_dto().position + 5.0),
             MediaKeyEvent::SeekBackward => core.seek((core.player_dto().position - 5.0).max(0.0)),
             MediaKeyEvent::Like => toggle_like_current(core),
+            MediaKeyEvent::Shuffle => core.set_shuffle(!core.player_dto().shuffle),
+            MediaKeyEvent::Repeat => core.set_repeat(glyph_app::dto::next_repeat(core.player_dto().repeat)),
+            MediaKeyEvent::SeekTo(ms) => core.seek(ms as f64 / 1000.0),
             MediaKeyEvent::Volume(_) => {}
         }
     }

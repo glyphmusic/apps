@@ -18,6 +18,22 @@
   import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Tile from "./stats/Tile.svelte";
   import Bars from "./stats/Bars.svelte";
+  import Segmented from "../settings/Segmented.svelte";
+  import TasteRate from "./taste/TasteRate.svelte";
+
+  // Easy (rate random songs) is the default; Advanced shows every detail.
+  const VIEW_KEY = "glyph:taste-view";
+  let view = $state<"easy" | "advanced">(
+    typeof localStorage !== "undefined" && localStorage.getItem(VIEW_KEY) === "advanced" ? "advanced" : "easy",
+  );
+  function setView(v: "easy" | "advanced") {
+    view = v;
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  }
+  const viewOptions = $derived([
+    { value: "easy" as const, label: t("taste.view.easy") },
+    { value: "advanced" as const, label: t("taste.view.advanced") },
+  ]);
 
   let profile = $state<TasteProfile | null>(null);
   let loading = $state(true);
@@ -171,7 +187,10 @@
   <div class="head">
     <div class="hl">
       {#if !app.compact}<SectionTitle heading title={t("taste.title")} />{/if}
-      {#if profile}
+      {#if tasteEnabled}
+        <Segmented value={view} options={viewOptions} onpick={setView} />
+      {/if}
+      {#if profile && view === "advanced"}
         <button type="button" class="mode-pill" class:hybrid={isServerMode} onclick={toggleLocalOptOut}>
           <Icon name={isServerMode ? "globe" : profile.mode === "off" ? "eye-off" : "lock"} size={12} color={isServerMode ? "var(--accent)" : "var(--dim)"} />
           <span>{modeLabel}</span>
@@ -179,7 +198,7 @@
       {/if}
     </div>
     <div class="hacts">
-      {#if tasteEnabled}
+      {#if tasteEnabled && view === "advanced"}
         <Button icon="sparkles" kind="primary" onclick={() => (app.tastePickerOpen = true)}>{t("taste.tune")}</Button>
         <Button icon="refresh-cw" disabled={refreshing} onclick={refresh}>{t("taste.refresh")}</Button>
       {/if}
@@ -194,6 +213,8 @@
         {t("taste.enable")}
       </Button>
     </div>
+  {:else if view === "easy"}
+    <TasteRate />
   {:else}
     <SkeletonSwap loading={loading && !profile}>
       {#snippet skeleton()}

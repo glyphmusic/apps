@@ -6,6 +6,7 @@
   // artist, like 24, seek, transport (68 px play), device / share / queue,
   // then the lyrics card (accent tile) and the "Next in queue" card.
   import { onDestroy } from "svelte";
+  import { fade } from "svelte/transition";
   import Cover from "../components/Cover.svelte";
   import { cornerPx } from "../corners";
   import SongTitle from "../components/SongTitle.svelte";
@@ -41,6 +42,14 @@
   let vh = $state(innerHeight);
   // Pulled up from the mini bar: the sheet sits under the finger (no slide-in).
   const rising = !phone.npOpen && phone.npRise > 0;
+  // The cards below the controls (lyrics, next songs) are off screen at
+  // first: they come once the sheet stands (its slide-in ended), so nothing
+  // in it changes while it glides up.
+  let settled = $state(false);
+  $effect(() => {
+    const t = setTimeout(() => (settled = true), rising ? 60 : 900);
+    return () => clearTimeout(t);
+  });
   const riseY = $derived(!phone.npOpen && phone.npRise > 0 ? Math.max(0, vh - 64 - phone.npRise) : null);
   const y = $derived(riseY ?? pull);
   const cur = $derived(app.player.current!);
@@ -119,6 +128,13 @@
       phone.videoPickerOpen = false;
     }
   });
+  // Measured right away (before the first picture): sizes that arrive a
+  // frame later would change the cover size while the sheet slides up.
+  $effect(() => {
+    if (!scroller) return;
+    vw = scroller.clientWidth || vw;
+    bodyH = scroller.clientHeight || bodyH;
+  });
   $effect(() => {
     void bodyH;
     if (!contentEl) return;
@@ -129,12 +145,17 @@
     phone.npPull = pull;
     return () => { phone.npPull = 0; };
   });
+  // The first time straight to the line (no scroll animation while the
+  // card fades in), later lines glide.
+  let lyPlaced: HTMLDivElement | undefined;
   $effect(() => {
     const i = active;
     if (i < 0 || !lyBox) return;
     const el = lyBox.children[i] as HTMLElement | undefined;
     if (!el) return;
-    lyBox.scrollTo({ top: Math.max(0, el.offsetTop - (lyBox.clientHeight - el.offsetHeight) * 0.42), behavior: "smooth" });
+    const first = lyPlaced !== lyBox;
+    lyPlaced = lyBox;
+    lyBox.scrollTo({ top: Math.max(0, el.offsetTop - (lyBox.clientHeight - el.offsetHeight) * 0.42), behavior: first ? "instant" : "smooth" });
   });
   function carouselEnd(dx: number, _dy: number, vx: number) {
     const can = dx < 0 ? !!next : !!prev;
@@ -149,8 +170,8 @@
 
 <svelte:window bind:innerHeight={vh} />
 
-<div class="sheet" data-part="now-playing" style:transform="translateY({y}px)" style:border-radius={y > 0 ? `${cornerPx(Math.min(22, 10 + y * 0.3))} ${cornerPx(Math.min(22, 10 + y * 0.3))} 0 0` : undefined} class:settle={y === 0} class:dragging={y > 0}
-  in:sheetIn|global={{ duration: rising ? 0 : 300 }} out:sheetOut|global={{ duration: 230, radius: true }}
+<div class="sheet" data-part="now-playing" style:transform="translateY({y}px)" style:border-radius={y > 0 ? `${cornerPx(22)} ${cornerPx(22)} 0 0` : undefined} class:settle={y === 0} class:dragging={y > 0}
+  in:sheetIn|global={{ duration: rising ? 0 : 380 }} onintroend={() => requestAnimationFrame(() => (settled = true))} out:sheetOut|global={{ duration: 230, radius: true }}
   onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="hdr" style:background="rgba(15,15,15,{0.94 * sk})"
     use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
@@ -238,8 +259,8 @@
         <IconButton name="share-2" size={20} box={40} notip onclick={() => app.share({ track: cur })} />
         <IconButton name="list-music" size={20} box={40} color={app.showQueue ? "var(--accent)" : undefined} notip onclick={() => (app.showQueue = true)} />
       </div>
-      {#if !phone.videoMode && hasLyrics}
-        <div class="card ly" style:margin-top="{cardMt}px" style:background={tile} onclick={() => (phone.lyricsOpen = true)} onkeydown={() => {}} role="button" tabindex="-1">
+      {#if settled && !phone.videoMode && hasLyrics}
+        <div class="card ly" in:fade={{ duration: 180 }} style:margin-top="{cardMt}px" style:background={tile} onclick={() => (phone.lyricsOpen = true)} onkeydown={() => {}} role="button" tabindex="-1">
           <div class="ch"><b>{t("np.mode.lyrics")}</b><span class="ex"><Icon name="maximize-2" size={15} color="#fff" /></span></div>
           <div class="ly-scroll scroll" bind:this={lyBox} use:fadeEdges={{ top: 20, bottom: 20, minOverflow: 8 }}>
             {#if app.lyrics.loading}
@@ -254,8 +275,8 @@
           </div>
         </div>
       {/if}
-      {#if app.upNext.length}
-        <div class="card q" style:margin-top={!phone.videoMode && hasLyrics ? undefined : `${cardMt}px`}>
+      {#if settled && app.upNext.length}
+        <div class="card q" in:fade={{ duration: 180 }} style:margin-top={!phone.videoMode && hasLyrics ? undefined : `${cardMt}px`}>
           <div class="ch"><b>{t("queue.next")}</b><button class="oq" onclick={() => (app.showQueue = true)}>{t("np.open_queue")}<Icon name="chevron-right" size={14} /></button></div>
           {#each app.upNext.slice(0, 4) as u}
             <button class="up" onclick={() => app.queueJump(u.index)}>

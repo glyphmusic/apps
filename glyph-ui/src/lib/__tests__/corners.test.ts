@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { scaleRadius } from "../corners";
+import { partOf, scaleRadius } from "../corners";
+
+describe("partOf", () => {
+  it("sorts a rule by what its selector styles", () => {
+    expect(partOf(".cover.svelte-x")).toBe("covers");
+    expect(partOf(".menu.svelte-x button")).toBe("buttons");
+    expect(partOf(".sheet.svelte-x")).toBe("dialogs");
+    expect(partOf(".ctx-menu")).toBe("menus");
+    expect(partOf(".search-field input")).toBe("fields");
+    expect(partOf(".mini-bar")).toBe("player");
+    expect(partOf(".box.svelte-x")).toBe("cards");
+  });
+});
 
 describe("scaleRadius", () => {
   it("scales pixel corners", () => {

@@ -9,6 +9,7 @@
   import Button from "../components/Button.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import ListCover from "../components/ListCover.svelte";
+  import FolderCover from "../components/FolderCover.svelte";
   import SectionTitle from "../components/SectionTitle.svelte";
   import Chip from "../components/Chip.svelte";
   import Select from "../settings/Select.svelte";
@@ -17,6 +18,7 @@
   import { app } from "../state.svelte";
   import { phone } from "../compact/cstate.svelte";
   import { onWeb } from "../web";
+  import { ink } from "../ui.svelte";
   import { t, tf } from "../i18n.svelte";
   import { sameList, type ListKey } from "../api/types";
   import { playlistX, scopeKey } from "./lists/actions";
@@ -28,6 +30,11 @@
   const runPct = $derived(running && running.total > 0 ? Math.min(100, Math.round((running.done * 100) / running.total)) : 0);
 
   const touch = $derived(app.platform === "android" || app.platform === "ios");
+  // Open folder (null = top level); a folder deleted elsewhere closes.
+  const folder = $derived(app.libraryFolder ? app.folder(app.libraryFolder) ?? null : null);
+  $effect(() => { if (app.libraryFolder && !folder) app.libraryFolder = null; });
+  const folders = $derived(app.library.folders ?? []);
+  const inFolder = $derived(new Set(folders.flatMap((f) => f.playlists)));
   const filter = $derived(app.compact ? app.libraryTab : 0);
 
   let filterOpen = $state(false);
@@ -53,13 +60,19 @@
   const rawTiles = $derived.by<LibraryTile[]>(() => {
     const out: { l: ListKey; kind: string }[] = [];
     const pl = t("list.kind.playlist");
-    if (filter <= 1) {
+    if (folder) {
+      for (const p of app.folderPlaylists(folder.id)) out.push({ l: { kind: "playlist", id: p.id }, kind: t(scopeKey(playlistX(p.id))) });
+    } else if (filter <= 1) {
       out.push({ l: { kind: "liked" }, kind: pl });
       if (filter === 0 && app.library.recent.length) out.push({ l: { kind: "recent" }, kind: pl });
       if (filter === 0 && app.library.downloads.length) out.push({ l: { kind: "downloads" }, kind: pl });
-      for (const p of app.library.playlists) out.push({ l: { kind: "playlist", id: p.id }, kind: t(scopeKey(playlistX(p.id))) });
+      // Playlists in a folder show inside it; a search finds them anyway.
+      for (const p of app.library.playlists) {
+        if (inFolder.has(p.id) && !filterQ.trim()) continue;
+        out.push({ l: { kind: "playlist", id: p.id }, kind: t(scopeKey(playlistX(p.id))) });
+      }
     }
-    if (filter === 0 || filter === 2) {
+    if (!folder && (filter === 0 || filter === 2)) {
       for (const k of app.library.saved_albums) out.push({ l: k, kind: k.kind === "album" ? `${t("list.kind.album")} · ${k.artist}` : t("list.kind.album") });
     }
     const rank = (l: ListKey) => { const i = app.library.pinned.findIndex((p) => sameList(p, l)); return i < 0 ? Infinity : i; };
@@ -74,9 +87,61 @@
   });
 
   const tiles = $derived(filterAndSortTiles(rawTiles, filterQ, sort));
-  const rawFollowed = $derived(filter === 0 || filter === 3 ? app.library.followed : []);
+  const rawFollowed = $derived(!folder && (filter === 0 || filter === 3) ? app.library.followed : []);
   const followed = $derived(filterArtists(rawFollowed, filterQ, sort));
-  const filterEmpty = $derived(filterQ.trim().length > 0 && tiles.length === 0 && followed.length === 0);
+  // Folders sit after Liked Songs / Recent / Downloads and pinned lists
+  // (default order), or first in the other sort orders.
+  const folderTiles = $derived.by(() => {
+    if (folder || filter > 1) return [];
+    const q = filterQ.trim().toLowerCase();
+    const out = q ? folders.filter((f) => f.name.toLowerCase().includes(q)) : [...folders];
+    if (sort === "name") out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    if (sort === "songs") out.sort((a, b) => app.folderTracks(b.id).length - app.folderTracks(a.id).length);
+    return out;
+  });
+  const isHead = (l: ListKey) => l.kind === "liked" || l.kind === "recent" || l.kind === "downloads" || app.isPinned(l);
+  const headTiles = $derived(sort === "default" ? tiles.filter((x) => isHead(x.l)) : []);
+  const restTiles = $derived(sort === "default" ? tiles.filter((x) => !isHead(x.l)) : tiles);
+  const filterEmpty = $derived(filterQ.trim().length > 0 && tiles.length === 0 && followed.length === 0 && folderTiles.length === 0);
+
+  // ---- drag a playlist onto a folder (desktop) ----
+  const DRAG_TYPE = "application/x-glyph-playlist";
+  const canDrag = $derived(!touch && !app.compact);
+  let dragId = $state<string | null>(null);
+  let dropOn = $state<string | null>(null);
+  function dragStart(e: DragEvent, l: ListKey) {
+    if (l.kind !== "playlist" || !e.dataTransfer) return;
+    dragId = l.id;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(DRAG_TYPE, l.id);
+  }
+  function dragEnd() { dragId = null; dropOn = null; }
+  function dragOver(e: DragEvent, target: string) {
+    if (!dragId || !e.dataTransfer?.types.includes(DRAG_TYPE)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    dropOn = target;
+  }
+  function dragLeave(e: DragEvent, target: string) {
+    const to = e.relatedTarget as Node | null;
+    if (dropOn === target && !(to && (e.currentTarget as HTMLElement).contains(to))) dropOn = null;
+  }
+  /** `target`: folder id, or "" for "out of the folder" (the back button). */
+  function drop(e: DragEvent, target: string) {
+    const id = e.dataTransfer?.getData(DRAG_TYPE) || dragId;
+    e.preventDefault();
+    dragEnd();
+    if (id) app.movePlaylistToFolder(id, target || null);
+  }
+
+  function folderMenu(e: MouseEvent, id: string) {
+    e.preventDefault(); e.stopPropagation();
+    app.openCtx({ x: e.clientX, y: e.clientY, track: app.folderTracks(id)[0] ?? null, folder: id });
+  }
+  function openFolder(id: string) {
+    clearFilter(true);
+    app.libraryFolder = id;
+  }
 
   function menu(e: MouseEvent, l: ListKey) {
     e.preventDefault(); e.stopPropagation();
@@ -90,7 +155,7 @@
     phone.libFilter = next;
   };
 
-  type LibAction = "local" | "migrate" | "stats" | "taste" | "new";
+  type LibAction = "local" | "migrate" | "stats" | "taste" | "new" | "folder";
   const actionOptions = $derived.by(() => {
     const opts: { value?: LibAction; label?: string; icon?: string; sep?: boolean }[] = [];
     if (!touch && !onWeb()) opts.push({ value: "local", label: t("local.title"), icon: "hard-drive" });
@@ -99,6 +164,7 @@
     opts.push({ value: "stats", label: t("stats.title"), icon: "chart-column" });
     opts.push({ sep: true });
     opts.push({ value: "new", label: t("library.playlist.new"), icon: "plus" });
+    opts.push({ value: "folder", label: t("library.folder.new"), icon: "folder-plus" });
     return opts;
   });
   function pickAction(v: LibAction | null) {
@@ -107,12 +173,63 @@
     else if (v === "taste") app.navigate("taste");
     else if (v === "stats") app.navigate("stats");
     else if (v === "new") app.nameDialog = { tracks: [], rename: null, initial: "" };
+    else if (v === "folder") app.newFolder();
+  }
+
+  type FolderAction = "rename" | "delete" | "new";
+  const folderOptions = $derived([
+    { value: "new" as FolderAction, label: t("library.playlist.new"), icon: "plus" },
+    { sep: true },
+    { value: "rename" as FolderAction, label: t("library.folder.rename"), icon: "pencil" },
+    { value: "delete" as FolderAction, label: t("library.folder.delete"), icon: "trash-2" },
+  ]);
+  async function pickFolderAction(v: FolderAction | null) {
+    const f = folder;
+    if (!f) return;
+    if (v === "rename") app.renameFolderDialog(f.id);
+    else if (v === "delete") app.deleteFolder(f.id);
+    else if (v === "new") {
+      app.nameDialog = {
+        tracks: [], rename: null, initial: "",
+        onSubmit: async (name: string) => {
+          const id = await app.createPlaylist(name, []);
+          if (id) await app.movePlaylistToFolder(id, f.id);
+        },
+      };
+    }
   }
 </script>
 
+{#snippet listTile({ l, kind, title, count }: LibraryTile)}
+  <button class="tile" class:dragging={l.kind === "playlist" && dragId === l.id} onclick={() => app.openListView(l)} oncontextmenu={(e) => menu(e, l)}
+    draggable={canDrag && l.kind === "playlist"} ondragstart={(e) => dragStart(e, l)} ondragend={dragEnd}>
+    <span class="art">
+      <ListCover list={l} size={168} />
+      {#if app.isPinned(l)}<span class="pin"><Icon name="pin-fill" size={12} color="var(--accent)" /></span>{/if}
+    </span>
+    <span class="tl trunc">{title}</span>
+    <span class="sub trunc">{kind} · {tf("common.n_songs", { n: count })}</span>
+  </button>
+{/snippet}
+
 <div class="lib">
   <div class="head">
-    <SectionTitle heading title={t("nav.library")} />
+    {#if folder}
+      <div class="fhead">
+        <button type="button" class="back" class:drop={dropOn === ""} aria-label={t("library.folder.back")} title={t("library.folder.back")}
+          onclick={() => (app.libraryFolder = null)}
+          ondragover={(e) => dragOver(e, "")} ondragleave={(e) => dragLeave(e, "")} ondrop={(e) => drop(e, "")}>
+          <Icon name="arrow-left" size={16} color="var(--text)" />
+        </button>
+        <h1 class="ftitle trunc" use:ink>
+          <button type="button" class="crumb" onclick={() => (app.libraryFolder = null)}>{t("nav.library")}</button>
+          <span class="slash">/</span>
+          <span>{folder.name}</span>
+        </h1>
+      </div>
+    {:else}
+      <SectionTitle heading title={t("nav.library")} />
+    {/if}
     <div class="hacts">
       {#if !app.compact}
         {#if filterOpen || filterQ}
@@ -136,7 +253,15 @@
         {/if}
         <Select value={sort} options={sortOptions} onpick={(v) => (sort = v)} />
       {/if}
-      <Select value={null as LibAction | null} label={t("ctx.more")} options={actionOptions} onpick={pickAction} />
+      {#if folder}
+        {@const ft = app.folderTracks(folder.id)}
+        {#if ft.length}
+          <Button icon="play" onclick={() => app.play(ft, 0, folder.name)}>{t("ctx.play")}</Button>
+        {/if}
+        <Select value={null as FolderAction | null} label={t("ctx.more")} options={folderOptions} onpick={pickFolderAction} />
+      {:else}
+        <Select value={null as LibAction | null} label={t("ctx.more")} options={actionOptions} onpick={pickAction} />
+      {/if}
     </div>
   </div>
 
@@ -154,7 +279,7 @@
     </button>
   {/if}
 
-  {#if app.compact}
+  {#if app.compact && !folder}
     <div class="chips">
       <Chip on={filter === 1} onclick={() => pick(1)}>{t("library.filter.playlists")}</Chip>
       <Chip on={filter === 2} onclick={() => pick(2)}>{t("search.filter.albums")}</Chip>
@@ -169,18 +294,23 @@
       </EmptyState>
     </div>
   {:else}
-    {#if tiles.length}
+    {#if folder && !tiles.length && !filterQ.trim()}
+      <div class="empty-wrap">
+        <EmptyState icon="folder-open" title={t("library.folder.empty.title")} sub={t(touch ? "library.folder.empty.sub_touch" : "library.folder.empty.sub")} />
+      </div>
+    {:else if tiles.length || folderTiles.length}
       <div class="grid">
-        {#each tiles as { l, kind, title, count } (JSON.stringify({ ...l, tracks: undefined }))}
-          <button class="tile" onclick={() => app.openListView(l)} oncontextmenu={(e) => menu(e, l)}>
-            <span class="art">
-              <ListCover list={l} size={168} />
-              {#if app.isPinned(l)}<span class="pin"><Icon name="pin-fill" size={12} color="var(--accent)" /></span>{/if}
-            </span>
-            <span class="tl trunc">{title}</span>
-            <span class="sub trunc">{kind} · {tf("common.n_songs", { n: count })}</span>
+        {#each headTiles as tl (JSON.stringify({ ...tl.l, tracks: undefined }))}{@render listTile(tl)}{/each}
+        {#each folderTiles as f (f.id)}
+          {@const n = app.folderPlaylists(f.id).length}
+          <button class="tile" class:drop={dropOn === f.id} onclick={() => openFolder(f.id)} oncontextmenu={(e) => folderMenu(e, f.id)}
+            ondragover={(e) => dragOver(e, f.id)} ondragleave={(e) => dragLeave(e, f.id)} ondrop={(e) => drop(e, f.id)}>
+            <span class="art"><FolderCover id={f.id} size={168} open={dropOn === f.id} /></span>
+            <span class="tl trunc">{f.name}</span>
+            <span class="sub trunc">{t("list.kind.folder")} · {tf(n === 1 ? "library.folder.one_playlist" : "library.folder.n_playlists", { n })}</span>
           </button>
         {/each}
+        {#each restTiles as tl (JSON.stringify({ ...tl.l, tracks: undefined }))}{@render listTile(tl)}{/each}
       </div>
     {/if}
 
@@ -223,7 +353,17 @@
   .chips { display: flex; gap: 8px; }
   .grid { display: flex; flex-wrap: wrap; gap: 8px; margin-left: -8px; }
   .tile { flex: none; width: 184px; padding: 8px; border-radius: 10px; display: flex; flex-direction: column; gap: 4px; transition: background-color .12s ease-out; animation: rise-in .25s var(--ease) both; }
-  .tile:hover { background: rgba(255, 255, 255, .05); }
+  .tile:hover, .tile.drop { background: rgba(255, 255, 255, .05); }
+  .tile.dragging { opacity: .45; }
+  .fhead { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .back { flex: none; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: #222226; transition: background-color .12s ease-out, transform .16s var(--ease); }
+  .back:hover { background: #2e2e34; }
+  .back:active { background: #3a3a40; }
+  .back.drop { background: color-mix(in srgb, var(--accent) 30%, transparent); transform: scale(1.08); }
+  .ftitle { margin: 0; min-width: 0; font-size: calc(24px * var(--k)); line-height: 1.25; font-weight: 700; color: var(--text); }
+  .crumb { font: inherit; color: var(--dim); transition: color .12s ease-out; }
+  .crumb:hover { color: var(--text); }
+  .slash { padding: 0 6px; color: var(--faint); font-weight: 500; }
   .art { position: relative; display: block; }
   .pin { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; border-radius: 50%; background: rgba(0, 0, 0, .6); display: grid; place-items: center; animation: pop .26s var(--ease); }
   .tl { padding-top: 6px; font-size: var(--md); font-weight: 500; color: var(--text); }

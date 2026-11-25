@@ -33,6 +33,8 @@ static URL_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 static LAST_JAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// "Pause when other apps play" as last handed to the playback service (0 unknown, 1 off, 2 on).
 static LAST_PAUSE_FOR_OTHERS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Last media player buttons sent to Java (choice, shuffle, repeat), 0 = none yet.
+static LAST_MEDIA_BUTTONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// Waits for the file picker's answer (`nativeFilePicked`).
 static PICK: Mutex<Option<flume::Sender<Option<String>>>> = Mutex::new(None);
 
@@ -258,6 +260,9 @@ impl Host for AndroidHost {
                 MediaKeyEvent::SeekForward => core.seek(core.player_dto().position + 5.0),
                 MediaKeyEvent::SeekBackward => core.seek((core.player_dto().position - 5.0).max(0.0)),
                 MediaKeyEvent::Like => toggle_like_current(core),
+                MediaKeyEvent::Shuffle => core.set_shuffle(!core.player_dto().shuffle),
+                MediaKeyEvent::Repeat => core.set_repeat(glyph_app::dto::next_repeat(core.player_dto().repeat)),
+                MediaKeyEvent::SeekTo(ms) => core.seek(ms as f64 / 1000.0),
                 MediaKeyEvent::Volume(v) => core.set_volume(f32::from(v) / 100.0),
             }
         }
@@ -301,6 +306,28 @@ impl Host for AndroidHost {
         if LAST_PAUSE_FOR_OTHERS.swap(code, std::sync::atomic::Ordering::AcqRel) != code {
             with_activity("pause for others", |env, activity| {
                 env.call_method(activity, jni_str!("gpuiPauseForOthers"), jni_sig!("(Z)V"), &[JValue::Bool(pause_for_others.into())])?;
+                Ok(())
+            });
+        }
+
+        // Which extra buttons the phone's media player shows (Settings >
+        // Playback), with shuffle / repeat lit when on.
+        let modes = core.st().config.playback.media_buttons == glyph_core::config::MediaButtons::Modes;
+        let pd = core.player_dto();
+        let repeat: i32 = match pd.repeat {
+            "all" => 1,
+            "one" => 2,
+            _ => 0,
+        };
+        let code = 1 + u8::from(modes) + (u8::from(pd.shuffle) << 1) + ((repeat as u8) << 2);
+        if LAST_MEDIA_BUTTONS.swap(code, std::sync::atomic::Ordering::AcqRel) != code {
+            with_activity("media buttons", |env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("gpuiMediaButtons"),
+                    jni_sig!("(ZZI)V"),
+                    &[JValue::Bool(modes.into()), JValue::Bool(pd.shuffle.into()), JValue::Int(repeat)],
+                )?;
                 Ok(())
             });
         }
@@ -856,9 +883,22 @@ pub extern "system" fn Java_app_glyph_PlaybackService_nativeMediaKey<'local>(
         4 => MediaKeyEvent::Previous,
         5 => MediaKeyEvent::Stop,
         6 => MediaKeyEvent::Like,
+        7 => MediaKeyEvent::Shuffle,
+        8 => MediaKeyEvent::Repeat,
         _ => return,
     };
     glyph_audio::media_keys::push_event(ev);
+}
+
+/// The seek bar of the phone's media player (notification, lock screen) was
+/// dragged to `ms`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_PlaybackService_nativeSeekTo<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    ms: jlong,
+) {
+    glyph_audio::media_keys::push_event(MediaKeyEvent::SeekTo(ms.max(0) as u64));
 }
 
 #[unsafe(no_mangle)]
@@ -876,6 +916,7 @@ pub extern "system" fn Java_app_glyph_PlaybackService_nativeOtherAudio<'local>(
     _class: JClass<'local>,
     active: jboolean,
     music: jboolean,
+    sure: jboolean,
 ) {
-    glyph_app::other_audio::report(active, music);
+    glyph_app::other_audio::report(active, music, sure);
 }

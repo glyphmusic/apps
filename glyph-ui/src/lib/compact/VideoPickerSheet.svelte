@@ -49,7 +49,7 @@
   class="sheet"
   style:transform="translateY({pull}px)"
   class:settle={pull === 0}
-  in:sheetIn|global={{ duration: 280 }}
+  in:sheetIn|global={{ duration: 360 }}
   out:sheetOut|global={{ duration: 220, radius: true }}
 >
   <div

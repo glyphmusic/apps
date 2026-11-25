@@ -1,8 +1,11 @@
 import { cubicOut } from "svelte/easing";
 import { app } from "../state.svelte";
-import { fx } from "../ui.svelte";
+import { fx, suspendBackground } from "../ui.svelte";
+import { holdStill } from "../motion";
 import { pwa } from "../pwa.svelte";
 import { cornerK } from "../corners";
+import { cancelWarning, closeDetail, pl } from "../settings/plugins-state.svelte";
+import { back as migrateBack, mg } from "../settings/migrate-state.svelte";
 
 // Phone layout state (compact.rs / compact/now_playing.rs): Now Playing is a
 // sheet over the page (it never enters the back history), lyrics open full
@@ -221,13 +224,44 @@ export function shouldClose(dist: number, vel: number, threshold = SWIPE_ACT): b
   return dist > threshold;
 }
 
+/**
+ * The curve phone sheets move on: a quick start that slows down gently at
+ * the end, like a sheet that is thrown and lands (cubic-bezier(.32, .72, 0, 1)).
+ */
+export function sheetEase(t: number): number {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  // Finds the curve's x for t (a few Newton steps), then returns its y.
+  const x1 = 0.32, y1 = 0.72, x2 = 0, y2 = 1;
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  let u = t;
+  for (let i = 0; i < 6; i++) {
+    const x = ((ax * u + bx) * u + cx) * u - t;
+    const d = (3 * ax * u + 2 * bx) * u + cx;
+    if (Math.abs(x) < 1e-5 || Math.abs(d) < 1e-6) break;
+    u -= x / d;
+  }
+  u = Math.min(1, Math.max(0, u));
+  return ((ay * u + by) * u + cy) * u;
+}
+
+/** While a sheet moves, the moving background and loading shimmer wait. */
+function quietWhileMoving(ms: number) {
+  if (ms <= 1) return;
+  holdStill(ms + 60);
+  suspendBackground(ms + 60);
+}
+
 export function sheetIn(_node: HTMLElement, opts: { axis?: "x" | "y"; dir?: 1 | -1; duration?: number } = {}) {
   const axis = opts.axis === "x" ? "X" : "Y";
   const dir = opts.dir ?? 1;
+  const duration = fx.reduce ? 1 : (opts.duration ?? 340);
+  quietWhileMoving(duration);
   return {
-    duration: fx.reduce ? 1 : (opts.duration ?? 280),
-    easing: cubicOut,
-    css: (t: number) => `transform: translate${axis}(${((1 - t) * dir * 100).toFixed(2)}%);`,
+    duration,
+    easing: sheetEase,
+    css: (t: number) => `transform: translate${axis}(${((1 - t) * dir * 100).toFixed(3)}%);`,
   };
 }
 
@@ -238,16 +272,23 @@ export function sheetOut(node: HTMLElement, opts: { axis?: "x" | "y"; dir?: 1 | 
   const m = new DOMMatrix(cs.transform);
   const start = axis === "X" ? m.m41 : m.m42;
   const end = dir * ((axis === "X" ? node.offsetWidth : node.offsetHeight) || (axis === "X" ? innerWidth : innerHeight));
-  const startR = opts.radius ? parseFloat(cs.borderTopLeftRadius) || 0 : 0;
+  // Round corners right away instead of growing them on the way: the
+  // phone can only slide a sheet smoothly on its own (GPU) when the slide
+  // changes nothing but the position.
+  if (opts.radius) {
+    const r = `${(22 * cornerK("dialogs")).toFixed(1)}px`;
+    node.style.transition = "none";
+    node.style.borderRadius = `${r} ${r} 0 0`;
+  }
+  // Already pulled most of the way down: the rest takes less time, so a
+  // flicked sheet keeps its speed instead of slowing down.
+  const left = end ? Math.min(1, Math.max(0, (end - start) / end)) : 1;
+  const duration = fx.reduce ? 1 : Math.round((opts.duration ?? 220) * (0.45 + 0.55 * left));
+  quietWhileMoving(duration);
   return {
-    duration: fx.reduce ? 1 : (opts.duration ?? 220),
+    duration,
     easing: cubicOut,
-    css: (_t: number, u: number) => {
-      const pos = start + (end - start) * u;
-      const rEnd = 22 * cornerK();
-      const rad = opts.radius ? ` border-radius: ${(startR + (rEnd - startR) * u).toFixed(1)}px ${(startR + (rEnd - startR) * u).toFixed(1)}px 0 0;` : "";
-      return `transform: translate${axis}(${pos.toFixed(1)}px);${rad}`;
-    },
+    css: (_t: number, u: number) => `transform: translate${axis}(${(start + (end - start) * u).toFixed(1)}px);`,
   };
 }
 
@@ -345,6 +386,19 @@ export function installCompactLongPress(holdMs = 360): () => void {
   };
 }
 
+/**
+ * One step back in phone settings, for the arrow and Android back alike:
+ * the install warning, then a plugin's page, then a migrate step, then the
+ * settings page, then settings.
+ */
+export function settingsBack() {
+  const inPage = phone.settingsInPage;
+  if (inPage && app.settingsPage === "plugins" && pl.confirm) { cancelWarning(); return; }
+  if (inPage && app.settingsPage === "plugins" && pl.detail && phone.settingsSub < 2) { closeDetail(); return; }
+  if (inPage && app.settingsPage === "migrate" && mg.step !== "pick" && mg.step !== "running") { migrateBack(); return; }
+  if (inPage) phone.settingsInPage = false; else app.settingsOpen = false;
+}
+
 /** Handles Android hardware/gesture back before backgrounding the activity. */
 export function installAndroidBack() {
   (window as unknown as { __glyphBack?: () => boolean }).__glyphBack = () => {
@@ -361,14 +415,11 @@ export function installAndroidBack() {
     if (app.jamOpen) { app.jamOpen = false; return true; }
     if (phone.drawerOpen) { phone.drawerOpen = false; return true; }
     if (phone.lyricsOpen) { phone.lyricsOpen = false; return true; }
-    if (app.settingsOpen) {
-      if (phone.settingsInPage) phone.settingsInPage = false;
-      else app.settingsOpen = false;
-      return true;
-    }
+    if (app.settingsOpen) { settingsBack(); return true; }
     if (app.showQueue) { app.showQueue = false; return true; }
     if (app.showDevices) { app.showDevices = false; return true; }
     if (phone.npOpen) { phone.npOpen = false; return true; }
+    if (app.view === "library" && app.libraryFolder) { app.libraryFolder = null; return true; }
     if (app.history.length > 0) { app.back(); return true; }
     if (app.view !== "home") { app.navigate("home"); return true; }
     return false;

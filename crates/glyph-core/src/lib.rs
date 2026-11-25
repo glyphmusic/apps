@@ -68,7 +68,7 @@ pub mod ytdlp;
 pub mod ytnative;
 
 pub use config::Config;
-pub use library::{FollowedArtist, Library, ListKey, Playlist, RecentItem, SearchItem};
+pub use library::{FollowedArtist, Library, LibraryFolder, ListKey, Playlist, RecentItem, SearchItem};
 pub use lyrics::Lyrics;
 pub use playback_session::{PlaybackPosition, PlaybackSession};
 pub use queue::{Queue, QueueSnapshot, RepeatMode};

@@ -21,6 +21,24 @@ import {
   loadArtistPhotos, loadWidth, pruneTrackedKeys, sameTrackKeys, saveArtistPhotos, saveWidth,
 } from "./state/cache";
 import { pickRangeKeys, selectedTracksOf, toggleAllKeys, togglePickedKey } from "./state/pick";
+import { cleanFolderName, deleteFolder as dropFolder, folderOf, folderPlaylists, renameFolder as setFolderName, setPlaylistFolder } from "./folders";
+
+/** Which songs in which order, and which one plays (to match the core's queue to one on screen). */
+function queueSig(q: QueueState): string {
+  return `${q.index}|${q.items.map(trackKey).join("\n")}`;
+}
+
+/** Moves one song in a queue copy; the playing song keeps playing. */
+function moveIn(q: QueueState, from: number, to: number) {
+  if (from === to || from < 0 || from >= q.items.length) return;
+  const [it] = q.items.splice(from, 1);
+  q.items.splice(Math.max(0, Math.min(to, q.items.length)), 0, it);
+  const i = q.index;
+  if (i == null) return;
+  if (from === i) q.index = to;
+  else if (from < i && to >= i) q.index = i - 1;
+  else if (from > i && to <= i) q.index = i + 1;
+}
 
 export type View =
   | "home" | "search" | "library" | "now_playing" | "list" | "artist" | "profile" | "section" | "releases" | "similar" | "stats" | "taste" | "local" | "server";
@@ -44,6 +62,8 @@ export interface CtxMenu {
   /** Multiple credited artists when opening the desktop/mobile artist picker. */
   artists?: string[] | null;
   list?: ListKey | null;
+  /** Library folder (its id). */
+  folder?: string | null;
   sidebar?: string | null;
   /** Queue row. */
   queueIndex?: number | null;
@@ -66,6 +86,8 @@ export interface NameDialog {
   title?: string;
   okLabel?: string;
   fallback?: string;
+  /** Desktop field hint (default: playlist name). */
+  placeholder?: string;
   nonEmpty?: boolean;
   onSubmit?: (name: string) => void | Promise<void>;
 }
@@ -223,6 +245,8 @@ class App {
   downloading = $state<Record<string, number | null>>({});
   selectedRow = $state<number | null>(null);
   libraryTab = $state(0);
+  /** Library folder open in the library page (null = top level). */
+  libraryFolder = $state<string | null>(null);
 
   /** Seconds, eased between backend reports (app.rs pos_anchor). */
   private posAnchor = { pos: 0, at: performance.now() };
@@ -273,7 +297,15 @@ class App {
       this.setPlayer(next);
       for (const fn of this.backendPlayerListeners) fn(next.status);
     });
-    api.on("queue", (q) => (this.queue = q));
+    api.on("queue", (q) => {
+      // A change already on screen: older queues from the core (from the
+      // steps before) wait, so moved rows never jump back and forth.
+      if (this.queueWant !== null) {
+        if (queueSig(q) !== this.queueWant) { this.queueHeld = q; return; }
+        this.queueSettled();
+      }
+      this.queue = q;
+    });
     // The core sends only the parts that changed (`{ __patch: {..} }`); the
     // rest stays the same object, so lists that did not change do not redraw.
     api.on("library", (l) => {
@@ -612,13 +644,66 @@ class App {
     this.toast(tracks.length === 1 ? tf(next ? "toast.play_next" : "toast.queued", { title: tracks[0].title }) : tf("toast.queued_n", { n: tracks.length }));
     return backend().call("queue_add", { tracks, next });
   }
-  queueRemove(index: number) { return backend().call("queue_remove", { index }); }
+  queueRemove(index: number) { return this.queueRemoveMany([index]); }
   queueMove(from: number, to: number) {
-    const items = [...this.queue.items];
-    const [it] = items.splice(from, 1);
-    items.splice(to, 0, it);
-    this.queue = { ...this.queue, items };
+    const q = { ...this.queue, items: [...this.queue.items] };
+    moveIn(q, from, to);
+    this.queueShow(q);
     return backend().call("queue_move", { from, to });
+  }
+  /** Moves these songs (queue indices) to `dest` and on, in their order: one step on screen. */
+  async queueMoveMany(indices: number[], dest: number) {
+    const sorted = [...indices].sort((a, b) => a - b);
+    const q = { ...this.queue, items: [...this.queue.items] };
+    const steps: [number, number][] = [];
+    // Each song lands right after the one before; later songs (higher
+    // indices) are not shifted by that, so their indices stay right.
+    for (let i = 0; i < sorted.length; i++) {
+      const from = sorted[i], to = dest + i;
+      if (from !== to) { steps.push([from, to]); moveIn(q, from, to); }
+    }
+    if (!steps.length) return;
+    this.queueShow(q);
+    for (const [from, to] of steps) await backend().call("queue_move", { from, to });
+  }
+  /** Takes these songs (queue indices) out: one step on screen. The playing song is left to the core. */
+  async queueRemoveMany(indices: number[]) {
+    const desc = [...new Set(indices)].sort((a, b) => b - a);
+    const cur = this.queue.index;
+    if (desc.some((i) => i === cur)) {
+      for (const index of desc) await backend().call("queue_remove", { index });
+      return;
+    }
+    const q = { ...this.queue, items: [...this.queue.items] };
+    for (const i of desc) {
+      if (i < 0 || i >= q.items.length) continue;
+      q.items.splice(i, 1);
+      if (q.index != null && i < q.index) q.index--;
+      else if (q.index != null && i <= q.index + q.user) q.user = Math.max(0, q.user - 1);
+      else if (q.index == null && i < q.user) q.user = Math.max(0, q.user - 1);
+    }
+    this.queueShow(q);
+    for (const index of desc) await backend().call("queue_remove", { index });
+  }
+  /** Queue shown before the core confirms it (signature), the newest core queue held meanwhile. */
+  private queueWant: string | null = null;
+  private queueHeld: QueueState | null = null;
+  private queueWait = 0;
+  private queueShow(q: QueueState) {
+    this.queue = q;
+    this.queueWant = queueSig(q);
+    clearTimeout(this.queueWait);
+    // The core said something else after all: its queue wins.
+    this.queueWait = setTimeout(() => {
+      const held = this.queueHeld;
+      this.queueSettled();
+      if (held) this.queue = held;
+    }, 1500) as unknown as number;
+  }
+  private queueSettled() {
+    clearTimeout(this.queueWait);
+    this.queueWant = null;
+    this.queueHeld = null;
   }
   queueClear() { return backend().call("queue_clear"); }
   queueJump(index: number) { return backend().call("queue_jump", { index }); }
@@ -826,6 +911,51 @@ class App {
     const p = this.playlist(id);
     if (p) { const [it] = p.tracks.splice(from, 1); p.tracks.splice(to, 0, it); }
     return backend().call("playlist_move", { id, from, to });
+  }
+  // ---- library folders ----
+  folder(id: string) { return this.library.folders?.find((f) => f.id === id); }
+  folderOf(playlist: string) { return folderOf(this.library, playlist); }
+  folderPlaylists(id: string) { return folderPlaylists(this.library, id); }
+  folderTracks(id: string): Track[] { return this.folderPlaylists(id).flatMap((p) => p.tracks); }
+  /** Name dialog for a new folder; `playlists` move into it. */
+  newFolder(playlists: string[] = []) {
+    const n = (this.library.folders?.length ?? 0) + 1;
+    this.nameDialog = {
+      tracks: [], initial: "", title: t("library.folder.new"), placeholder: t("library.folder.placeholder"), fallback: tf("library.folder.default_name", { n }),
+      onSubmit: async (name: string) => {
+        const id = await backend().call<string>("folder_create", { name, playlists });
+        if (playlists.length && id) this.toast(tf("toast.moved_to_folder", { name: cleanFolderName(name) }));
+      },
+    };
+  }
+  renameFolderDialog(id: string) {
+    const f = this.folder(id);
+    if (!f) return;
+    this.nameDialog = {
+      tracks: [], initial: f.name, title: t("library.folder.rename"), placeholder: t("library.folder.placeholder"), okLabel: t("dialog.save"), nonEmpty: true,
+      onSubmit: (name: string) => { setFolderName(this.library, id, name); return backend().call("folder_rename", { id, name }); },
+    };
+  }
+  deleteFolder(id: string) {
+    const f = this.folder(id);
+    if (!f) return;
+    this.confirm = {
+      title: t("library.folder.delete.title"), body: tf("library.folder.delete.body", { name: f.name }), ok: t("list.delete.confirm.ok"), danger: true,
+      run: () => {
+        if (this.libraryFolder === id) this.libraryFolder = null;
+        dropFolder(this.library, id);
+        return backend().call("folder_delete", { id });
+      },
+    };
+  }
+  /** Puts a playlist into a folder, or out of folders with null. */
+  movePlaylistToFolder(playlist: string, folder: string | null) {
+    const from = this.folderOf(playlist)?.id ?? null;
+    if (from === folder) return;
+    setPlaylistFolder(this.library, playlist, folder);
+    const name = folder ? this.folder(folder)?.name : null;
+    this.toast(name ? tf("toast.moved_to_folder", { name }) : t("toast.removed_from_folder"));
+    return backend().call("folder_set", { playlist, folder });
   }
   isPinned(l: ListKey) { return this.library.pinned.some((p) => sameList(p, l)); }
   togglePin(l: ListKey) { return backend().call("pin", { list: l, on: !this.isPinned(l) }); }

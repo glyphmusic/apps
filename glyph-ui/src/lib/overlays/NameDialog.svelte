@@ -185,7 +185,7 @@
     {:else}
       <div class="panel" data-part="dialog" transition:scale|global={{ start: 0.97, duration: 180, easing: cubicOut }} role="dialog" tabindex="-1">
         <div class="tt">{titleLabel}</div>
-        <div class="field"><input bind:this={input} bind:value={name} placeholder={eq ? "" : t("dialog.playlist.placeholder")} onkeydown={key} spellcheck="false" /></div>
+        <div class="field"><input bind:this={input} bind:value={name} placeholder={eq ? "" : d.placeholder ?? t("dialog.playlist.placeholder")} onkeydown={key} spellcheck="false" /></div>
         <div class="foot">
           <span class="flex1"></span>
           <Button onclick={close}>{t("dialog.cancel")}</Button>

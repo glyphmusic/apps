@@ -241,6 +241,7 @@ pub fn snapshot(lib: &Library, downloads: &[Track]) -> Snapshot {
     }
     for (name, value) in [
         ("pinned", serde_json::to_value(&lib.pinned)),
+        ("folders", serde_json::to_value(&lib.folders)),
         ("sidebar_hidden", serde_json::to_value(&lib.sidebar_hidden)),
         ("lyrics_offsets", serde_json::to_value(&lib.lyrics_offsets)),
         ("recent_lists", serde_json::to_value(&lib.recent_lists)),
@@ -546,6 +547,7 @@ pub fn apply(lib: &mut Library, state: &mut SyncState, items: &[SyncItem], downl
                 macro_rules! field { ($field:ident) => { lib.$field = value.and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default() }; }
                 match i.key.as_str() {
                     "pinned" => field!(pinned),
+                    "folders" => field!(folders),
                     "sidebar_hidden" => field!(sidebar_hidden),
                     "lyrics_offsets" => field!(lyrics_offsets),
                     "recent_lists" => field!(recent_lists),
@@ -813,6 +815,7 @@ pub fn merge_guest(target: &mut Library, guest: &Library) {
     apply(target, &mut SyncState::default(), &items, &[]);
     // A merge keeps both sets of personal list choices.
     for item in previous.pinned { if !target.pinned.contains(&item) { target.pinned.push(item); } }
+    for folder in previous.folders { if target.folder(&folder.id).is_none() { target.folders.push(folder); } }
     for item in previous.sidebar_hidden { if !target.sidebar_hidden.contains(&item) { target.sidebar_hidden.push(item); } }
     for item in previous.recent_lists { if !target.recent_lists.contains(&item) { target.recent_lists.push(item); } }
     target.recent_lists.truncate(crate::library::RECENT_LISTS_LIMIT);
@@ -946,6 +949,7 @@ mod tests {
         source.record_listen(&song, 1000);
         source.record_skip(&song);
         source.pinned.push(ListKey::Liked);
+        source.create_folder("Rock", &["pl-1".to_string()]);
         source.sidebar_hidden.push("recent".into());
         source.lyrics_offsets.insert("remember|artist".into(), 80);
         let snap = snapshot(&source, &[]);
@@ -958,6 +962,7 @@ mod tests {
         assert_eq!(target.artist_plays, source.artist_plays);
         assert_eq!(target.artist_skips, source.artist_skips);
         assert_eq!(target.pinned, source.pinned);
+        assert_eq!(target.folders, source.folders);
         assert_eq!(target.sidebar_hidden, source.sidebar_hidden);
         assert_eq!(target.lyrics_offsets, source.lyrics_offsets);
         assert!(state.changes(&snapshot(&target, &[]), 2000).is_empty());

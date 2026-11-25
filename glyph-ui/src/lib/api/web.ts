@@ -35,6 +35,7 @@ import {
 import { cancelSoon, load, loadBig, save, saveSoon } from "./web-store";
 import { bgAdd, bgList, bgRemove } from "./bg-store";
 import { filterTrackByEnabled } from "../settings/sources";
+import { folderHandlers } from "../folders";
 
 interface WebPlaybackSession {
   queue: QueueState;
@@ -1743,6 +1744,7 @@ export class WebBackend implements Backend {
         this.saveLibrary();
       },
       pin: (a) => { lib().pinned = a.on ? [...lib().pinned, a.list] : lib().pinned.filter((l) => !sameList(l, a.list)); this.saveLibrary(); },
+      ...folderHandlers(lib, () => this.saveLibrary()),
       save_album: (a) => { const l = { ...a.list, tracks: [] } as ListKey; lib().saved_albums = a.on ? [...lib().saved_albums, l] : lib().saved_albums.filter((x) => !sameList(x, l)); this.saveLibrary(); },
       follow: (a) => { lib().followed = a.on ? [...lib().followed, a.artist] : lib().followed.filter((x) => norm(x) !== norm(a.artist)); this.saveLibrary(); },
       list_opened: (a) => { lib().recent_lists = [a.list, ...lib().recent_lists.filter((l) => !sameList(l, a.list))].slice(0, 20); this.saveLibrary(); },

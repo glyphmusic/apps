@@ -301,6 +301,25 @@ pub fn pin(core: C, list: ListKey, on: bool) {
     });
 }
 
+/// New library folder with `playlists` moved into it; returns its id.
+pub fn folder_create(core: C, name: String, playlists: Vec<String>) -> String {
+    lib(&core, |l| l.create_folder(&name, &playlists))
+}
+
+pub fn folder_rename(core: C, id: String, name: String) {
+    lib(&core, |l| l.rename_folder(&id, &name));
+}
+
+/// Deletes the folder only; its playlists move back to the library.
+pub fn folder_delete(core: C, id: String) {
+    lib(&core, |l| l.delete_folder(&id));
+}
+
+/// Puts a playlist into a folder, or takes it out with `None`.
+pub fn folder_set(core: C, playlist: String, folder: Option<String>) {
+    lib(&core, |l| l.set_playlist_folder(&playlist, folder.as_deref()));
+}
+
 pub fn save_album(core: C, list: ListKey, on: bool) {
     lib(&core, |l| {
         if l.is_saved(&list) != on {

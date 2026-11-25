@@ -34,7 +34,7 @@ export interface PluginListing {
   look?: {
     /** Glyph's font name, "file" for the plugin's own font, or "". */
     font: string; mono?: string; app_icon?: boolean; layout?: boolean; splash?: boolean;
-    radius: number | null; backgrounds: number; css: boolean; assets?: number; icons?: number;
+    radius: number | null; radii?: Record<string, number>; backgrounds: number; css: boolean; assets?: number; icons?: number;
     home?: boolean; sidebar?: boolean; tabs?: boolean; sidebar_position?: string;
     /** Names of the icons it replaces, and its startup animation picture. */
     icon_names?: string[]; splash_art?: string[] | null;

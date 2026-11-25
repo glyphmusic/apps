@@ -273,6 +273,7 @@
         {#if m.look?.splash}<div class="srow"><RowBase label={t("plugins.does.splash")} info={t("plugins.does.splash.desc")} /></div>{/if}
         {#if m.look?.app_icon}<div class="srow"><RowBase label={t("plugins.does.app_icon")} info={t("plugins.does.app_icon.desc")}>{#if m.kind === "theme" && curTheme !== themeId(id)}<span class="v">{t("plugins.app_icon.pick_theme")}</span>{:else if pl.canPinIcon && installed?.enabled}<Button onclick={() => pinPluginIcon(id)}>{t("plugins.pin_icon")}</Button>{/if}</RowBase></div>{/if}
         {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{tf("plugins.corners.value", { p: Math.round(m.look.radius * 100) })}</span></RowBase></div>{/if}
+        {#each Object.entries(m.look?.radii ?? {}) as [part, k] (part)}<div class="srow"><RowBase label={t(`plugins.corners.part.${part}`)}><span class="v">{tf("plugins.corners.value", { p: Math.round(k * 100) })}</span></RowBase></div>{/each}
         {#if m.look?.backgrounds}<div class="srow"><RowBase label={t("plugins.does.backgrounds")}><span class="v">{m.look.backgrounds}</span></RowBase></div>{/if}
         {#if m.look?.icons}<div class="srow"><RowBase label={t("plugins.does.icons")}><span class="v">{m.look.icons}</span></RowBase></div>{/if}
         {#if m.look?.css}<div class="srow"><RowBase label={t("plugins.does.css")} info={tf("plugins.does.css.desc", { key: keyLabel(keyOf("plugins")) })} /></div>{/if}

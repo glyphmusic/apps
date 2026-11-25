@@ -90,7 +90,7 @@ export function pluginSlots(m: PluginListing): Slot[] {
   if (l?.font) out.push({ key: "font", label: "plugins.part.font" });
   if (l?.mono) out.push({ key: "mono", label: "plugins.part.mono" });
   if (l?.app_icon) out.push({ key: "app_icon", label: "plugins.part.app_icon" });
-  if (l?.radius != null) out.push({ key: "corners", label: "plugins.part.corners" });
+  if (l?.radius != null || Object.keys(l?.radii ?? {}).length) out.push({ key: "corners", label: "plugins.part.corners" });
   if (l?.splash) out.push({ key: "splash", label: "plugins.part.splash" });
   if (l?.sidebar_position) out.push({ key: "sidebar_position", label: "plugins.part.sidebar_position" });
   for (const a of ["home", "sidebar", "tabs"] as const) if (l?.[a]) out.push({ key: a, label: "plugins.part.layout" });

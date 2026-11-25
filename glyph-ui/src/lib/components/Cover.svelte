@@ -1,8 +1,41 @@
 <script lang="ts" module>
+  import { backend } from "../api/backend";
+  import { trackKey, type Track } from "../api/types";
   // Shared observer so offscreen covers do not decode until near the viewport,
   // and scrolled-far-away thumbnails unload cleanly to bound memory.
   const callbacks = new WeakMap<Element, (visible: boolean) => void>();
   let observer: IntersectionObserver | null = null;
+  /**
+   * Covers already shown once (song -> picture address): shown again at
+   * once, without the shimmer and the fade. Rows that come back (a sheet
+   * opens, a list scrolls back) then draw nothing new while they move.
+   */
+  const known = new Map<string, string>();
+  function remember(sig: string, url: string) {
+    known.delete(sig);
+    known.set(sig, url);
+    if (known.size > 1500) known.delete(known.keys().next().value!);
+  }
+  const sigOf = (t: Track) => `${trackKey(t)}|${t.source}|${t.id}|${t.cover_url ?? ""}`;
+  const warming = new Set<string>();
+  /**
+   * Fetches and decodes these songs' covers ahead of time (e.g. the next
+   * songs of the queue), so a sheet that shows them later has them at once.
+   */
+  export function warmCovers(tracks: Track[]) {
+    for (const t of tracks) {
+      const sig = sigOf(t);
+      if (known.has(sig) || warming.has(sig)) continue;
+      warming.add(sig);
+      void backend().cover(t).then((u) => {
+        if (!u) return;
+        const im = new Image();
+        im.decoding = "async";
+        im.src = u;
+        return im.decode().then(() => remember(sig, u), () => {});
+      }).catch(() => {}).finally(() => warming.delete(sig));
+    }
+  }
   function observeVisibility(el: Element, cb: (visible: boolean) => void): () => void {
     if (typeof IntersectionObserver === "undefined") {
       cb(true);
@@ -33,20 +66,20 @@
   import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import Skeleton from "./Skeleton.svelte";
-  import { backend } from "../api/backend";
-  import { trackKey, type Track } from "../api/types";
   import { fx } from "../ui.svelte";
   import { cornerPx } from "../corners";
   let { track, size = 40, radius = 6, round = false }: { track: Track | null | undefined; size?: number; radius?: number; round?: boolean } = $props();
-  let url = $state<string | null>(null);
-  let phase = $state<"loading" | "ready" | "none">("loading");
-  let unveiling = $state(false);
-  let loadedKey = "";
-  let box: HTMLDivElement | undefined = $state();
-  let near = $state(false);
   const r = $derived(round ? size / 2 : radius);
   const key = $derived(track ? trackKey(track) : "");
-  const loadSig = $derived(track ? `${key}|${track.source}|${track.id}|${track.cover_url ?? ""}` : "");
+  const loadSig = $derived(track ? sigOf(track) : "");
+  // Known cover: ready from the first picture on.
+  const hit = untrack(() => (loadSig ? known.get(loadSig) : undefined));
+  let url = $state<string | null>(hit ?? null);
+  let phase = $state<"loading" | "ready" | "none">(hit ? "ready" : "loading");
+  let unveiling = $state(false);
+  let loadedKey = hit ? untrack(() => key) : "";
+  let box: HTMLDivElement | undefined = $state();
+  let near = $state(!!hit);
 
   let timedOut = $state(false);
   $effect(() => {
@@ -80,6 +113,16 @@
     if (!near) return;
     const sameTrack = k === loadedKey;
     if (sameTrack && untrack(() => phase === "ready" && url !== null)) return;
+    const sig = untrack(() => loadSig);
+    const seen = known.get(sig);
+    if (seen) {
+      loadedKey = k;
+      url = seen;
+      phase = "ready";
+      timedOut = false;
+      unveiling = false;
+      return;
+    }
     if (!sameTrack) {
       loadedKey = k;
       url = null;
@@ -104,6 +147,7 @@
       // Found on the second try: keep the note until the picture is decoded.
       if (phase === "none") { phase = "loading"; timedOut = true; }
       url = u;
+      remember(sig, u);
     });
     ask(false);
     return () => { alive = false; ac.abort(); clearTimeout(late); clearTimeout(again); clearTimeout(veilTimer); };
@@ -111,6 +155,8 @@
 
   let veilTimer: ReturnType<typeof setTimeout> | undefined;
   function onImgLoad() {
+    // A known cover was ready from the start: no shimmer, no fade.
+    if (phase === "ready") return;
     phase = "ready";
     timedOut = false;
     clearTimeout(veilTimer);
@@ -122,6 +168,7 @@
     }
   }
   function onImgError() {
+    known.delete(untrack(() => loadSig));
     url = null;
     phase = "none";
     timedOut = false;

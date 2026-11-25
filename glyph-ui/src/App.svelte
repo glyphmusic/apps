@@ -250,10 +250,10 @@
     applyLooks(app.config && !paused ? activeLooks(pl.ui.looks ?? [], app.config.visuals.theme) : []);
   });
   // A look's startup animation plays from the next start on (looks arrive
-  // after it began); not touched while looks are paused.
+  // after it began). Saved right away, also on Settings > Plugins, so a
+  // restart straight after installing already shows it.
   $effect(() => {
-    const paused = (app.settingsOpen && app.settingsPage === "plugins") || !!pl.confirm;
-    if (!app.config || !pl.loaded || paused) return;
+    if (!app.config || !pl.loaded) return;
     rememberSplash(activeLooks(pl.ui.looks ?? [], app.config.visuals.theme).find((l) => l.splash)?.splash);
   });
   // A look can put the sidebar on the right; the side panel then opens on the left.

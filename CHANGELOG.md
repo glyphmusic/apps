@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.14.0 - 2026-11-25
+
+### Added
+
+- **Folders in the library**: make a folder (Library › More › New folder) and put playlists in it, by dragging a playlist onto the folder or with "Move to folder" in its menu. A folder opens inside the library; deleting it keeps its playlists. Folders sync between your devices and work on the phone too.
+- **Good or not?**: "Your taste" now has an Easy view. Glyph plays one song after another and you say "Good", "Not for me" or "Skip". Good songs only shape your taste; they land in no playlist. The old page is under "Advanced".
+- **Media player buttons** (Android): the phone's media player can show Shuffle and Repeat instead of "Add to Liked Songs" (Settings › Playback).
+- **Seek in the media player**: drag the bar in the Android notification or lock screen (or your system's media controls) to jump in the song.
+- **Corners per part for plugins**: a look can round covers, buttons, fields, cards, menus, dialogs and the player separately (`radii`).
+
+### Changed
+
+- **Smoother on the phone**: sheets slide without stutter, and moving or removing songs in the queue is animated without jumping.
+- **Pause when other apps play** (Android): Glyph plays on only when the other sound has surely stopped, and no longer after 2 minutes (before: 5).
+- **Plugin icon on the Android home screen**: you add it once; after that it follows your look by itself.
+
+### Fixed
+
+- **Phone list menu**: "More" on a playlist now shows the playlist's options instead of its first song's.
+
 ## 0.13.11 - 2026-11-25
 
 ### Fixed

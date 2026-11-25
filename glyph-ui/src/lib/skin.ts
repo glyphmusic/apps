@@ -14,12 +14,12 @@
 // "settings" | "menu" | "dialog" | "toasts" | "tooltip" | "mini-player" |
 // "tab-bar" | "mini-bar" | "now-playing"]`.
 import { setIconOverrides } from "./icon-overrides.svelte";
-import { setCornerScale } from "./corners";
+import { setCornerScale, type CornerPart } from "./corners";
 import { setLayouts, type LayoutArea, type LayoutSpec } from "./layout.svelte";
 import type { SplashSpec } from "./overlays/splash-art";
 
 export interface PluginLook {
-  plugin: string; font: string; radius: number | null; css: string;
+  plugin: string; font: string; radius: number | null; radii?: Record<string, number>; css: string;
   /** The plugin's own text font as a data: address (font: ""). */
   font_data?: string | null;
   /** Monospaced font: Glyph's font name, or the plugin's own as mono_data. */
@@ -94,12 +94,16 @@ export function applyLooks(looks: PluginLook[]) {
     const k = Math.min(2, Math.max(0, radius));
     root.setProperty("--radius", `${Math.round(BASE_RADIUS * k * 10) / 10}px`);
     root.setProperty("--radius-k", String(k));
-    setCornerScale(k);
   } else {
     root.removeProperty("--radius");
     root.removeProperty("--radius-k");
-    setCornerScale(1);
   }
+  // Single parts (radii): for each part the first look that names it wins.
+  const parts: Partial<Record<CornerPart, number>> = {};
+  for (const l of [...looks].reverse()) {
+    for (const [p, v] of Object.entries(l.radii ?? {})) if (Number.isFinite(v)) parts[p as CornerPart] = v;
+  }
+  setCornerScale(radius ?? 1, parts);
   const icons: Record<string, string> = {};
   for (const l of [...looks].reverse()) Object.assign(icons, l.icons ?? {});
   setIconOverrides(icons);

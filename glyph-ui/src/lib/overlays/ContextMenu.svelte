@@ -14,6 +14,9 @@
   // edit) | more | delete. Sidebar entries add "Hide from sidebar".
   // Flyouts (add to playlist, recommendations, storage, versions) open on
   // hover, right of the menu or left when they would not fit.
+  // Own playlists: "Move to folder" flyout (folders with a round check,
+  // "Remove from folder", "New folder"). Folder menu: folder header → play,
+  // shuffle, queue | rename | delete folder (its playlists stay).
   // "Save to" (right-click on a heart): song header, then Liked Songs and
   // every playlist with a round check (filled = the song is in it); a click
   // adds or removes and the menu stays open; "New playlist" at the end.
@@ -22,6 +25,7 @@
   import { cubicOut } from "svelte/easing";
   import Cover from "../components/Cover.svelte";
   import ListCover from "../components/ListCover.svelte";
+  import FolderCover from "../components/FolderCover.svelte";
   import ArtistAvatar from "../components/ArtistAvatar.svelte";
   import Icon from "../components/Icon.svelte";
   import MenuItem from "./menu/MenuItem.svelte";
@@ -41,7 +45,7 @@
   } from "../pages/lists/actions";
 
   const MENU_W = 244, SUB_W = 228, SUB_GAP = 5;
-  type Sub = "playlist" | "recommend" | "more" | "storage" | "versions" | "artists" | null;
+  type Sub = "playlist" | "recommend" | "more" | "storage" | "versions" | "artists" | "folder" | null;
   type MoreSub = "artists" | "storage" | "versions" | null;
 
   let m = $state(app.ctx!);
@@ -49,8 +53,9 @@
   const tr = $derived(m.track);
   const list = $derived(m.list ?? null);
   const artist = $derived(m.artist ?? null);
-  // Songs the menu acts on: one song, or a whole list.
-  const songs = $derived<Track[]>(m.tracks?.length ? m.tracks : list ? shownTracks(list) : tr ? [tr] : []);
+  const fold = $derived(m.folder ? app.folder(m.folder) ?? null : null);
+  // Songs the menu acts on: one song, a whole list or a whole folder.
+  const songs = $derived<Track[]>(m.tracks?.length ? m.tracks : fold ? app.folderTracks(fold.id) : list ? shownTracks(list) : tr ? [tr] : []);
   let sub = $state<Sub>(null);
   let directArtists = $state(false);
   let moreSub = $state<MoreSub>(null);
@@ -97,9 +102,11 @@
     : sub === "storage" ? t("ctx.storage")
     : sub === "versions" ? t("ctx.versions")
     : sub === "artists" ? t("library.artists")
+    : sub === "folder" ? t("ctx.move_to_folder")
     : "",
   );
-  const subContext = $derived(tr ? tr.title : list ? app.listTitle(list) : artist ?? "");
+  // List and folder menus name the list, not its first song.
+  const subContext = $derived(fold ? fold.name : list ? app.listTitle(list) : tr ? tr.title : artist ?? "");
 
   // Position: at the pointer, kept 8 px inside the window.
   let el: HTMLDivElement | undefined = $state();
@@ -207,6 +214,27 @@
       </span>
     </button>
   {/each}
+{/snippet}
+
+{#snippet folderBody(id: string)}
+  {@const cur = app.folderOf(id)?.id ?? null}
+  <MenuItem icon="folder-plus" label={t("library.folder.new")} onclick={run(() => app.newFolder([id]))} />
+  {#if app.library.folders?.length}<Sep />{/if}
+  {#each app.library.folders ?? [] as f (f.id)}
+    {@const on = cur === f.id}
+    <button class="pl-row" role="menuitemradio" aria-checked={on} onclick={run(() => app.movePlaylistToFolder(id, on ? null : f.id))}>
+      <FolderCover id={f.id} size={compact ? 38 : 28} />
+      <span class="pl-tx">
+        <span class="pl-nm trunc">{f.name}</span>
+        <span class="pl-ct trunc">{tf(app.folderPlaylists(f.id).length === 1 ? "library.folder.one_playlist" : "library.folder.n_playlists", { n: app.folderPlaylists(f.id).length })}</span>
+      </span>
+      {@render saveMark(on)}
+    </button>
+  {/each}
+  {#if cur}
+    <Sep />
+    <MenuItem icon="circle-minus" label={t("ctx.remove_from_folder")} onclick={run(() => app.movePlaylistToFolder(id, null))} />
+  {/if}
 {/snippet}
 
 {#snippet saveMark(on: boolean)}
@@ -362,6 +390,15 @@
 {#snippet header()}
   {#if artist}
     <div class="ah trunc">{artist}</div>
+  {:else if fold}
+    {@const n = app.folderPlaylists(fold.id).length}
+    <div class="hd">
+      <FolderCover id={fold.id} size={compact ? 42 : 36} />
+      <div class="ht">
+        <span class="t1 trunc">{fold.name}</span>
+        <span class="t2 trunc">{t("list.kind.folder")} · {tf(n === 1 ? "library.folder.one_playlist" : "library.folder.n_playlists", { n })}</span>
+      </div>
+    </div>
   {:else if list}
     <div class="hd">
       <ListCover {list} size={compact ? 42 : 36} />
@@ -398,6 +435,20 @@
     {:else}
       <MenuItem icon="eye-off" label={t("ctx.hide_artist")} danger onenter={closesSub} onclick={run(() => toggleHiddenArtist(artist))} />
     {/if}
+  {:else if fold}
+    {@const fid = fold.id}
+    {#if has}
+      <MenuItem icon="play" label={t("ctx.play")} onenter={closesSub} onclick={run(() => app.play(songs, 0, fold.name))} />
+      <MenuItem icon="shuffle" label={t("ctx.shuffle")} onenter={closesSub} onclick={run(() => playShuffled(songs, fold.name))} />
+      <MenuItem icon="list-plus" label={t("ctx.queue")} onenter={closesSub} onclick={run(() => queueAll(songs))} />
+      <Sep />
+    {/if}
+    {#if !(app.view === "library" && app.libraryFolder === fid)}
+      <MenuItem icon="folder-open" label={t("ctx.open")} onenter={closesSub} onclick={run(() => { if (app.view !== "library") app.navigate("library"); app.libraryFolder = fid; })} />
+    {/if}
+    <MenuItem icon="pencil" label={t("library.folder.rename")} onenter={closesSub} onclick={run(() => app.renameFolderDialog(fid))} />
+    <Sep />
+    <MenuItem icon="trash-2" label={t("library.folder.delete")} danger onenter={closesSub} onclick={run(() => app.deleteFolder(fid))} />
   {:else if list}
     {#if has}
       <MenuItem icon="play" label={t("ctx.play")} onenter={closesSub} onclick={run(() => app.play(songs, 0, contextOf(list)))} />
@@ -414,6 +465,10 @@
       {@const id = own}
       <MenuItem icon="circle-plus" label={t("add.title")} onenter={closesSub} onclick={run(() => openAddSongs(id))} />
       <MenuItem icon="pencil" label={t("list.edit")} onenter={closesSub} onclick={() => openNameDialog([], id)} />
+      <MenuItem icon="folder" label={t("ctx.move_to_folder")} sub open={!compact && subOpen("folder")}
+        onenter={() => { if (!compact) sub = "folder"; }} onclick={compact ? () => setSub("folder") : undefined}>
+        {#if !compact && subOpen("folder")}<Flyout {flip}>{@render folderBody(id)}</Flyout>{/if}
+      </MenuItem>
     {/if}
     {#if album || has || own}<Sep />{/if}
     {#if !onWeb() && anyDlBusy}
@@ -515,7 +570,7 @@
 
 {#if compact}
   <div class="bs-dim" transition:fade|global={{ duration: 180 }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")} onpointerdown={() => { eatTap(); close(); }} oncontextmenu={(e) => e.preventDefault()} role="presentation">
-    <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 260 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
+    <div class="bs-panel" data-part="menu" style:--bs-body-max="{bodyMax}px" style:transform="translateY({pull}px)" class:settle={pull === 0} class:dragging={pull > 0} in:sheetIn|global={{ duration: 340 }} out:sheetOut|global={{ duration: 210 }} onpointerdown={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
       <div class="bs-grab" bind:this={grabEl} use:drag={{ axis: "y", move: (_, dy) => (pull = Math.max(0, dy)), end: (_, dy, _vx, vy) => { if (shouldClose(dy, vy)) { close(); return; } pull = 0; } }}>
         <span class="hdl"></span>
         <div class="bs-stage">
@@ -538,7 +593,7 @@
                     {#if subContext}<span class="t2 trunc">{subContext}</span>{/if}
                   </span>
                 </button>
-              {:else if artist || list || tr}
+              {:else if artist || list || tr || fold}
                 <div class="bs-hd">{@render header()}</div>
               {/if}
             </div>
@@ -562,9 +617,10 @@
           >
             {#if sub === "playlist"}{@render playlistBody()}
             {:else if sub === "recommend" && tr}{@render recommendBody(tr)}
-            {:else if sub === "more" && tr}{@render moreBody(tr)}
             {:else if sub === "more" && list}{@render listMoreBody(list)}
+            {:else if sub === "more" && tr}{@render moreBody(tr)}
             {:else if sub === "storage" && own}{@render storageBody(own)}
+            {:else if sub === "folder" && own}{@render folderBody(own)}
             {:else if sub === "versions"}{@render versionsBody()}
             {:else if sub === "artists"}{@render artistsBody(sheetArtists, 44)}
             {:else}{@render rootItems()}{/if}
@@ -577,7 +633,7 @@
   <div class="ctx" data-part="menu" bind:this={el} bind:clientWidth={w} bind:clientHeight={h} style:left="{left}px" style:top="{top}px" use:outside={close}
     oncontextmenu={(e) => e.preventDefault()} role="menu" tabindex="-1"
     in:fly|global={{ y: -6, duration: 140, easing: cubicOut }} out:fly|global={{ y: -6, duration: 110, easing: cubicOut }}>
-    {#if artist || list || tr}{@render header()}<Sep />{/if}
+    {#if artist || list || tr || fold}{@render header()}<Sep />{/if}
     {@render rootItems()}
   </div>
 {/if}

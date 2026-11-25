@@ -8,11 +8,9 @@
   import Icon from "../components/Icon.svelte";
   import { app, type SettingsPage } from "../state.svelte";
   import { t } from "../i18n.svelte";
-  import { phone } from "./cstate.svelte";
+  import { phone, settingsBack } from "./cstate.svelte";
   import { fadeEdges } from "../ui.svelte";
   import { onWeb } from "../web";
-  import { closeDetail, pl } from "../settings/plugins-state.svelte";
-  import { back as migrateBack, mg } from "../settings/migrate-state.svelte";
   import Tog from "../settings/Tog.svelte";
   import { adv, setAdvanced, subHidden } from "../settings/advanced.svelte";
   import { GROUPS, pageComponent, pageInfo, pageShown, subtabs } from "../settings/pages";
@@ -41,11 +39,6 @@
     const s = Math.min(phone.settingsSub, Math.max(0, tabs.length - 1));
     return tabs[s] && subHidden(tabs[s]) ? 0 : s;
   });
-  function back() {
-    if (phone.settingsInPage && page === "plugins" && pl.detail && phone.settingsSub < 2) { closeDetail(); return; }
-    if (phone.settingsInPage && page === "migrate" && mg.step !== "pick" && mg.step !== "running") { migrateBack(); return; }
-    if (phone.settingsInPage) phone.settingsInPage = false; else app.settingsOpen = false;
-  }
   function open(p: SettingsPage) { if (p !== app.settingsPage) phone.settingsSub = 0; app.settingsPage = p; phone.settingsInPage = true; }
   // Opened for one page (a tapped notification): straight into it.
   $effect(() => { const d = app.settingsDirect; if (d) { app.settingsDirect = null; open(d); } });
@@ -63,7 +56,7 @@
 
 <div class="screen" transition:fly|global={{ x: 24, duration: 200, easing: cubicOut }} onoutrostart={(e) => ((e.currentTarget as HTMLElement).style.pointerEvents = "none")}>
   <div class="head">
-    <button class="bk" onclick={back} aria-label={t("tip.chevron-left")}><Icon name="arrow-left" size={22} color="#fff" /></button>
+    <button class="bk" onclick={settingsBack} aria-label={t("tip.chevron-left")}><Icon name="arrow-left" size={22} color="#fff" /></button>
     <h1>{phone.settingsInPage ? pageInfo(page).name : t("nav.settings")}</h1>
     <span class="sp"></span>
   </div>
