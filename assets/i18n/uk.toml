@@ -1979,6 +1979,7 @@
 "admin.bans.until" = "до {d}"
 "admin.bans.forever" = "безстроково"
 "admin.bans.none" = "Нікого не заблоковано."
+"admin.bans.devices" = "+{n} записів пристроїв"
 "admin.note.owner" = "Виконано вхід як власник сервера."
 "admin.note.admin" = "Ключі, оновлення та призначення адміністраторів доступні лише власнику сервера."
 "admin.limit.youtube_account" = "YouTube лише з акаунтом"

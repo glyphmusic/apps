@@ -2011,6 +2011,7 @@
 "admin.bans.until" = "until {d}"
 "admin.bans.forever" = "no end"
 "admin.bans.none" = "Nobody is banned."
+"admin.bans.devices" = "+{n} device entries"
 "admin.note.owner" = "You are signed in as the server owner."
 "admin.note.admin" = "Keys, updates and handing out the admin role stay with the server owner."
 "admin.limit.youtube_account" = "YouTube only with an account"

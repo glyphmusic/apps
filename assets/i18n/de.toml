@@ -2011,6 +2011,7 @@
 "admin.bans.until" = "bis {d}"
 "admin.bans.forever" = "ohne Ende"
 "admin.bans.none" = "Niemand ist gesperrt."
+"admin.bans.devices" = "+{n} Geräte-Einträge"
 "admin.note.owner" = "Du bist als Server-Besitzer angemeldet."
 "admin.note.admin" = "Schlüssel, Updates und die Admin-Rolle vergeben bleiben beim Server-Besitzer."
 "admin.limit.youtube_account" = "YouTube nur mit Konto"
