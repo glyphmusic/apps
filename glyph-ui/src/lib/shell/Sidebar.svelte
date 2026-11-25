@@ -36,6 +36,8 @@
   // "lists" is the block of recent lists and artists. Settings always stays.
   const PARTS = ["home", "search", "library", "now_playing", "lists"] as const;
   const parts = $derived(arrange(PARTS, layout.areas.sidebar));
+  // Tooltips point away from the window edge the sidebar sits at.
+  const tipSide = $derived(layout.sidebarRight ? "left" : "right");
   const items = $derived(app.sidebarItems(5));
   // The server dashboard shows up only for accounts the server made admins.
   $effect(() => admin.check(app.account?.handle, app.backendState.kind === "ready"));
@@ -56,7 +58,7 @@
   {#each parts as part, pi (part)}
     {#if part !== "lists"}
       {@const n = nav[part]}
-      <button class="it {n.motion}" class:on={active(n.view)} onclick={() => app.navigate(n.view)} use:tip={{ label: expanded ? "" : t(n.label), side: "right" }} aria-label={t(n.label)} data-item={part}>
+      <button class="it {n.motion}" class:on={active(n.view)} onclick={() => app.navigate(n.view)} use:tip={{ label: expanded ? "" : t(n.label), side: tipSide }} aria-label={t(n.label)} data-item={part}>
         <span class="ico"><Icon name={n.icon} size={20} color={active(n.view) ? "var(--text)" : "var(--dim)"} /></span>
         {#if expanded}<span class="lab trunc">{t(n.label)}</span>{/if}
       </button>
@@ -65,7 +67,7 @@
     {#each items as it}
       {@const title = it.kind === "list" ? app.listTitle(it.list) : it.name}
       <button class="it" class:on={activeItem(it)} onclick={() => openItem(it)} oncontextmenu={(e) => menu(e, it)}
-        use:tip={{ label: expanded ? "" : title, side: "right" }}>
+        use:tip={{ label: expanded ? "" : title, side: tipSide }}>
         {#if it.kind === "list"}<ListCover list={it.list} size={expanded ? 32 : 36} />
         {:else if app.artistPhoto(it.name) || !it.track}<ArtistAvatar name={it.name} size={expanded ? 32 : 36} iconSize={16} />
         {:else}<Cover track={it.track} size={expanded ? 32 : 36} round />{/if}
@@ -77,18 +79,18 @@
   {/each}
   <span class="flex1"></span>
   {#if admin.on}
-    <button class="it pulse" class:on={active("server")} onclick={() => { admin.sub = ""; app.navigate("server"); }} use:tip={{ label: expanded ? "" : t("admin.title"), side: "right" }} aria-label={t("admin.title")}>
+    <button class="it pulse" class:on={active("server")} onclick={() => { admin.sub = ""; app.navigate("server"); }} use:tip={{ label: expanded ? "" : t("admin.title"), side: tipSide }} aria-label={t("admin.title")}>
       <span class="ico"><Icon name="server" size={20} color={active("server") ? "var(--text)" : "var(--dim)"} /></span>
       {#if expanded}<span class="lab trunc">{t("admin.title")}</span>{/if}
     </button>
   {/if}
   {#if trRun && !app.settingsOpen}
-    <button class="it trbtn" onclick={() => app.openSettings("migrate")} use:tip={{ label: expanded ? "" : trTip, side: "right" }} aria-label={t("sp.migrate")}>
+    <button class="it trbtn" onclick={() => app.openSettings("migrate")} use:tip={{ label: expanded ? "" : trTip, side: tipSide }} aria-label={t("sp.migrate")}>
       <span class="ico trico"><Icon name="arrow-right-left" size={18} color="var(--accent)" /><span class="trbadge"></span></span>
       {#if expanded}<span class="lab trunc trlab">{trTip}</span>{/if}
     </button>
   {/if}
-  <button class="it turn" class:on={app.settingsOpen} onclick={() => app.navigate("settings")} use:tip={{ label: expanded ? "" : t("nav.settings"), side: "right" }} aria-label={t("nav.settings")}>
+  <button class="it turn" class:on={app.settingsOpen} onclick={() => app.navigate("settings")} use:tip={{ label: expanded ? "" : t("nav.settings"), side: tipSide }} aria-label={t("nav.settings")}>
     <span class="ico"><Icon name="settings" size={20} color={app.settingsOpen ? "var(--text)" : "var(--dim)"} /></span>
     {#if expanded}<span class="lab trunc">{t("nav.settings")}</span>{/if}
   </button>

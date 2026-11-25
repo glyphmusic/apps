@@ -1865,6 +1865,8 @@
 "plugins.does.app_icon" = "Muda o ícone da app"
 "plugins.does.app_icon.desc" = "Um ícone próprio para a janela, a barra de tarefas, a bandeja e o Dock (no Android, na vista de apps recentes). O ícone do Glyph volta quando desativas o plugin."
 "plugins.does.layout" = "Reorganiza o início, a barra lateral ou os separadores"
+"plugins.does.splash" = "Muda a animação de arranque"
+"plugins.does.splash.desc" = "Aparece a partir do próximo arranque do Glyph. Podes desligar a animação em Configurações › Aparência."
 "plugins.font.file" = "Fonte própria"
 "sp.keys.plugins" = "Abrir plugins (funciona com qualquer visual)"
 "share.kind.artist" = "Artista"

@@ -7,6 +7,7 @@
 - **Glyph Drift (beta)**: a new radio that keeps playing when the queue ends, built on Glyph's own taste instead of Last.fm. Songs you play to the end lead the way, skipped songs steer it away, and it adds a few songs at a time so it follows your mood. Turn it on in Settings > Playback > Content.
 - **Plugins can change the app icon and the whole font**: a plugin's look can bring its own app icon (window, taskbar, tray, Dock, and the app overview on Android), its own font file for all text, and its own monospaced font. Turn the plugin off and Glyph's icon and fonts come back.
 - **Plugins can rearrange the home page, sidebar and tabs**: a plugin's look can put the sections of the home page, the sidebar entries and the tabs on phones in a new order, or hide some. Settings always stays in the sidebar.
+- **Plugins can move the sidebar and change the startup animation**: a plugin's look can put the sidebar on the right (the queue and lyrics panel then opens on the left) and bring its own ASCII picture for the startup animation, shown from the next start.
 
 ### Changed
 

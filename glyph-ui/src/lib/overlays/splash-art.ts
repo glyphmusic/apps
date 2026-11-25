@@ -68,6 +68,48 @@ export const TINT: string[] = [
 
 export const COLS = ART[0].length;
 export const ROWS = ART.length;
+
+/** A plugin look's startup animation (glyph_core::plugins::SplashSpec). */
+export interface SplashSpec { art: string[]; tint?: string[]; speed?: number | null }
+/** What the startup animation draws: rows of characters, `p` in `tint` = accent. */
+export interface SplashArt { art: string[]; tint: string[]; cols: number; rows: number; speed: number }
+
+const SPLASH_KEY = "glyph.look.splash";
+
+/** Checks and pads a look's art; null when it is not usable. */
+export function splashArt(spec: SplashSpec | null | undefined): SplashArt | null {
+  if (!spec || !Array.isArray(spec.art) || !spec.art.length || spec.art.length > 40) return null;
+  if (!spec.art.every((r) => typeof r === "string" && r.length <= 60 && /^[\x20-\x7e]*$/.test(r))) return null;
+  if (!spec.art.some((r) => r.trim())) return null;
+  const cols = Math.max(...spec.art.map((r) => r.length));
+  const tint = Array.isArray(spec.tint) && spec.tint.length === spec.art.length ? spec.tint : [];
+  const speed = typeof spec.speed === "number" && spec.speed >= 0.5 && spec.speed <= 2 ? spec.speed : 1;
+  return { art: spec.art.map((r) => r.padEnd(cols)), tint: spec.art.map((_, i) => String(tint[i] ?? "").padEnd(cols)), cols, rows: spec.art.length, speed };
+}
+
+/** Glyph's own note. */
+export const GLYPH_SPLASH: SplashArt = { art: ART, tint: TINT, cols: ART[0].length, rows: ART.length, speed: 1 };
+
+/**
+ * Remembers the look's startup animation for the next start (looks arrive
+ * after the animation began); null brings Glyph's note back.
+ */
+export function rememberSplash(spec: SplashSpec | null | undefined) {
+  try {
+    const art = splashArt(spec);
+    if (art) localStorage.setItem(SPLASH_KEY, JSON.stringify({ art: art.art, tint: art.tint, speed: art.speed }));
+    else localStorage.removeItem(SPLASH_KEY);
+  } catch { /* storage off: Glyph's note */ }
+}
+
+/** The startup animation to play: the remembered look's, or Glyph's note. */
+export function currentSplash(): SplashArt {
+  try {
+    const raw = localStorage.getItem(SPLASH_KEY);
+    if (raw) return splashArt(JSON.parse(raw)) ?? GLYPH_SPLASH;
+  } catch { /* broken entry: Glyph's note */ }
+  return GLYPH_SPLASH;
+}
 /** Character cell aspect of the icon raster (height / width). */
 export const CELL_ASPECT = 25.2 / 19.85;
 /** Number of currents the characters arrive in. */
@@ -104,10 +146,11 @@ export function rnd(i: number, salt: number): number {
 export const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 export const smooth = (t: number) => { t = Math.min(1, Math.max(0, t)); return t * t * (3 - 2 * t); };
 
-export function makeParticles(): Particle[] {
+export function makeParticles(src: SplashArt = GLYPH_SPLASH): Particle[] {
   const out: Particle[] = [];
   let i = 0;
-  ART.forEach((line, row) => {
+  const TINT = src.tint;
+  src.art.forEach((line, row) => {
     for (let col = 0; col < line.length; col++) {
       const ch = line[col];
       if (ch === " ") continue;

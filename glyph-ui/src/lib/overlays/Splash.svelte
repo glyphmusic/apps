@@ -9,10 +9,13 @@
   import { onMount } from "svelte";
   import { app } from "../state.svelte";
   import { fx } from "../ui.svelte";
-  import { CELL_ASPECT, COLS, easeInOut, makeParticles, pathAt, REST, ROWS, smooth, T_OUT, T_OUT_START, TOTAL, TRAIL } from "./splash-art";
+  import { ART, CELL_ASPECT, currentSplash, easeInOut, makeParticles, pathAt, REST, smooth, T_OUT, T_OUT_START, TOTAL, TRAIL } from "./splash-art";
 
   let cv: HTMLCanvasElement;
-  const parts = makeParticles();
+  // Glyph's note, or a plugin look's picture (remembered from the last start).
+  const art = currentSplash();
+  const COLS = art.cols, ROWS = art.rows;
+  const parts = makeParticles(art);
 
   onMount(() => {
     if (fx.reduce) { app.splash = false; return; }
@@ -28,7 +31,7 @@
       cancelAnimationFrame(raf);
       app.splash = false;
     };
-    const safetyTimer = window.setTimeout(finish, (TOTAL + 1.5) * 1000);
+    const safetyTimer = window.setTimeout(finish, (TOTAL / art.speed + 1.5) * 1000);
     skip = finish;
 
     // Pre-render the 5 unique characters in white and accent once per scale
@@ -80,7 +83,8 @@
         ctx.fillRect(0, 0, w, h);
 
         // The note is about a quarter of the smaller window side tall.
-        const rowH = Math.min(11, Math.max(5, (Math.min(w, h) * 0.26) / ROWS));
+        // A look's smaller picture may draw bigger characters than the note.
+        const rowH = Math.min(art.art === ART ? 11 : 28, Math.max(5, (Math.min(w, h) * 0.26) / ROWS));
         const cellW = rowH / CELL_ASPECT, cellH = rowH;
         if (!buildSprites(rowH, cellW, dpr)) { finish(); return; }
         const cx = w / 2, cy = h / 2;
@@ -106,7 +110,7 @@
     };
     const frame = (now: number) => {
       if (start === null) start = now;
-      draw((now - start) / 1000);
+      draw(((now - start) / 1000) * art.speed);
       if (!done) raf = requestAnimationFrame(frame);
     };
     // Paint t = 0 immediately on mount so the background never flashes before the first rAF.

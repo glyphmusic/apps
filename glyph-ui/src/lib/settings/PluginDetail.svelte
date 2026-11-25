@@ -160,6 +160,7 @@
         {#if m.look?.font}<div class="srow"><RowBase label={t("plugins.does.font")}><span class="v">{t(`plugins.font.${m.look.font}`)}</span></RowBase></div>{/if}
         {#if m.look?.mono}<div class="srow"><RowBase label={t("plugins.does.mono")}><span class="v">{t(`plugins.font.${m.look.mono}`)}</span></RowBase></div>{/if}
         {#if m.look?.layout}<div class="srow"><RowBase label={t("plugins.does.layout")} /></div>{/if}
+        {#if m.look?.splash}<div class="srow"><RowBase label={t("plugins.does.splash")} info={t("plugins.does.splash.desc")} /></div>{/if}
         {#if m.look?.app_icon}<div class="srow"><RowBase label={t("plugins.does.app_icon")} info={t("plugins.does.app_icon.desc")} /></div>{/if}
         {#if m.look?.radius != null}<div class="srow"><RowBase label={t("plugins.does.corners")}><span class="v">{Math.round(m.look.radius * 100)}%</span></RowBase></div>{/if}
         {#if m.look?.backgrounds}<div class="srow"><RowBase label={t("plugins.does.backgrounds")}><span class="v">{m.look.backgrounds}</span></RowBase></div>{/if}

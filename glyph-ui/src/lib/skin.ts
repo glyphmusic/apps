@@ -15,6 +15,7 @@
 // "tab-bar" | "mini-bar" | "now-playing"]`.
 import { setIconOverrides } from "./icon-overrides.svelte";
 import { setLayouts, type LayoutArea, type LayoutSpec } from "./layout.svelte";
+import type { SplashSpec } from "./overlays/splash-art";
 
 export interface PluginLook {
   plugin: string; font: string; radius: number | null; css: string;
@@ -24,6 +25,10 @@ export interface PluginLook {
   mono?: string; mono_data?: string | null;
   /** Order and hidden parts of the home page, sidebar and phone tabs. */
   home?: LayoutSpec | null; sidebar?: LayoutSpec | null; tabs?: LayoutSpec | null;
+  /** "left" (Glyph's) or "right", "" = not set. */
+  sidebar_position?: string;
+  /** Own startup animation (splash-art.ts). */
+  splash?: SplashSpec | null;
   /** Replaced icons: name -> SVG text. */
   icons?: Record<string, string>;
   /** A theme plugin's look: only while its theme is picked. */
@@ -100,7 +105,8 @@ export function applyLooks(looks: PluginLook[]) {
     const spec = looks.find((l) => l[a])?.[a];
     if (spec) areas[a] = spec;
   }
-  setLayouts(areas);
+  const side = looks.find((l) => l.sidebar_position === "left" || l.sidebar_position === "right")?.sidebar_position;
+  setLayouts(areas, side === "right");
   const sheets = looks.filter((l) => l.css.trim() && safe(l.css));
   if (!sheets.length && !faces.length) {
     styleEl?.remove();

@@ -216,6 +216,14 @@ fn looks_validate() {
     assert!(parse(r#"{"home":{"hide":["from-the-future"]}}"#).validate("1.0.0").is_ok());
     assert!(matches!(parse(r#"{"home":{"hide":["Recent"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     assert!(matches!(parse(r#"{"sidebar":{"order":["home","home"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    // Sidebar on the right and an own startup animation.
+    assert!(parse(r#"{"sidebar_position":"right","splash":{"art":[" /\\ ","(**)"],"tint":["    ","pppp"],"speed":1.5}}"#).validate("1.0.0").is_ok());
+    assert!(matches!(parse(r#"{"sidebar_position":"top"}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"splash":{"art":[]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"splash":{"art":["   "]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"splash":{"art":["ä"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"splash":{"art":["ab"],"tint":["pp","pp"]}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
+    assert!(matches!(parse(r#"{"splash":{"art":["ab"],"speed":5}}"#).validate("1.0.0"), Err(Invalid::Bad(_))));
     // A theme may bring a look; a look alone makes a valid extension.
     let mut t = theme("sunset", "1.0.0");
     t.look = Some(LookSpec { font: "rounded".into(), ..Default::default() });
