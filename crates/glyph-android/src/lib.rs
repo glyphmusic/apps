@@ -31,6 +31,8 @@ static SHEETS: Mutex<Vec<Global<JObject<'static>>>> = Mutex::new(Vec::new());
 static STATE: OnceLock<Arc<AndroidAppState>> = OnceLock::new();
 static URL_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_JAM_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// "Pause when other apps play" as last handed to the playback service (0 unknown, 1 off, 2 on).
+static LAST_PAUSE_FOR_OTHERS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// Waits for the file picker's answer (`nativeFilePicked`).
 static PICK: Mutex<Option<flume::Sender<Option<String>>>> = Mutex::new(None);
 
@@ -292,6 +294,16 @@ impl Host for AndroidHost {
             };
             (current, liked, playing, buffering, pos, remote_vol)
         };
+
+        glyph_app::other_audio::tick(core);
+        let pause_for_others = core.st().config.playback.pause_for_others;
+        let code = if pause_for_others { 2 } else { 1 };
+        if LAST_PAUSE_FOR_OTHERS.swap(code, std::sync::atomic::Ordering::AcqRel) != code {
+            with_activity("pause for others", |env, activity| {
+                env.call_method(activity, jni_str!("gpuiPauseForOthers"), jni_sig!("(Z)V"), &[JValue::Bool(pause_for_others.into())])?;
+                Ok(())
+            });
+        }
 
         let jam_active = glyph_app::jam::jam_active();
         if LAST_JAM_ACTIVE.swap(jam_active, std::sync::atomic::Ordering::AcqRel) != jam_active {
@@ -856,4 +868,14 @@ pub extern "system" fn Java_app_glyph_PlaybackService_nativeVolume<'local>(
     volume: jint,
 ) {
     glyph_audio::media_keys::push_event(MediaKeyEvent::Volume(volume.clamp(0, 100) as u8));
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_glyph_PlaybackService_nativeOtherAudio<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    active: jboolean,
+    music: jboolean,
+) {
+    glyph_app::other_audio::report(active, music);
 }

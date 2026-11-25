@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Pause when other apps play** (Android): Glyph pauses when another app starts playing sound, like a YouTube video or a voice message. When the other sound stops, Glyph plays on. It stays paused after a music app like Spotify, or when the other sound played longer than 5 minutes. Both can be turned off in Settings › Playback › Content.
 - **Plugin app icon on the Android home screen**: Android doesn't let an app swap its own home screen icon for any picture. A plugin's page now has "Add to home screen", which puts a Glyph shortcut with the plugin's icon there (Android asks first).
 - **Broken look parts are shown**: when part of a plugin's look doesn't work (an app icon of the wrong size, a missing file …), its page now lists it, instead of Glyph quietly using its own. The preview also works for plugins you made yourself.
 

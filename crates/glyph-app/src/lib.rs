@@ -16,6 +16,7 @@ pub mod mcp_tools;
 pub mod mpd;
 pub mod notify;
 pub mod opened;
+pub mod other_audio;
 pub mod page_cache;
 pub mod plugins;
 pub mod settings;

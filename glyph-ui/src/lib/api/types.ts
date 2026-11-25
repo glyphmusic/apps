@@ -492,7 +492,7 @@ export interface Config {
   integrations: { discord_presence: boolean; discord_client_id: string };
   sharing: { glyph_links: boolean; profile_sections?: ProfileSection[] };
   player: { volume: number; shuffle: boolean; repeat: string; show_queue: boolean; mini_on_top: boolean; mini_large: boolean; mini_card_w?: number; mini_card_h?: number };
-  playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; autoplay?: boolean; gapless?: boolean };
+  playback: { shuffle: ShuffleStyle; skip_unplayable: boolean; patient_search: boolean; pause_for_others?: boolean; resume_after_others?: boolean; autoplay?: boolean; gapless?: boolean };
   lists: { sort: Record<string, string> };
   stats: { enabled: boolean };
   taste?: TasteConfig;

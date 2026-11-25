@@ -1639,6 +1639,11 @@ public class MainActivity extends AppCompatActivity {
                 remoteVolume));
     }
 
+    /** The setting "Pause when other apps play": with it, Glyph takes the audio focus while it plays. */
+    public void gpuiPauseForOthers(boolean on) {
+        runOnUiThread(() -> PlaybackService.setPauseForOthers(on));
+    }
+
     /** Keeps the foreground service and wake/Wi-Fi locks alive while in a Jam even without active audio. */
     public void gpuiJamActive(boolean active) {
         runOnUiThread(() -> PlaybackService.setJamActive(this, active));
