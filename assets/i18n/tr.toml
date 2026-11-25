@@ -763,6 +763,7 @@
 "queue.from_n" = "Sıradaki, şuradan: {name} · {n}"
 "queue.later_n" = "Daha sonra · {n}"
 "queue.radio_from" = "Radyo · {title}"
+"playlist.song_radio" = "Şarkı radyosu · {title}"
 "queue.drift_from" = "Glyph Drift · {title}"
 "ctx.no_playlists" = "Henüz çalma listesi yok"
 "ctx.no_playlists.sub" = "Yukarıdaki “Yeni çalma listesi” ile oluştur."

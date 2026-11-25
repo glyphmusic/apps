@@ -788,6 +788,7 @@
 "queue.from_n" = "Далее из: {name} · {n}"
 "queue.later_n" = "Затем · {n}"
 "queue.radio_from" = "Радио · {title}"
+"playlist.song_radio" = "Радио трека · {title}"
 "queue.drift_from" = "Glyph Drift · {title}"
 "ctx.no_playlists" = "Пока нет плейлистов"
 "ctx.no_playlists.sub" = "Создайте его через «Новый плейлист» выше."

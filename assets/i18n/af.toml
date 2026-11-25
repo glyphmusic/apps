@@ -788,6 +788,7 @@
 "queue.from_n" = "Volgende uit: {name} · {n}"
 "queue.later_n" = "Dan · {n}"
 "queue.radio_from" = "Radio · {title}"
+"playlist.song_radio" = "Liedjieradio · {title}"
 "queue.drift_from" = "Glyph Drift · {title}"
 "ctx.no_playlists" = "Nog geen snitlyste nie"
 "ctx.no_playlists.sub" = "Skep een met “Nuwe snitlys” hierbo."

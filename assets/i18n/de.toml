@@ -813,6 +813,7 @@
 "queue.from_n" = "Weiter aus: {name} · {n}"
 "queue.later_n" = "Danach · {n}"
 "queue.radio_from" = "Radio · {title}"
+"playlist.song_radio" = "Songradio · {title}"
 "queue.drift_from" = "Glyph Drift · {title}"
 "ctx.no_playlists" = "Noch keine Playlists"
 "ctx.no_playlists.sub" = "Erstelle eine mit „Neue Playlist“ oben."

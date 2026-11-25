@@ -1,6 +1,5 @@
-# Glyph 0.13.9 - 2026-11-25
+# Glyph 0.13.10 - 2026-11-25
 
-- **Web**: signing in and creating an account on glyph.my/web work again.
-- **iPhone**: the web app on the home screen fills the whole screen, without a black bar at the bottom.
+- **Song radio as a playlist**: a radio started from a song empties the queue and plays only the radio. Its songs are saved as a playlist "Song radio · <song>" that you can keep or delete.
 
 See CHANGELOG.md for the complete changes.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.10 - 2026-11-25
+
+### Changed
+
+- **Song radio as a playlist**: starting a radio from a song now empties the queue (also the songs you queued by hand) and plays only the radio. The songs are saved as a playlist "Song radio · <song>", with the song first, so you can keep it or simply delete it. Starting the radio again for the same song refills that playlist.
+
 ## 0.13.9 - 2026-11-25
 
 ### Fixed

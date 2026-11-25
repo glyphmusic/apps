@@ -763,6 +763,7 @@
 "queue.from_n" = "Następne z: {name} · {n}"
 "queue.later_n" = "Później · {n}"
 "queue.radio_from" = "Radio · {title}"
+"playlist.song_radio" = "Radio utworu · {title}"
 "queue.drift_from" = "Glyph Drift · {title}"
 "ctx.no_playlists" = "Brak playlist"
 "ctx.no_playlists.sub" = "Utwórz ją przez „Nowa playlista” powyżej."

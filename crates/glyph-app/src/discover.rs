@@ -427,7 +427,8 @@ async fn radio_tracks(core: &Arc<Core>, b: &glyph_core::Backend, picked: &[Track
 
 /// Plays the radio songs. `append`: they go on after the ended queue
 /// (`ended_on`) instead of replacing it.
-fn finish_radio(core: &Arc<Core>, tracks: Vec<Track>, error: Option<String>, title: &str, append: bool, ended_on: Option<String>) {
+/// `song`: a song radio; its songs become a playlist (see [`song_radio_playlist`]).
+fn finish_radio(core: &Arc<Core>, tracks: Vec<Track>, error: Option<String>, title: &str, append: bool, ended_on: Option<String>, song: Option<Track>) {
     let label = tr(lang(core), "queue.radio_from", &[("title", title)]);
     match (tracks.is_empty(), error) {
         (false, _) if append => {
@@ -453,7 +454,10 @@ fn finish_radio(core: &Arc<Core>, tracks: Vec<Track>, error: Option<String>, tit
                 core.emit_player();
             }
         }
-        (false, _) => core.play_list(tracks, 0, Some(label)),
+        (false, _) => match song {
+            Some(seed) => song_radio_playlist(core, seed, tracks),
+            None => core.play_list(tracks, 0, Some(label)),
+        },
         (true, e) => {
             let err_msg = e.as_deref().unwrap_or("radio_empty").to_string();
             if append {
@@ -475,16 +479,60 @@ fn finish_radio(core: &Arc<Core>, tracks: Vec<Track>, error: Option<String>, tit
     }
 }
 
+/// Song radio: the songs go into a playlist "Song radio · <song>" (the song
+/// first), so it can be kept or simply deleted. Starting it again for the same
+/// song refills that playlist. The queue then holds only this playlist: the
+/// hand-queued songs are gone too.
+fn song_radio_playlist(core: &Arc<Core>, seed: Track, tracks: Vec<Track>) {
+    let name = glyph_core::library::clean_playlist_name(&tr(lang(core), "playlist.song_radio", &[("title", &seed.title)]));
+    let key = track_key(&seed);
+    let limit = glyph_core::library::playlist_track_limit();
+    let all: Vec<Track> = std::iter::once(seed).chain(tracks.into_iter().filter(|t| track_key(t) != key)).take(limit).collect();
+    let id = {
+        let mut st = core.st();
+        let old = st.library.playlists.iter().find(|p| p.name == name).map(|p| p.id.clone());
+        let id = match old {
+            Some(id) => id,
+            None => st.library.create_playlist(&name).id.clone(),
+        };
+        if let Some(p) = st.library.playlist_mut(&id) {
+            p.tracks = all.clone();
+        }
+        id
+    };
+    core.library_changed();
+    let list = ListKey::Playlist { id };
+    let playing_seed = core.st().current.as_ref().map(track_key).as_deref() == Some(key.as_str());
+    if playing_seed {
+        // The song keeps playing; the radio songs follow it.
+        {
+            let mut st = core.st();
+            st.queue.clear_manual();
+            st.queue.set(all, 0);
+            st.context = Some(name);
+            st.playing_from = Some(list);
+        }
+        core.playback_changed();
+        core.emit_queue();
+    } else {
+        core.st().queue.clear_manual();
+        let from = crate::controller::PlayFrom { list: Some(list), ..Default::default() };
+        core.play_list_from(all, 0, Some(name), from);
+    }
+}
+
 /// Plays songs similar to `seeds` (up to five, spread over the list).
 /// `append`: the songs go on after the ended queue instead of replacing it.
 /// One seed (song radio) keeps the station close to that song's sound.
-fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String>, title: String, append: bool) {
+/// `song`: started from one song (song radio), see [`song_radio_playlist`].
+fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String>, title: String, append: bool, song: bool) {
     let Some(b) = core.backend() else { return };
     if seeds.is_empty() {
         toast(core, "toast.radio_empty", None, None, "info");
         return;
     }
     let picked = pick_seeds(&seeds);
+    let song = song.then(|| seeds[0].clone());
     let mut skip = exclude;
     skip.extend(seeds.iter().map(track_key));
     let ended_on = core.st().current.as_ref().map(track_key);
@@ -499,7 +547,7 @@ fn radio_from_seeds(core: &Arc<Core>, seeds: Vec<Track>, exclude: HashSet<String
     let core = core.clone();
     crate::rt::spawn(async move {
         let (tracks, error) = radio_tracks(&core, &b, &picked, &skip).await;
-        finish_radio(&core, tracks, error, &title, append, ended_on);
+        finish_radio(&core, tracks, error, &title, append, ended_on, song);
     });
 }
 
@@ -588,12 +636,12 @@ pub fn on_queue_end(core: &Arc<Core>) -> bool {
         drop_unwanted(core, &mut scored);
         if !scored.is_empty() {
             toast(core, "toast.radio", Some(json!({ "title": current.title })), None, "ok");
-            finish_radio(core, scored.into_iter().map(|(t, _)| t).collect(), None, &current.title, true, Some(key));
+            finish_radio(core, scored.into_iter().map(|(t, _)| t).collect(), None, &current.title, true, Some(key), None);
             return true;
         }
     }
     let (seeds, exclude) = end_seeds(&current, &played);
-    radio_from_seeds(core, seeds, exclude, current.title, true);
+    radio_from_seeds(core, seeds, exclude, current.title, true, false);
     true
 }
 
@@ -859,12 +907,12 @@ pub async fn radio_state(core: C<'_>) -> Res<Value> {
 }
 
 pub fn start_radio_tracks(core: &Arc<Core>, seeds: Vec<Track>, title: String) {
-    radio_from_seeds(core, seeds, HashSet::new(), title, false);
+    radio_from_seeds(core, seeds, HashSet::new(), title, false, false);
 }
 
 pub fn start_list_radio(core: &Arc<Core>, list: &ListKey) {
     let (tracks, title) = list_tracks(core, list);
-    radio_from_seeds(core, tracks, HashSet::new(), title, false);
+    radio_from_seeds(core, tracks, HashSet::new(), title, false, false);
 }
 
 pub fn list_radio(core: C, list: ListKey) {
@@ -887,11 +935,11 @@ pub fn artist_radio(core: C, artist: String, page_tracks: Option<Vec<Track>>) {
         toast(&core, "toast.radio_empty", None, None, "info");
         return;
     }
-    radio_from_seeds(core, seeds, HashSet::new(), artist, false);
+    radio_from_seeds(core, seeds, HashSet::new(), artist, false, false);
 }
 
 pub fn song_radio(core: C, track: Track, title: String) {
-    radio_from_seeds(core, vec![track], HashSet::new(), title, false);
+    radio_from_seeds(core, vec![track], HashSet::new(), title, false, true);
 }
 
 /// "Add songs" panel: songs similar to the playlist's own, minus what is in it.
