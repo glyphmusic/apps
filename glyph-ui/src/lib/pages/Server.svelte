@@ -21,6 +21,7 @@
   import Field from "../settings/Field.svelte";
   import Tog from "../settings/Tog.svelte";
   import { whenMs } from "../settings/util";
+  import { platformIconFor } from "../connect";
   import BackPill from "./lists/BackPill.svelte";
   import Tile from "./stats/Tile.svelte";
   import Donut from "./server/Donut.svelte";
@@ -436,7 +437,7 @@
         {/each}
         {#each detail.devices as d (d.id)}
           <div class="dev">
-            <Icon name="smartphone" size={14} color="var(--dim)" />
+            <Icon name={platformIconFor(d.platform, d.name)} size={14} color="var(--dim)" />
             <span class="dn trunc">{d.name}</span>
             {#if d.app_version}<span class="badge sm mono">v{d.app_version}</span>{/if}
             <span class="dm">{d.platform} · {whenMs(d.last_seen, t, tf)}</span>

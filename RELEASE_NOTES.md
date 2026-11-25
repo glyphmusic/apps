@@ -1,5 +1,5 @@
-# Glyph 0.13.10 - 2026-11-25
+# Glyph 0.13.11 - 2026-11-25
 
-- **Song radio as a playlist**: a radio started from a song empties the queue and plays only the radio. Its songs are saved as a playlist "Song radio · <song>" that you can keep or delete.
+- **Device icons**: in the server dashboard each device shows its own icon (phone, computer, laptop or browser) instead of a phone for all of them.
 
 See CHANGELOG.md for the complete changes.

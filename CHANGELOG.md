@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.11 - 2026-11-25
+
+### Fixed
+
+- **Device icons in the server dashboard**: each signed-in device now shows its own icon (phone, computer, laptop or browser for Glyph Web) instead of a phone for all of them.
+
 ## 0.13.10 - 2026-11-25
 
 ### Changed

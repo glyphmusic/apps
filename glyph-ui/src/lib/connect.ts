@@ -30,9 +30,10 @@ export const platformIcon = (platform?: string) => platformIconFor(platform);
 
 export function platformIconFor(platform?: string, name?: string): string {
   const p = (platform ?? "").toLowerCase();
-  if (p === "android" || p === "ios") return "smartphone";
-  if (p === "web" || p === "browser") return "globe";
   const n = (name ?? "").toLowerCase();
+  // Glyph Web reports the OS it runs on, so its name tells it apart.
+  if (p === "web" || p === "browser" || n.startsWith("glyph web")) return "globe";
+  if (p === "android" || p === "ios") return "smartphone";
   if (p === "macos" || n.includes("macbook") || n.includes("laptop") || n.includes("thinkpad")) return "laptop";
   return "monitor";
 }
