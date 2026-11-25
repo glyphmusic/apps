@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **See a plugin before you use it**: a plugin's page now shows its app icon, the icons it replaces, its background pictures and its startup animation. Plugins with their own app icon show it in the list too.
+- **Plugin warnings**: a plugin's page (and the warning before you install it) lists your own settings it replaces while it is on, like the background, font or app icon. When two plugins change the same thing, both say "Plugin conflict" and which one wins (the one whose name comes first). Turn one off to choose.
+
+### Fixed
+
+- **Plugin corners**: a look's corner roundness now changes the corners of the whole interface, not only a few panels. The plugin page says how round, compared to Glyph's.
+- **Plugin app icons, startup animations and layouts missing**: plugins installed with an older Glyph lost the parts that Glyph did not know yet. Glyph now installs them again in full by itself.
+- **Plugin texts**: when two plugins replace the same text, the one whose name comes first wins, like for the rest of a look.
+
 ## 0.13.6 - 2026-11-25
 
 ### Added

@@ -28,6 +28,7 @@
   import RiskNote from "./RiskNote.svelte";
   import { tip } from "../ui.svelte";
   import { sui } from "./settings.svelte";
+  import { pluginConflicts } from "./plugins-state.svelte";
   import { pl, loadPlugins, refreshCatalog, pluginUpdates, installPlugin, uninstallPlugin, setEnabled, reloadPlugins, showPlugin, themeId, findInstalled, newer, isHeld, atVersion } from "./plugins-state.svelte";
   import { setTab } from "./settings.svelte";
   import { isMobile, openUrl } from "./util";
@@ -77,6 +78,8 @@
     let s = metaLine(p, !p.checked && !p.local);
     if (p.local) s += ` · ${t("plugins.local")}`;
     if (isHeld(p.id)) s += ` · ${t("plugins.held.short")}`;
+    const lost = p.enabled && (p.kind !== "theme" || curTheme === themeId(p.id)) ? pluginConflicts(p).find((c) => !c.wins) : undefined;
+    if (lost) s = `${tf("plugins.conflict.short", { name: lost.other.name })} · ${s}`;
     if (p.missing_credentials) s = `${t("plugins.setup.needed")} · ${s}`;
     if (p.stopped && p.enabled) s = `${t("plugins.stopped_short")} · ${s}`;
     else if (!p.enabled && p.kind !== "theme") s = `${t("plugins.off")} · ${s}`;
@@ -97,7 +100,7 @@
 {#snippet prow(m: PluginListing | PluginInstalled, status: string, installed: boolean)}
   <div class="srow pr">
     <button class="open" onclick={() => showPlugin(m.id)}>
-      <PluginPreview theme={m.theme} size={28} />
+      <PluginPreview theme={m.theme} size={28} icon={m.look?.preview?.app_icon} />
       <span class="px"><span class="pn">{m.name}</span><span class="ps">{status}</span></span>
     </button>
     <div class="pc">{#if installed}{@render ictl(m as PluginInstalled)}{:else}{@render listingControls(m)}{/if}</div>
@@ -229,7 +232,7 @@
             {#each pl.unfit as p (p.id)}
               <div class="srow pr">
                 <button class="open" onclick={() => showPlugin(p.id)}>
-                  <PluginPreview theme={p.theme} size={28} />
+                  <PluginPreview theme={p.theme} size={28} icon={p.look?.preview?.app_icon} />
                   <span class="px"><span class="pn">{p.name}</span><span class="ps">{pausedStatus(p)}</span></span>
                 </button>
                 <div class="pc">
