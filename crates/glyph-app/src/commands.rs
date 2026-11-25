@@ -1802,9 +1802,23 @@ pub async fn lyrics(core: C<'_>, track: Track) -> Res<Option<Value>> {
     Ok(b.lyrics(&track).await.map_err(err)?.map(|l| dto::lyrics(&l, offset)))
 }
 
+/// A cover already on this device (downloaded songs, local files, the cover
+/// cache). Never waits for the network, so the UI asks it before queueing.
+pub fn cover_local(core: C, track: Track) -> Option<String> {
+    let b = core.backend()?;
+    b.cover_on_disk(&track).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Error text when the server asked us to slow down: `cover_busy:<ms>`. The UI
+/// then tries again quietly after that time instead of showing "no cover".
+pub const COVER_BUSY: &str = "cover_busy";
+
 pub async fn cover_path(core: C<'_>, track: Track) -> Res<Option<String>> {
     let b = core.backend_or_err()?;
     let Some(res) = b.cover_with_meta(&track).await.map_err(err)? else {
+        if let Some(wait) = b.covers_busy_for() {
+            return Err(format!("{COVER_BUSY}:{}", wait.as_millis()));
+        }
         return Ok(None);
     };
     if res.album.is_some() || res.cover_url.is_some() {

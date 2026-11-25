@@ -187,6 +187,24 @@ impl CoverCache {
         }
     }
 
+    /// How long the server still asks us to wait (after a "too many requests").
+    pub fn busy_for(&self) -> Option<Duration> {
+        let now = std::time::Instant::now();
+        let g = self.server_cooldown_until.lock().unwrap_or_else(|e| e.into_inner());
+        g.filter(|until| *until > now).map(|until| until - now)
+    }
+
+    /// The cover already on disk, without asking the network. `None` when it is
+    /// missing, broken, or not square (those go through [`Self::get_with_meta`]).
+    pub fn cached(&self, track: &Track) -> Option<PathBuf> {
+        let path = self.path_for(&paths::hash_hex(&track_key(track)));
+        if !path.is_file() || cached_truncated(&path) || !is_roughly_square(&path) {
+            return None;
+        }
+        touch(&path);
+        Some(path)
+    }
+
     fn note_rate_limit(&self, retry_after_s: Option<u64>, is_abuse_block: bool) {
         let default_s = if is_abuse_block { 900 } else { SERVER_RATE_LIMIT_DEFAULT_SECS };
         let secs = retry_after_s.unwrap_or(default_s).clamp(5, 900);
@@ -1063,5 +1081,40 @@ mod tests {
         assert!(cache.note_server_error(&hard_block));
         let until = cache.server_cooldown_until.lock().unwrap().unwrap();
         assert!(until.saturating_duration_since(std::time::Instant::now()) >= std::time::Duration::from_secs(850));
+        // The UI is told how long to wait before asking again.
+        assert!(cache.busy_for().unwrap() >= std::time::Duration::from_secs(850));
+    }
+
+    #[test]
+    fn cached_cover_is_found_without_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CoverCache::new(dir.path().to_path_buf(), reqwest::Client::new(), Arc::new(Providers::default()));
+        assert!(cache.busy_for().is_none());
+        let song = Track {
+            id: "d1".into(),
+            source: ProviderId::Deezer,
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: None,
+            duration_ms: None,
+            cover_url: None,
+            isrc: None,
+            permalink: None,
+            external_ids: Default::default(),
+            explicit: false,
+        };
+        assert!(cache.cached(&song).is_none());
+        let path = cache.path_for(&paths::hash_hex(&track_key(&song)));
+        let save = |w: u32, h: u32| {
+            let img = image::RgbImage::from_pixel(w, h, image::Rgb([10, 20, 30]));
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+            std::fs::write(&path, jpeg).unwrap();
+        };
+        save(32, 32);
+        assert_eq!(cache.cached(&song), Some(path.clone()));
+        // A wide YouTube picture still goes through the full lookup (for an upgrade).
+        save(64, 36);
+        assert!(cache.cached(&song).is_none());
     }
 }

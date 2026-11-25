@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- **Covers in long playlists**: when the server asks Glyph to slow down while you scroll, covers keep loading in the background and show up as soon as the server allows it again, instead of a music note for half a minute. Each new try waits a little longer, and rows you scrolled past are no longer asked for. Downloaded songs and covers that are already saved show right away without waiting in line.
 - **Plugin corners**: a look's corner roundness now changes the corners of the whole interface, not only a few panels. The plugin page says how round, compared to Glyph's.
 - **Plugin app icons, startup animations and layouts missing**: plugins installed with an older Glyph lost the parts that Glyph did not know yet. Glyph now installs them again in full by itself.
 - **Plugin texts**: when two plugins replace the same text, the same one wins as for the rest of a look.
