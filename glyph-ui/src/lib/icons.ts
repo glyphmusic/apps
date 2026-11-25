@@ -4,17 +4,32 @@
 // translucent tokens like `--dim` or `--faint`) is applied.
 const files = import.meta.glob("$assets/icons/ui/*.svg", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
+/** `src` without `<!-- … -->` comments; an unclosed one cuts off the rest.
+ *  Repeats until none is left, so joined pieces cannot form a new one. */
+function stripComments(src: string): string {
+  let s = src;
+  while (s.includes("<!--")) s = stripOnce(s);
+  return s;
+}
+
+function stripOnce(src: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const start = src.indexOf("<!--", i);
+    if (start < 0) return out + src.slice(i);
+    out += src.slice(i, start);
+    const end = src.indexOf("-->", start + 4);
+    if (end < 0) return out;
+    i = end + 3;
+  }
+}
+
 const icons: Record<string, string> = {};
 const masks: Record<string, string> = {};
 for (const [path, src] of Object.entries(files)) {
   const name = path.split("/").pop()!.replace(/\.svg$/, "");
-  // Repeat until nothing is left, so nested or broken comments cannot slip through.
-  let clean = src;
-  for (let prev = ""; prev !== clean; ) {
-    prev = clean;
-    clean = clean.replace(/<!--[\s\S]*?-->/g, "").replace(/<!--/g, "");
-  }
-  clean = clean.trim();
+  const clean = stripComments(src).trim();
   // Size only the outer <svg>; rects inside keep their width / height.
   icons[name] = clean.replace(/<svg\b[^>]*>/, (tag) =>
     tag.replace(/\s(width|height|class)="[^"]*"/g, "").replace("<svg", '<svg aria-hidden="true" width="100%" height="100%"'),
