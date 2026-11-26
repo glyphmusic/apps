@@ -34,20 +34,31 @@
     }
     if (f <= 1) {
       out.push({ list: { kind: "liked" }, sub: `${pl} · ${tf("common.n_songs", { n: app.library.liked.length })}` });
+      if (f === 0 && app.library.recent.length) out.push({ list: { kind: "recent" }, sub: pl });
+      if (f === 0 && app.library.downloads.length) out.push({ list: { kind: "downloads" }, sub: `${pl} · ${tf("common.n_songs", { n: app.library.downloads.length })}` });
       for (const p of app.library.playlists) {
         if (inFolder.has(p.id)) continue;
         out.push({ list: { kind: "playlist", id: p.id }, sub: `${pl} · ${tf("common.n_songs", { n: p.tracks.length })}` });
       }
     }
     if (f === 0 || f === 2) for (const a of app.library.saved_albums) out.push({ list: a, sub: a.kind === "album" ? `${t("list.kind.album")} · ${a.artist}` : t("list.kind.album") });
+    // Pinned lists show here too, as in the sidebar on a computer (an album
+    // pinned without saving it, Recent or Downloads under a filter, ...).
+    if (f === 0) for (const p of app.library.pinned) {
+      if (p.kind === "playlist" && inFolder.has(p.id)) continue;
+      if (out.some((x) => sameList(x.list, p))) continue;
+      const n = app.listTracks(p).length;
+      out.push({ list: p, sub: p.kind === "album" ? `${t("list.kind.album")} · ${p.artist}` : `${pl} · ${tf("common.n_songs", { n })}` });
+    }
     const rank = (l: ListKey) => { const i = app.library.pinned.findIndex((p) => sameList(p, l)); return i < 0 ? 1e9 : i; };
     return out.sort((a, b) => rank(a.list) - rank(b.list));
   });
   const artists = $derived(!folder && (f === 0 || f === 3) ? app.library.followed : []);
-  // Liked Songs and pinned lists stay above the folders.
+  // Liked Songs, Recent, Downloads and pinned lists stay above the folders.
   const headN = $derived.by(() => {
     if (folder) return 0;
-    const i = lists.findIndex((x) => x.list.kind !== "liked" && !app.isPinned(x.list));
+    const head = new Set(["liked", "recent", "downloads"]);
+    const i = lists.findIndex((x) => !head.has(x.list.kind) && !app.isPinned(x.list));
     return i < 0 ? lists.length : i;
   });
   function folderMenu(e: MouseEvent, id: string) {

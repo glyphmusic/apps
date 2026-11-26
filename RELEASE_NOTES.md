@@ -3,5 +3,6 @@
 - **No connection bar**: a thin bar at the bottom says when you are offline and offers your downloaded songs.
 - **Saved music when offline** (phone): a sheet lists Downloads and every playlist with downloaded songs.
 - **Folders on the phone**: a new "New folder" button in the library.
+- **Phone library**: Recently played, Downloads and pinned lists now show there too.
 
 See CHANGELOG.md for the complete changes.

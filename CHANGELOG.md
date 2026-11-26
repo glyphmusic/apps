@@ -10,6 +10,7 @@
 ### Fixed
 
 - **Folders on the phone**: the library now has a "New folder" button next to "New playlist", so you can make folders on the phone too.
+- **Phone library**: Recently played, Downloads and pinned lists now show in the library on the phone too, like on the computer.
 
 ## 0.14.1 - 2026-11-26
 
