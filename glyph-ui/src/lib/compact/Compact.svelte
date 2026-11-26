@@ -20,6 +20,9 @@
   import IconAction from "./IconAction.svelte";
   import TabBar from "./TabBar.svelte";
   import MiniBar from "./MiniBar.svelte";
+  import OfflineBar from "../shell/OfflineBar.svelte";
+  import OfflineSheet from "./OfflineSheet.svelte";
+  import { offline } from "../offline.svelte";
   import Drawer from "./Drawer.svelte";
   import PhoneLibrary from "./PhoneLibrary.svelte";
   import PhoneListView from "./PhoneListView.svelte";
@@ -247,7 +250,8 @@
     <Header title={t("nav.library")}>
       {#snippet actions()}
         <IconAction name="search" onclick={() => app.navigate("search")} />
-        <IconAction name="plus" onclick={() => (app.nameDialog = { tracks: [] })} />
+        <IconAction name="folder-plus" label={t("library.folder.new")} onclick={() => app.newFolder()} />
+        <IconAction name="plus" label={t("library.playlist.new")} onclick={() => (app.nameDialog = { tracks: [] })} />
       {/snippet}
     </Header>
   {:else}
@@ -303,6 +307,7 @@
   <div class="bottom" class:has-mini={!!app.player.current} bind:offsetHeight={phone.bottomH}>
     {#if app.player.current}<MiniBar />{/if}
     <TabBar />
+    <div class="offrow"><OfflineBar phone /></div>
   </div>
 </div>
 
@@ -310,6 +315,7 @@
 {#if phone.lyricsOpen && app.player.current}<LyricsView />{/if}
 {#if phone.videoPickerOpen && app.player.current}<VideoPickerSheet />{/if}
 {#if app.showQueue || app.showDevices}<BottomSheet />{/if}
+{#if offline.sheetOpen}<OfflineSheet />{/if}
 {#if phone.drawerOpen}<Drawer />{/if}
 {#if app.settingsOpen}<SettingsScreen />{/if}
 {#if app.shareSheet}<ShareSheet />{/if}
@@ -350,5 +356,7 @@
   .tail.with-mini { height: calc(150px + var(--safe-bottom, env(safe-area-inset-bottom))); }
   .bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 6px 10px calc(6px + var(--safe-bottom, env(safe-area-inset-bottom))); display: flex; flex-direction: column; gap: 8px; pointer-events: none; background: linear-gradient(to bottom, rgba(10, 10, 10, 0), rgba(10, 10, 10, .55) 60%, rgba(10, 10, 10, .75)); }
   .bottom > :global(*) { pointer-events: auto; }
+  .offrow { margin: 0 -10px calc(-6px - var(--safe-bottom, env(safe-area-inset-bottom))); padding-bottom: var(--safe-bottom, env(safe-area-inset-bottom)); background: hsla(0, 0%, 6%, .98); }
+  .offrow:empty { display: none; }
   .admin-role { flex: none; max-width: 46%; height: 26px; padding: 0 10px; border-radius: 13px; background: rgba(255, 255, 255, .08); display: inline-flex; align-items: center; font-size: var(--xs); color: var(--dim); }
 </style>

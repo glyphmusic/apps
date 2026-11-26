@@ -17,6 +17,7 @@
   import Titlebar from "./lib/shell/Titlebar.svelte";
   import Sidebar from "./lib/shell/Sidebar.svelte";
   import PlayerBar from "./lib/shell/PlayerBar.svelte";
+  import OfflineBar from "./lib/shell/OfflineBar.svelte";
   import Toasts from "./lib/shell/Toasts.svelte";
   import TooltipLayer from "./lib/shell/TooltipLayer.svelte";
   import RightPanel from "./lib/shell/RightPanel.svelte";
@@ -384,6 +385,7 @@
       {#if showBar}
         <div class="barslot" transition:slide={{ duration: 250 }}><PlayerBar /></div>
       {/if}
+      <OfflineBar />
     </div>
     {#if app.settingsOpen}<SettingsModal />{/if}
   {/if}
@@ -413,6 +415,7 @@
   .sash:hover::after, .sash.on::after { opacity: 1; transform: translate(-50%, -50%) scaleY(1); }
   .sash.on::after { height: 56px; background: var(--accent); }
   .barslot { flex: none; padding: var(--gap); }
+
   .fatal { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
   .ftb { flex: none; height: var(--titlebar-h); padding: 0 8px 0 18px; display: flex; align-items: center; gap: 4px; }
   .ftb.mac { padding-left: 84px; }

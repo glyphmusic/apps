@@ -6,6 +6,7 @@ import { pwa } from "../pwa.svelte";
 import { cornerK } from "../corners";
 import { cancelWarning, closeDetail, pl } from "../settings/plugins-state.svelte";
 import { back as migrateBack, mg } from "../settings/migrate-state.svelte";
+import { offline } from "../offline.svelte";
 
 // Phone layout state (compact.rs / compact/now_playing.rs): Now Playing is a
 // sheet over the page (it never enters the back history), lyrics open full
@@ -413,6 +414,7 @@ export function installAndroidBack() {
     if (app.onboarding) { app.onboarding = false; return true; }
     if (app.ctx || app.controlMenu) { app.closeMenus(); return true; }
     if (app.jamOpen) { app.jamOpen = false; return true; }
+    if (offline.sheetOpen) { offline.sheetOpen = false; return true; }
     if (phone.drawerOpen) { phone.drawerOpen = false; return true; }
     if (phone.lyricsOpen) { phone.lyricsOpen = false; return true; }
     if (app.settingsOpen) { settingsBack(); return true; }

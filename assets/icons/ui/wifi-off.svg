@@ -1,0 +1,10 @@
+<!-- Glyph icon set, see docs/ICONS.md -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.5 9a14 14 0 0 1 5-3"/>
+  <path d="M12 5.5a14 14 0 0 1 9.5 3.5"/>
+  <path d="M6 12.6a8.5 8.5 0 0 1 4-2.1"/>
+  <path d="M15.5 11.4a8.5 8.5 0 0 1 2.5 1.2"/>
+  <path d="M9.4 16a4 4 0 0 1 5.2 0"/>
+  <circle cx="12" cy="19.5" r="1.5" fill="currentColor" stroke="none"/>
+  <path d="M3.5 3.5l17 17"/>
+</svg>
