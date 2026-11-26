@@ -127,7 +127,8 @@ pub fn by_artist(track_artist: &str, name: &str) -> bool {
         return true;
     }
     let n_lower = n.to_lowercase();
-    if track_artist.trim().to_lowercase() == n_lower {
+    let n_squash = squash(n);
+    if track_artist.trim().to_lowercase() == n_lower || (!n_squash.is_empty() && squash(track_artist) == n_squash) {
         return true;
     }
     let mut parts = vec![track_artist];
@@ -136,7 +137,9 @@ pub fn by_artist(track_artist: &str, name: &str) -> bool {
     }
     parts.into_iter().any(|p| {
         let p = p.trim();
-        p.eq_ignore_ascii_case(n) || p.to_lowercase() == n_lower
+        p.eq_ignore_ascii_case(n)
+            || p.to_lowercase() == n_lower
+            || (!n_squash.is_empty() && squash(p) == n_squash)
     })
 }
 
@@ -290,7 +293,8 @@ pub fn prefer_cover(into: &mut Option<String>, incoming: &Option<String>) {
 /// Merges `incoming` into `into` (same song): records the other source id and
 /// fills missing metadata.
 pub fn merge_track(into: &mut Track, incoming: &Track) {
-    into.explicit |= incoming.explicit;
+    let merged_rating = into.rating().merge(incoming.rating());
+    let keep_rating = into.explicit_rating.is_some() || incoming.explicit_rating.is_some();
     if incoming.source != into.source {
         into.external_ids.entry(incoming.source).or_insert_with(|| incoming.id.clone());
     }
@@ -298,6 +302,9 @@ pub fn merge_track(into: &mut Track, incoming: &Track) {
         if *p != into.source {
             into.external_ids.entry(*p).or_insert_with(|| id.clone());
         }
+    }
+    if merged_rating != into.rating() || keep_rating || merged_rating == glyph_protocol::ExplicitRating::Explicit {
+        into.set_rating(merged_rating);
     }
     if into.album.is_none() {
         into.album = incoming.album.clone();
@@ -388,7 +395,7 @@ pub(crate) fn test_track(
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     }
 }
 

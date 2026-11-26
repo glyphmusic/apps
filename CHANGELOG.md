@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.1 - 2026-11-26
+
+### Fixed
+
+- **Reliable Explicit & unknown ratings**: songs now carry a three-state explicit rating (Explicit, Clean, Unknown `?`) across Deezer, Apple Music/iTunes and lyrics scanning, so songs with explicit lyrics no longer appear clean and unrated uploads keep their `?` marker reliably (including when merged across providers or filtered by enabled sources).
+- **Consistent artist verification**: verified badges now come from service-level signals instead of arbitrary fan-count cutoffs, batch-resolve through the server without rate-limit flicker, never cache temporary lookup errors as unverified, and show consistently everywhere artists appear (artist pages, similar artists, search, home, library, taste, profile, stats and recap).
+- **Complete artist pages & full song catalogs**: artist pages now show the server-cached full catalog, real total song count, genre tags, external links, related artist portraits and stepped song expansion instead of stopping at a handful of songs, and work consistently in the desktop, mobile and web apps.
+
 ## 0.14.0 - 2026-11-25
 
 ### Added

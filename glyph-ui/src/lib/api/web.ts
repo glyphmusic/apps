@@ -10,10 +10,10 @@
 import type { Backend } from "./backend";
 import type { StatsRange } from "../pages/stats/types";
 import type {
-  ArtistInfo, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, HomeTop, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
-  RecentItem, Release, SearchResults, Snapshot, Track,
+  ArtistInfo, ArtistMetaItem, ArtistPage, BackendEvents, BackendState, Config, HomeFeeds, HomeTop, Library, ListKey, Lyrics, PlayerState, ProviderId, QueueState,
+  Rating, RecentItem, Release, ReleaseKind, SearchResults, Snapshot, Track,
 } from "./types";
-import { PROVIDER_NAME, isYoutubeCover, primaryArtist, sameList, trackKey } from "./types";
+import { PROVIDER_NAME, isYoutubeCover, primaryArtist, rating as trackRating, sameList, trackKey } from "./types";
 import { WebAccountManager } from "./web-account";
 import { WebConnectManager } from "./web-connect";
 import { WebMcpManager } from "./web-mcp";
@@ -107,6 +107,12 @@ const wire = <T>(v: T): T => (v === undefined ? v : (JSON.parse(JSON.stringify(v
 const norm = (s: string) => s.trim().toLowerCase();
 const shuffled = <T>(a: T[]) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
 
+function mergeRating(a: Rating, b: Rating): Rating {
+  if (a === "explicit" || b === "explicit") return "explicit";
+  if (a === "clean" || b === "clean") return "clean";
+  return "unknown";
+}
+
 /** Same song from several providers: one row, all ids kept (dedupe::merge). */
 function mergeInto(list: Track[], add: Track[]): Track[] {
   const at = new Map(list.map((t, i) => [trackKey(t), i]));
@@ -115,12 +121,22 @@ function mergeInto(list: Track[], add: Track[]): Track[] {
     const i = at.get(k);
     if (i == null) { at.set(k, list.length); list.push(t); continue; }
     const cur = list[i];
+    const mergedRating = mergeRating(trackRating(cur), trackRating(t));
     const ids = { ...(t.external_ids ?? {}), ...(cur.external_ids ?? {}) };
     if (t.source !== cur.source) ids[t.source] = t.id;
     const cover_url = (!cur.cover_url || (isYoutubeCover(cur.cover_url) && t.cover_url && !isYoutubeCover(t.cover_url)))
       ? (t.cover_url ?? cur.cover_url)
       : cur.cover_url;
-    list[i] = { ...cur, external_ids: ids, cover_url, album: cur.album ?? t.album, duration_ms: cur.duration_ms ?? t.duration_ms, isrc: cur.isrc ?? t.isrc, explicit: cur.explicit || t.explicit };
+    list[i] = {
+      ...cur,
+      external_ids: ids,
+      cover_url,
+      album: cur.album ?? t.album,
+      duration_ms: cur.duration_ms ?? t.duration_ms,
+      isrc: cur.isrc ?? t.isrc,
+      explicit: mergedRating === "explicit",
+      explicit_rating: mergedRating,
+    };
   }
   return list;
 }
@@ -175,6 +191,7 @@ export class WebBackend implements Backend {
   private search: { query: string; page: number; results: SearchResults; abort: AbortController } | null = null;
   private home: { at: number; feeds: HomeFeeds } | null = null;
   private artists = new Map<string, ArtistPage>();
+  private artistMetaCache = new Map<string, ArtistMetaItem>();
   private lyricsOffsets: Record<string, number>;
   private stats: WebStats;
   private tasteStore: LocalTasteStore;
@@ -1328,35 +1345,110 @@ export class WebBackend implements Backend {
     if (!k) return { name, tracks: [], loading: false, similar: [], releases: [], info: null };
     const hit = this.artists.get(k);
     if (hit) return hit;
-    const [all, infoRes] = await Promise.all([
-      this.searchAll(name),
-      server.artist(name, this.config.language || "en").catch(() => null),
-    ]);
-    const tracks = all.filter((t) => norm(primaryArtist(t.artist)) === k || norm(t.artist).includes(k));
-    const similar = tracks[0]
-      ? await server.similar(name, tracks[0].title).then((s) => [...new Set(s.map((t) => primaryArtist(t.artist)).filter((a) => norm(a) !== k))].slice(0, 8), () => [] as string[])
-      : [];
+    const infoRes = await server.artist(name, this.config.language || "en").catch(() => null);
+    let tracks: Track[] = infoRes?.top?.length ? infoRes.top : [];
+    if (!tracks.length) {
+      const all = await this.searchAll(name);
+      tracks = all.filter((t) => norm(primaryArtist(t.artist)) === k || norm(t.artist).includes(k));
+    }
+    const similarArtists: ArtistMetaItem[] = (infoRes?.similar_artists ?? []).filter((a) => norm(a.name) !== k);
+    for (const sim of similarArtists) {
+      const sk = norm(primaryArtist(sim.name));
+      if (sk && (sim.verified != null || sim.photo)) {
+        const prev = this.artistMetaCache.get(sk);
+        this.artistMetaCache.set(sk, {
+          name: sim.name,
+          photo: sim.photo ?? prev?.photo ?? null,
+          verified: sim.verified ?? prev?.verified ?? null,
+        });
+      }
+    }
+    const similar = infoRes?.similar?.length
+      ? infoRes.similar.filter((a) => norm(a) !== k)
+      : tracks[0]
+        ? await server.similar(name, tracks[0].title).then((s) => [...new Set(s.map((t) => primaryArtist(t.artist)).filter((a) => norm(a) !== k))].slice(0, 12), () => [] as string[])
+        : [];
+    const parseKind = (raw?: string | null): ReleaseKind => {
+      const s = (raw ?? "").toLowerCase();
+      if (s === "ep") return "ep";
+      if (s === "single") return "single";
+      if (s === "compile" || s === "compilation") return "compilation";
+      return "album";
+    };
+    const releases: Release[] = infoRes?.releases?.length
+      ? infoRes.releases.map((r) => ({
+          id: r.id,
+          title: r.title,
+          artist: infoRes.name || name,
+          kind: parseKind(r.record_type),
+          year: r.released ? Number(r.released.slice(0, 4)) || null : null,
+          date: r.released ?? null,
+          cover_url: r.cover_url ?? null,
+          tracks: r.tracks ?? null,
+        }))
+      : albumsOf(tracks, name);
     const photo = infoRes?.photo ?? infoRes?.banner ?? tracks.find((t) => t.cover_url)?.cover_url ?? null;
     const banner = infoRes?.banner ?? infoRes?.photo ?? photo;
     const info: ArtistInfo = {
       name: infoRes?.name ?? name,
       bio: infoRes?.bio ?? null,
-      photo: banner ?? photo,
+      photo,
+      banner,
       fans: infoRes?.fans ?? null,
       verified: Boolean(infoRes?.verified),
+      total_songs: infoRes?.total_songs ?? (tracks.length || null),
+      total_releases: infoRes?.total_releases ?? (releases.length || null),
       listeners: null,
       tags: infoRes?.tags ?? [],
       links: infoRes?.links ?? (infoRes?.url ? [{ label: "Wikipedia", url: infoRes.url }] : []),
     };
-    if (banner) {
-      (info as any).banner = banner;
+    if (infoRes) {
+      this.artistMetaCache.set(k, { name: info.name, photo: info.photo ?? null, verified: Boolean(info.verified) });
     }
     const page: ArtistPage = {
-      name, tracks, loading: false, similar, releases: albumsOf(tracks, name),
+      name: info.name || name,
+      tracks,
+      loading: false,
+      similar,
+      similar_artists: similarArtists,
+      releases,
       info,
     };
     this.artists.set(k, page);
     return page;
+  }
+
+  private async fetchArtistsMeta(names: string[]): Promise<ArtistMetaItem[]> {
+    const out: ArtistMetaItem[] = [];
+    const missing: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of names) {
+      const n = primaryArtist(String(raw)).trim();
+      const k = norm(n);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      const pg = this.artists.get(k);
+      if (pg?.info) {
+        out.push({ name: n, photo: pg.info.photo ?? null, verified: Boolean(pg.info.verified) });
+        continue;
+      }
+      const hit = this.artistMetaCache.get(k);
+      if (hit && hit.verified != null) {
+        out.push({ name: n, photo: hit.photo ?? null, verified: hit.verified });
+      } else {
+        missing.push(n);
+      }
+    }
+    if (!missing.length) return out;
+    const resp = await server.artistsMeta(missing).catch(() => null);
+    for (const item of resp?.items ?? []) {
+      const k = norm(primaryArtist(item.name));
+      if (k && item.verified != null) {
+        this.artistMetaCache.set(k, item);
+      }
+      out.push(item);
+    }
+    return out;
   }
 
   private async albumTracks(title: string, artist: string): Promise<Track[]> {
@@ -1856,8 +1948,19 @@ export class WebBackend implements Backend {
       search_more: (a) => this.runSearch(String(a.query), (this.search && this.search.query === a.query ? this.search.page : 0) + 1, true),
       home: () => this.homeFeeds(),
       artist: (a) => this.artistPage(String(a.name)),
-      artist_photo: (a) => this.artists.get(norm(String(a.name)))?.info?.photo ?? null,
-      artist_verified: (a) => Boolean(this.artists.get(norm(String(a.name)))?.info?.verified),
+      artist_photo: async (a) => {
+        const name = String(a.name);
+        const k = norm(primaryArtist(name));
+        const direct = this.artists.get(k)?.info?.photo ?? this.artistMetaCache.get(k)?.photo;
+        if (direct) return direct;
+        const items = await this.fetchArtistsMeta([name]);
+        return items[0]?.photo ?? null;
+      },
+      artist_verified: async (a) => {
+        const items = await this.fetchArtistsMeta([String(a.name)]);
+        return Boolean(items[0]?.verified);
+      },
+      artists_meta: (a) => this.fetchArtistsMeta(Array.isArray(a.names) ? a.names.map(String) : []),
       album: (a) => this.albumTracks(String(a.title), String(a.artist)),
       album_meta: () => null,
       lyrics: (a) => this.lyrics(a.track),

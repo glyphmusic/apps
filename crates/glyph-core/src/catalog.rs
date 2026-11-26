@@ -1,17 +1,15 @@
-//! Catalog facts for artist and album pages from Deezer's public API (no key):
-//! fan count + "verified" for artists, release year + type for albums.
-//!
-//! "Verified" means the name has an official artist profile in the catalog
-//! (exact name match with a real audience), not a user upload.
+//! Catalog facts for artist and album pages (direct/offline fallback when no
+//! Glyph server is configured): fan count, service-based artist verification
+//! (no arbitrary fan-count cutoff), and album release year + type.
 
 use crate::dedupe::normalize_artist;
 use crate::provider::send_json;
 use anyhow::Result;
 use serde::Deserialize;
 
-const API: &str = "https://api.deezer.com";
-/// Fans needed before a matching profile counts as the official one.
-const VERIFIED_FANS: u64 = 1000;
+const DEEZER_API: &str = "https://api.deezer.com";
+const AUDIUS_API: &str = "https://api.audius.co/v1";
+const ITUNES_API: &str = "https://itunes.apple.com";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtistStats {
@@ -66,6 +64,14 @@ struct DArtist {
     name: String,
     #[serde(default)]
     nb_fan: u64,
+    #[serde(default)]
+    nb_album: Option<u64>,
+    #[serde(default)]
+    picture_xl: Option<String>,
+    #[serde(default)]
+    picture_big: Option<String>,
+    #[serde(default)]
+    picture_medium: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,17 +93,137 @@ struct DAlbum {
     record_type: Option<String>,
 }
 
-fn pick_artist(hits: Vec<DArtist>, name: &str) -> Option<ArtistStats> {
+#[derive(Deserialize)]
+struct AudiusUser {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    is_verified: bool,
+}
+
+#[derive(Deserialize)]
+struct ItunesResp {
+    #[serde(default)]
+    results: Vec<ItunesArtist>,
+}
+
+#[derive(Deserialize)]
+struct ItunesArtist {
+    #[serde(rename = "artistName", default)]
+    artist_name: String,
+}
+
+fn pick_deezer_artist(hits: Vec<DArtist>, name: &str) -> Option<DArtist> {
     let want = normalize_artist(name);
+    if want.is_empty() {
+        return None;
+    }
     hits.into_iter()
         .filter(|a| normalize_artist(&a.name) == want)
-        .max_by_key(|a| a.nb_fan)
-        .map(|a| ArtistStats { fans: a.nb_fan, verified: a.nb_fan >= VERIFIED_FANS })
+        .max_by_key(|a| (a.nb_album.unwrap_or(0) > 0, a.nb_fan))
+}
+
+fn evaluate_service_verified(
+    audius_verified: Option<bool>,
+    deezer_official: Option<bool>,
+    itunes_official: Option<bool>,
+) -> Option<bool> {
+    if audius_verified == Some(true) {
+        return Some(true);
+    }
+    let confirmations = usize::from(deezer_official == Some(true)) + usize::from(itunes_official == Some(true));
+    if confirmations >= 2 {
+        return Some(true);
+    }
+    let answered = usize::from(audius_verified.is_some())
+        + usize::from(deezer_official.is_some())
+        + usize::from(itunes_official.is_some());
+    if answered >= 2 {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Service-based artist verification + portrait lookup for direct/no-server mode.
+/// Returns `verified: None` on transient network/quota errors so callers never
+/// cache a temporary failure as `false`.
+pub async fn verify_artist_direct(http: &reqwest::Client, name: &str) -> glyph_protocol::ArtistMetaItem {
+    let want = normalize_artist(name);
+    if want.is_empty() {
+        return glyph_protocol::ArtistMetaItem { name: name.to_string(), photo: None, verified: Some(false) };
+    }
+    let dz_fut = send_json::<List<DArtist>>(
+        http.get(format!("{DEEZER_API}/search/artist")).query(&[("q", name), ("limit", "10")]),
+    );
+    let it_fut = send_json::<ItunesResp>(
+        http.get(format!("{ITUNES_API}/search")).query(&[("term", name), ("media", "music"), ("entity", "musicArtist"), ("limit", "6")]),
+    );
+    let au_fut = send_json::<List<AudiusUser>>(
+        http.get(format!("{AUDIUS_API}/users/search")).query(&[("query", name), ("limit", "5"), ("app_name", "glyph")]),
+    );
+    let (dz_res, it_res, au_res) = tokio::join!(dz_fut, it_fut, au_fut);
+
+    let dz_hit = dz_res.as_ref().ok().and_then(|l| {
+        l.data
+            .iter()
+            .filter(|a| normalize_artist(&a.name) == want)
+            .max_by_key(|a| (a.nb_album.unwrap_or(0) > 0, a.nb_fan))
+    });
+    let deezer_official = match &dz_res {
+        Ok(_) => Some(dz_hit.is_some_and(|a| a.nb_album.unwrap_or(1) > 0)),
+        Err(_) => None,
+    };
+    let itunes_official = match &it_res {
+        Ok(r) => Some(r.results.iter().any(|a| normalize_artist(&a.artist_name) == want)),
+        Err(_) => None,
+    };
+    let audius_verified = match &au_res {
+        Ok(l) => Some(l.data.iter().any(|u| {
+            let match_name = normalize_artist(&u.name) == want
+                || u.handle.as_deref().is_some_and(|h| normalize_artist(h) == want);
+            match_name && u.is_verified
+        })),
+        Err(_) => None,
+    };
+    let photo = dz_hit.and_then(|d| {
+        d.picture_xl
+            .clone()
+            .or_else(|| d.picture_big.clone())
+            .or_else(|| d.picture_medium.clone())
+    });
+    let verified = evaluate_service_verified(audius_verified, deezer_official, itunes_official);
+    glyph_protocol::ArtistMetaItem { name: name.to_string(), photo, verified }
 }
 
 pub async fn artist_stats(http: &reqwest::Client, name: &str) -> Result<Option<ArtistStats>> {
-    let r: List<DArtist> = send_json(http.get(format!("{API}/search/artist")).query(&[("q", name), ("limit", "5")])).await?;
-    Ok(pick_artist(r.data, name))
+    let dz_fut = send_json::<List<DArtist>>(
+        http.get(format!("{DEEZER_API}/search/artist")).query(&[("q", name), ("limit", "10")]),
+    );
+    let it_fut = send_json::<ItunesResp>(
+        http.get(format!("{ITUNES_API}/search")).query(&[("term", name), ("media", "music"), ("entity", "musicArtist"), ("limit", "6")]),
+    );
+    let au_fut = send_json::<List<AudiusUser>>(
+        http.get(format!("{AUDIUS_API}/users/search")).query(&[("query", name), ("limit", "5"), ("app_name", "glyph")]),
+    );
+    let (dz_res, it_res, au_res) = tokio::join!(dz_fut, it_fut, au_fut);
+    let dz_hit = pick_deezer_artist(dz_res?.data, name);
+    let want = normalize_artist(name);
+    let deezer_official = Some(dz_hit.as_ref().is_some_and(|a| a.nb_album.unwrap_or(1) > 0));
+    let itunes_official = it_res.ok().map(|r| r.results.iter().any(|a| normalize_artist(&a.artist_name) == want));
+    let audius_verified = au_res.ok().map(|l| {
+        l.data.iter().any(|u| {
+            let match_name = normalize_artist(&u.name) == want
+                || u.handle.as_deref().is_some_and(|h| normalize_artist(h) == want);
+            match_name && u.is_verified
+        })
+    });
+    let verified = evaluate_service_verified(audius_verified, deezer_official, itunes_official).unwrap_or(false);
+    Ok(dz_hit.map(|a| ArtistStats { fans: a.nb_fan, verified }).or_else(|| {
+        verified.then_some(ArtistStats { fans: 0, verified: true })
+    }))
 }
 
 fn squash(s: &str) -> String {
@@ -106,7 +232,7 @@ fn squash(s: &str) -> String {
 
 pub async fn album_meta(http: &reqwest::Client, title: &str, artist: &str) -> Result<Option<AlbumMeta>> {
     let q = format!("artist:\"{artist}\" album:\"{title}\"");
-    let r: List<DAlbumHit> = send_json(http.get(format!("{API}/search/album")).query(&[("q", q.as_str()), ("limit", "5")])).await?;
+    let r: List<DAlbumHit> = send_json(http.get(format!("{DEEZER_API}/search/album")).query(&[("q", q.as_str()), ("limit", "5")])).await?;
     let want_t = squash(title);
     let want_a = normalize_artist(artist);
     let Some(hit) = r.data.into_iter().find(|h| {
@@ -114,7 +240,7 @@ pub async fn album_meta(http: &reqwest::Client, title: &str, artist: &str) -> Re
     }) else {
         return Ok(None);
     };
-    let a: DAlbum = send_json(http.get(format!("{API}/album/{}", hit.id))).await?;
+    let a: DAlbum = send_json(http.get(format!("{DEEZER_API}/album/{}", hit.id))).await?;
     let kind = a
         .record_type
         .as_deref()
@@ -159,14 +285,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn verified_needs_exact_name_and_audience() {
-        let hits = vec![
-            DArtist { name: "Oliver Tree".into(), nb_fan: 812_000 },
-            DArtist { name: "Oliver Tree Fan".into(), nb_fan: 9_000_000 },
-        ];
-        assert_eq!(pick_artist(hits, "oliver tree"), Some(ArtistStats { fans: 812_000, verified: true }));
-        let small = vec![DArtist { name: "Bedroom Act".into(), nb_fan: 12 }];
-        assert_eq!(pick_artist(small, "Bedroom Act").map(|s| s.verified), Some(false));
+    fn service_verification_ignores_arbitrary_fan_counts() {
+        assert_eq!(evaluate_service_verified(Some(true), Some(false), Some(false)), Some(true));
+        assert_eq!(evaluate_service_verified(Some(false), Some(true), Some(true)), Some(true));
+        assert_eq!(evaluate_service_verified(Some(false), Some(true), Some(false)), Some(false));
+        assert_eq!(evaluate_service_verified(None, None, None), None);
     }
 
     #[test]

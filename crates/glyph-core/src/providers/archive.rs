@@ -71,7 +71,7 @@ fn doc_to_track(d: Doc) -> Track {
         duration_ms: None,
         isrc: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     }
 }
 

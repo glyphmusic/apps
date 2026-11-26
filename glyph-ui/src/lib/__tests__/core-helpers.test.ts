@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { registerListNav, currentListNav, stepRowIndex } from "../state/list-nav.svelte";
 import { compact, fmtMs, fmtTime, fmtTotal, listMeta, uniqBy } from "../fmt";
-import { listId, primaryArtist, sameList, splitArtists, trackKey, type Track } from "../api/types";
+import { listId, primaryArtist, rating, sameList, splitArtists, trackKey, type Track } from "../api/types";
+import { filterTrackByEnabled } from "../settings/sources";
 import { pruneTrackedKeys, sameTrackKeys } from "../state/cache";
 
 describe("list keyboard navigation", () => {
@@ -54,5 +55,23 @@ describe("formatters, wire types, and cache helpers", () => {
     pruneTrackedKeys(asked, dict, 2);
     expect([...asked]).toEqual(["c", "d"]);
     expect(Object.keys(dict)).toEqual(["c", "d"]);
+  });
+
+  it("evaluates tri-state explicit ratings and preserves them across source filtering", () => {
+    const yt: Track = { id: "v1", source: "youtube", title: "Song", artist: "Artist" };
+    const sc: Track = { id: "s1", source: "soundcloud", title: "Song", artist: "Artist" };
+    const dzUnknown: Track = { id: "d1", source: "deezer", title: "Song", artist: "Artist", explicit_rating: "unknown" };
+    const ytClean: Track = { id: "v2", source: "youtube", title: "Song", artist: "Artist", explicit_rating: "clean" };
+    const ytExp: Track = { id: "v3", source: "youtube", title: "Song", artist: "Artist", explicit: true };
+    expect(rating(yt)).toBe("unknown");
+    expect(rating(sc)).toBe("unknown");
+    expect(rating(dzUnknown)).toBe("unknown");
+    expect(rating(ytClean)).toBe("clean");
+    expect(rating(ytExp)).toBe("explicit");
+
+    const dzRatedYt: Track = { id: "v4", source: "youtube", title: "Song", artist: "Artist", external_ids: { deezer: "99" } };
+    const filtered = filterTrackByEnabled(dzRatedYt, ["youtube"]);
+    expect(filtered).not.toBeNull();
+    expect(rating(filtered!)).toBe("clean");
   });
 });

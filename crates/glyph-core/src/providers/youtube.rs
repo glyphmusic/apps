@@ -253,7 +253,7 @@ pub(crate) fn video_track(id: &str, raw_title: &str, channel: &str, cover: Optio
             isrc: None,
             permalink: Some(format!("https://www.youtube.com/watch?v={id}")),
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         },
         bonus,
     )

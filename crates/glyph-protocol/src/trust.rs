@@ -195,6 +195,7 @@ mod tests {
             permalink: Some("https://www.deezer.com/track/123".into()),
             external_ids: Default::default(),
             explicit: false,
+            explicit_rating: None,
         }
     }
 

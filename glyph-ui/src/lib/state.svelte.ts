@@ -5,10 +5,10 @@
 import { admin } from "./admin/admin.svelte";
 import { backend, connect, type Backend } from "./api/backend";
 import type {
-  Account, ArtistPage, BackendState, Config, Device, HomeFeeds, Library, ListKey, Lyrics, PlayerState, Playlist,
+  Account, ArtistMetaItem, ArtistPage, BackendState, Config, Device, HomeFeeds, Library, ListKey, Lyrics, PlayerState, Playlist,
   QueueState, RecentItem, ReleaseKind, RepeatMode, SearchResults, Snapshot, Track, UpdateInfo,
 } from "./api/types";
-import { listId, primaryArtist, sameList, trackKey } from "./api/types";
+import { listId, primaryArtist, rating, sameList, trackKey } from "./api/types";
 import { setLang, t, tf } from "./i18n.svelte";
 import { initPluginEvents } from "./settings/plugin-events.svelte";
 import { openPasted } from "./settings/migrate-state.svelte";
@@ -135,6 +135,7 @@ function sameTrackData(a: Track | null | undefined, b: Track | null | undefined)
     a.id !== b.id || a.source !== b.source || a.title !== b.title || a.artist !== b.artist
     || a.album !== b.album || a.duration_ms !== b.duration_ms || a.cover_url !== b.cover_url
     || a.isrc !== b.isrc || a.permalink !== b.permalink || Boolean(a.explicit) !== Boolean(b.explicit)
+    || a.explicit_rating !== b.explicit_rating
   ) return false;
   const ae = a.external_ids ?? {}, be = b.external_ids ?? {};
   const ak = Object.keys(ae), bk = Object.keys(be);
@@ -465,6 +466,24 @@ class App {
   private cacheArtist(a: ArtistPage) {
     const k = a.name.toLowerCase();
     this.artists[k] = a;
+    if (a.info && typeof a.info.verified === "boolean") {
+      this.verified[k] = a.info.verified;
+      this.verifiedAsked.add(k);
+    }
+    let photosChanged = false;
+    for (const sim of a.similar_artists ?? []) {
+      const sk = primaryArtist(sim.name).toLowerCase();
+      if (!sk) continue;
+      if (typeof sim.verified === "boolean") {
+        this.verified[sk] = sim.verified;
+        this.verifiedAsked.add(sk);
+      }
+      if (sim.photo && !this.artistPhotos[sk]) {
+        this.artistPhotos[sk] = sim.photo;
+        photosChanged = true;
+      }
+    }
+    if (photosChanged) saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>);
     const idx = this.artistLru.indexOf(k);
     if (idx !== -1) this.artistLru.splice(idx, 1);
     this.artistLru.push(k);
@@ -865,7 +884,7 @@ class App {
     const have = new Set(liked.map(trackKey));
     return [...add.filter((x) => !have.has(trackKey(x))), ...liked.filter((x) => !drop.has(trackKey(x)))];
   }
-  allowed(t: Track) { return !(this.config?.audio.hide_explicit && (t.explicit || (t.source === "youtube" && !t.external_ids?.deezer && !t.external_ids?.spotify))); }
+  allowed(t: Track) { return !(this.config?.audio.hide_explicit && rating(t) !== "clean"); }
   playlist(id: string): Playlist | undefined { return this.library.playlists.find((p) => p.id === id); }
   get addSongsOpen(): boolean {
     return (
@@ -1389,6 +1408,9 @@ class App {
   private photoAsked = new Map<string, number>();
   verified = $state<Record<string, boolean>>({});
   private verifiedAsked = new Set<string>();
+  private verifiedRetryAt = new Map<string, number>();
+  private verifiedPending = new Map<string, string>();
+  private verifiedTimer: ReturnType<typeof setTimeout> | null = null;
   /** The artist's picture; looked up in the background the first time. */
   /** A cached artist photo failed to load (file gone): forget it and ask again. */
   dropArtistPhoto(name: string) {
@@ -1411,18 +1433,76 @@ class App {
     }
     return null;
   }
-  /** Is the artist verified? Looked up once per name. */
+  /** Is the artist verified? Coalesced into batch `/v1/artists/meta` calls; transient failures retry after a cooldown. */
   isVerifiedArtist(name: string): boolean {
-    const k = primaryArtist(name).toLowerCase();
+    const who = primaryArtist(name).trim();
+    const k = who.toLowerCase();
+    if (!k) return false;
     const page = this.artists[k]?.info;
-    if (page) return !!page.verified;
-    if (this.verified[k]) return true;
-    if (k && this.backendState.kind === "ready" && !this.verifiedAsked.has(k)) {
+    if (page && typeof page.verified === "boolean") return page.verified;
+    if (k in this.verified) return this.verified[k];
+    if (this.backendState.kind === "ready" && !this.verifiedAsked.has(k)) {
+      const retryAt = this.verifiedRetryAt.get(k);
+      if (retryAt !== undefined && performance.now() < retryAt) return false;
       pruneTrackedKeys(this.verifiedAsked, this.verified, 299);
       this.verifiedAsked.add(k);
-      backend().call<boolean>("artist_verified", { name: k }).then((v) => { if (v) this.verified[k] = true; }).catch(() => {});
+      this.verifiedPending.set(k, who);
+      if (!this.verifiedTimer) {
+        this.verifiedTimer = setTimeout(() => {
+          this.verifiedTimer = null;
+          void this.flushVerifiedBatch();
+        }, 40);
+      }
     }
     return false;
+  }
+
+  private async flushVerifiedBatch() {
+    if (!this.verifiedPending.size) return;
+    const entries = [...this.verifiedPending.entries()];
+    this.verifiedPending.clear();
+    const retryAfter = performance.now() + 60_000;
+    for (let i = 0; i < entries.length; i += 25) {
+      const slice = entries.slice(i, i + 25);
+      const names = slice.map(([, original]) => original);
+      const batchKeys = new Set(slice.map(([k]) => k));
+      try {
+        const items = await backend().call<ArtistMetaItem[]>("artists_meta", { names });
+        const answered = new Set<string>();
+        let photosChanged = false;
+        for (const item of items ?? []) {
+          const ik = primaryArtist(item.name).toLowerCase();
+          if (!ik) continue;
+          if (typeof item.verified === "boolean") {
+            this.verified[ik] = item.verified;
+            this.verifiedRetryAt.delete(ik);
+            answered.add(ik);
+          }
+          if (item.photo && !this.artistPhotos[ik]) {
+            this.artistPhotos[ik] = item.photo;
+            photosChanged = true;
+          }
+        }
+        if (photosChanged) saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>);
+        // Any artist whose verification was deferred (`null`) can retry after cooldown.
+        for (const k of batchKeys) {
+          if (!answered.has(k)) {
+            this.verifiedAsked.delete(k);
+            this.verifiedRetryAt.set(k, retryAfter);
+          }
+        }
+      } catch {
+        // Fallback for older backends without `artists_meta`: per-name `artist_verified`.
+        for (const [k, original] of slice) {
+          backend().call<boolean>("artist_verified", { name: original }).then((v) => {
+            if (typeof v === "boolean") this.verified[k] = v;
+          }).catch(() => {
+            this.verifiedAsked.delete(k);
+            this.verifiedRetryAt.set(k, retryAfter);
+          });
+        }
+      }
+    }
   }
   loadLyrics() {
     const cur = this.player.current;

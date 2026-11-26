@@ -85,12 +85,20 @@ pub(crate) fn convert(t: STrack) -> Option<Track> {
             .min_by_key(|i| i.width.unwrap_or(640).abs_diff(640))
             .map(|i| i.url.clone())
     });
+    let explicit_rating = t.explicit.map(|e| {
+        if e {
+            glyph_protocol::ExplicitRating::Explicit
+        } else {
+            glyph_protocol::ExplicitRating::Clean
+        }
+    });
     Some(Track {
         permalink: t
             .external_urls
             .and_then(|u| u.spotify)
             .or_else(|| Some(format!("https://open.spotify.com/track/{id}"))),
         explicit: t.explicit == Some(true),
+        explicit_rating,
         id,
         source: ProviderId::Spotify,
         title: t.name,

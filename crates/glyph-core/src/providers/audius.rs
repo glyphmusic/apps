@@ -110,7 +110,7 @@ fn convert(t: ATrack) -> Option<Track> {
         isrc: t.isrc.filter(|s| !s.is_empty()),
         permalink: t.permalink.map(|p| format!("https://audius.co{p}")),
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     })
 }
 

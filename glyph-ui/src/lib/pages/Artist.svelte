@@ -58,18 +58,28 @@
     return y > 0 ? `translateY(${(y * 0.3).toFixed(1)}px) scale(${(1 + y * 0.000625).toFixed(4)})` : undefined;
   });
   const has = $derived(tracks.length > 0);
+  const totalSongs = $derived(Math.max(info?.total_songs ?? 0, tracks.length));
   const fans = $derived(info?.fans && info.fans > 0 ? info.fans : null);
   const compactMeta = $derived.by(() => {
     const parts: string[] = [];
     if (fans) parts.push(tf("artist.fans", { n: compactCount(fans) }));
-    if (has) parts.push(tf("common.n_songs", { n: tracks.length }));
+    if (totalSongs > 0) parts.push(tf("common.n_songs", { n: totalSongs }));
     return parts.join(" · ");
   });
-  const verified = $derived(!!info?.verified);
-  let showAll = $state(false);
+  const verified = $derived(info && typeof info.verified === "boolean" ? info.verified : app.isVerifiedArtist(name));
+  let visibleCount = $state(5);
   let aboutOpen = $state(false);
   /** The closed bio is cut off (more text than its three lines): only then "Show more". */
   let aboutCut = $state(false);
+  $effect(() => {
+    void name;
+    visibleCount = 5;
+    aboutOpen = false;
+  });
+  const shownCount = $derived(Math.min(visibleCount, tracks.length));
+  function showMoreSongs() {
+    visibleCount = visibleCount <= 5 ? 25 : visibleCount + 50;
+  }
   function measureCut(el: HTMLElement, _text: string | null) {
     let raf = 0;
     const check = () => {
@@ -126,7 +136,7 @@
 
   const meta = $derived.by(() => {
     const parts: string[] = [];
-    if (has) parts.push(tf("common.n_songs", { n: tracks.length }));
+    if (totalSongs > 0) parts.push(tf("common.n_songs", { n: totalSongs }));
     if (fans) parts.push(tf("artist.fans", { n: compactCount(fans) }));
     return parts.join(" · ");
   });
@@ -139,9 +149,11 @@
   }
 
   const about = $derived(info?.bio?.trim() ? info.bio : null);
-  const wiki = $derived(info?.links?.find((x) => /wikipedia/i.test(x.url) || /wikipedia/i.test(x.label))?.url ?? info?.links?.[0]?.url ?? "");
+  const tags = $derived((info?.tags ?? []).filter((g) => g.trim().length > 0).slice(0, 5));
+  const links = $derived((info?.links ?? []).filter((x) => x.url?.trim()));
+  const wiki = $derived(links.find((x) => /wikipedia/i.test(x.url) || /wikipedia/i.test(x.label))?.url ?? links[0]?.url ?? "");
   const aboutK = $derived.by(() => (about ? revealK(`artist:about:${wiki || name}`, 0.5) : 1));
-  const showAbout = $derived(!!about || infoLoading);
+  const showAbout = $derived(!!about || links.length > 0 || tags.length > 0 || infoLoading);
 
   // Your liked songs by this artist.
   const likedList = $derived<ListKey>({ kind: "artist_liked", artist: name });
@@ -158,7 +170,7 @@
   $effect(() => {
     if (compact) return;
     return registerListNav({
-      count: () => (showAll ? tracks.length : Math.min(5, tracks.length)),
+      count: () => shownCount,
       play: (i) => {
         const tr = tracks[i];
         if (tr && app.allowed(tr)) app.play(tracks, i, name);
@@ -176,20 +188,29 @@
 {#snippet aboutCard(mobile: boolean)}
   <div class="about" class:mob={mobile}>
     <div class="at">{t("artist.about")}</div>
-    <SkeletonSwap loading={!about}>
+    <SkeletonSwap loading={!about && !links.length && !tags.length && infoLoading}>
       {#snippet skeleton()}
         <Skeleton w="100%" h={64} radius={6} id="about-sk-{name}" />
       {/snippet}
+      {#if tags.length}
+        <div class="atags">
+          {#each tags as g (g)}<span class="atag">{g}</span>{/each}
+        </div>
+      {/if}
       {#if about}
         <div class="ab scroll" class:open={aboutOpen} style:opacity={0.15 + 0.85 * aboutK} use:measureCut={about} use:fadeEdges={{ top: 16, bottom: 16, minOverflow: 8, active: aboutOpen }}>{about}</div>
-        {#if aboutCut || aboutOpen || wiki}
+      {/if}
+      {#if aboutCut || aboutOpen || links.length}
         <div class="af">
           {#if aboutCut || aboutOpen}<button class="more" onclick={() => (aboutOpen = !aboutOpen)}>{aboutOpen ? t("artist.less") : t("artist.more")}</button>{:else}<span></span>{/if}
-          {#if wiki}
-            <button class="wiki" onclick={() => backend().call("open_url", { url: wiki }).catch(() => {})}>Wikipedia<Icon name="external-link" size={11} /></button>
+          {#if links.length}
+            <div class="alinks">
+              {#each links as lnk (lnk.url)}
+                <button class="wiki" onclick={() => backend().call("open_url", { url: lnk.url }).catch(() => {})}>{lnk.label}<Icon name="external-link" size={11} /></button>
+              {/each}
+            </div>
           {/if}
         </div>
-        {/if}
       {/if}
     </SkeletonSwap>
   </div>
@@ -259,7 +280,7 @@
           <EmptyState title={t("artist.empty")} sub={t("artist.empty.sub")} />
         {:else}
           <div class="rows" bind:this={popRowsEl}>
-            {#each tracks.slice(0, showAll ? tracks.length : 5) as _, i (i)}
+            {#each tracks.slice(0, shownCount) as _, i (i)}
               {#if compact}
                 <PhoneSongRow {tracks} index={i} context={name} number={i + 1} />
               {:else}
@@ -268,7 +289,14 @@
             {/each}
           </div>
           {#if tracks.length > 5}
-            <div class="all"><Button onclick={() => (showAll = !showAll)}>{showAll ? t("artist.show_less") : t("artist.show_more_n")}</Button></div>
+            <div class="all">
+              {#if shownCount < tracks.length}
+                <Button onclick={showMoreSongs}>{t("artist.show_more_n")}</Button>
+              {/if}
+              {#if shownCount > 5}
+                <Button kind="text" onclick={() => (visibleCount = 5)}>{t("artist.show_less")}</Button>
+              {/if}
+            </div>
           {/if}
         {/if}
       </SkeletonSwap>
@@ -374,7 +402,10 @@
   .at { font-size: 14px; font-weight: 600; color: rgba(255, 255, 255, .95); }
   .ab { font-size: 12.5px; line-height: 18px; color: rgba(255, 255, 255, .72); max-height: 72px; overflow: hidden; user-select: text; transition: max-height .25s var(--ease); white-space: pre-line; }
   .ab.open { max-height: 198px; overflow-y: auto; }
-  .af { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .af { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .atags { display: flex; flex-wrap: wrap; gap: 5px; }
+  .atag { height: 22px; padding: 0 8px; border-radius: 999px; background: rgba(255, 255, 255, .09); color: rgba(255, 255, 255, .78); font-size: 11px; font-weight: 500; display: inline-flex; align-items: center; }
+  .alinks { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .more { font-size: 12px; font-weight: 500; color: rgba(255, 255, 255, .6); transition: color .12s; }
   .more:hover { color: rgba(255, 255, 255, .95); }
   .wiki { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: rgba(255, 255, 255, .45); transition: color .12s; }
@@ -383,7 +414,7 @@
   .top.mob { flex-direction: column; align-items: stretch; gap: 14px; }
   .pop { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
   .rows { display: flex; flex-direction: column; min-width: 0; }
-  .all { display: flex; padding-top: 4px; }
+  .all { display: flex; align-items: center; gap: 10px; padding-top: 4px; }
   .liked { flex: none; width: 300px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .liked.mob { order: -1; width: 100%; }
   .lcard { display: flex; align-items: center; gap: 14px; padding: 10px; border-radius: 8px; background: var(--card); transition: background-color .12s ease-out; width: 100%; min-width: 0; }

@@ -99,7 +99,7 @@ fn main() {
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     };
     player.load(t, PlaybackSource::Embed { provider: ProviderId::YouTube, embed_id: id });
     let start = Instant::now();

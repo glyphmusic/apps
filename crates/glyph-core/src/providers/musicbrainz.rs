@@ -84,7 +84,7 @@ fn convert(r: &Recording) -> Track {
         isrc: r.isrcs.first().cloned(),
         permalink: Some(format!("https://musicbrainz.org/recording/{}", r.id)),
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     }
 }
 

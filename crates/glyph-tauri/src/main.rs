@@ -254,6 +254,7 @@ fn main() {
             tauri_commands::search_paste_kind,
             tauri_commands::artist_photo,
             tauri_commands::artist_verified,
+            tauri_commands::artists_meta,
             tauri_commands::plugin_lyrics,
             tauri_commands::share_save,
             tauri_commands::mcp_pending,

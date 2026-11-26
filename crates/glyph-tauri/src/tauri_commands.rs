@@ -310,6 +310,11 @@ pub async fn artist_verified(core: C<'_>, name: String) -> Res<bool> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn artists_meta(core: C<'_>, names: Vec<String>) -> Res<Vec<glyph_protocol::ArtistMetaItem>> {
+    commands::artists_meta(&core, names).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn album(core: C<'_>, title: String, artist: String) -> Res<Vec<Track>> {
     commands::album(&core, title, artist).await
 }

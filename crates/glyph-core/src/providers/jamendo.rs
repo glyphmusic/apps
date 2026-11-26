@@ -57,7 +57,7 @@ fn convert(t: &JTrack) -> Track {
         isrc: None,
         permalink: t.shareurl.clone(),
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     }
 }
 

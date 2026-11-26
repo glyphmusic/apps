@@ -210,8 +210,13 @@ impl SearchOps {
                 return false;
             }
         }
-        if self.explicit.is_some_and(|e| e != t.explicit) {
-            return false;
+        if let Some(e) = self.explicit {
+            if e && t.rating() != glyph_protocol::ExplicitRating::Explicit {
+                return false;
+            }
+            if !e && t.maybe_explicit() {
+                return false;
+            }
         }
         if self.min_ms.is_some() || self.max_ms.is_some() {
             let Some(d) = t.duration_ms else { return false };

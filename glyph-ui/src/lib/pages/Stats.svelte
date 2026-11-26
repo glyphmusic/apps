@@ -23,6 +23,7 @@
   import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Segmented from "../settings/Segmented.svelte";
   import BackPill from "./lists/BackPill.svelte";
+  import ArtistName from "./lists/ArtistName.svelte";
   import Tile from "./stats/Tile.svelte";
   import Bars from "./stats/Bars.svelte";
   import Recap from "./stats/Recap.svelte";
@@ -109,7 +110,7 @@
             <button class="arow" onclick={() => app.openArtistPage(a.name)}>
               <span class="n mono">{String(i + 1).padStart(2, "0")}</span>
               <ArtistAvatar name={a.name} size={32} />
-              <span class="an trunc">{a.name}</span>
+              <span class="an"><ArtistName name={a.name} badge={14} /></span>
               {#if !app.compact}<span class="track"><span class="fill" style:width="{(a.ms / maxA) * 100}%" style:animation-delay="{i * 30}ms"></span></span>{/if}
               <span class="tm mono">{fmtListen(a.ms)}</span>
             </button>
@@ -177,8 +178,8 @@
   .arow { display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 10px; border-radius: 8px; transition: background-color .12s ease-out; }
   .arow:hover { background: rgba(255, 255, 255, .05); }
   .n { width: 22px; font-size: var(--sm); color: var(--faint); flex: none; }
-  .an { width: 180px; font-size: var(--md); font-weight: 500; flex: none; }
-  :global(html.compact) .an { flex: 1; width: auto; }
+  .an { width: 180px; min-width: 0; font-size: var(--md); font-weight: 500; flex: none; }
+  :global(html.compact) .an { flex: 1; width: auto; min-width: 0; }
   .track { flex: 1; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .07); overflow: hidden; }
   .fill { display: block; height: 100%; border-radius: 2px; background: var(--accent); transform-origin: left; animation: fillin .35s var(--ease) both; }
   @keyframes fillin { from { transform: scaleX(0); } to { transform: scaleX(1); } }

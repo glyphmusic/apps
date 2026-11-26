@@ -285,7 +285,9 @@
                           <span class="ph"><Icon name="search" size={20} color="rgba(255,255,255,.6)" /></span>
                         {/if}
                         <div class="gt">
-                          <div class="g1 trunc">{it.kind === "song" ? it.track.title : it.kind === "artist" ? it.name : it.text}</div>
+                          <div class="g1 trunc">
+                            {#if it.kind === "artist"}<ArtistName name={it.name} badge={14} />{:else}{it.kind === "song" ? it.track.title : it.text}{/if}
+                          </div>
                           <div class="g2 trunc">{it.kind === "song" ? `${t("search.kind.song")} • ${it.track.artist}` : it.kind === "artist" ? t("search.kind.artist") : t("search.kind.query")}</div>
                         </div>
                         <button
@@ -396,7 +398,7 @@
               {@const n = songsOf(a.name)}
               <div class="grow" onclick={() => pickArtist(a)} oncontextmenu={artistMenu(a.name)} onkeydown={(e) => e.key === "Enter" && pickArtist(a)} role="button" tabindex="-1">
                 <Cover track={artistTrack(a)} size={44} radius={22} />
-                <div class="gt"><div class="g1 trunc">{a.name}</div></div>
+                <div class="gt"><div class="g1"><ArtistName name={a.name} badge={14} /></div></div>
                 {#if n}<div class="gn">{tf("common.n_songs", { n })}</div>{/if}
               </div>
             {/snippet}

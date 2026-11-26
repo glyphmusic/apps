@@ -219,6 +219,7 @@ impl LibrarySource for DeezerLibrary {
                                 year: None,
                                 released: None,
                                 kind: crate::catalog::AlbumKind::Album,
+                                tracks: None,
                             };
                             if release.title.is_empty() {
                                 return (idx, None);

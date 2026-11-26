@@ -66,7 +66,7 @@ fn convert(t: &LTrack) -> Option<Track> {
         isrc: None,
         permalink: t.url.clone(),
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     })
 }
 

@@ -10,6 +10,7 @@
   import ListCover from "../../components/ListCover.svelte";
   import Cover from "../../components/Cover.svelte";
   import SongTitle from "../../components/SongTitle.svelte";
+  import ArtistName from "../lists/ArtistName.svelte";
   import { app } from "../../state.svelte";
   import { t, tf } from "../../i18n.svelte";
   import ArtistAvatar from "../../components/ArtistAvatar.svelte";
@@ -185,7 +186,7 @@
         <div class="c artist" onclick={() => app.openArtistPage(c.name)} oncontextmenu={artistMenu(c.name)} onkeydown={(e) => e.key === "Enter" && app.openArtistPage(c.name)} role="button" tabindex="-1">
           <ArtistAvatar name={c.name} track={c.track} size={56} iconSize={22} />
           <div class="tx">
-            <div class="tl trunc">{c.name}</div>
+            <div class="tl"><ArtistName name={c.name} badge={14} /></div>
             <div class="sub trunc">{t("search.kind.artist")}</div>
           </div>
         </div>

@@ -471,6 +471,15 @@ impl SearchCache {
         self.insert_ranked(t, sc);
     }
 
+    fn remove_track(&mut self, source: glyph_protocol::ProviderId, id: &str) -> bool {
+        let Some(i) = self.tracks.iter().position(|x| x.source == source && x.id == id) else {
+            return false;
+        };
+        self.tracks.remove(i);
+        self.scores.remove(i);
+        true
+    }
+
     /// A later page: below everything already shown.
     fn push_unranked(&mut self, t: Track) {
         self.tracks.push(t);
@@ -757,6 +766,11 @@ async fn run_search(core: &Arc<Core>, query: &str, page: usize) -> Res<Value> {
                             || !glyph_core::taste::matches_phrases(&t, &phrases)
                             || !ops.matches(&t)
                         {
+                            // If a later rating upgrade (e.g. lyrics/iTunes) flagged a
+                            // previously shown track explicit while hide_explicit is on, drop it.
+                            if st.search.remove_track(t.source, &t.id) {
+                                changed = true;
+                            }
                             continue;
                         }
                         // Ranked by text match, odd versions and the user's
@@ -1430,23 +1444,47 @@ struct ArtistBuild {
     info: Option<Value>,
     stats: Option<glyph_core::catalog::ArtistStats>,
     similar: Vec<String>,
+    similar_artists: Vec<glyph_protocol::ArtistMetaItem>,
     releases: Vec<Release>,
+    tags: Vec<String>,
+    links: Vec<glyph_core::server_client::ServerArtistLink>,
+    total_songs: Option<u32>,
+    total_releases: Option<u32>,
 }
 
 impl ArtistBuild {
     fn json(&self) -> Value {
-        let info = match (&self.info, &self.stats) {
-            (None, None) => Value::Null,
-            (i, s) => {
-                let mut v = i.clone().unwrap_or_else(|| json!({ "name": self.name, "bio": Value::Null, "photo": Value::Null, "links": [] }));
-                v["fans"] = json!(s.as_ref().map(|s| s.fans));
-                v["verified"] = json!(s.as_ref().is_some_and(|s| s.verified));
-                v
+        let has_meta = self.info.is_some()
+            || self.stats.is_some()
+            || !self.tags.is_empty()
+            || !self.links.is_empty()
+            || self.total_songs.is_some()
+            || self.total_releases.is_some();
+        let info = if !has_meta {
+            Value::Null
+        } else {
+            let mut v = self.info.clone().unwrap_or_else(|| json!({ "name": self.name, "bio": Value::Null, "photo": Value::Null, "links": [] }));
+            let fans = self.stats.as_ref().map(|s| s.fans).filter(|f| *f > 0);
+            v["fans"] = json!(fans);
+            v["verified"] = json!(self.stats.as_ref().is_some_and(|s| s.verified));
+            if !self.tags.is_empty() {
+                v["tags"] = json!(self.tags);
             }
+            if !self.links.is_empty() {
+                v["links"] = json!(self.links);
+            }
+            if let Some(n) = self.total_songs {
+                v["total_songs"] = json!(n);
+            }
+            if let Some(n) = self.total_releases {
+                v["total_releases"] = json!(n);
+            }
+            v
         };
         json!({
             "name": self.name, "tracks": self.tracks, "loading": self.loading, "info_loading": self.info_loading, "info": info,
-            "similar": self.similar, "releases": self.releases.iter().map(dto::release).collect::<Vec<_>>(),
+            "similar": self.similar, "similar_artists": self.similar_artists,
+            "releases": self.releases.iter().map(dto::release).collect::<Vec<_>>(),
         })
     }
 }
@@ -1490,6 +1528,7 @@ fn server_release(r: glyph_core::server_client::ServerRelease, artist: &str) -> 
         year,
         released: r.released,
         kind: r.record_type.as_deref().and_then(glyph_core::catalog::AlbumKind::parse).unwrap_or(glyph_core::catalog::AlbumKind::Album),
+        tracks: r.tracks,
     }
 }
 
@@ -1523,7 +1562,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         core.library_changed();
     }
     let lang = core.st().config.resolved_language().to_string();
-    let cache_key = format!("{}|{lang}", name.to_lowercase());
+    let cache_key = format!("v2|{}|{lang}", name.to_lowercase());
     let cached = artist_pages().get(&cache_key).filter(|(age, _)| *age < ARTIST_KEEP_S);
     if let Some((age, v)) = &cached {
         core.emit("artist", v.clone());
@@ -1538,30 +1577,72 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         (Err(_), Some((_, v))) => return Ok(v.clone()),
         (Err(e), None) => return Err(e),
     };
-    let page = std::sync::Mutex::new(ArtistBuild { name: name.clone(), tracks: vec![], loading: true, info_loading: true, info: None, stats: None, similar: vec![], releases: vec![] });
+    let page = std::sync::Mutex::new(ArtistBuild {
+        name: name.clone(),
+        tracks: vec![],
+        loading: true,
+        info_loading: true,
+        info: None,
+        stats: None,
+        similar: vec![],
+        similar_artists: vec![],
+        releases: vec![],
+        tags: vec![],
+        links: vec![],
+        total_songs: None,
+        total_releases: None,
+    });
     let lock = || page.lock().unwrap_or_else(|e| e.into_inner());
-    // The server keeps a whole artist page (popular songs, discography,
-    // related artists, fans) for 14 days for every app: one quick request
-    // instead of a search and four lookups on the phone. What it lacks is
-    // still looked up here.
-    let from_server = tokio::time::timeout(Duration::from_secs(4), b.artist_server(&name, &lang)).await.ok().flatten();
+    // The server owns the complete artist catalog (popular + album tracks,
+    // discography, related artists, service-based verification, total song
+    // count) and caches/incrementally updates it for every app.
+    let from_server = tokio::time::timeout(Duration::from_secs(10), b.artist_server(&name, &lang)).await.ok().flatten();
     let (mut have_songs, mut have_stats, mut have_similar, mut have_releases) = (false, false, false, false);
     if let Some(s) = from_server {
+        // Seed local verified cache from the server's single source of truth.
+        {
+            let mut vc = verified_cache().lock().unwrap_or_else(|e| e.into_inner());
+            vc.insert(name.to_lowercase(), s.verified);
+            if !s.name.trim().is_empty() {
+                vc.insert(s.name.trim().to_lowercase(), s.verified);
+            }
+            for sim in &s.similar_artists {
+                if let Some(v) = sim.verified {
+                    let k = glyph_core::dedupe::primary_artist(&sim.name).to_lowercase();
+                    if !k.is_empty() {
+                        vc.insert(k, v);
+                    }
+                }
+            }
+        }
         let mut p = lock();
-        let top: Vec<Track> = s.top.into_iter().filter(|t| glyph_core::dedupe::by_artist(&t.artist, &name)).collect();
-        if top.len() >= 5 {
-            p.tracks = top;
+        if !s.top.is_empty() {
+            p.tracks = s.top;
             p.loading = p.info_loading;
             have_songs = true;
         }
-        if let Some(fans) = s.fans {
-            p.stats = Some(glyph_core::catalog::ArtistStats { fans, verified: s.verified });
-            have_stats = true;
+        p.stats = Some(glyph_core::catalog::ArtistStats { fans: s.fans.unwrap_or(0), verified: s.verified });
+        have_stats = true;
+        if !s.tags.is_empty() {
+            p.tags = s.tags;
         }
+        if !s.links.is_empty() {
+            p.links = s.links;
+        }
+        p.total_songs = s.total_songs;
+        p.total_releases = s.total_releases;
         let similar: Vec<String> = s.similar.into_iter().filter(|n| !n.eq_ignore_ascii_case(&name)).collect();
         if !similar.is_empty() {
             p.similar = similar;
             have_similar = true;
+        }
+        let similar_artists: Vec<glyph_protocol::ArtistMetaItem> = s
+            .similar_artists
+            .into_iter()
+            .filter(|a| !a.name.eq_ignore_ascii_case(&name))
+            .collect();
+        if !similar_artists.is_empty() {
+            p.similar_artists = similar_artists;
         }
         if !s.releases.is_empty() {
             p.releases = s.releases.into_iter().map(|r| server_release(r, &name)).collect();
@@ -1572,7 +1653,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
             artist_event(&core, &page, refresh);
         }
     }
-    // Songs: a normal search for the name, keeping the artist's own songs.
+    // Songs (direct/no-server fallback only): search + fill from releases when few hits came back.
     let songs = async {
         if have_songs {
             return;
@@ -1602,12 +1683,10 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
                 _ => {}
             }
         }
-        // The search knows no song under this exact name (other scripts,
-        // channel names): the songs of the latest releases stand in, so the
-        // page is never empty next to its albums.
-        if found.is_empty() {
+        // Pull unique songs from releases whenever search returned few songs (direct mode).
+        if found.len() < 20 {
             if let Ok(releases) = b.artist_releases(&name).await {
-                for r in releases.iter().take(6) {
+                for r in releases.iter().take(12) {
                     let Ok(tracks) = b.release_tracks(r).await else { continue };
                     for tr in tracks {
                         let n = glyph_core::dedupe::normalize_title(&tr.title);
@@ -1615,7 +1694,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
                             found.push(tr);
                         }
                     }
-                    if found.len() >= 10 {
+                    if found.len() >= 40 {
                         break;
                     }
                 }
@@ -1623,7 +1702,7 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
         }
         {
             let mut p = lock();
-            if p.tracks.is_empty() {
+            if p.tracks.len() < found.len() {
                 p.tracks = found;
             }
             p.loading = p.info_loading;
@@ -1715,30 +1794,72 @@ pub(crate) fn trim_verified_cache(aggressive: bool) {
     }
 }
 
-/// Is the artist verified? Looked up once per name (with bounded concurrency).
-pub async fn artist_verified(core: C<'_>, name: String) -> Res<bool> {
-    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+/// Batch service-based artist verification + portrait lookup. Uses the server's
+/// `/v1/artists/meta` as the single source of truth; transient errors (`None`)
+/// are never cached as `false`.
+pub async fn artists_meta(core: C<'_>, names: Vec<String>) -> Res<Vec<glyph_protocol::ArtistMetaItem>> {
     let known = verified_cache();
+    let mut cleaned: Vec<(String, String)> = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    for raw in names {
+        let who = glyph_core::dedupe::primary_artist(&raw);
+        let key = who.to_lowercase();
+        if !key.is_empty() && seen_keys.insert(key.clone()) {
+            cleaned.push((who, key));
+        }
+    }
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<glyph_protocol::ArtistMetaItem> = Vec::with_capacity(cleaned.len());
+    let mut missing: Vec<String> = Vec::new();
+    {
+        let k = known.lock().unwrap_or_else(|e| e.into_inner());
+        for (who, key) in &cleaned {
+            if let Some(&v) = k.get(key) {
+                out.push(glyph_protocol::ArtistMetaItem { name: who.clone(), photo: None, verified: Some(v) });
+            } else {
+                missing.push(who.clone());
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(out);
+    }
+
+    let b = core.backend_or_err()?;
+    let fetched = b.artists_meta(missing).await.map_err(err)?;
+    {
+        let mut k = known.lock().unwrap_or_else(|e| e.into_inner());
+        if k.len() > 1000 {
+            k.clear();
+        }
+        for item in &fetched {
+            if let Some(v) = item.verified {
+                let key = glyph_core::dedupe::primary_artist(&item.name).to_lowercase();
+                if !key.is_empty() {
+                    k.insert(key, v);
+                }
+            }
+        }
+    }
+    out.extend(fetched);
+    Ok(out)
+}
+
+/// Is the artist verified? Uses the same server-backed batch lookup + cache.
+pub async fn artist_verified(core: C<'_>, name: String) -> Res<bool> {
     let who = glyph_core::dedupe::primary_artist(&name);
     let key = who.to_lowercase();
     if key.is_empty() {
         return Ok(false);
     }
-    if let Some(v) = known.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Ok(*v);
+    if let Some(&v) = verified_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(v);
     }
-    let _permit = SEM.get_or_init(|| tokio::sync::Semaphore::new(4)).acquire().await.ok();
-    if let Some(v) = known.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Ok(*v);
-    }
-    let b = core.backend_or_err()?;
-    let v = matches!(b.artist_stats(&who).await, Ok(Some(s)) if s.verified);
-    let mut k = known.lock().unwrap_or_else(|e| e.into_inner());
-    if k.len() > 1000 {
-        k.clear();
-    }
-    k.insert(key, v);
-    Ok(v)
+    let items = artists_meta(core, vec![who]).await?;
+    Ok(items.into_iter().next().and_then(|i| i.verified).unwrap_or(false))
 }
 
 /// The songs of an album: from the catalog, else a search for "artist album".

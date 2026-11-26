@@ -32,7 +32,7 @@ fn mk(source: ProviderId, idx: usize, title: &str, artist: &str, album: Option<&
         isrc: None,
         permalink: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     })
 }
 
@@ -191,7 +191,7 @@ pub fn parse_csv(text: &str, name: &str) -> anyhow::Result<ParsedList> {
                 cover_url: None,
                 isrc: None,
                 external_ids: Default::default(),
-                explicit: false,
+                explicit: false, explicit_rating: None,
             })
             .collect();
         return Ok(ParsedList { name: name.to_string(), label: TAKEOUT_LABEL.into(), tracks });

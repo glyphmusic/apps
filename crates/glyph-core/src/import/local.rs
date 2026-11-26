@@ -151,7 +151,7 @@ pub fn read_track(path: &Path) -> Result<(Track, Option<Vec<u8>>)> {
         isrc: tags.isrc,
         permalink: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     };
     track.id = format!("local:{}", paths::hash_hex(&track_key(&track)));
     Ok((track, tags.cover))

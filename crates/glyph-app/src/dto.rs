@@ -239,7 +239,7 @@ pub fn release(r: &glyph_core::providers::deezer::Release) -> Value {
         glyph_core::catalog::AlbumKind::Single => "single",
         glyph_core::catalog::AlbumKind::Compilation => "compilation",
     };
-    json!({ "id": r.id, "title": r.title, "artist": r.artist, "kind": kind, "year": r.year, "date": r.released, "cover_url": r.cover_url })
+    json!({ "id": r.id, "title": r.title, "artist": r.artist, "kind": kind, "year": r.year, "date": r.released, "cover_url": r.cover_url, "tracks": r.tracks })
 }
 
 /// "2026-11-15 14:30" (UTC) for a Unix time.
@@ -283,7 +283,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         }
     }
 

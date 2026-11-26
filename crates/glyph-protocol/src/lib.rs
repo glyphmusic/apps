@@ -97,6 +97,27 @@ pub enum Capabilities {
     FullPlayback,
 }
 
+/// Explicitness rating for a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplicitRating {
+    Clean,
+    Explicit,
+    Unknown,
+}
+
+impl ExplicitRating {
+    /// Combines two ratings for the same song: `Explicit` always wins, then
+    /// confirmed `Clean`, else `Unknown`.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Explicit, _) | (_, Self::Explicit) => Self::Explicit,
+            (Self::Clean, _) | (_, Self::Clean) => Self::Clean,
+            (Self::Unknown, Self::Unknown) => Self::Unknown,
+        }
+    }
+}
+
 /// A song as Glyph sees it, independent of where it came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -119,10 +140,14 @@ pub struct Track {
     /// Ids of the same song at other providers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub external_ids: BTreeMap<ProviderId, String>,
-    /// Marked explicit by a source that knows (Deezer, Spotify). Optional on
-    /// the wire, so older servers and clients keep working.
+    /// Marked explicit by a rating source (Deezer, Spotify, Apple/iTunes, lyrics).
+    /// Optional on the wire, so older servers and clients keep working.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub explicit: bool,
+    /// Tri-state rating (`clean` / `explicit` / `unknown`). Optional on the
+    /// wire so older servers and clients keep working seamlessly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit_rating: Option<ExplicitRating>,
 }
 
 impl Track {
@@ -133,16 +158,37 @@ impl Track {
         v
     }
 
-    /// A YouTube upload no rating source (Deezer, Spotify) knows: whether it
-    /// is explicit cannot be told (videos, live recordings, other noise).
-    pub fn explicit_unknown(&self) -> bool {
+    /// Effective explicitness rating, honoring explicit tri-state ratings first
+    /// and falling back to legacy source inference for older wire payloads.
+    pub fn rating(&self) -> ExplicitRating {
+        if self.explicit || self.explicit_rating == Some(ExplicitRating::Explicit) {
+            return ExplicitRating::Explicit;
+        }
+        if let Some(r) = self.explicit_rating {
+            return r;
+        }
         const RATED: [ProviderId; 2] = [ProviderId::Deezer, ProviderId::Spotify];
-        !self.explicit && self.source == ProviderId::YouTube && !self.sources().iter().any(|p| RATED.contains(p))
+        if self.sources().iter().any(|p| RATED.contains(p)) {
+            ExplicitRating::Clean
+        } else {
+            ExplicitRating::Unknown
+        }
+    }
+
+    /// Applies a tri-state rating while keeping legacy `explicit` in sync.
+    pub fn set_rating(&mut self, rating: ExplicitRating) {
+        self.explicit = rating == ExplicitRating::Explicit;
+        self.explicit_rating = Some(rating);
+    }
+
+    /// Whether explicitness cannot be told (unrated source or catalog "unknown").
+    pub fn explicit_unknown(&self) -> bool {
+        self.rating() == ExplicitRating::Unknown
     }
 
     /// Explicit, or not known to be clean ("Hide explicit songs" leaves both out).
     pub fn maybe_explicit(&self) -> bool {
-        self.explicit || self.explicit_unknown()
+        self.rating() != ExplicitRating::Clean
     }
 }
 
@@ -296,6 +342,33 @@ pub mod capability {
     /// Full server-side intent-aware music taste & recommendation engine
     /// (`/v1/taste/recommend` for Home feeds, Daily Mixes, and Radio).
     pub const TASTE_ENGINE: &str = "taste_engine";
+    /// Batch artist verification and portrait lookup (`/v1/artists/meta`).
+    pub const ARTISTS_META: &str = "artists_meta";
+}
+
+// ------------------------------------------------------------ /v1/artists/meta
+
+/// Batch request for `POST /v1/artists/meta`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtistsMetaRequest {
+    pub names: Vec<String>,
+}
+
+/// Service-verified badge and portrait metadata for one artist card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtistMetaItem {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo: Option<String>,
+    /// `Some(true/false)` when determined by services; `None` on transient error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtistsMetaResponse {
+    #[serde(default)]
+    pub items: Vec<ArtistMetaItem>,
 }
 
 fn default_playlist_max_tracks() -> usize { 5_000 }
@@ -961,17 +1034,29 @@ mod account_tests {
     use super::*;
 
     #[test]
-    fn only_unrated_youtube_uploads_have_unknown_explicit() {
+    fn explicit_rating_tri_state_and_legacy_fallback() {
         let mut t: Track = serde_json::from_str(r#"{"id":"v","source":"youtube","title":"t","artist":"a"}"#).unwrap();
+        assert_eq!(t.rating(), ExplicitRating::Unknown);
         assert!(t.explicit_unknown() && t.maybe_explicit());
         t.external_ids.insert(ProviderId::Deezer, "1".into());
+        assert_eq!(t.rating(), ExplicitRating::Clean);
         assert!(!t.explicit_unknown() && !t.maybe_explicit());
+        // Explicit Unknown overrides legacy source inference (e.g. Deezer "no advice").
+        t.set_rating(ExplicitRating::Unknown);
+        assert!(t.explicit_unknown() && t.maybe_explicit() && !t.explicit);
+        // Confirmed Clean on an unrated source works too.
         t.external_ids.clear();
-        t.explicit = true;
-        assert!(!t.explicit_unknown() && t.maybe_explicit());
-        t.explicit = false;
-        t.source = ProviderId::SoundCloud;
-        assert!(!t.maybe_explicit());
+        t.set_rating(ExplicitRating::Clean);
+        assert!(!t.explicit_unknown() && !t.maybe_explicit());
+        // Explicit always wins.
+        t.set_rating(ExplicitRating::Explicit);
+        assert!(t.explicit && !t.explicit_unknown() && t.maybe_explicit());
+        // Unrated SoundCloud / Audius without explicit_rating stay Unknown.
+        let sc: Track = serde_json::from_str(r#"{"id":"1","source":"soundcloud","title":"t","artist":"a"}"#).unwrap();
+        assert!(sc.explicit_unknown() && sc.maybe_explicit());
+        // Merging prefers Explicit > Clean > Unknown.
+        assert_eq!(ExplicitRating::Unknown.merge(ExplicitRating::Clean), ExplicitRating::Clean);
+        assert_eq!(ExplicitRating::Clean.merge(ExplicitRating::Explicit), ExplicitRating::Explicit);
     }
 
     #[test]
@@ -2051,6 +2136,7 @@ pub mod jam {
                 permalink: None,
                 external_ids: Default::default(),
                 explicit: false,
+                explicit_rating: None,
             }
         }
 

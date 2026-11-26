@@ -23,6 +23,7 @@ export interface Track {
   permalink?: string;
   external_ids?: Partial<Record<ProviderId, string>>;
   explicit?: boolean;
+  explicit_rating?: Rating;
 }
 
 /** Track identity across sources (glyph_core::dedupe::track_key). */
@@ -57,9 +58,10 @@ export function sources(t: Track): ProviderId[] {
 
 export type Rating = "clean" | "explicit" | "unknown";
 export function rating(t: Track): Rating {
-  if (t.explicit) return "explicit";
+  if (t.explicit || t.explicit_rating === "explicit") return "explicit";
+  if (t.explicit_rating === "clean" || t.explicit_rating === "unknown") return t.explicit_rating;
   const rated = sources(t).some((p) => p === "deezer" || p === "spotify");
-  return t.source === "youtube" && !rated ? "unknown" : "clean";
+  return rated ? "clean" : "unknown";
 }
 
 /** Split a multi-artist credit string ("A, B", "A & B", "A feat. B") into unique artist names. */
@@ -244,12 +246,21 @@ export interface Release {
   tracks?: number | null;
 }
 
+export interface ArtistMetaItem {
+  name: string;
+  photo?: string | null;
+  verified?: boolean | null;
+}
+
 export interface ArtistInfo {
   name: string;
   bio?: string | null;
   photo?: string | null;
+  banner?: string | null;
   fans?: number | null;
   verified?: boolean;
+  total_songs?: number | null;
+  total_releases?: number | null;
   listeners?: number | null;
   tags?: string[];
   links?: { label: string; url: string }[];
@@ -261,6 +272,7 @@ export interface ArtistPage {
   loading: boolean;
   info: ArtistInfo | null;
   similar: string[];
+  similar_artists?: ArtistMetaItem[];
   releases: Release[];
 }
 

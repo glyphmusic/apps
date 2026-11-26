@@ -170,7 +170,7 @@ fn engine(input: &str, start: f32, secs: f32, out: &str, eq: bool) {
     p.set_volume(0.3);
     let track = Track {
         id: "sound-check".into(), source: ProviderId::YouTube, title: "sound check".into(), artist: String::new(),
-        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
     };
     let path = std::fs::canonicalize(input).unwrap().to_string_lossy().trim_start_matches(r"\?\").to_string();
     p.load(track, PlaybackSource::Stream { provider: ProviderId::YouTube, url: path, mime: Some("audio/mp4".into()) });

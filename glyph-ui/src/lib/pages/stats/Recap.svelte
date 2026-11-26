@@ -10,6 +10,7 @@
   import { t, tf } from "../../i18n.svelte";
   import Icon from "../../components/Icon.svelte";
   import ArtistAvatar from "../../components/ArtistAvatar.svelte";
+  import ArtistName from "../lists/ArtistName.svelte";
   import Cover from "../../components/Cover.svelte";
   import SectionTitle from "../../components/SectionTitle.svelte";
   import EmptyState from "../../components/EmptyState.svelte";
@@ -72,7 +73,7 @@
         {#if seed}<Cover track={seed} size={120} radius={10} />{/if}
         <div class="tt">
           <div class="l">{t("recap.top_artist")}</div>
-          <div class="nm trunc">{top.name}</div>
+          <div class="nm"><ArtistName name={top.name} badge={20} /></div>
           <div class="ln">{tf("recap.top_artist_line", { t: fmtListen(top.ms), n: top.plays })}</div>
         </div>
       </button>
@@ -91,7 +92,7 @@
           <button class="arow" onclick={() => app.openArtistPage(a.name)}>
             <span class="n mono">{String(i + 1).padStart(2, "0")}</span>
             <ArtistAvatar name={a.name} size={32} />
-            <span class="an trunc">{a.name}</span>
+            <span class="an"><ArtistName name={a.name} badge={14} /></span>
             <span class="tm mono">{fmtListen(a.ms)}</span>
           </button>
         {/each}
@@ -131,7 +132,7 @@
   .top:hover { background: var(--card-hover); }
   .tt { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .l { font-size: var(--sm); font-weight: 500; color: var(--dim); }
-  .nm { font-size: 28px; font-weight: 700; color: var(--text); }
+  .nm { font-size: 28px; font-weight: 700; color: var(--text); min-width: 0; }
   .ln { font-size: var(--sm); color: var(--dim); }
   .sec { display: flex; flex-direction: column; gap: 12px; }
   .card { background: var(--card); border-radius: 12px; }
@@ -139,7 +140,7 @@
   .arow { display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 10px; border-radius: 8px; transition: background-color .12s ease-out; }
   .arow:hover { background: rgba(255, 255, 255, .05); }
   .n { width: 22px; font-size: var(--sm); color: var(--faint); flex: none; }
-  .an { flex: 1; font-size: var(--md); font-weight: 500; }
+  .an { flex: 1; min-width: 0; font-size: var(--md); font-weight: 500; }
   .tm { width: 90px; text-align: right; font-size: var(--sm); color: var(--dim); }
   .rows { display: flex; flex-direction: column; padding: 8px; }
   .btns { display: flex; gap: 8px; }

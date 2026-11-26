@@ -338,7 +338,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         };
         let now = Now { track: Some(track), playing: true, position: Duration::from_secs(30), captured: Instant::now() };
         let a = now.activity().unwrap();

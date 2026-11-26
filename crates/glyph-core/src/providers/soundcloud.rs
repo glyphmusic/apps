@@ -102,7 +102,7 @@ fn convert_meta(t: SCTrack) -> Track {
         isrc,
         permalink: t.permalink_url,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     }
 }
 

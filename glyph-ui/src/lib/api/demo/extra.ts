@@ -234,6 +234,7 @@ const jamHandlers: Record<string, DemoHandler> = {
 export const handlers: Record<string, DemoHandler> = {
   artist_photo: () => null,
   artist_verified: () => false,
+  artists_meta: () => [],
   profile: (_, a) => profile(String(a.handle).trim().replace(/^@/, "")),
   profile_playlist: (_, a) => profile(String(a.handle)).playlists.find((p) => p.id === a.id)?.tracks ?? [],
   profile_follow: () => {},

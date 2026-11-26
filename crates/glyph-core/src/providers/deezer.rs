@@ -34,6 +34,8 @@ pub(crate) struct DTrack {
     album: Option<DAlbum>,
     #[serde(default)]
     explicit_lyrics: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
+    explicit_content_lyrics: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +73,13 @@ pub(crate) fn convert(t: DTrack) -> Option<Track> {
         return None;
     }
     let album = t.album;
+    let code = t.explicit_content_lyrics.map(|v| v as u64);
+    let explicit_rating = match (t.explicit_lyrics, code) {
+        (Some(true), _) | (_, Some(1 | 4 | 7)) => Some(glyph_protocol::ExplicitRating::Explicit),
+        (_, Some(2 | 6)) => Some(glyph_protocol::ExplicitRating::Unknown),
+        (_, Some(0 | 3)) | (Some(false), None) => Some(glyph_protocol::ExplicitRating::Clean),
+        _ => None,
+    };
     Some(Track {
         permalink: t.link.or_else(|| Some(format!("https://www.deezer.com/track/{}", t.id))),
         id: t.id,
@@ -82,7 +91,8 @@ pub(crate) fn convert(t: DTrack) -> Option<Track> {
         duration_ms: t.duration.and_then(secs_to_ms),
         isrc: t.isrc.filter(|s| !s.is_empty()),
         external_ids: Default::default(),
-        explicit: t.explicit_lyrics == Some(true),
+        explicit: explicit_rating == Some(glyph_protocol::ExplicitRating::Explicit),
+        explicit_rating,
     })
 }
 
@@ -118,6 +128,9 @@ pub struct Release {
     #[serde(default)]
     pub released: Option<String>,
     pub kind: crate::catalog::AlbumKind,
+    /// Number of tracks on this release, when known.
+    #[serde(default)]
+    pub tracks: Option<u32>,
 }
 
 impl Release {
@@ -135,6 +148,7 @@ impl Release {
             permalink: Some(format!("https://www.deezer.com/album/{}", self.id)),
             external_ids: Default::default(),
             explicit: false,
+            explicit_rating: None,
         }
     }
 }
@@ -238,6 +252,7 @@ impl Deezer {
                     year: r.release_date.as_deref().and_then(|d| d.get(..4)).and_then(|y| y.parse().ok()).filter(|y| *y > 1900),
                     released: r.release_date.clone().filter(|d| d.len() == 10 && !d.starts_with("0000")),
                     kind: r.record_type.as_deref().and_then(crate::catalog::AlbumKind::parse).unwrap_or(crate::catalog::AlbumKind::Album),
+                    tracks: None,
                 });
             }
             if n < 100 || v["next"].is_null() {
@@ -450,6 +465,7 @@ impl Deezer {
             year: None,
             released: None,
             kind: crate::catalog::AlbumKind::Album,
+            tracks: None,
         };
         let tracks = self.album_tracks(&release).await?;
         Ok((release.title, release.artist, tracks))

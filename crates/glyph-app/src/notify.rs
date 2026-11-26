@@ -301,7 +301,7 @@ mod tests {
     use glyph_core::providers::deezer::Release;
 
     fn rel(id: &str, artist: &str, day: &str) -> Release {
-        Release { id: id.into(), title: format!("Album {id}"), artist: artist.into(), cover_url: None, year: Some(2026), released: Some(day.into()), kind: AlbumKind::Album }
+        Release { id: id.into(), title: format!("Album {id}"), artist: artist.into(), cover_url: None, year: Some(2026), released: Some(day.into()), kind: AlbumKind::Album, tracks: None }
     }
 
     #[test]

@@ -57,6 +57,11 @@ fn spotify_track(id: &str, title: &str, artist: &str, album: Option<String>, dur
         permalink: Some(format!("https://open.spotify.com/track/{id}")),
         external_ids: Default::default(),
         explicit,
+        explicit_rating: Some(if explicit {
+            glyph_protocol::ExplicitRating::Explicit
+        } else {
+            glyph_protocol::ExplicitRating::Clean
+        }),
     }
 }
 

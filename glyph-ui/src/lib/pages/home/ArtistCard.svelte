@@ -6,6 +6,7 @@
   // "Artist" sm dim.
   import Cover from "../../components/Cover.svelte";
   import Icon from "../../components/Icon.svelte";
+  import ArtistName from "../lists/ArtistName.svelte";
   import { app } from "../../state.svelte";
   import { t } from "../../i18n.svelte";
   import type { Track } from "../../api/types";
@@ -22,7 +23,7 @@
   {:else}
     <div class="ph"><Icon name="user-round" size={56} color="rgba(255,255,255,.55)" /></div>
   {/if}
-  <div class="t trunc">{name}</div>
+  <div class="t"><ArtistName {name} badge={14} /></div>
   <div class="a">{t("search.kind.artist")}</div>
 </div>
 
@@ -32,6 +33,6 @@
   .pic, .ph { flex: none; width: 176px; height: 176px; border-radius: 50%; }
   .pic { display: block; object-fit: cover; background: var(--card); }
   .ph { background: var(--card); display: grid; place-items: center; }
-  .t { padding-top: 4px; font-size: var(--md); font-weight: 500; }
+  .t { padding-top: 4px; font-size: var(--md); font-weight: 500; min-width: 0; }
   .a { font-size: var(--sm); color: var(--dim); }
 </style>

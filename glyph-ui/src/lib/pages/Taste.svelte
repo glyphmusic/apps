@@ -8,6 +8,7 @@
   import { t, tf } from "../i18n.svelte";
   import { trackKey, type TasteProfile, type Track } from "../api/types";
   import BackPill from "./lists/BackPill.svelte";
+  import ArtistName from "./lists/ArtistName.svelte";
   import SectionTitle from "../components/SectionTitle.svelte";
   import Button from "../components/Button.svelte";
   import Icon from "../components/Icon.svelte";
@@ -395,7 +396,7 @@
                     <button type="button" class="arow" onclick={() => app.openArtistPage(a.name)}>
                       <ArtistAvatar name={a.name} size={32} />
                       <span class="atx">
-                        <span class="an trunc">{a.name}</span>
+                        <span class="an"><ArtistName name={a.name} badge={13} /></span>
                         {#if a.genres.length || a.reasons.length}
                           <span class="ameta trunc">
                             {[...a.genres, ...a.reasons.slice(0, 2).map((r) => t(`taste.reason.${r}`))].join(" · ")}
@@ -419,7 +420,7 @@
                     <div class="drow">
                       <ArtistAvatar name={d.name} size={30} />
                       <span class="atx">
-                        <span class="an trunc">{d.name}</span>
+                        <span class="an"><ArtistName name={d.name} badge={13} /></span>
                         <span class="ameta trunc">
                           {d.kind === "high_skips"
                             ? tf("taste.dislike.high_skips", { n: d.skips })
@@ -483,7 +484,7 @@
                   <button type="button" class="ccard" onclick={() => app.openArtistPage(rec.artist)}>
                     <ArtistAvatar name={rec.artist} size={40} />
                     <span class="atx">
-                      <span class="an trunc">{rec.artist}</span>
+                      <span class="an"><ArtistName name={rec.artist} badge={13} /></span>
                       {#if rec.because_of.length}
                         <span class="ameta trunc">{tf("taste.collab.because", { artists: rec.because_of.slice(0, 2).join(", ") })}</span>
                       {:else if rec.genres.length}
@@ -606,7 +607,7 @@
   .arow { transition: background-color .12s ease-out; }
   .arow:hover { background: rgba(255, 255, 255, .05); }
   .atx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .an { font-size: var(--md); font-weight: 500; color: var(--text); }
+  .an { font-size: var(--md); font-weight: 500; color: var(--text); min-width: 0; }
   .ameta { font-size: var(--xs); color: var(--dim); }
   .undo { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none; }
   .undo:hover { background: rgba(255, 255, 255, .09); }

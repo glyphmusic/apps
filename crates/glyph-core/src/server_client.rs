@@ -48,12 +48,28 @@ pub struct ServerArtist {
     pub tags: Vec<String>,
     #[serde(default)]
     pub similar: Vec<String>,
-    /// Popular songs (newer servers).
+    #[serde(default)]
+    pub similar_artists: Vec<ArtistMetaItem>,
+    #[serde(default)]
+    pub links: Vec<ServerArtistLink>,
+    /// Popular songs followed by unique catalog tracks (newer servers).
     #[serde(default)]
     pub top: Vec<Track>,
     /// The discography, newest first (newer servers).
     #[serde(default)]
     pub releases: Vec<ServerRelease>,
+    #[serde(default)]
+    pub total_songs: Option<u32>,
+    #[serde(default)]
+    pub total_releases: Option<u32>,
+    #[serde(default)]
+    pub catalog_complete: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ServerArtistLink {
+    pub label: String,
+    pub url: String,
 }
 
 /// One release in `ServerArtist::releases` (Deezer album id).
@@ -67,6 +83,8 @@ pub struct ServerRelease {
     pub released: Option<String>,
     #[serde(default)]
     pub record_type: Option<String>,
+    #[serde(default)]
+    pub tracks: Option<u32>,
 }
 
 /// What a jam's push socket delivers.
@@ -685,6 +703,21 @@ impl ServerClient {
             return Ok(None);
         }
         Ok(Some(Self::check(resp).await?.json().await?))
+    }
+
+    /// `POST /v1/artists/meta`: batch service-based verification & portrait URLs.
+    pub async fn artists_meta(&self, names: &[String]) -> Result<ArtistsMetaResponse> {
+        let body = ArtistsMetaRequest { names: names.to_vec() };
+        let resp = Self::check(
+            self.member_request(self.post("/v1/artists/meta"))
+                .await
+                .timeout(Duration::from_secs(10))
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(resp.json().await?)
     }
 
     /// `POST /v1/import/spotify` (public Spotify / Deezer / YouTube playlist links).

@@ -27,6 +27,7 @@
   import Skeleton from "../components/Skeleton.svelte";
   import SkeletonSwap from "../components/SkeletonSwap.svelte";
   import Icon from "../components/Icon.svelte";
+  import ArtistName from "./lists/ArtistName.svelte";
   import Avatar from "./profile/Avatar.svelte";
   import SkeletonRows from "./profile/SkeletonRows.svelte";
   import CropDialog from "./profile/CropDialog.svelte";
@@ -226,7 +227,7 @@
             {#each p.top_artists as a, i (a)}
               <button class="arow" onclick={() => app.openArtistPage(a)}>
                 <span class="n mono">{String(i + 1).padStart(2, "0")}</span>
-                <span class="an trunc">{a}</span>
+                <span class="an"><ArtistName name={a} badge={14} /></span>
               </button>
             {/each}
           </div>
@@ -312,7 +313,7 @@
   .arow { display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 10px; border-radius: 8px; transition: background-color .12s ease-out; }
   .arow:hover { background: rgba(255, 255, 255, .05); }
   .n { width: 22px; font-size: var(--sm); color: var(--faint); }
-  .an { flex: 1; font-size: var(--md); }
+  .an { flex: 1; min-width: 0; font-size: var(--md); }
   .rows { display: flex; flex-direction: column; }
   .busy { position: fixed; right: 24px; bottom: 100px; font-size: var(--xs); color: var(--faint); }
 </style>

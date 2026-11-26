@@ -1,4 +1,4 @@
-import type { Config, ProviderId, Track } from "../api/types";
+import { rating, type Config, type ProviderId, type Track } from "../api/types";
 
 export type ProvidersConfig = Config["providers"];
 
@@ -42,23 +42,26 @@ export function activeSearchSources(pv: ProvidersConfig, web: boolean): Provider
  */
 export function filterTrackByEnabled(track: Track, enabled: readonly ProviderId[]): Track | null {
   const allow = new Set(enabled);
+  const keptRating = rating(track);
   const external_ids: Partial<Record<ProviderId, string>> = {};
   for (const [k, v] of Object.entries(track.external_ids ?? {}) as [ProviderId, string | undefined][]) {
     if (v && allow.has(k) && SEARCHABLE.has(k)) external_ids[k] = v;
   }
+  const withRating = (out: Track): Track =>
+    rating(out) === keptRating ? out : { ...out, explicit: keptRating === "explicit", explicit_rating: keptRating };
   if (allow.has(track.source)) {
-    return { ...track, external_ids };
+    return withRating({ ...track, external_ids });
   }
   for (const p of SEARCH_SOURCES) {
     const id = external_ids[p];
     if (!id || !allow.has(p)) continue;
-    return {
+    return withRating({
       ...track,
       id,
       source: p,
       permalink: p === "youtube" ? `https://www.youtube.com/watch?v=${id}` : undefined,
       external_ids,
-    };
+    });
   }
   return null;
 }

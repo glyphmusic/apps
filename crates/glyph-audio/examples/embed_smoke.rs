@@ -8,7 +8,7 @@ fn main() {
     let p = PlayerController::new().unwrap();
     let t = Track {
         id: id.clone(), source: ProviderId::YouTube, title: "smoke".into(), artist: "-".into(),
-        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
     };
     p.load(t, PlaybackSource::Embed { provider: ProviderId::YouTube, embed_id: id });
     let rx = p.events();

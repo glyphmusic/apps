@@ -239,7 +239,7 @@ impl Drift {
                 isrc: None,
                 permalink: None,
                 external_ids: Default::default(),
-                explicit: false,
+                explicit: false, explicit_rating: None,
             };
             match e.outcome {
                 SessionEventOutcome::Completed | SessionEventOutcome::Replayed | SessionEventOutcome::Liked => self.finished(&t, taste),
@@ -361,7 +361,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         }
     }
 

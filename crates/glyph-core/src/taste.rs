@@ -3921,7 +3921,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         }
     }
 
@@ -3937,7 +3937,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         }
     }
 

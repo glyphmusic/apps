@@ -131,6 +131,7 @@ pub fn decode(s: &str) -> Result<(String, Vec<Track>)> {
             permalink: None,
             external_ids: Default::default(),
             explicit: s.x,
+            explicit_rating: s.x.then_some(glyph_protocol::ExplicitRating::Explicit),
         })
         .collect();
     tracks.iter_mut().for_each(Track::sanitize);
@@ -156,6 +157,7 @@ mod tests {
             permalink: Some("https://y".into()),
             external_ids: Default::default(),
             explicit: true,
+            explicit_rating: None,
         };
         let code = encode("Road trip", &[t.clone(), t.clone()]);
         assert!(is_code(&format!("  {code}\n")));
@@ -196,7 +198,7 @@ mod tests {
     fn same_songs_ignores_the_name() {
         let t = Track {
             id: "1".into(), source: ProviderId::Audius, title: "S".into(), artist: "A".into(), album: None, duration_ms: None,
-            cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+            cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
         };
         assert!(same_songs(&encode("a", &[t.clone()]), &encode("b", &[t.clone()])));
         assert!(!same_songs(&encode("a", &[t.clone()]), &encode("a", &[t.clone(), t])));

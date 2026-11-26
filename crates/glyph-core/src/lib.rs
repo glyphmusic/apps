@@ -971,10 +971,34 @@ impl Backend {
         self.ytdlp_status().await
     }
 
-    /// Fans + verified profile of an artist.
+    /// Fans + verified profile of an artist (direct fallback when no server is configured).
     pub async fn artist_stats(&self, name: &str) -> anyhow::Result<Option<catalog::ArtistStats>> {
         let (inner, name) = (self.cur(), name.to_string());
         self.spawn(async move { catalog::artist_stats(&inner.http, &name).await }).await?
+    }
+
+    /// Batch service-based artist verification + portraits. Uses the server's
+    /// `/v1/artists/meta` as the single source of truth when connected, falling
+    /// back to direct multi-service checks only in local/no-server mode.
+    pub async fn artists_meta(&self, names: Vec<String>) -> anyhow::Result<Vec<glyph_protocol::ArtistMetaItem>> {
+        let inner = self.cur();
+        self.spawn(async move {
+            if names.is_empty() {
+                return Ok(Vec::new());
+            }
+            if let Some(srv) = inner.live_server() {
+                if let Ok(resp) = srv.artists_meta(&names).await {
+                    return Ok(resp.items);
+                }
+            }
+            let http = inner.http.clone();
+            let futs = names.into_iter().map(move |name| {
+                let http = http.clone();
+                async move { catalog::verify_artist_direct(&http, &name).await }
+            });
+            Ok(futures::stream::iter(futs).buffer_unordered(4).collect().await)
+        })
+        .await?
     }
 
     /// An artist's whole discography (Deezer catalog), newest first.
@@ -1947,8 +1971,14 @@ const SEARCH_SOURCES: [ProviderId; 6] = [
 /// Filters a server or cached track against enabled providers, promoting an
 /// enabled searchable match from `external_ids` if the primary source is disabled.
 pub(crate) fn filter_track_by_enabled(mut track: Track, enabled: &[ProviderId]) -> Option<Track> {
+    // Preserve the track's rating before stripping disabled/unsearchable ids
+    // (such as Spotify or a disabled Deezer source) so clean ratings don't flip to "?".
+    let rating = track.rating();
     track.external_ids.retain(|p, id| !id.is_empty() && enabled.contains(p) && SEARCH_SOURCES.contains(p));
     if enabled.contains(&track.source) {
+        if track.rating() != rating {
+            track.set_rating(rating);
+        }
         return Some(track);
     }
     let next = SEARCH_SOURCES
@@ -1959,6 +1989,9 @@ pub(crate) fn filter_track_by_enabled(mut track: Track, enabled: &[ProviderId]) 
     track.id = next.1.clone();
     track.permalink = (next.0 == ProviderId::YouTube)
         .then(|| format!("https://www.youtube.com/watch?v={}", next.1));
+    if track.rating() != rating {
+        track.set_rating(rating);
+    }
     Some(track)
 }
 

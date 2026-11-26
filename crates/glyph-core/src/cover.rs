@@ -994,7 +994,7 @@ mod tests {
                     isrc: None,
                     permalink: None,
                     external_ids: Default::default(),
-                    explicit: false,
+                    explicit: false, explicit_rating: None,
                 }])
             }
             async fn track(&self, _id: &str) -> Result<Track> { Err(anyhow!("unused")) }
@@ -1037,7 +1037,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         };
 
         // 1. Fresh lookup skips YouTube and caches Deezer's 32x32 square cover.
@@ -1101,7 +1101,7 @@ mod tests {
             isrc: None,
             permalink: None,
             external_ids: Default::default(),
-            explicit: false,
+            explicit: false, explicit_rating: None,
         };
         assert!(cache.cached(&song).is_none());
         let path = cache.path_for(&paths::hash_hex(&track_key(&song)));

@@ -92,7 +92,7 @@ fn meta_track(source: ProviderId, id: String, title: &str, artist: &str, album: 
         isrc: None,
         permalink: link,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     })
 }
 

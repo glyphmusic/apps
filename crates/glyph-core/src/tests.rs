@@ -12,7 +12,7 @@ async fn configured_server_handles_known_tracks_and_errors_without_direct_fallba
     let base = format!("http://{}", listener.local_addr().unwrap());
     let track = Track {
         id: "known".into(), source: ProviderId::Audius, title: "Song".into(), artist: "Artist".into(),
-        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        album: None, duration_ms: None, cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
     };
     let resolved = serde_json::json!({"matched":track,"source":{"kind":"stream","provider":"audius","url":"/v1/audio/audius/known"},"confidence":1.0}).to_string();
     let fixture = std::thread::spawn(move || {
@@ -269,11 +269,11 @@ async fn server_download_skips_resolve_roundtrip_when_youtube_id_is_known_or_cac
     let inner = backend.cur();
     let mut deezer = Track {
         id: "3845609381".into(), source: ProviderId::Deezer, title: "s".into(), artist: "yungalligator".into(),
-        album: None, duration_ms: Some(170_000), cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        album: None, duration_ms: Some(170_000), cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
     };
     let yt = Track {
         id: "vEa2biPJuRg".into(), source: ProviderId::YouTube, title: "s".into(), artist: "yungalligator".into(),
-        album: None, duration_ms: Some(170_000), cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false,
+        album: None, duration_ms: Some(170_000), cover_url: None, isrc: None, permalink: None, external_ids: Default::default(), explicit: false, explicit_rating: None,
     };
     inner.resolver.remember(&deezer, &yt, 0.9);
     let job = downloads::Job { progress: Arc::default(), quality: crate::config::AudioQuality::High };
@@ -316,7 +316,7 @@ async fn multi_playlist_1050_song_migration_defers_matching_without_server_flood
                     isrc: None,
                     permalink: None,
                     external_ids: Default::default(),
-                    explicit: false,
+                    explicit: false, explicit_rating: None,
                 })
                 .collect();
             Ok(Fetched::Tracks(tracks))
@@ -440,7 +440,7 @@ async fn live_benchmark_download_preparing_and_total_speed() {
         isrc: Some("DEA621500610".into()),
         permalink: None,
         external_ids: Default::default(),
-        explicit: false,
+        explicit: false, explicit_rating: None,
     };
 
     // Measure exact "Preparing download" duration (until fraction() becomes Some)

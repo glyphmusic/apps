@@ -4,7 +4,7 @@
 // encrypted account sync, profiles and MCP relay go through here: resolve asks
 // for `direct=1`, so the answer holds the provider's own URL and never a
 // server audio path.
-import type { ProviderId, Track } from "./types";
+import type { ArtistMetaItem, ProviderId, Track } from "./types";
 import type { SyncItem } from "./web-e2e";
 import type { McpSession } from "../settings/types";
 import { installId } from "./web-store";
@@ -23,6 +23,14 @@ export type PlaybackSource =
   | { kind: "preview"; provider: ProviderId; url: string };
 
 export interface ResolveResponse { matched: Track | null; source: PlaybackSource | null; confidence: number; youtube_hint?: string | null }
+export interface ServerArtistRelease {
+  id: string;
+  title: string;
+  cover_url?: string | null;
+  released?: string | null;
+  record_type?: string | null;
+  tracks?: number | null;
+}
 export interface ServerArtistResponse {
   name: string;
   bio?: string | null;
@@ -33,7 +41,13 @@ export interface ServerArtistResponse {
   verified?: boolean;
   tags?: string[];
   similar?: string[];
+  similar_artists?: ArtistMetaItem[];
   links?: { label: string; url: string }[];
+  top?: Track[];
+  releases?: ServerArtistRelease[];
+  total_songs?: number | null;
+  total_releases?: number | null;
+  catalog_complete?: boolean;
 }
 export type SearchEvent =
   | { event: "results"; provider: ProviderId; tracks: Track[] }
@@ -285,8 +299,8 @@ async function sendJson<T>(
 
 /** The wire track (glyph_protocol::Track) without UI-only fields. */
 export function wireTrack(t: Track): Track {
-  const { id, source, title, artist, album, duration_ms, cover_url, isrc, permalink, external_ids, explicit } = t;
-  return { id, source, title, artist, album, duration_ms, cover_url, isrc, permalink, external_ids, explicit };
+  const { id, source, title, artist, album, duration_ms, cover_url, isrc, permalink, external_ids, explicit, explicit_rating } = t;
+  return { id, source, title, artist, album, duration_ms, cover_url, isrc, permalink, external_ids, explicit, ...(explicit_rating ? { explicit_rating } : {}) };
 }
 
 export const server = {
@@ -379,6 +393,10 @@ export const server = {
   /** Look up normalized artist metadata (bio, photo, banner, fans, etc.) cached on the server. */
   artist: (name: string, lang = "en") =>
     getJson<ServerArtistResponse>("/v1/artist", { name, lang }),
+
+  /** Batch service-based verification + portrait URLs for multiple artists. */
+  artistsMeta: (names: string[]) =>
+    sendJson<{ items: ArtistMetaItem[] }>("POST", "/v1/artists/meta", { names }),
 
   tasteTags: (artists: string[]) =>
     sendJson<{ items: { artist: string; genres?: string[]; moods?: string[]; eras?: string[]; tags?: string[]; similar?: string[] }[] }>(
