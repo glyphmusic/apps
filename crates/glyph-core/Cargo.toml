@@ -39,7 +39,7 @@ webp = { version = "0.3.1", default-features = false }
 self-replace = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
-base64 = "0.22"
+base64 = "0.23"
 tar = "0.4"
 # Password key derivation on the device (see glyph_protocol::password_kdf).
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
