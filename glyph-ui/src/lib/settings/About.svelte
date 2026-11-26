@@ -32,6 +32,7 @@
   const REPO_URL = "https://github.com/glyphmusic/apps";
   const RELEASES_URL = "https://github.com/glyphmusic/apps/releases";
   const ISSUES_URL = "https://github.com/glyphmusic/apps/issues/new";
+  const X_URL = "https://x.com/glyph_my";
 
   let u = $state({ checking: false, installing: null as [number, number] | null, installed: false, error: null as string | null, status: { kind: "none" } as UpdateState });
   const android = $derived(app.platform === "android");
@@ -108,6 +109,7 @@
           {#if !web}<div class="mono st" style:color={status[1]}>{#if u.checking}<Spin label={status[0]} />{:else}{status[0]}{/if}</div>{/if}
           <div class="links">
             <LinkButton icon="github" label="GitHub" url={REPO_URL} />
+            <LinkButton icon="x-logo" label="X" url={X_URL} />
             <LinkButton icon="external-link" label={t("sp.link.releases")} url={RELEASES_URL} />
             <LinkButton icon="life-buoy" label={t("sp.support")} url={ISSUES_URL} />
           </div>

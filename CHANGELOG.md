@@ -6,6 +6,7 @@
 
 - **No connection bar**: when the internet is gone for a few seconds, a thin bar shows "No connection" at the very bottom, with your downloaded songs and a button to play them. It goes away as soon as you are back online.
 - **Saved music when offline** (phone): a sheet comes up with Downloads and every playlist that has downloaded songs, ready to play.
+- **Glyph on X**: Settings › About now links to [@glyph_my](https://x.com/glyph_my) on X.
 
 ### Fixed
 

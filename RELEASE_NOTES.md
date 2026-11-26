@@ -4,5 +4,6 @@
 - **Saved music when offline** (phone): a sheet lists Downloads and every playlist with downloaded songs.
 - **Folders on the phone**: a new "New folder" button in the library.
 - **Phone library**: Recently played, Downloads and pinned lists now show there too.
+- **Glyph on X**: a link to @glyph_my in Settings › About.
 
 See CHANGELOG.md for the complete changes.
