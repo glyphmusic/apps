@@ -19,7 +19,7 @@ tokio.workspace = true
 flume.workspace = true
 reqwest.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-roxmltree = "0.20"
+roxmltree = "0.21"
 qrcode = { version = "0.14", default-features = false }
 if-addrs = "0.13"
 socket2 = "0.6"
