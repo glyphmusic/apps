@@ -463,7 +463,7 @@ impl Backend {
             imports,
             local,
             search_cache: Default::default(),
-            ratings: Default::default(),
+            ratings: rating::load_cache(),
             warm: Default::default(),
             dl_progress: Default::default(),
             rt: Some(rt),
@@ -612,10 +612,12 @@ impl Backend {
                         _ = fwd.closed() => break,
                         ev = out_rx.recv() => match ev { Some(ev) => ev, None => break },
                     };
-                    let Some(ev) = filter_search_event(ev, &enabled) else { continue };
-                    match &ev {
+                    let Some(mut ev) = filter_search_event(ev, &enabled) else { continue };
+                    match &mut ev {
                         SearchEvent::Results { tracks, .. } => {
-                            for t in tracks {
+                            rating::apply_cached(&ratings, tracks);
+                            rating::remember_tracks(&ratings, tracks);
+                            for t in tracks.iter() {
                                 match seen.iter_mut().find(|x| x.source == t.source && x.id == t.id) {
                                     Some(x) => *x = t.clone(),
                                     None => seen.push(t.clone()),
@@ -1378,9 +1380,26 @@ impl Backend {
         self.downloads.reload();
     }
 
+    pub fn apply_cached_ratings(&self, tracks: &mut [Track]) {
+        rating::apply_cached(&self.ratings, tracks);
+    }
+
+    pub fn remember_ratings(&self, tracks: &[Track]) {
+        rating::remember_tracks(&self.ratings, tracks);
+    }
+
     pub async fn lyrics(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
-        let (inner, track) = (self.cur(), track.clone());
-        self.spawn(async move { inner.lyrics(&track).await }).await?
+        let (inner, track_owned, ratings) = (self.cur(), track.clone(), self.ratings.clone());
+        let res = self.spawn(async move { inner.lyrics(&track_owned).await }).await??;
+        if let Some(ly) = &res {
+            let mut text = ly.plain.clone().unwrap_or_default();
+            for line in &ly.synced {
+                text.push('\n');
+                text.push_str(&line.text);
+            }
+            rating::remember_lyrics(&ratings, track, &text, ly.instrumental);
+        }
+        Ok(res)
     }
 
     /// Songs whose lyrics contain `query` (a remembered line), with the line.

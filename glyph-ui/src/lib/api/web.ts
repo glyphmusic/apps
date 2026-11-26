@@ -100,6 +100,29 @@ function saveCoverUrlsSoon(m: Map<string, { url: string | null; expiresAt: numbe
   }, 1500);
 }
 
+const ARTIST_META_TTL_MS = 14 * 24 * 3600_000;
+function loadWebArtistMeta(): [string, ArtistMetaItem & { savedAt?: number }][] {
+  const saved = load<[string, ArtistMetaItem & { savedAt?: number }][]>("artist_meta_v1") ?? [];
+  const now = Date.now();
+  return Array.isArray(saved)
+    ? saved.filter((e) => Array.isArray(e) && typeof e[0] === "string" && e[1] && (!e[1].savedAt || now - e[1].savedAt < ARTIST_META_TTL_MS))
+    : [];
+}
+let artistMetaSaveTimer = 0;
+function saveWebArtistMetaSoon(m: Map<string, ArtistMetaItem & { savedAt?: number }>) {
+  clearTimeout(artistMetaSaveTimer);
+  artistMetaSaveTimer = window.setTimeout(() => {
+    const now = Date.now();
+    const out: [string, ArtistMetaItem & { savedAt?: number }][] = [];
+    for (const [k, v] of m) {
+      if (typeof v.verified === "boolean" && (!v.savedAt || now - v.savedAt < ARTIST_META_TTL_MS)) {
+        out.push([k, v]);
+      }
+    }
+    save("artist_meta_v1", out.slice(-1500));
+  }, 1000);
+}
+
 const emptyLibrary = (): Library => ({ liked: [], recent: [], playlists: [], saved_albums: [], pinned: [], recent_lists: [], followed: [], downloads: [], search_history: [], hidden_sidebar: [] });
 
 /** Deep copy, like Tauri's JSON bridge: the UI never holds our objects. */
@@ -191,7 +214,7 @@ export class WebBackend implements Backend {
   private search: { query: string; page: number; results: SearchResults; abort: AbortController } | null = null;
   private home: { at: number; feeds: HomeFeeds } | null = null;
   private artists = new Map<string, ArtistPage>();
-  private artistMetaCache = new Map<string, ArtistMetaItem>();
+  private artistMetaCache = new Map<string, ArtistMetaItem & { savedAt?: number }>(loadWebArtistMeta());
   private lyricsOffsets: Record<string, number>;
   private stats: WebStats;
   private tasteStore: LocalTasteStore;
@@ -1356,10 +1379,12 @@ export class WebBackend implements Backend {
       const sk = norm(primaryArtist(sim.name));
       if (sk && (sim.verified != null || sim.photo)) {
         const prev = this.artistMetaCache.get(sk);
+        const nextVerified = sim.verified ?? prev?.verified ?? null;
         this.artistMetaCache.set(sk, {
           name: sim.name,
           photo: sim.photo ?? prev?.photo ?? null,
-          verified: sim.verified ?? prev?.verified ?? null,
+          verified: nextVerified,
+          savedAt: typeof nextVerified === "boolean" ? Date.now() : prev?.savedAt,
         });
       }
     }
@@ -1403,7 +1428,8 @@ export class WebBackend implements Backend {
       links: infoRes?.links ?? (infoRes?.url ? [{ label: "Wikipedia", url: infoRes.url }] : []),
     };
     if (infoRes) {
-      this.artistMetaCache.set(k, { name: info.name, photo: info.photo ?? null, verified: Boolean(info.verified) });
+      this.artistMetaCache.set(k, { name: info.name, photo: info.photo ?? null, verified: Boolean(info.verified), savedAt: Date.now() });
+      saveWebArtistMetaSoon(this.artistMetaCache);
     }
     const page: ArtistPage = {
       name: info.name || name,
@@ -1441,13 +1467,16 @@ export class WebBackend implements Backend {
     }
     if (!missing.length) return out;
     const resp = await server.artistsMeta(missing).catch(() => null);
+    let metaDirty = false;
     for (const item of resp?.items ?? []) {
       const k = norm(primaryArtist(item.name));
       if (k && item.verified != null) {
-        this.artistMetaCache.set(k, item);
+        this.artistMetaCache.set(k, { ...item, savedAt: Date.now() });
+        metaDirty = true;
       }
       out.push(item);
     }
+    if (metaDirty) saveWebArtistMetaSoon(this.artistMetaCache);
     return out;
   }
 

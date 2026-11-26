@@ -18,7 +18,8 @@ import { applyTheme } from "./theme";
 import { gpuProbe, recommendVisuals } from "./glow";
 import {
   albumCacheGet, albumCachePut, fetchInitialSnapshot, homeCacheLoad, homeCacheSave,
-  loadArtistPhotos, loadWidth, pruneTrackedKeys, sameTrackKeys, saveArtistPhotos, saveWidth,
+  loadArtistPhotos, loadArtistVerified, loadWidth, pruneTrackedKeys, sameTrackKeys,
+  saveArtistPhotos, saveArtistVerified, saveWidth, syncTrackRatings,
 } from "./state/cache";
 import { pickRangeKeys, selectedTracksOf, toggleAllKeys, togglePickedKey } from "./state/pick";
 import { cleanFolderName, deleteFolder as dropFolder, folderOf, folderPlaylists, renameFolder as setFolderName, setPlaylistFolder } from "./folders";
@@ -312,6 +313,9 @@ class App {
     api.on("library", (l) => {
       const patch = (l as { __patch?: Partial<Library> }).__patch;
       this.library = patch ? { ...this.library, ...patch } : l;
+      syncTrackRatings(this.library.liked);
+      syncTrackRatings(this.library.recent.flatMap((r) => (r.kind === "song" ? [r.track] : [])));
+      for (const pl of this.library.playlists) syncTrackRatings(pl.tracks);
       // Hearts still waiting to be sent stay as tapped (no flicker back).
       if (this.likeBatch.size && (!patch || patch.liked)) this.library.liked = this.withPendingLikes(this.library.liked);
       this.pruneAddSongs();
@@ -330,11 +334,14 @@ class App {
     });
     api.on("search", (s) => {
       if (this.view === "search" && s.query === this.search.query) {
+        syncTrackRatings(s.tracks);
         this.search = s;
         this.scheduleClock();
       }
     });
     api.on("home", (h) => {
+      syncTrackRatings(h.recs);
+      syncTrackRatings(h.trending);
       this.home = h;
       if (!h.loading && (h.recs.length || h.trending.length)) homeCacheSave($state.snapshot(h) as HomeFeeds);
     });
@@ -464,9 +471,12 @@ class App {
   }
 
   private cacheArtist(a: ArtistPage) {
+    syncTrackRatings(a.tracks);
     const k = a.name.toLowerCase();
     this.artists[k] = a;
+    let verifiedChanged = false;
     if (a.info && typeof a.info.verified === "boolean") {
+      if (this.verified[k] !== a.info.verified) verifiedChanged = true;
       this.verified[k] = a.info.verified;
       this.verifiedAsked.add(k);
     }
@@ -475,6 +485,7 @@ class App {
       const sk = primaryArtist(sim.name).toLowerCase();
       if (!sk) continue;
       if (typeof sim.verified === "boolean") {
+        if (this.verified[sk] !== sim.verified) verifiedChanged = true;
         this.verified[sk] = sim.verified;
         this.verifiedAsked.add(sk);
       }
@@ -483,6 +494,7 @@ class App {
         photosChanged = true;
       }
     }
+    if (verifiedChanged) saveArtistVerified($state.snapshot(this.verified) as Record<string, boolean>);
     if (photosChanged) saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>);
     const idx = this.artistLru.indexOf(k);
     if (idx !== -1) this.artistLru.splice(idx, 1);
@@ -1323,7 +1335,7 @@ class App {
     this.scheduleClock();
     backend().call<SearchResults & { paste?: string; text?: string }>("search", { query: q, page: 0 }).then((r) => {
       if (r?.paste) return this.pasted(r.paste, r.text ?? q);
-      if (r && this.view === "search" && r.query === this.search.query) { this.search = r; this.scheduleClock(); }
+      if (r && this.view === "search" && r.query === this.search.query) { syncTrackRatings(r.tracks); this.search = r; this.scheduleClock(); }
     }).catch(() => { if (this.view === "search" && this.search.query === q) { this.search = { ...this.search, loading: false, error: t("status.backend_offline") }; this.scheduleClock(); } });
   }
   /** A code or link was pasted into the search field: it is imported instead. */
@@ -1396,6 +1408,8 @@ class App {
       const empty = !h.recs.length && !h.trending.length && !h.new_releases.length;
       // A failed refresh (offline, server busy) keeps the cached feeds.
       if (empty && (this.home.recs.length || this.home.trending.length)) { this.home = { ...this.home, loading: false }; return; }
+      syncTrackRatings(h.recs);
+      syncTrackRatings(h.trending);
       this.home = h;
       if (!empty) homeCacheSave($state.snapshot(h) as HomeFeeds);
     }).catch(() => { this.home = { ...this.home, loading: false }; });
@@ -1406,8 +1420,8 @@ class App {
   /** Pictures of artists whose page was not opened (tiles), and verified badges. */
   artistPhotos = $state<Record<string, string | null>>(loadArtistPhotos());
   private photoAsked = new Map<string, number>();
-  verified = $state<Record<string, boolean>>({});
-  private verifiedAsked = new Set<string>();
+  verified = $state<Record<string, boolean>>(loadArtistVerified());
+  private verifiedAsked = new Set<string>(Object.keys(loadArtistVerified()));
   private verifiedRetryAt = new Map<string, number>();
   private verifiedPending = new Map<string, string>();
   private verifiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1469,11 +1483,13 @@ class App {
       try {
         const items = await backend().call<ArtistMetaItem[]>("artists_meta", { names });
         const answered = new Set<string>();
+        let verifiedChanged = false;
         let photosChanged = false;
         for (const item of items ?? []) {
           const ik = primaryArtist(item.name).toLowerCase();
           if (!ik) continue;
           if (typeof item.verified === "boolean") {
+            if (this.verified[ik] !== item.verified) verifiedChanged = true;
             this.verified[ik] = item.verified;
             this.verifiedRetryAt.delete(ik);
             answered.add(ik);
@@ -1483,6 +1499,7 @@ class App {
             photosChanged = true;
           }
         }
+        if (verifiedChanged) saveArtistVerified($state.snapshot(this.verified) as Record<string, boolean>);
         if (photosChanged) saveArtistPhotos($state.snapshot(this.artistPhotos) as Record<string, string | null>);
         // Any artist whose verification was deferred (`null`) can retry after cooldown.
         for (const k of batchKeys) {
@@ -1495,7 +1512,10 @@ class App {
         // Fallback for older backends without `artists_meta`: per-name `artist_verified`.
         for (const [k, original] of slice) {
           backend().call<boolean>("artist_verified", { name: original }).then((v) => {
-            if (typeof v === "boolean") this.verified[k] = v;
+            if (typeof v === "boolean") {
+              this.verified[k] = v;
+              saveArtistVerified($state.snapshot(this.verified) as Record<string, boolean>);
+            }
           }).catch(() => {
             this.verifiedAsked.delete(k);
             this.verifiedRetryAt.set(k, retryAfter);

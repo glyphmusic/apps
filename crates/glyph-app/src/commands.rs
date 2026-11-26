@@ -1598,23 +1598,26 @@ pub async fn artist(core: C<'_>, name: String, quiet: Option<bool>) -> Res<Value
     // count) and caches/incrementally updates it for every app.
     let from_server = tokio::time::timeout(Duration::from_secs(10), b.artist_server(&name, &lang)).await.ok().flatten();
     let (mut have_songs, mut have_stats, mut have_similar, mut have_releases) = (false, false, false, false);
-    if let Some(s) = from_server {
-        // Seed local verified cache from the server's single source of truth.
+    if let Some(mut s) = from_server {
+        // Seed persistent local verified cache (both true and false) from server.
         {
-            let mut vc = verified_cache().lock().unwrap_or_else(|e| e.into_inner());
-            vc.insert(name.to_lowercase(), s.verified);
+            let mut entries = Vec::with_capacity(2 + s.similar_artists.len());
+            entries.push((name.to_lowercase(), s.verified));
             if !s.name.trim().is_empty() {
-                vc.insert(s.name.trim().to_lowercase(), s.verified);
+                entries.push((s.name.trim().to_lowercase(), s.verified));
             }
             for sim in &s.similar_artists {
                 if let Some(v) = sim.verified {
                     let k = glyph_core::dedupe::primary_artist(&sim.name).to_lowercase();
                     if !k.is_empty() {
-                        vc.insert(k, v);
+                        entries.push((k, v));
                     }
                 }
             }
+            put_verified_entries(entries);
         }
+        b.apply_cached_ratings(&mut s.top);
+        b.remember_ratings(&s.top);
         let mut p = lock();
         if !s.top.is_empty() {
             p.tracks = s.top;
@@ -1780,15 +1783,96 @@ pub async fn artist_photo(core: C<'_>, name: String) -> Res<Option<String>> {
     Ok(b.artist_photo(&name, &lang).await.map_err(err)?.map(|p| crate::host::asset_url(&p)))
 }
 
-fn verified_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
-    static KNOWN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = std::sync::OnceLock::new();
-    KNOWN.get_or_init(Default::default)
+const VERIFIED_CACHE_FILE: &str = "artist-verified-v1.json";
+const VERIFIED_TTL_S: u64 = 14 * 86_400;
+const VERIFIED_MAX_ENTRIES: usize = 2000;
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct VerifiedEntry {
+    verified: bool,
+    #[serde(default)]
+    saved_at_s: u64,
 }
 
-/// Drops cached artist-verification lookups under memory pressure.
+fn verified_now_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn verified_is_fresh(e: &VerifiedEntry, now: u64) -> bool {
+    e.saved_at_s == 0 || now.saturating_sub(e.saved_at_s) < VERIFIED_TTL_S
+}
+
+fn verified_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, VerifiedEntry>> {
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, VerifiedEntry>>> =
+        std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| {
+        let path = glyph_core::paths::cache_dir().join(VERIFIED_CACHE_FILE);
+        let now = verified_now_s();
+        let mut map: std::collections::HashMap<String, VerifiedEntry> =
+            glyph_core::paths::read_json(&path).unwrap_or_default();
+        map.retain(|_, v| verified_is_fresh(v, now));
+        std::sync::Mutex::new(map)
+    })
+}
+
+fn get_verified_entry(key: &str) -> Option<bool> {
+    let now = verified_now_s();
+    verified_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .filter(|e| verified_is_fresh(e, now))
+        .map(|e| e.verified)
+}
+
+fn put_verified_entries(entries: Vec<(String, bool)>) {
+    if entries.is_empty() {
+        return;
+    }
+    let now = verified_now_s();
+    let snap: Option<std::collections::HashMap<String, VerifiedEntry>> = {
+        let mut k = verified_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let mut dirty = false;
+        for (key, verified) in entries {
+            if key.is_empty() {
+                continue;
+            }
+            let unchanged = k.get(&key).is_some_and(|e| e.verified == verified && verified_is_fresh(e, now));
+            if !unchanged {
+                k.insert(key, VerifiedEntry { verified, saved_at_s: now });
+                dirty = true;
+            }
+        }
+        if dirty {
+            k.retain(|_, v| verified_is_fresh(v, now));
+            if k.len() > VERIFIED_MAX_ENTRIES {
+                let mut by_age: Vec<(String, u64)> = k.iter().map(|(key, v)| (key.clone(), v.saved_at_s)).collect();
+                by_age.sort_by_key(|(_, ts)| *ts);
+                let drop_n = k.len() - VERIFIED_MAX_ENTRIES;
+                for (key, _) in by_age.into_iter().take(drop_n) {
+                    k.remove(&key);
+                }
+            }
+            Some(k.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(snap) = snap {
+        let path = glyph_core::paths::cache_dir().join(VERIFIED_CACHE_FILE);
+        std::thread::spawn(move || {
+            let _ = glyph_core::paths::write_json(&path, &snap);
+        });
+    }
+}
+
+/// Drops cached artist-verification lookups under memory pressure (disk cache stays intact).
 pub(crate) fn trim_verified_cache(aggressive: bool) {
     let mut k = verified_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if aggressive || k.len() > 256 {
+    if aggressive || k.len() > 512 {
         k.clear();
         k.shrink_to_fit();
     }
@@ -1796,9 +1880,8 @@ pub(crate) fn trim_verified_cache(aggressive: bool) {
 
 /// Batch service-based artist verification + portrait lookup. Uses the server's
 /// `/v1/artists/meta` as the single source of truth; transient errors (`None`)
-/// are never cached as `false`.
+/// are never cached as `false`, while definitive `true`/`false` answers persist locally.
 pub async fn artists_meta(core: C<'_>, names: Vec<String>) -> Res<Vec<glyph_protocol::ArtistMetaItem>> {
-    let known = verified_cache();
     let mut cleaned: Vec<(String, String)> = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
     for raw in names {
@@ -1814,10 +1897,11 @@ pub async fn artists_meta(core: C<'_>, names: Vec<String>) -> Res<Vec<glyph_prot
 
     let mut out: Vec<glyph_protocol::ArtistMetaItem> = Vec::with_capacity(cleaned.len());
     let mut missing: Vec<String> = Vec::new();
+    let now = verified_now_s();
     {
-        let k = known.lock().unwrap_or_else(|e| e.into_inner());
+        let k = verified_cache().lock().unwrap_or_else(|e| e.into_inner());
         for (who, key) in &cleaned {
-            if let Some(&v) = k.get(key) {
+            if let Some(v) = k.get(key).filter(|e| verified_is_fresh(e, now)).map(|e| e.verified) {
                 out.push(glyph_protocol::ArtistMetaItem { name: who.clone(), photo: None, verified: Some(v) });
             } else {
                 missing.push(who.clone());
@@ -1830,32 +1914,28 @@ pub async fn artists_meta(core: C<'_>, names: Vec<String>) -> Res<Vec<glyph_prot
 
     let b = core.backend_or_err()?;
     let fetched = b.artists_meta(missing).await.map_err(err)?;
-    {
-        let mut k = known.lock().unwrap_or_else(|e| e.into_inner());
-        if k.len() > 1000 {
-            k.clear();
-        }
-        for item in &fetched {
-            if let Some(v) = item.verified {
-                let key = glyph_core::dedupe::primary_artist(&item.name).to_lowercase();
-                if !key.is_empty() {
-                    k.insert(key, v);
-                }
+    let mut to_save = Vec::new();
+    for item in &fetched {
+        if let Some(v) = item.verified {
+            let key = glyph_core::dedupe::primary_artist(&item.name).to_lowercase();
+            if !key.is_empty() {
+                to_save.push((key, v));
             }
         }
     }
+    put_verified_entries(to_save);
     out.extend(fetched);
     Ok(out)
 }
 
-/// Is the artist verified? Uses the same server-backed batch lookup + cache.
+/// Is the artist verified? Uses the same server-backed batch lookup + persistent cache.
 pub async fn artist_verified(core: C<'_>, name: String) -> Res<bool> {
     let who = glyph_core::dedupe::primary_artist(&name);
     let key = who.to_lowercase();
     if key.is_empty() {
         return Ok(false);
     }
-    if let Some(&v) = verified_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+    if let Some(v) = get_verified_entry(&key) {
         return Ok(v);
     }
     let items = artists_meta(core, vec![who]).await?;
