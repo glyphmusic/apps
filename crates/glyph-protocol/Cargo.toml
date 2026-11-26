@@ -13,4 +13,4 @@ release-verify = ["dep:minisign-verify"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-minisign-verify = { version = "0.2", optional = true }
+minisign-verify = { version = "0.3", optional = true }
